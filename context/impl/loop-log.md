@@ -35,3 +35,6 @@ last_edited: "2026-04-14"
 - 2 parallel packets: T-030+T-031+T-033+T-034+T-035+T-036+T-037+T-038 (layout templating + KDL writer + 6 shipped layouts + precedence + list + validation + docs) and T-040 (ark pane diff with delta + ansi-to-tui). All COMPLETE. Commits ecda420, 8020b64. **TIER 1 COMPLETE: 28/28 tasks done. 265 tests passing across 6 crates.**
 
 Overall: 45/134 (34%). Next: Tier 2 (engine-claude-code + event-bus consumers, 16 tasks).
+
+### Iteration 11 — 2026-04-14 (Tier 2 W1)
+- 3 parallel packets. T-046 (ark-hook skeleton, commit a7a289c, 12 tests, 6 files), T-052 (settings.local.json injection, commit 9370e71, 12 tests, sha256 checksum + .ark-backup + deep-merge), T-059+T-060+T-061 (consumers state_writer/status_pipe/hook_dispatcher, commit 2c43e37, 10 tests, ark-core+=ark-config dep no cycle, F-037 closed Lagged(n) warn-log in every recv loop). Packet A paused for solution-set fork on clap exit-2 behavior; user picked B (keep Cli::parse, exit 2 only on arg-validation = loud setup bug; all runtime errors still fail-open). Build P, tests 308/308 workspace. Next: T-047 (hook payload parser, deps T-046+T-005 met) + T-053 (transcript tailer, deps T-052+T-005 met) + T-058 (engine preflight, deps T-046 met).

@@ -1,6 +1,6 @@
 ---
 created: "2026-04-14"
-last_edited: "2026-04-14"
+last_edited: "2026-04-14T01:00:00Z"
 ---
 
 # Implementation Overview
@@ -13,13 +13,13 @@ Build site: context/plans/build-site.md (134 tasks, 7 tiers).
 |------|------|-------|--------|
 | 0 | 17 | 17 | ✅ COMPLETE |
 | 1 | 28 | 28 | ✅ COMPLETE |
-| 2 | 0 | 16 | pending |
+| 2 | 5 | 16 | in-progress |
 | 3 | 0 | 22 | pending |
 | 4 | 0 | 10 | pending |
 | 5 | 0 | 16 | pending |
 | 6 | 0 | 26 | pending |
 
-**Overall: 45/134 tasks done (34%) · 265 tests passing across 6 crates**
+**Overall: 50/134 tasks done (37%) · 308 tests passing**
 
 **Crate test breakdown:**
 - ark-types: 85 (foundation types)
@@ -40,11 +40,11 @@ Build site: context/plans/build-site.md (134 tasks, 7 tiers).
 | mux-zellij | 9 | TIER-1 DONE (T-024-T-032) | (impl-mux-zellij.md pending) |
 | layouts | 6 | TIER-1 DONE (T-033-T-038) | (impl-layouts.md pending) |
 | pane-commands | 4 | TIER-1 DONE (T-039-T-042) | (impl-pane-commands.md pending) |
-| hook-ipc | 3 | TIER-1 primitives DONE (T-043-T-045) | (impl-hook-ipc.md pending) |
-| engine-claude-code | 0 | TIER-2 pending | (pending) |
+| hook-ipc | 4 | TIER-1 primitives + T-046 skeleton | (impl-hook-ipc.md pending) |
+| engine-claude-code | 1 | T-052 settings injection DONE | (impl-engine-claude-code.md pending) |
 | orchestrator-cavekit | 0 | TIER-3 pending | (pending) |
 | orchestrator-claude-code | 0 | TIER-3 pending | (pending) |
-| supervisor | 0 | TIER-3 pending | (pending) |
+| supervisor | 3 | T-059/T-060/T-061 consumers DONE | (impl-supervisor.md pending) |
 | cli | 0 | TIER-4 pending | (pending) |
 | plugin-status | 0 | TIER-5 pending | (pending) |
 | plugin-picker | 0 | TIER-5 pending | (pending) |
