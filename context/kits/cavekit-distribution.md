@@ -53,7 +53,13 @@ Building, packaging, and shipping ark. Cargo workspace layout, `cargo-dist` rele
   - Copies resulting `.wasm` files to `$OUT_DIR/wasm/`
   - Embeds them via `include_bytes!("...")` in a module
 - [ ] `ark doctor --fix` writes these bytes to `~/.config/zellij/plugins/ark-{status,picker}.wasm`
-- [ ] Size budgets: ark-status < 500 KB, ark-picker < 800 KB (enforced by test asserting bytes.len())
+- [ ] **Size posture:** no hard byte budget (zellij-tile floor is ~500 KB raw / ~480 KB after wasm-opt; comparable plugins land 1-2 MB). Instead: CI regression check fails the PR if either plugin grows >25% vs main. Track absolute size in release notes.
+- [ ] **Required size-reduction stack** (build defaults for both wasm crates):
+  - `[profile.release] opt-level = "z", lto = "fat", codegen-units = 1, strip = true, panic = "abort"`
+  - Postprocess via `wasm-opt -Oz --enable-bulk-memory` (saves ~15-20%)
+  - `default-features = false` on every dep that supports it
+  - Avoid `serde_json`, `chrono`, `regex`, `url`, `uuid`, `humantime` in plugins (collectively ~200-400 KB)
+  - For picker fuzzy matching: use `nucleo-matcher` (leaf deps: `memchr` only), NOT `fuzzy-matcher` or full `nucleo` crate
 - [ ] A standalone release asset also uploads the raw `.wasm` files (for users who want to install manually)
 **Dependencies:** cavekit-plugin-status, cavekit-plugin-picker
 

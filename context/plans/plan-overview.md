@@ -8,5 +8,4 @@ last_edited: "2026-04-14"
 ## Build Sites
 | Site | File | Tasks | Done | Status |
 |------|------|-------|------|--------|
-
-No build sites yet. Run `/ck:map` to generate one.
+| ark v1 | build-site.md | 135 | 0 | DRAFT |

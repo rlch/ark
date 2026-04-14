@@ -1,6 +1,6 @@
 ---
 created: "2026-04-14T00:00:00Z"
-last_edited: "2026-04-14T00:00:00Z"
+last_edited: "2026-04-14"
 ---
 
 # Cavekit Overview — ark
@@ -19,7 +19,7 @@ One engine can be used by many orchestrators. Third-party extension via a subpro
 2. **Session-per-run** — every `ark spawn` creates a new zellij session, never nests or joins existing. Users switch via zellij's session picker.
 3. **Observers, not orchestrators** — engines and orchestrator adapters observe upstream tools; they never fork or rewrite them. Cavekit stays external.
 4. **Filesystem-first state** — all state lives under `$XDG_STATE_HOME/ark/`. Restart-safe. `ark list` reads the directory.
-5. **No mandatory daemon** — ephemeral per-agent supervisors, no central server. Optional plugin-host control socket for picker actions.
+5. **No daemon, ever** — ephemeral per-agent supervisors. Per-supervisor control sockets (kakoune model: one socket per `kak -s`, picker enumerates via `read_dir`, dead sockets GC'd by reachability). Picker spawns new agents by `exec`ing `ark spawn` subprocess (wezterm "connect-or-spawn" coarsened) — no shared listener, no bootstrap dead zone.
 6. **Compile-in default, subprocess escape hatch later** — blessed engines + orchestrators in-binary; third-party comes in v2.
 7. **XDG compliant** — state in `$XDG_STATE_HOME`, sockets in `$XDG_RUNTIME_DIR`, config in `$XDG_CONFIG_HOME`.
 8. **Textual aesthetic** — `delta` for diff rendering, syntect-backed. No ratatui for wasm plugins (zellij-tile instead). Ratatui reserved for native pane commands.
@@ -28,22 +28,22 @@ One engine can be used by many orchestrators. Third-party extension via a subpro
 
 | Domain | Cavekit File | Requirements | Status | Description |
 |--------|--------------|--------------|--------|-------------|
-| Core architecture | cavekit-architecture.md | 6 | DRAFT | Two-layer Engine + Orchestrator abstraction, trait surfaces, ownership rules |
-| Types, state, events | cavekit-types-state-events.md | 7 | DRAFT | AgentId, AgentSpec, AgentEvent exhaustive, state-dir XDG schema, events.jsonl |
-| CLI surface | cavekit-cli.md | 8 | DRAFT | 6 top-level subcommands with arg schema, exit codes, env vars |
-| Configuration | cavekit-config.md | 5 | DRAFT | Figment-layered TOML, defaults → user → project → env → flag |
-| Zellij multiplexer | cavekit-mux-zellij.md | 6 | DRAFT | Session-per-run, tabs, pipe integration, `$ZELLIJ` detection |
-| Claude Code engine | cavekit-engine-claude-code.md | 7 | DRAFT | Hook injection, transcript tailing, permission auto-approve, done/stall detection |
-| Cavekit orchestrator | cavekit-orchestrator-cavekit.md | 9 | DRAFT | Impl-tracking, ralph-loop, site phases, review tab trigger, codex integration |
-| Claude-code orchestrator | cavekit-orchestrator-claude-code.md | 3 | DRAFT | Passthrough mode, minimal observation |
-| Supervisor lifecycle | cavekit-supervisor.md | 6 | DRAFT | Fork/detach, event bus wiring, crash recovery, kill semantics |
-| KDL layouts | cavekit-layouts.md | 6 | DRAFT | Shipped tab KDLs, templating, user authoring |
-| Pane commands (ratatui) | cavekit-pane-commands.md | 4 | DRAFT | `ark pane diff/git/log` ratatui widgets |
-| Status plugin (wasm) | cavekit-plugin-status.md | 5 | DRAFT | Zellij-tile renderer, pipe ingestion, graceful degradation |
-| Picker plugin (wasm) | cavekit-plugin-picker.md | 7 | DRAFT | Session-manager-alike UI, W1-W5 wireframes, fuzzy search, host control |
-| Hook sidecar + IPC | cavekit-hook-ipc.md | 5 | DRAFT | `ark-hook` binary, control socket protocol for picker→host |
-| Testing strategy | cavekit-testing.md | 5 | DRAFT | Contract tests, fixtures, e2e, CI matrix |
-| Distribution | cavekit-distribution.md | 4 | DRAFT | cargo-dist, homebrew, install flow, wasm embedding |
+| Core architecture | cavekit-architecture.md | 6 | APPROVED | Two-layer Engine + Orchestrator abstraction, trait surfaces, ownership rules |
+| Types, state, events | cavekit-types-state-events.md | 7 | APPROVED | AgentId, AgentSpec, AgentEvent exhaustive, state-dir XDG schema, events.jsonl |
+| CLI surface | cavekit-cli.md | 8 | APPROVED | 6 top-level subcommands with arg schema, exit codes, env vars |
+| Configuration | cavekit-config.md | 5 | APPROVED | Figment-layered TOML, defaults → user → project → env → flag |
+| Zellij multiplexer | cavekit-mux-zellij.md | 6 | APPROVED | Session-per-run, tabs, pipe integration, `$ZELLIJ` detection |
+| Claude Code engine | cavekit-engine-claude-code.md | 7 | APPROVED | Hook injection, transcript tailing, permission auto-approve, done/stall detection |
+| Cavekit orchestrator | cavekit-orchestrator-cavekit.md | 9 | APPROVED | Impl-tracking, ralph-loop, site phases, review tab trigger, codex integration |
+| Claude-code orchestrator | cavekit-orchestrator-claude-code.md | 3 | APPROVED | Passthrough mode, minimal observation |
+| Supervisor lifecycle | cavekit-supervisor.md | 7 | APPROVED | Fork/detach, event bus wiring, control socket, crash recovery, kill semantics |
+| KDL layouts | cavekit-layouts.md | 6 | APPROVED | Shipped tab KDLs, templating, user authoring |
+| Pane commands (ratatui) | cavekit-pane-commands.md | 4 | APPROVED | `ark pane diff/git/log` ratatui widgets |
+| Status plugin (wasm) | cavekit-plugin-status.md | 5 | APPROVED | Zellij-tile renderer, pipe ingestion, graceful degradation |
+| Picker plugin (wasm) | cavekit-plugin-picker.md | 7 | APPROVED | Session-manager-alike UI, W1-W5 wireframes, fuzzy search, host control |
+| Hook sidecar + IPC | cavekit-hook-ipc.md | 5 | APPROVED | `ark-hook` binary, control socket protocol for picker→host |
+| Testing strategy | cavekit-testing.md | 5 | APPROVED | Contract tests, fixtures, e2e, CI matrix |
+| Distribution | cavekit-distribution.md | 4 | APPROVED | cargo-dist, homebrew, install flow, wasm embedding |
 
 ## Cross-Reference Map
 

@@ -74,7 +74,7 @@ Zellij plugins are `wasm32-wasip1` modules using `zellij-tile` primitives (Text,
 - [ ] Compiled wasm is embedded in the `ark` binary via `include_bytes!`
 - [ ] `ark doctor --fix` writes the embedded wasm to `~/.config/zellij/plugins/ark-status.wasm` (overwrites existing; doctor says so)
 - [ ] Doctor prints a KDL snippet users paste into their zellij config default layout to enable the plugin
-- [ ] Wasm size target: < 500 KB (achievable with zellij-tile; no ratatui)
+- [ ] Wasm size: no hard budget (zellij-tile floor is ~480 KB after wasm-opt; comparable status plugins land 1-2 MB). CI fails on >25% growth vs main — see cavekit-distribution.md R3 for the size-reduction stack.
 **Dependencies:** cavekit-distribution, cavekit-cli R5
 
 ## Example rendered status bar (main cockpit session)

@@ -16,8 +16,8 @@ The `ZellijMux` implementation of the `Multiplexer` trait. Creates zellij sessio
 - [ ] Session name derived from `AgentSpec.session` (set at spawn time per cavekit-types-state-events R1)
 - [ ] If session name collides with existing session, append `-{short-ulid}`
 - [ ] Detect existing zellij context via `$ZELLIJ` env var:
-  - **outside zellij** (`$ZELLIJ` unset): spawn new session via `zellij -s {session} --layout {path}` wrapped in `setsid` (POSIX) or double-fork to detach
-  - **inside zellij** (`$ZELLIJ` set): ask current client to switch via `zellij action switch-session --name {session} --create` (zellij ≥ 0.40)
+  - **outside zellij** (`$ZELLIJ` unset): spawn new session via `zellij -s {session} --layout {path.kdl}` wrapped in `setsid` (POSIX) or double-fork to detach. Layout file MUST end in `.kdl` (zellij issue #4994: non-`.kdl` extensions silently fail with `--layout`)
+  - **inside zellij** (`$ZELLIJ` set): ask current client to switch via `zellij action switch-session {session} [--layout {path.kdl}]` (zellij ≥ 0.44.1). Note: `switch-session` create-if-missing is the DEFAULT behavior; there is no `--create` flag (that flag exists on `attach`, not `switch-session`)
 - [ ] Under no circumstance nest zellij clients (no `zellij attach` inside a running zellij)
 - [ ] Switching sessions returns control to the caller; supervisor continues independently in its own process
 **Dependencies:** cavekit-types-state-events R1
@@ -62,7 +62,7 @@ The `ZellijMux` implementation of the `Multiplexer` trait. Creates zellij sessio
   2. Shipped: `{binary-dir}/share/ark/layouts/{stem}.kdl` (or embedded via `include_str!` and extracted on first use)
 - [ ] Layout path: used verbatim after template substitution
 - [ ] Template variables: `{{cwd}}`, `{{agent_cmd}}`, `{{agent_args}}` (as KDL array), `{{id}}`, `{{name}}`
-- [ ] Rendered output written to `$XDG_RUNTIME_DIR/ark/layouts/{id}-{tab-name}.kdl` (temp file, cleaned on tab close)
+- [ ] Rendered output written to `$XDG_RUNTIME_DIR/ark/layouts/{id}-{tab-name}.kdl` (temp file, cleaned on tab close). MUST use `.kdl` extension — zellij issue #4994 silently fails for other extensions when invoked with `--layout`
 - [ ] Rendering validates KDL syntax before calling zellij (reject malformed with clear error)
 **Dependencies:** cavekit-layouts
 
@@ -71,7 +71,7 @@ The `ZellijMux` implementation of the `Multiplexer` trait. Creates zellij sessio
 **Acceptance Criteria:**
 - [ ] Preflight (called by `ark doctor` and `ark spawn`):
   - `zellij --version` present
-  - Version ≥ 0.44 (requires wasmi plugin host + switch-session action)
+  - Version ≥ 0.44.1 (requires wasmi plugin host + switch-session action; 0.44.1 picks up web-client + scrollback fixes vs 0.44.0)
   - Required plugins locatable at configured paths
 - [ ] Clear error messages: tells user exact install command (e.g., `brew install zellij` on macOS)
 - [ ] Commands spawned with `zellij` use `tokio::process::Command`, capture stderr for error reporting

@@ -82,21 +82,45 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      ZELLIJ_VERSION: "0.44.1"
+      DELTA_VERSION: "0.18.2"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install dependencies (macOS)
-        if: runner.os == 'macOS'
-        run: brew install zellij git-delta
-      - name: Install dependencies (Linux)
-        if: runner.os == 'Linux'
+      - name: Install zellij (prebuilt tarball, ~10s)
+        shell: bash
         run: |
-          cargo install zellij
-          cargo install git-delta
+          case "${{ runner.os }}-${{ runner.arch }}" in
+            Linux-X64)   T=zellij-x86_64-unknown-linux-musl.tar.gz ;;
+            Linux-ARM64) T=zellij-aarch64-unknown-linux-musl.tar.gz ;;
+            macOS-X64)   T=zellij-x86_64-apple-darwin.tar.gz ;;
+            macOS-ARM64) T=zellij-aarch64-apple-darwin.tar.gz ;;
+          esac
+          curl -fsSL "https://github.com/zellij-org/zellij/releases/download/v${ZELLIJ_VERSION}/${T}" \
+            | sudo tar -xz -C /usr/local/bin
+          zellij --version
+      - name: Install delta (prebuilt)
+        shell: bash
+        run: |
+          case "${{ runner.os }}-${{ runner.arch }}" in
+            Linux-X64)   T=git-delta-${DELTA_VERSION}-x86_64-unknown-linux-gnu.tar.gz ;;
+            Linux-ARM64) T=git-delta-${DELTA_VERSION}-aarch64-unknown-linux-gnu.tar.gz ;;
+            macOS-X64)   T=git-delta-${DELTA_VERSION}-x86_64-apple-darwin.tar.gz ;;
+            macOS-ARM64) T=git-delta-${DELTA_VERSION}-aarch64-apple-darwin.tar.gz ;;
+          esac
+          curl -fsSL "https://github.com/dandavison/delta/releases/download/${DELTA_VERSION}/${T}" \
+            | sudo tar -xz -C /tmp
+          sudo mv "/tmp/git-delta-${DELTA_VERSION}-"*/delta /usr/local/bin/
+          delta --version
       - run: cargo test --all-features
       - run: ARK_E2E=1 cargo test --all-features -- --test-threads=1
 ```
+
+**Why prebuilt tarballs:** `cargo install zellij` is ~5 min cold; `brew install` is 30-90s cold; tarball is ~10s and same on macOS + Linux. Avoid `apt install zellij` (Ubuntu universe lags badly). No maintained `setup-zellij` action exists.
+
+**Linux musl tarball is statically linked** — runs on any `ubuntu-*` runner regardless of glibc.
 
 ## Out of Scope
 - Property-based tests beyond serde round-tripping — nice-to-have, not required

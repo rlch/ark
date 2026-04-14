@@ -8,7 +8,7 @@ last_edited: "2026-04-14T00:00:00Z"
 ## Scope
 Two inter-process surfaces:
 1. **`ark-hook` sidecar binary** — invoked by Claude Code when a hook event fires, reads JSON from stdin, writes structured AgentEvent-shaped record to the agent's state dir and pipes to the status plugin.
-2. **Host control socket** — unix socket at `$XDG_RUNTIME_DIR/ark/control.sock` listening for commands from the picker plugin (spawn, kill, rename, resurrect). One daemon-less listener per supervisor OR a central lightweight coordinator.
+2. **Per-supervisor control sockets** — each supervisor binds a unix socket at `${XDG_RUNTIME_DIR:-/tmp}/ark-$UID/agents/{agent-id}.sock`. Picker enumerates the directory and connects to per-agent sockets. No central daemon. Modeled on kakoune's session-per-socket pattern (`kak -s`/`kak -l`/`kak -p`). New-agent spawn does NOT use the socket — picker `exec`s `ark spawn` as a subprocess (wezterm "connect-or-spawn" pattern coarsened).
 
 ## Requirements — ark-hook sidecar
 
@@ -52,31 +52,40 @@ Two inter-process surfaces:
 
 ## Requirements — Control socket
 
-### R4: Control socket daemon
-**Description:** Accept administrative commands from the picker plugin (or other clients like the CLI).
+### R4: Per-supervisor control socket (kakoune model)
+**Description:** Each supervisor binds its own unix socket. Picker enumerates the agents directory and connects to per-agent sockets. No central daemon, no shared listener, no bind-race. Precedent: kakoune (one socket per `kak -s` session, `kak -l` enumerates by `read_dir`, dead sessions GC'd by reachability check).
 **Acceptance Criteria:**
-- [ ] Path: `$XDG_RUNTIME_DIR/ark/control.sock` (unix stream socket, mode 0700)
-- [ ] Lifecycle options (pick one at impl time; leaning toward option A):
-  - **A) Shared lightweight listener** started on first `ark spawn`, exits when no agents active. Runs in a forked process separate from any supervisor.
-  - B) Each supervisor listens on its own per-agent socket — more sockets, more complex dispatch.
+- [ ] Path scheme: `${XDG_RUNTIME_DIR:-/tmp}/ark-$UID/agents/{agent-id}.sock` (flat directory, one socket per supervisor)
+- [ ] Parent dir mode 0700; socket file mode 0700
+- [ ] **macOS:** `XDG_RUNTIME_DIR` is unset by default. The shell-style `:-/tmp` fallback handles this — resolved path becomes `/tmp/ark-$UID/agents/{id}.sock`. `dirs::runtime_dir()` returns `None` on macOS; ark MUST handle the fallback explicitly. Precedent: kakoune uses `/tmp/kakoune-$USER`, tmux uses `$TMPDIR/tmux-$UID`.
+- [ ] **Path length cap:** macOS unix sockets cap at ~104 bytes (Linux 108). Typical resolved path is ~60 chars (`/tmp/ark-501/agents/cavekit-myfeat-01JX....sock`) — well under. If agent-id schema ever grows, validate at bind time.
+- [ ] Supervisor binds the socket immediately after `setsid` and StateDir creation, before signaling readiness to the parent CLI (see cavekit-supervisor.md R3 + R7). Listener lifetime = supervisor lifetime; no daemon process exists.
+- [ ] Cleanup (graceful): supervisor unlinks its socket via `Drop` guard + `signal_hook` SIGTERM/SIGINT handler. On SIGKILL or hard crash the socket file remains stale until GC.
+- [ ] **Stale socket GC:** any client (picker, CLI) that finds a `.sock` for which `connect()` returns `ECONNREFUSED` or `ENOENT`-during-handshake (50ms timeout) MUST `unlink()` it. This is the kakoune `kak -l` pattern.
+- [ ] **No file locks needed.** Per-socket scheme avoids bind-race entirely.
+- [ ] **`Spawn` is NOT a control-socket command.** Picker spawns new agents by `exec`ing `ark spawn <args>` as a detached subprocess (it then double-forks itself per cavekit-supervisor.md R1). This eliminates the bootstrap dead zone (zero supervisors → no socket → can still spawn the first agent via CLI). See R5 below for the command list.
 - [ ] Protocol: newline-delimited JSON requests + responses
-- [ ] Permissions: socket file is user-only (0700)
 - [ ] Errors: malformed requests get `{"ok": false, "error": "..."}`; connection remains open
+- [ ] Implementation: `interprocess` crate (`local_socket::Listener` with Tokio integration). Default name-reclamation-on-drop is fine here.
+- [ ] Optional belt-and-suspenders: an `fd-lock` flock on `${XDG_RUNTIME_DIR}/ark-$UID/spawn.lock` only around `ark spawn` if deterministic agent-id assignment under concurrent spawns matters; otherwise skip.
 **Dependencies:** cavekit-plugin-picker, cavekit-supervisor
 
 ### R5: Control protocol
 **Description:** Commands the socket accepts.
 **Acceptance Criteria:**
 - [ ] Request shape: `{"cmd": "<name>", "args": {...}}`, response: `{"ok": true, "data": ...}` or `{"ok": false, "error": "..."}`
-- [ ] Commands:
-  - `List { }` — returns array of AgentStatus for all known agents (active + recent done, reading state dir)
-  - `Spawn { orchestrator, engine, cwd, name, layout, cmd, env? }` — forks supervisor (invokes `ark spawn` internally or reuses shared spawn logic)
-  - `Kill { id, remove_worktree?: bool }` — SIGTERM supervisor, with optional worktree removal
-  - `ForceKill { id }` — SIGKILL supervisor
-  - `Rename { id, new_name }` — rewrites `spec.json.name` (not session name, which is frozen)
-  - `Resurrect { id }` — reads crashed agent's spec, runs `Spawn` with same params
-  - `Forget { id }` — sets `status.json.hide = true` so picker omits it
+- [ ] Each command is sent to the **per-agent socket** for the target agent (picker resolves agent-id → socket path). `List` is the exception: it does not need a socket — picker reads `$STATE/agents/*/status.json` + reachability-checks `${XDG_RUNTIME_DIR}/ark-$UID/agents/*.sock` directly (see cavekit-plugin-picker.md R3).
+- [ ] Commands accepted on a supervisor's own socket:
+  - `Status { }` — returns this agent's full AgentStatus snapshot (single agent; not aggregate)
+  - `Kill { remove_worktree?: bool }` — SIGTERM self, with optional worktree removal
+  - `ForceKill { }` — SIGKILL self (supervisor sends SIGKILL to its own process group)
+  - `Rename { new_name }` — rewrites `spec.json.name` (session name is frozen)
+  - `Forget { }` — sets `status.json.hide = true` so picker omits this agent
   - `Ping` — `{"ok": true, "data": "pong"}`
+- [ ] **Out of socket protocol** (handled differently):
+  - `Spawn` — picker `exec`s `ark spawn <args>` subprocess (no socket; agent-id doesn't exist yet)
+  - `Resurrect` — picker reads crashed agent's `spec.json`, then `exec`s `ark spawn` with same params (semantically equivalent to Spawn)
+  - `List` — picker scans state dir + socket dir directly (no central aggregator exists)
 - [ ] Authorization: local-only (unix socket + user perms); no tokens
 - [ ] Audit log: every command appended to `$STATE/control.log`
 **Dependencies:** R4, cavekit-supervisor
@@ -99,12 +108,28 @@ Two inter-process surfaces:
 ```
 
 ## Example control protocol exchange
-```
-C: {"cmd":"List","args":{}}
-S: {"ok":true,"data":[{...AgentStatus}, ...]}
 
-C: {"cmd":"Kill","args":{"id":"cavekit-myfeat-01JX...","remove_worktree":false}}
+Picker enumerates agents (no socket needed):
+```
+$ ls $XDG_RUNTIME_DIR/ark-$UID/agents/
+cavekit-myfeat-01JX....sock
+cavekit-pay-01JY....sock
+```
+
+Picker connects to a specific agent's socket:
+```
+$ socat - UNIX-CONNECT:$XDG_RUNTIME_DIR/ark-$UID/agents/cavekit-myfeat-01JX....sock
+C: {"cmd":"Status","args":{}}
+S: {"ok":true,"data":{...AgentStatus}}
+
+C: {"cmd":"Kill","args":{"remove_worktree":false}}
 S: {"ok":true,"data":{"signaled":"SIGTERM"}}
+```
+
+Picker spawns a new agent (NOT via socket):
+```
+$ ark spawn --orchestrator cavekit --cwd /path -- claude --resume
+spawned cavekit-newfeat-01JZ...
 ```
 
 ## Out of Scope
@@ -112,6 +137,8 @@ S: {"ok":true,"data":{"signaled":"SIGTERM"}}
 - Authentication / authorization — local user is trusted
 - Event streaming over control socket — picker uses zellij pipe; control socket is request/response
 - Hooks for non-claude engines — each engine declares its own hook surface
+- Central daemon / shared listener — explicitly rejected; per-supervisor sockets win on simplicity (no bind-race, no orphan listener, no bootstrap dead zone)
+- Cross-agent aggregate commands over socket (e.g. "kill all") — picker iterates per-agent sockets locally
 
 ## Cross-References
 - cavekit-engine-claude-code.md — hook injection reads this spec for the sidecar

@@ -20,7 +20,7 @@ Mirrors zellij's `default-plugins/session-manager/` in Zellij repo. Uses SingleS
 - [ ] Build target: `wasm32-wasip1`
 - [ ] Permissions: `ReadCliPipes`, `ChangeApplicationState`, `ReadApplicationState`, `MessageAndLaunchOtherPlugins`
 - [ ] Subscribed events: `EventType::Key`, `EventType::Timer`, `EventType::SessionUpdate`, `EventType::ModeUpdate`
-- [ ] Dependencies: `zellij-tile`, `serde`, `serde_json`, `fuzzy-matcher`, `humantime`, `chrono`
+- [ ] Dependencies: `zellij-tile`, `serde`, `nucleo-matcher` (NOT `fuzzy-matcher` — nucleo-matcher is faster and has lighter wasm footprint; only deps `memchr`). Avoid `serde_json`, `humantime`, `chrono` in plugin code (use hand-rolled formatters); see cavekit-distribution.md R3 size-reduction stack.
 - [ ] `load()` registers pipe target: `ark-picker`
 **Dependencies:** cavekit-mux-zellij
 
@@ -43,14 +43,18 @@ Mirrors zellij's `default-plugins/session-manager/` in Zellij repo. Uses SingleS
 - [ ] Resurrectable agents: separate cache for crashed agents (pid dead) found via state dir scan
 **Dependencies:** R1
 
-### R3: Bootstrap + updates
-**Description:** Plugin populates agent list on load and stays fresh.
+### R3: Bootstrap + updates (no central listener)
+**Description:** Plugin populates agent list on load via direct state-dir + socket-dir scan, then stays fresh via incremental pipe updates from supervisors. There is no central `List` command — the picker IS the aggregator (kakoune `kak -l` model).
 **Acceptance Criteria:**
-- [ ] On `load()`: request bootstrap via `pipe_message_to_plugin` to the ark host sending a `List` command; receive full state dump
-- [ ] Alternatively (fallback), scan `$STATE/ark/agents/*/status.json` via WASI fs
+- [ ] On `load()`:
+  1. Scan `$XDG_STATE_HOME/ark/agents/*/status.json` via WASI fs — gives full agent set including done/crashed
+  2. Scan `${XDG_RUNTIME_DIR:-/tmp}/ark-$UID/agents/*.sock` — gives liveness signal (socket present = supervisor still bound)
+  3. For each `.sock`, attempt `connect()` with 50ms timeout; on `ECONNREFUSED`/`ENOENT`-during-handshake, `unlink()` the stale socket file (kakoune `kak -l` GC pattern)
+  4. Cross-reference: socket present + fresh status = `running`; socket absent + status `Done` = done; socket absent + status not Done = crashed (resurrectable)
 - [ ] Incremental updates: supervisors pipe to `ark-picker` target on every event; plugin updates its cache
-- [ ] 2s timer re-renders for timing-sensitive fields (stall age, "5m ago" counters)
-**Dependencies:** cavekit-types-state-events
+- [ ] 2s timer: re-render for timing-sensitive fields (stall age, "5m ago" counters) AND re-scan socket dir for liveness changes
+- [ ] Per-agent detail (R5): on demand, `connect()` to that agent's socket and send `{"cmd":"Status"}` for the full snapshot (avoids polling every agent)
+**Dependencies:** cavekit-types-state-events, cavekit-hook-ipc R4
 
 ### R4: List screen (W1 wireframe)
 **Description:** Main screen layout, fuzzy search, per-agent summary.
@@ -75,7 +79,7 @@ Mirrors zellij's `default-plugins/session-manager/` in Zellij repo. Uses SingleS
 **Dependencies:** R4
 
 ### R6: New-agent form (W3 wireframe)
-**Description:** `Ctrl+n` opens a spawn form; submit sends `Spawn` command via control socket.
+**Description:** `Ctrl+n` opens a spawn form; submit `exec`s `ark spawn` as a subprocess (NOT a socket command — agent doesn't exist yet, so no socket exists yet).
 **Acceptance Criteria:**
 - [ ] Fields:
   - Orchestrator (radio: `cavekit | claude-code`)
@@ -84,21 +88,24 @@ Mirrors zellij's `default-plugins/session-manager/` in Zellij repo. Uses SingleS
   - Layout (dropdown from shipped + user layouts)
   - Cmd (text; default = `claude --resume`)
 - [ ] Tab/Shift+Tab cycle fields; Enter submits
-- [ ] Submission sends to host via control socket: `{"cmd": "spawn", "args": {...}}`
-- [ ] Host validates, performs spawn, returns `{"ok": true, "id": "..."}` or error; picker updates cache
-**Dependencies:** cavekit-hook-ipc
+- [ ] Submission: plugin uses zellij-tile `run_command` to exec `ark spawn --orchestrator <o> --cwd <c> --name <n> --layout <l> -- <cmd>` as a detached subprocess. `ark spawn` itself double-forks (cavekit-supervisor.md R1) and returns the new agent-id on stdout
+- [ ] On exec failure (binary missing, validation error): plugin transitions to `Error(stderr)` screen
+- [ ] On success: plugin returns to List screen; new agent appears once its socket binds and supervisors pipe their first event (typically <500ms)
+- [ ] **Why subprocess not socket:** "no agents alive → no socket → can't spawn" deadlock is removed at the cost of fork+exec latency (~10ms, irrelevant for human-triggered actions). Precedent: wezterm `wezterm cli`'s connect-or-spawn pattern, coarsened.
+**Dependencies:** cavekit-hook-ipc R4
 
 ### R7: Kill + rename + resurrect + detach
-**Description:** Administrative actions on selected agent.
+**Description:** Administrative actions on selected agent. Live actions (Kill/Rename/Forget) connect to that agent's per-supervisor socket. Resurrect (dead supervisor) execs `ark spawn`.
 **Acceptance Criteria:**
 - [ ] `Del`: enters `ConfirmKill` screen showing `[y] kill  [Y] kill + remove worktree  [n] cancel`
-- [ ] `y`: sends `Kill { id, remove_worktree: false }` to host; host SIGTERMs supervisor
-- [ ] `Shift+Y`: sends `Kill { id, remove_worktree: true }`; host removes worktree after kill
-- [ ] `Ctrl+r`: rename flow — prompt for new name; sends `Rename { id, new_name }` to host; updates `spec.json.name`
-- [ ] `Ctrl+d`: detach — picker removes from its display; agent continues running (sends `Forget { id }` to host, host writes `{ hide: true }` marker to status.json)
-- [ ] `r` on a crashed agent: sends `Resurrect { id }` to host; host runs `ark spawn` with same spec
+- [ ] `y`: connect to `${XDG_RUNTIME_DIR}/ark-$UID/agents/{id}.sock`, send `{"cmd":"Kill","args":{"remove_worktree":false}}`; supervisor SIGTERMs itself
+- [ ] `Shift+Y`: same as above with `"remove_worktree":true`; supervisor removes worktree before exiting
+- [ ] `Ctrl+r`: rename flow — prompt for new name; connect to agent socket, send `{"cmd":"Rename","args":{"new_name":"..."}}`; supervisor rewrites `spec.json.name`
+- [ ] `Ctrl+d`: detach — connect to agent socket, send `{"cmd":"Forget","args":{}}`; supervisor writes `{"hide":true}` to status.json. Picker removes from display; agent continues running.
+- [ ] `r` on a crashed agent (no live socket): plugin reads `$STATE/agents/{id}/spec.json`, then `run_command`s `ark spawn` with the same params (same path as R6 New-agent). Old agent's state dir archived to `$STATE/archive/{date}/{id}/` first.
 - [ ] All confirmations in-place; no leaving the picker
-**Dependencies:** R4, cavekit-hook-ipc
+- [ ] On socket connect failure mid-flow (supervisor died between list refresh and action): plugin shows "agent no longer alive — refresh? [y/n]" and re-runs R3 bootstrap on `y`
+**Dependencies:** R4, cavekit-hook-ipc R4 + R5
 
 ### R8: Switch action
 **Description:** `Enter` on a row — switch to that agent's zellij session.
@@ -245,7 +252,7 @@ Mirrors zellij's `default-plugins/session-manager/` in Zellij repo. Uses SingleS
       }
   }
   ```
-- Wasm size target: < 800 KB
+- Wasm size: no hard budget; CI fails on >25% growth vs main. See cavekit-distribution.md R3 for size-reduction stack.
 
 ## Out of Scope
 - Cross-user / remote agents
