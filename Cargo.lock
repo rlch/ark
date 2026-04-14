@@ -101,6 +101,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "ark-config",
+ "ark-orchestrators-cavekit",
+ "ark-orchestrators-claude-code",
  "ark-pane",
  "ark-types",
  "chrono",
@@ -108,6 +110,7 @@ dependencies = [
  "nix",
  "serde",
  "serde_json",
+ "shlex",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
