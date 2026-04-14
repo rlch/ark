@@ -10,6 +10,13 @@ rust-version.workspace = true
 [dependencies]
 ark-types = { path = "../types" }
 ark-core = { path = "../core" }
+ark-config = { path = "../config" }
+ark-engines-claude-code = { path = "../engines/claude-code" }
+ark-orchestrators-cavekit = { path = "../orchestrators/cavekit" }
+ark-orchestrators-claude-code = { path = "../orchestrators/claude-code" }
+ark-mux-zellij = { path = "../mux/zellij" }
+async-trait = { workspace = true }
+chrono = { workspace = true }
 nix = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -18,8 +25,12 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 interprocess = { workspace = true }
+signal-hook = { workspace = true }
+signal-hook-tokio = { workspace = true }
+futures = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

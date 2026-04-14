@@ -142,6 +142,7 @@ mod tests {
             supervisor_pid: 12345,
             stalled_since: Some(Utc::now()),
             findings,
+            hide: false,
         };
         (id, status)
     }

@@ -68,6 +68,11 @@ pub struct AgentStatus {
     pub supervisor_pid: u32,
     pub stalled_since: Option<DateTime<Utc>>,
     pub findings: Findings,
+    /// Picker-hide flag toggled by the `Forget` control-socket command
+    /// (cavekit-hook-ipc.md R5). `#[serde(default)]` keeps pre-existing
+    /// status files deserialising cleanly.
+    #[serde(default)]
+    pub hide: bool,
 }
 
 impl AgentStatus {
@@ -84,6 +89,7 @@ impl AgentStatus {
             supervisor_pid,
             stalled_since: None,
             findings: Findings::default(),
+            hide: false,
         }
     }
 }
@@ -168,6 +174,7 @@ mod tests {
         assert!(s.stalled_since.is_none());
         assert_eq!(s.findings, Findings::default());
         assert_eq!(s.spec, spec);
+        assert!(!s.hide, "hide defaults to false");
     }
 
     #[test]
@@ -210,9 +217,51 @@ mod tests {
             supervisor_pid: 12345,
             stalled_since: Some(Utc::now()),
             findings,
+            hide: false,
         };
         let json = serde_json::to_string(&status).expect("ser");
         let back: AgentStatus = serde_json::from_str(&json).expect("de");
         assert_eq!(back, status);
+    }
+
+    #[test]
+    fn hide_field_is_optional_on_deserialize() {
+        // Existing status.json files written before T-066 do not carry a
+        // `hide` field; `#[serde(default)]` must keep them readable.
+        let spec = sample_spec();
+        let legacy = serde_json::json!({
+            "spec": spec,
+            "phase": "starting",
+            "progress": null,
+            "last_event_at": Utc::now(),
+            "last_event_summary": "",
+            "tab_handles": [],
+            "supervisor_pid": 42,
+            "stalled_since": null,
+            "findings": { "p0": 0, "p1": 0, "p2": 0, "p3": 0 }
+        });
+        let status: AgentStatus = serde_json::from_value(legacy).expect("legacy deserialize");
+        assert!(!status.hide);
+    }
+
+    #[test]
+    fn hide_true_roundtrips() {
+        let spec = sample_spec();
+        let status = AgentStatus {
+            spec,
+            phase: Phase::Idle,
+            progress: None,
+            last_event_at: Utc::now(),
+            last_event_summary: String::new(),
+            tab_handles: vec![],
+            supervisor_pid: 1,
+            stalled_since: None,
+            findings: Findings::default(),
+            hide: true,
+        };
+        let json = serde_json::to_string(&status).expect("ser");
+        assert!(json.contains("\"hide\":true"));
+        let back: AgentStatus = serde_json::from_str(&json).expect("de");
+        assert!(back.hide);
     }
 }

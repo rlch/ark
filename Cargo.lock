@@ -136,7 +136,9 @@ name = "ark-engines-claude-code"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ark-core",
  "ark-types",
+ "async-trait",
  "chrono",
  "nix",
  "notify",
@@ -241,12 +243,23 @@ name = "ark-supervisor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ark-config",
  "ark-core",
+ "ark-engines-claude-code",
+ "ark-mux-zellij",
+ "ark-orchestrators-cavekit",
+ "ark-orchestrators-claude-code",
  "ark-types",
+ "async-trait",
+ "chrono",
  "fd-lock",
+ "futures",
  "interprocess",
  "nix",
+ "serde",
  "serde_json",
+ "signal-hook",
+ "signal-hook-tokio",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -1489,6 +1502,18 @@ checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
 dependencies = [
  "errno",
  "libc",
+]
+
+[[package]]
+name = "signal-hook-tokio"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "213241f76fb1e37e27de3b6aa1b068a2c333233b59cca6634f634b80a27ecf1e"
+dependencies = [
+ "futures-core",
+ "libc",
+ "signal-hook",
+ "tokio",
 ]
 
 [[package]]

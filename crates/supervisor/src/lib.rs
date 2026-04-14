@@ -35,3 +35,17 @@ pub use foreground::{
     ForegroundCtx, SharedWriter, StderrSink, build_foreground_dispatch, run_foreground,
 };
 pub use lock::{LockError, LockGuard, acquire_lock};
+
+// T-066: per-supervisor socket command handlers (cavekit-hook-ipc R5).
+pub mod commands;
+pub use commands::{SignalSender, SupervisorCommandCtx, SupervisorCommandHandler};
+
+// T-067: signal handlers + socket-cleanup guard (cavekit-supervisor R7).
+pub mod signals;
+pub use signals::{ControlSocketGuard, SignalTaskHandle, install_signal_handlers};
+
+// T-069: factory + full R3 boot sequence.
+pub mod factory;
+pub mod orchestration;
+pub use factory::{build_engine, build_multiplexer, build_orchestrator};
+pub use orchestration::{SupervisorMode, finalize_state, outcome_exit_code, run_supervisor};
