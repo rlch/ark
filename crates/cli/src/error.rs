@@ -1,12 +1,11 @@
 //! CLI error type used by subcommand stubs and future handlers.
 //!
-//! T-084 only needs a "not yet wired" sentinel so stubs can return a
-//! meaningful error that later tasks replace. The exit-code contract
-//! from cavekit-cli R8 is T-085 territory, so this module deliberately
-//! stays small and does NOT embed code mappings — those will land with
-//! T-085 and `CliError` will pick up a `From`/`exit_code()` impl then.
+//! T-085 (cavekit-cli R8) adds [`CliError::code`] which maps every
+//! variant to its canonical [`crate::ExitCode`].
 
 use thiserror::Error;
+
+use crate::ExitCode;
 
 /// Top-level CLI error.
 #[derive(Debug, Error)]
@@ -26,6 +25,13 @@ impl CliError {
     /// Constructor helper used by every stub.
     pub const fn not_yet_wired(subcommand: &'static str, task: &'static str) -> Self {
         Self::NotYetWired { subcommand, task }
+    }
+
+    /// Map this error to its canonical exit code (cavekit-cli R8).
+    pub fn code(&self) -> i32 {
+        match self {
+            Self::NotYetWired { .. } => ExitCode::NotYetWired.code(),
+        }
     }
 }
 
@@ -50,5 +56,19 @@ mod tests {
                 assert_eq!(task, "T-088");
             }
         }
+    }
+
+    #[test]
+    fn not_yet_wired_exit_code_is_seven() {
+        let e = CliError::not_yet_wired("spawn", "T-087");
+        assert_eq!(e.code(), 7);
+    }
+
+    #[test]
+    fn not_yet_wired_maps_to_exit_code_enum() {
+        // Guards against drift between `CliError::code()` and the
+        // canonical `ExitCode::NotYetWired` constant (cavekit-cli R8).
+        let e = CliError::not_yet_wired("list", "T-088");
+        assert_eq!(e.code(), ExitCode::NotYetWired as i32);
     }
 }

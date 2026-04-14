@@ -1,19 +1,15 @@
 //! `ark` binary entry.
 //!
-//! Scaffold scope (T-084, cavekit-cli.md R1):
-//! - clap-derive parser in the lib crate (see `ark_cli::Cli`)
-//! - `--version | -V` and `--help | -h` honored automatically
-//! - `$NO_COLOR` detected at startup, fed into subcommand context
-//! - subcommand stubs return [`CliError::NotYetWired`], which this
-//!   entry turns into a non-zero exit until T-085 installs the real
-//!   exit-code contract.
+//! T-084 (cavekit-cli R1): clap-derive parser, `--version`/`--help`,
+//! `$NO_COLOR` detection, and subcommand dispatch.
+//!
+//! T-085 (cavekit-cli R8): all errors are printed to stderr and the
+//! process exits with the canonical code from [`ark_cli::CliError::code`].
 
-use std::process::ExitCode;
-
-use ark_cli::{Cli, CliError, Ctx};
+use ark_cli::{Cli, Ctx};
 use clap::FromArgMatches;
 
-fn main() -> ExitCode {
+fn main() {
     let ctx = Ctx::from_env();
 
     // Build the clap command with NO_COLOR awareness, then hand it
@@ -29,12 +25,8 @@ fn main() -> ExitCode {
         }
     };
 
-    match cli.command.run(&ctx) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(CliError::NotYetWired { subcommand, task }) => {
-            eprintln!("ark: `{subcommand}` is not yet wired (waiting on {task})");
-            // Exit 1 for now. T-085 replaces this with the R8 contract.
-            ExitCode::from(1)
-        }
+    if let Err(err) = cli.command.run(&ctx) {
+        eprintln!("ark: {err}");
+        std::process::exit(err.code());
     }
 }
