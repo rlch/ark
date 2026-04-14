@@ -14,12 +14,12 @@ Build site: context/plans/build-site.md (134 tasks, 7 tiers).
 | 0 | 17 | 17 | ✅ COMPLETE |
 | 1 | 28 | 28 | ✅ COMPLETE |
 | 2 | 16 | 16 | ✅ COMPLETE |
-| 3 | 0 | 22 | pending |
+| 3 | 5 | 22 | in-progress |
 | 4 | 0 | 10 | pending |
 | 5 | 0 | 16 | pending |
 | 6 | 0 | 26 | pending |
 
-**Overall: 61/134 tasks done (46%) · 405 tests passing**
+**Overall: 66/134 tasks done (49%) · 481 tests passing**
 
 **Crate test breakdown:**
 - ark-types: 85 (foundation types)
@@ -42,9 +42,9 @@ Build site: context/plans/build-site.md (134 tasks, 7 tiers).
 | pane-commands | 4 | TIER-1 DONE (T-039-T-042) | (impl-pane-commands.md pending) |
 | hook-ipc | 9 | T-043-T-051 all hook-ipc tasks (primitives + skeleton + parser + JSONL + pipe + allow + fail-open) | (impl-hook-ipc.md pending) |
 | engine-claude-code | 7 | T-052-T-058 full ClaudeCodeEngine building blocks (settings, transcript, permission, done, stall, handle, preflight) | (impl-engine-claude-code.md pending) |
-| orchestrator-cavekit | 0 | TIER-3 pending | (pending) |
-| orchestrator-claude-code | 0 | TIER-3 pending | (pending) |
-| supervisor | 3 | T-059/T-060/T-061 consumers DONE | (impl-supervisor.md pending) |
+| orchestrator-cavekit | 1 | T-075 detect DONE | (pending) |
+| orchestrator-claude-code | 2 | T-073 detect + T-074 run DONE | (pending) |
+| supervisor | 5 | T-059/060/061 consumers + T-062 daemonize + T-064 file lock | (impl-supervisor.md pending) |
 | cli | 0 | TIER-4 pending | (pending) |
 | plugin-status | 0 | TIER-5 pending | (pending) |
 | plugin-picker | 0 | TIER-5 pending | (pending) |
