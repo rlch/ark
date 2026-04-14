@@ -5,6 +5,7 @@
 //! See `context/kits/cavekit-pane-commands.md` R4 for requirements.
 
 pub mod app;
+pub mod diff;
 pub mod git;
 pub mod log;
 pub mod tracing_init;

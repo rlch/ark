@@ -19,6 +19,7 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 notify = { workspace = true }
+ansi-to-tui = { workspace = true }
 chrono = { workspace = true }
 
 [dev-dependencies]
