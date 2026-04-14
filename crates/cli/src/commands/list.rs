@@ -66,38 +66,45 @@ pub struct ListArgs {
     pub watch: bool,
 }
 
-/// A single agent row — either a live `AgentStatus` snapshot
-/// or an "orphan" marker when the supervisor is unreachable.
+/// A single agent row.
+///
+/// - `Live`: socket answered with an `AgentStatus` — supervisor up.
+/// - `Archived`: socket missing/dead BUT a persisted
+///   `{state}/agents/{id}/status.json` was found and parsed — the
+///   supervisor wrote its final state at shutdown (F-518).
+/// - `Orphan`: neither a socket response nor a parseable
+///   `status.json` — genuinely abandoned, steer to `ark doctor`.
 #[derive(Debug, Clone)]
 enum Row {
     Live(AgentId, AgentStatus),
+    Archived(AgentId, AgentStatus),
     Orphan(AgentId),
 }
 
 impl Row {
     fn id(&self) -> &AgentId {
         match self {
-            Row::Live(id, _) | Row::Orphan(id) => id,
+            Row::Live(id, _) | Row::Archived(id, _) | Row::Orphan(id) => id,
         }
     }
 
     fn phase_str(&self) -> &'static str {
         match self {
-            Row::Live(_, s) => phase_name(s.phase),
+            Row::Live(_, s) | Row::Archived(_, s) => phase_name(s.phase),
             Row::Orphan(_) => "orphan",
         }
     }
 
     fn orchestrator(&self) -> &str {
         match self {
-            Row::Live(_, s) => s.spec.orchestrator.as_str(),
+            Row::Live(_, s) | Row::Archived(_, s) => s.spec.orchestrator.as_str(),
             Row::Orphan(id) => id.orchestrator(),
         }
     }
 
     fn name(&self) -> &str {
         match self {
-            Row::Live(_, s) => s.spec.name.as_str(),
+            Row::Live(_, s) | Row::Archived(_, s) => s.spec.name.as_str(),
             Row::Orphan(id) => id.name(),
         }
     }
@@ -135,6 +142,23 @@ const PHASE_NAMES: &[&str] = &[
 
 fn is_known_phase(s: &str) -> bool {
     PHASE_NAMES.contains(&s)
+}
+
+/// Read a persisted `status.json` for an archived agent (F-518).
+///
+/// The supervisor writes its final `AgentStatus` atomically at
+/// shutdown (see `crates/core/src/status_writer.rs`). When the
+/// control socket is gone (process exited) but the file remains,
+/// we surface the agent as `Row::Archived` rather than misclassify
+/// it as orphaned.
+///
+/// Returns `None` on any of: file missing, unreadable, or
+/// malformed JSON. The caller treats "no status.json" as a signal
+/// to emit `Row::Orphan`.
+fn read_persisted_status(layout: &StateLayout, id: &AgentId) -> Option<AgentStatus> {
+    let path = layout.status_path(id);
+    let bytes = std::fs::read(&path).ok()?;
+    serde_json::from_slice::<AgentStatus>(&bytes).ok()
 }
 
 /// Query one supervisor's status over its control socket.
@@ -200,7 +224,7 @@ fn render_table<W: Write>(out: &mut W, rows: &[Row], no_color: bool) -> std::io:
         let orch = truncate(row.orchestrator(), 12);
         let phase = row.phase_str();
         let uptime = match row {
-            Row::Live(_, s) => format_uptime_since(s.spec.created_at),
+            Row::Live(_, s) | Row::Archived(_, s) => format_uptime_since(s.spec.created_at),
             Row::Orphan(_) => "-".to_string(),
         };
         writeln!(
@@ -252,7 +276,7 @@ fn format_uptime_since(created_at: chrono::DateTime<chrono::Utc>) -> String {
 /// Render the detail view for a single agent.
 fn render_detail<W: Write>(out: &mut W, row: &Row, _no_color: bool) -> std::io::Result<()> {
     match row {
-        Row::Live(_, s) => {
+        Row::Live(_, s) | Row::Archived(_, s) => {
             writeln!(out, "id:           {}", s.spec.id.as_str())?;
             writeln!(out, "name:         {}", s.spec.name)?;
             writeln!(out, "cwd:          {}", s.spec.cwd.display())?;
@@ -268,6 +292,9 @@ fn render_detail<W: Write>(out: &mut W, row: &Row, _no_color: bool) -> std::io::
             writeln!(out, "layout:       {}", layout)?;
             writeln!(out, "tab count:    {}", s.tab_handles.len())?;
             writeln!(out, "last event:   {}", s.last_event_summary)?;
+            if matches!(row, Row::Archived(_, _)) {
+                writeln!(out, "source:       status.json (supervisor archived)")?;
+            }
             Ok(())
         }
         Row::Orphan(id) => {
@@ -319,7 +346,13 @@ fn gather_rows(layout: &StateLayout, only: Option<&AgentId>) -> Result<Vec<Row>,
             let sock = layout.agent_socket_path(&id);
             match query_status(&sock) {
                 Some(status) => Row::Live(id, status),
-                None => Row::Orphan(id),
+                None => match read_persisted_status(layout, &id) {
+                    // F-518: supervisor is gone but its final
+                    // `status.json` remains — surface the archived
+                    // phase instead of classifying as orphan.
+                    Some(status) => Row::Archived(id, status),
+                    None => Row::Orphan(id),
+                },
             }
         })
         .collect())
@@ -387,6 +420,17 @@ fn emit_json<W: Write>(out: &mut W, rows: &[Row], single: bool) -> Result<(), Cl
         .iter()
         .filter_map(|r| match r {
             Row::Live(_, s) => serde_json::to_value(s).ok(),
+            Row::Archived(_, s) => {
+                // Same AgentStatus shape as Live so downstream
+                // consumers don't need a union type. Adorn with a
+                // `source` marker so scripts can distinguish a
+                // socket-fresh snapshot from a persisted one.
+                let mut v = serde_json::to_value(s).ok()?;
+                if let Value::Object(ref mut m) = v {
+                    m.insert("source".to_string(), Value::String("status.json".into()));
+                }
+                Some(v)
+            }
             Row::Orphan(id) => Some(json!({
                 "id": id.as_str(),
                 "phase": "orphan",
@@ -796,6 +840,121 @@ mod tests {
     fn format_uptime_compact_under_minute() {
         let now = chrono::Utc::now();
         assert_eq!(format_uptime_since(now), "0s");
+    }
+
+    // ---------- F-518: status.json fallback → Row::Archived -----------
+
+    fn write_status_json(layout: &StateLayout, id: &AgentId, status: &AgentStatus) {
+        let dir = layout.agent_dir(id);
+        fs::create_dir_all(&dir).expect("mkdir agent dir");
+        let body = serde_json::to_vec_pretty(status).expect("serialize");
+        fs::write(layout.status_path(id), body).expect("write status.json");
+    }
+
+    #[test]
+    fn missing_socket_with_status_json_yields_archived_row() {
+        // No socket → read_persisted_status() picks up status.json →
+        // gather_rows emits Row::Archived with the persisted phase.
+        let tmp = tempfile::Builder::new()
+            .prefix("arklist-arch")
+            .tempdir_in("/tmp")
+            .expect("short tempdir");
+        let ctx = layout_ctx(tmp.path().to_path_buf());
+        let layout = StateLayout::new(
+            ctx.state_dir.clone(),
+            ctx.runtime_dir.clone(),
+            ctx.config_dir.clone(),
+        );
+        let id = AgentId::from_parts("cavekit", "archived", ulid_a());
+        let archived = mk_status(&id, Phase::Done, "cavekit");
+        write_status_json(&layout, &id, &archived);
+
+        let rows = gather_rows(&layout, None).expect("gather");
+        assert_eq!(rows.len(), 1);
+        match &rows[0] {
+            Row::Archived(got_id, got_status) => {
+                assert_eq!(got_id, &id);
+                assert_eq!(got_status.phase, Phase::Done);
+                assert_eq!(got_status.spec.name, "archived");
+            }
+            other => panic!("expected Archived, got {other:?}"),
+        }
+        assert_eq!(rows[0].phase_str(), "done");
+    }
+
+    #[test]
+    fn missing_socket_without_status_json_yields_orphan_row() {
+        // Regression guard for the original Orphan path: when neither
+        // socket nor status.json exist, the row is still Orphan.
+        let tmp = tempfile::Builder::new()
+            .prefix("arklist-orph")
+            .tempdir_in("/tmp")
+            .expect("short tempdir");
+        let ctx = layout_ctx(tmp.path().to_path_buf());
+        let layout = StateLayout::new(
+            ctx.state_dir.clone(),
+            ctx.runtime_dir.clone(),
+            ctx.config_dir.clone(),
+        );
+        let id = AgentId::from_parts("cavekit", "genuine-orphan", ulid_a());
+        seed_agent(&layout, &id); // dir only, no socket, no status.json
+
+        let rows = gather_rows(&layout, None).expect("gather");
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(rows[0], Row::Orphan(_)));
+    }
+
+    #[test]
+    fn read_persisted_status_returns_none_when_missing() {
+        let tmp = tempfile::Builder::new()
+            .prefix("arklist-read")
+            .tempdir_in("/tmp")
+            .expect("short tempdir");
+        let ctx = layout_ctx(tmp.path().to_path_buf());
+        let layout = StateLayout::new(
+            ctx.state_dir.clone(),
+            ctx.runtime_dir.clone(),
+            ctx.config_dir.clone(),
+        );
+        let id = AgentId::from_parts("cavekit", "nope", ulid_a());
+        assert!(read_persisted_status(&layout, &id).is_none());
+    }
+
+    #[test]
+    fn archived_row_renders_persisted_phase_in_table() {
+        // Row::Archived must show its persisted phase in the table
+        // (not "orphan") so users can see lifecycle outcomes after
+        // supervisors have exited.
+        let id = AgentId::from_parts("cavekit", "old", ulid_a());
+        let rows = vec![Row::Archived(
+            id.clone(),
+            mk_status(&id, Phase::Killed, "cavekit"),
+        )];
+        let mut buf: Vec<u8> = Vec::new();
+        render_table(&mut buf, &rows, true).expect("render");
+        let s = String::from_utf8(buf).expect("utf8");
+        assert!(s.contains("killed"), "expected phase killed in table: {s}");
+        assert!(
+            !s.contains("orphan"),
+            "archived rows must not show 'orphan'"
+        );
+    }
+
+    #[test]
+    fn archived_row_json_has_source_marker() {
+        // JSON emission must let callers distinguish fresh-socket
+        // snapshots from archived persisted ones.
+        let id = AgentId::from_parts("cavekit", "done", ulid_a());
+        let rows = vec![Row::Archived(
+            id.clone(),
+            mk_status(&id, Phase::Done, "cavekit"),
+        )];
+        let mut buf: Vec<u8> = Vec::new();
+        emit_json(&mut buf, &rows, false).expect("emit");
+        let v: Value = serde_json::from_slice(&buf).expect("json");
+        let arr = v.as_array().expect("array");
+        assert_eq!(arr[0]["phase"], "done");
+        assert_eq!(arr[0]["source"], "status.json");
     }
 
     // ---------- F-505: unreadable agents_root surfaces as CliError::Generic ----------

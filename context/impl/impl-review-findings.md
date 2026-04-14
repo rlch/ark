@@ -239,3 +239,45 @@ ark-cli: 217 baseline → 224 passing (+7: 4 new `build_zellij_command` tests fo
 ## Test Delta — Cycle 5
 
 ark-cli: 224 baseline → 227 passing in lib unittests + 2 integration = 229 total (+5 new lib tests: 2 for F-514 replacing 1 deleted env-mutation test → net +1 pane; 4 new `build_editor_argv_tail` tests for F-515 → +4 config). Full-workspace `cargo test --workspace -- --test-threads=1` reports pre-existing failures in `ark-orchestrators-cavekit::watchers::{codex_findings, impl_tracking, ralph_loop}` and `ark-engines-claude-code` that are entirely outside the files this cycle touched (cycle-3 notes already flagged ralph_loop as flaky; these failures reproduce on the same crates in isolation). `cargo test -p ark-cli` is green.
+
+## Tier 4 — Cycle 6 (Codex)
+
+### F-516 — P1 inside-zellij spawn must create per-agent session, not a tab (FIXED)
+
+**Source:** codex
+**Tier:** 4
+**Severity:** P1
+**Status:** fixed
+**Location:** crates/cli/src/commands/spawn.rs (`ZellijSpawn`, `zellij_plan`, `build_zellij_command`)
+
+**Description:** When `$ZELLIJ` was set, `build_zellij_command` emitted `zellij action new-tab --name <session>`. That only adds a tab to the CURRENT session — it does NOT create a dedicated per-agent zellij session. R2 requires 1:1 mapping between agent and session, and `ark pane switch` / `kill` / `list` all assume a real session named after the agent id. With the old code, spawning from inside zellij produced zero new sessions and left orphan spec.json files whose sessions never existed.
+
+**Resolution:** Collapsed the inside-vs-outside-zellij branch at the spawn level — `spawn` ALWAYS creates a dedicated session via `setsid zellij -s <session> [--layout <path>]` (the canonical pattern in `crates/mux/zellij/src/mux.rs`). Replaced the `ZellijPlan` enum (`Attach` / `NewSession` variants) with a single `ZellijSpawn { session, layout }` struct — there is no longer a meaningful distinction. `zellij_plan()` keeps its env-getter parameter for API stability but no longer branches on `$ZELLIJ`. `inside_zellij()` is retained as a diagnostic helper. Rewrote the three `zellij_plan_*` tests: `zellij_plan_inside_zellij_still_creates_new_session` (guard against the regressed behavior), `zellij_plan_outside_zellij_creates_new_session`, `zellij_plan_no_layout_preserves_none`. Rewrote the four `build_zellij_command_*` tests into three: `build_zellij_command_setsid_with_layout`, `build_zellij_command_setsid_without_layout_omits_layout_arg`, and a regression guard `build_zellij_command_inside_zellij_env_still_emits_setsid` that asserts argv[0]="setsid", argv[1]="zellij", and that neither "new-tab" nor "attach" appear. The user attaches to the new session later (or it auto-attaches if it's their only session).
+
+### F-517 — P1 outside-zellij spawn must use setsid, not `attach --create` (FIXED)
+
+**Source:** codex
+**Tier:** 4
+**Severity:** P1
+**Status:** fixed
+**Location:** crates/cli/src/commands/spawn.rs (`build_zellij_command`)
+
+**Description:** The old `ZellijPlan::NewSession` branch emitted `zellij --session <s> [--layout <p>] attach --create`. `attach` needs a controlling TTY; `run()` spawns the command with stdin/stdout/stderr redirected to `/dev/null` via `Command::spawn()`, so zellij exited immediately with "no tty" instead of creating a detached session. Users running `ark spawn` from a non-zellij shell got zero sessions and zero diagnostics (the process exited before anything reached the operator).
+
+**Resolution:** Covered by F-516 — both branches now emit `setsid zellij -s <session> --layout <path>`. `setsid` places zellij in a new session id and detaches from the caller's controlling TTY; zellij itself forks a long-lived daemon and exits the foreground process, so null-redirected stdio is safe. Existing tests covering stdio-null-redirect behavior in `run_preflight_fail_leaves_state_untouched` continue to pass because the preflight path short-circuits before the subprocess is ever spawned.
+
+### F-518 — P1 `ark list` must fall back to persisted status.json (FIXED)
+
+**Source:** codex
+**Tier:** 4
+**Severity:** P1
+**Status:** fixed
+**Location:** crates/cli/src/commands/list.rs (`Row::Archived`, `read_persisted_status`, `gather_rows`, `render_table`, `render_detail`, `emit_json`)
+
+**Description:** When a supervisor socket was missing or refused connections, `gather_rows` classified every such agent as `Row::Orphan`. But supervisors write a final `status.json` (via `ark-core::status_writer::write_status_atomic`) at shutdown containing the terminal `AgentStatus` — R3 explicitly requires `ark list` to show ARCHIVED agents by reading that file. The old behavior hid all lifecycle outcomes (`done`, `failed`, `killed`, `timeout`, `crashed`) behind a uniform "orphan" label as soon as the supervisor process exited, which is the normal end-state for any completed agent.
+
+**Resolution:** Added `Row::Archived(AgentId, AgentStatus)` alongside `Live` and `Orphan`. New helper `read_persisted_status(layout, id) -> Option<AgentStatus>` reads `{state}/agents/{id}/status.json` and deserializes it. `gather_rows` now tries the socket first; on socket failure it falls back to `read_persisted_status`; only if BOTH fail is the row classified `Orphan`. Updated `Row::id/phase_str/orchestrator/name`, `render_table` (uptime column uses `created_at` for archived rows), `render_detail` (adds `source: status.json (supervisor archived)` footer when archived), and `emit_json` (archived rows emit the full AgentStatus JSON plus a `"source": "status.json"` adornment so scripts can distinguish fresh-socket snapshots from persisted ones). Added four tests: `missing_socket_with_status_json_yields_archived_row` (no socket + persisted status.json with phase=Done → Row::Archived, phase_str()=="done"); `missing_socket_without_status_json_yields_orphan_row` (regression guard for the original path); `read_persisted_status_returns_none_when_missing`; `archived_row_renders_persisted_phase_in_table` (table shows "killed" not "orphan"); `archived_row_json_has_source_marker` (JSON emits `source: "status.json"`). Pure helpers so tests need only a tempdir + synthesized AgentStatus fixtures, no socket or subprocess required.
+
+## Test Delta — Cycle 6
+
+ark-cli: 229 baseline → 231 lib + 2 integration = 233 total (+4 net: F-516 rewrote 3 `zellij_plan_*` and 3 `build_zellij_command_*` tests for −1 count versus cycle-4 since the two variants merged, then +5 F-518 tests → net +4). Full-workspace `cargo test --workspace -- --test-threads=1` continues to report the same pre-existing `ark-orchestrators-cavekit::watchers::*` + `ark-engines-claude-code` failures from cycle-3 / cycle-5 (ralph_loop flaky, etc.) — entirely outside any file touched this cycle. `cargo test -p ark-cli` is green end-to-end.

@@ -12,8 +12,13 @@
 //! Design choices:
 //! - Supervisor launch uses `std::process::Command` (no fork, no
 //!   daemonize crate, no nix).
-//! - Zellij is invoked as a subprocess — in-session uses `zellij
-//!   action new-tab`, new-session uses `zellij --session`.
+//! - Zellij is invoked as a subprocess — always a dedicated
+//!   per-agent session via `setsid zellij -s <name> --layout <path>`
+//!   (R2: 1:1 agent↔session). The inside-vs-outside-zellij
+//!   distinction collapses at spawn time (F-516 / F-517).
+//! - `setsid` detaches zellij from the caller's controlling TTY so
+//!   `spawn()` with null stdio works cleanly; zellij forks its own
+//!   daemon and the user can attach later with `zellij attach`.
 //! - Zellij invocation is factored through `build_zellij_command`
 //!   so tests can introspect argv without actually spawning a
 //!   process (F-511).
@@ -263,71 +268,67 @@ pub fn write_spec_json(state_dir: &Path, spec: &AgentSpec) -> Result<PathBuf, Cl
 }
 
 /// Whether we are already inside a zellij session (env snapshot).
+///
+/// Kept public for diagnostics / doctor; no longer steers
+/// `build_zellij_command` since F-516 unifies both paths behind
+/// `setsid zellij -s …`.
 pub fn inside_zellij<F: Fn(&str) -> Option<String>>(getter: F) -> bool {
     matches!(getter("ZELLIJ"), Some(v) if !v.is_empty())
 }
 
-/// The two zellij invocation modes R2 calls out.
+/// A resolved zellij spawn plan: create a dedicated per-agent
+/// session via `setsid zellij -s <name> --layout <path>`.
+///
+/// F-516 / F-517: prior cycles branched on `$ZELLIJ` and emitted
+/// either `zellij action new-tab` (which only adds a tab to the
+/// caller's session, violating R2's 1:1 agent↔session mapping) or
+/// `zellij attach --create` (which needs a TTY — incompatible with
+/// `/dev/null` stdio + `spawn()`). Unifying on `setsid zellij -s`
+/// mirrors the canonical pattern in `crates/mux/zellij/src/mux.rs`
+/// and detaches cleanly from the caller's controlling terminal.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ZellijPlan {
-    /// In-session: `zellij action new-tab [--layout <p>] --name <session>`.
-    Attach {
-        session: String,
-        layout: Option<String>,
-    },
-    /// New detached session: `zellij --session <s> [--layout <p>] attach --create`.
-    NewSession {
-        session: String,
-        layout: Option<String>,
-    },
+pub struct ZellijSpawn {
+    /// Session name (1:1 with agent id).
+    pub session: String,
+    /// Layout path (stem or absolute) — required: R2 defines a
+    /// default layout for every spawn so this is never `None` in
+    /// practice, but we keep the type `Option` for forward-compat
+    /// with future layout-less spawn modes (e.g. `ark spawn --bare`).
+    pub layout: Option<String>,
 }
 
-/// Choose the zellij invocation based on the env snapshot.
+/// Resolve the zellij spawn plan.
+///
+/// F-516: the inside-vs-outside-zellij distinction collapses at the
+/// spawn level — we always create a new session. The env getter is
+/// retained (unused here) so the public signature stays stable for
+/// call sites and future diagnostics.
 pub fn zellij_plan<F: Fn(&str) -> Option<String>>(
-    getter: F,
+    _getter: F,
     session: &str,
     layout: Option<&str>,
-) -> ZellijPlan {
-    if inside_zellij(getter) {
-        ZellijPlan::Attach {
-            session: session.to_string(),
-            layout: layout.map(ToString::to_string),
-        }
-    } else {
-        ZellijPlan::NewSession {
-            session: session.to_string(),
-            layout: layout.map(ToString::to_string),
-        }
+) -> ZellijSpawn {
+    ZellijSpawn {
+        session: session.to_string(),
+        layout: layout.map(ToString::to_string),
     }
 }
 
-/// Build the `zellij` [`Command`] for a given [`ZellijPlan`].
+/// Build the command for a given [`ZellijSpawn`] plan.
 ///
-/// Factored out so tests can introspect argv without actually
-/// spawning a subprocess (F-511).
-///
-/// - [`ZellijPlan::Attach`] (agent is already inside a zellij
-///   session): `zellij action new-tab --layout <path> --name
-///   <session>`. `--layout` is omitted when the plan has no layout.
-/// - [`ZellijPlan::NewSession`] (outside any session): `zellij
-///   --session <name> [--layout <path>] attach --create`.
-pub fn build_zellij_command(plan: &ZellijPlan) -> Command {
-    let mut c = Command::new("zellij");
-    match plan {
-        ZellijPlan::Attach { session, layout } => {
-            c.arg("action").arg("new-tab");
-            if let Some(p) = layout {
-                c.arg("--layout").arg(p);
-            }
-            c.arg("--name").arg(session);
-        }
-        ZellijPlan::NewSession { session, layout } => {
-            c.arg("--session").arg(session);
-            if let Some(p) = layout {
-                c.arg("--layout").arg(p);
-            }
-            c.arg("attach").arg("--create");
-        }
+/// Always emits `setsid zellij -s <session> [--layout <path>]`.
+/// `setsid` detaches zellij from the caller's controlling TTY so
+/// `Command::spawn()` with null stdio completes cleanly — zellij
+/// itself forks a detached daemon; `setsid`'s only job is to hand
+/// it a fresh session id so it doesn't exit when the parent's TTY
+/// goes away. This is the same invocation used by
+/// `crates/mux/zellij/src/mux.rs` for outside-zellij first-spawn
+/// (F-517).
+pub fn build_zellij_command(plan: &ZellijSpawn) -> Command {
+    let mut c = Command::new("setsid");
+    c.arg("zellij").arg("-s").arg(&plan.session);
+    if let Some(p) = &plan.layout {
+        c.arg("--layout").arg(p);
     }
     c
 }
@@ -703,10 +704,14 @@ mod tests {
         assert_eq!(back, spec);
     }
 
-    // --- zellij plan branching -----------------------------------------
+    // --- zellij plan (F-516) -------------------------------------------
 
     #[test]
-    fn zellij_plan_inside_session_attaches() {
+    fn zellij_plan_inside_zellij_still_creates_new_session() {
+        // F-516: even when $ZELLIJ is set (caller is inside a zellij
+        // session), spawn must create a DEDICATED per-agent session —
+        // never `action new-tab`, which only tacks a tab onto the
+        // caller's session.
         let plan = zellij_plan(
             |k| {
                 if k == "ZELLIJ" {
@@ -720,7 +725,7 @@ mod tests {
         );
         assert_eq!(
             plan,
-            ZellijPlan::Attach {
+            ZellijSpawn {
                 session: "ark-cavekit-auth".into(),
                 layout: Some("builder".into()),
             }
@@ -728,37 +733,22 @@ mod tests {
     }
 
     #[test]
-    fn zellij_plan_empty_env_treated_as_not_in_session() {
-        let plan = zellij_plan(
-            |k| {
-                if k == "ZELLIJ" {
-                    Some(String::new())
-                } else {
-                    None
-                }
-            },
-            "ark-cavekit-auth",
-            None,
-        );
-        match plan {
-            ZellijPlan::NewSession { session, layout } => {
-                assert_eq!(session, "ark-cavekit-auth");
-                assert!(layout.is_none());
-            }
-            other => panic!("expected NewSession, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn zellij_plan_outside_session_new_session_with_layout() {
+    fn zellij_plan_outside_zellij_creates_new_session() {
         let plan = zellij_plan(|_| None, "ark-cavekit-auth", Some("builder"));
         assert_eq!(
             plan,
-            ZellijPlan::NewSession {
+            ZellijSpawn {
                 session: "ark-cavekit-auth".into(),
                 layout: Some("builder".into()),
             }
         );
+    }
+
+    #[test]
+    fn zellij_plan_no_layout_preserves_none() {
+        let plan = zellij_plan(|_| None, "ark-cavekit-auth", None);
+        assert!(plan.layout.is_none());
+        assert_eq!(plan.session, "ark-cavekit-auth");
     }
 
     #[test]
@@ -784,7 +774,7 @@ mod tests {
         assert!(!inside_zellij(|_| None));
     }
 
-    // --- build_zellij_command argv shape (F-511) -----------------------
+    // --- build_zellij_command argv shape (F-511 + F-516 + F-517) ------
 
     fn argv_of(cmd: &Command) -> Vec<String> {
         std::iter::once(cmd.get_program().to_string_lossy().into_owned())
@@ -793,77 +783,54 @@ mod tests {
     }
 
     #[test]
-    fn build_zellij_command_inside_session_attaches_with_layout() {
-        // ZellijPlan::Attach { session, layout: Some(..) } should
-        // produce: zellij action new-tab --layout <p> --name <session>.
-        let cmd = build_zellij_command(&ZellijPlan::Attach {
+    fn build_zellij_command_setsid_with_layout() {
+        // F-516/F-517: always `setsid zellij -s <name> --layout <path>`,
+        // regardless of whether we were launched from inside zellij.
+        let cmd = build_zellij_command(&ZellijSpawn {
             session: "ark-cavekit-auth".into(),
             layout: Some("/tmp/builder.kdl".into()),
         });
         assert_eq!(
             argv_of(&cmd),
             vec![
+                "setsid",
                 "zellij",
-                "action",
-                "new-tab",
+                "-s",
+                "ark-cavekit-auth",
                 "--layout",
                 "/tmp/builder.kdl",
-                "--name",
-                "ark-cavekit-auth",
             ]
         );
     }
 
     #[test]
-    fn build_zellij_command_inside_session_without_layout_omits_layout_arg() {
-        let cmd = build_zellij_command(&ZellijPlan::Attach {
+    fn build_zellij_command_setsid_without_layout_omits_layout_arg() {
+        let cmd = build_zellij_command(&ZellijSpawn {
             session: "ark-cavekit-auth".into(),
             layout: None,
         });
         assert_eq!(
             argv_of(&cmd),
-            vec!["zellij", "action", "new-tab", "--name", "ark-cavekit-auth"]
+            vec!["setsid", "zellij", "-s", "ark-cavekit-auth"]
         );
     }
 
     #[test]
-    fn build_zellij_command_new_session_attaches_create_with_layout() {
-        // ZellijPlan::NewSession { session, layout: Some(..) } should
-        // produce: zellij --session <s> --layout <p> attach --create.
-        let cmd = build_zellij_command(&ZellijPlan::NewSession {
-            session: "ark-cavekit-auth".into(),
-            layout: Some("/tmp/builder.kdl".into()),
-        });
-        assert_eq!(
-            argv_of(&cmd),
-            vec![
-                "zellij",
-                "--session",
-                "ark-cavekit-auth",
-                "--layout",
-                "/tmp/builder.kdl",
-                "attach",
-                "--create",
-            ]
+    fn build_zellij_command_inside_zellij_env_still_emits_setsid() {
+        // Guard against regression: even when the env getter reports
+        // $ZELLIJ is set, the produced command must be the setsid
+        // session-creator, NOT `zellij action new-tab`.
+        let plan = zellij_plan(
+            |k| (k == "ZELLIJ").then(|| "1".to_string()),
+            "ark-cavekit-auth",
+            Some("/tmp/b.kdl".into()),
         );
-    }
-
-    #[test]
-    fn build_zellij_command_new_session_without_layout_omits_layout_arg() {
-        let cmd = build_zellij_command(&ZellijPlan::NewSession {
-            session: "ark-cavekit-auth".into(),
-            layout: None,
-        });
-        assert_eq!(
-            argv_of(&cmd),
-            vec![
-                "zellij",
-                "--session",
-                "ark-cavekit-auth",
-                "attach",
-                "--create",
-            ]
-        );
+        let cmd = build_zellij_command(&plan);
+        let argv = argv_of(&cmd);
+        assert_eq!(argv[0], "setsid");
+        assert_eq!(argv[1], "zellij");
+        assert!(!argv.iter().any(|a| a == "new-tab"));
+        assert!(!argv.iter().any(|a| a == "attach"));
     }
 
     // --- require_zellij_on_path error variant -------------------------
