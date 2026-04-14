@@ -161,11 +161,12 @@ mod tests {
     fn run_returns_not_yet_wired() {
         let args = Host::try_parse_from(["pane", "git"]).unwrap().args;
         let err = run(args, &Ctx::default()).expect_err("stub");
-        match err {
-            CliError::NotYetWired { subcommand, task } => {
-                assert_eq!(subcommand, "pane");
-                assert_eq!(task, "T-092");
+        assert!(matches!(
+            err,
+            CliError::NotYetWired {
+                subcommand: "pane",
+                task: "T-092",
             }
-        }
+        ));
     }
 }

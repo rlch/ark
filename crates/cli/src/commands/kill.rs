@@ -79,11 +79,12 @@ mod tests {
     fn run_returns_not_yet_wired() {
         let args = Host::try_parse_from(["kill", "x"]).unwrap().args;
         let err = run(args, &Ctx::default()).expect_err("stub");
-        match err {
-            CliError::NotYetWired { subcommand, task } => {
-                assert_eq!(subcommand, "kill");
-                assert_eq!(task, "T-089");
+        assert!(matches!(
+            err,
+            CliError::NotYetWired {
+                subcommand: "kill",
+                task: "T-089",
             }
-        }
+        ));
     }
 }

@@ -182,11 +182,12 @@ mod tests {
             .unwrap()
             .args;
         let err = run(args, &Ctx::default()).expect_err("stub");
-        match err {
-            CliError::NotYetWired { subcommand, task } => {
-                assert_eq!(subcommand, "spawn");
-                assert_eq!(task, "T-087");
+        assert!(matches!(
+            err,
+            CliError::NotYetWired {
+                subcommand: "spawn",
+                task: "T-087",
             }
-        }
+        ));
     }
 }

@@ -142,11 +142,12 @@ mod tests {
     fn run_returns_not_yet_wired() {
         let args = Host::try_parse_from(["config", "show"]).unwrap().args;
         let err = run(args, &Ctx::default()).expect_err("stub");
-        match err {
-            CliError::NotYetWired { subcommand, task } => {
-                assert_eq!(subcommand, "config");
-                assert_eq!(task, "T-090");
+        assert!(matches!(
+            err,
+            CliError::NotYetWired {
+                subcommand: "config",
+                task: "T-090",
             }
-        }
+        ));
     }
 }
