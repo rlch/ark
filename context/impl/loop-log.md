@@ -36,6 +36,18 @@ last_edited: "2026-04-14"
 
 Overall: 45/134 (34%). Next: Tier 2 (engine-claude-code + event-bus consumers, 16 tasks).
 
+### Iteration 20 — 2026-04-15 (Tier 3 W5 close)
+- Single task wave. T-083 (cavekit done-signal resolver, commit 6467b97) wires all 5 watchers into CavekitOrchestrator::run via JoinSet, adds ImplTrackingSnapshot via tokio watch channel, resolve_done_outcome implements R9 cases: all-DONE → Success, pending → 60s grace → Success-if-transition-else-Failed, no-build-site → Success empty, cancel → Killed with child-tab cascade. trim_artifacts dedupes/sorts/caps at 100. factory.rs swapped CavekitOrchestratorStub → real CavekitOrchestrator. 8 new tests incl. timeout path via tokio::time::pause. **TIER 3 COMPLETE 22/22.** Workspace 658/658 pass (+111 vs T2 close). Next: Codex tier-gate review vs 5ac148f.
+
+### Iteration 19 — 2026-04-15 (Tier 3 W4)
+- 2 parallel packets. T-078 (build-site total extractor for Progress events, commit dad48bd, 14 tests, strict regex excludes coverage-matrix rows, domain-filename correlation) and T-080 (review tab spawn/close on PhaseTransition, commit 9b1e837, 11 tests, default matcher "review"/"check"/"inspect"). Then T-081 (codex findings watcher, commit 60d7bc3, 17 tests, synthetic codex reviewer AgentId, F-ID dedupe, NO_FINDINGS sentinel skip).
+
+### Iteration 18 — 2026-04-15 (Tier 3 W3)
+- 2 parallel packets. T-072 (auto-close policy on outcome with StubMux tests, commit ac910ca, 14 tests) and T-077+T-079+T-082 (3 cavekit watchers: impl_tracking 500ms debounce + Progress/TaskDone, ralph_loop PhaseTransition+Iteration, git_diff numstat with dedupe, commit 1ecb197, 45 tests). Workspace 633/633.
+
+### Iteration 17 — 2026-04-15 (Tier 3 W2)
+- 2 parallel packets. T-066+T-067 (SupervisorCommandHandler with Status/Kill/ForceKill/Rename/Forget/Ping, signal_hook SIGTERM/SIGINT cleanup + ControlSocketGuard, AgentStatus.hide field added, commit 01a1c47, 17 tests). T-069 (supervisor R3 full 18-step boot sequence — state→lock→socket→logging→config→factory→ensure_session→preflight→consumers→install_observability→Started→orchestrator.run→drain→teardown→finalize→exit, commit 932eba1, factory.rs + orchestration.rs + minimal ClaudeCodeEngine Engine impl in engines/claude-code). Workspace 535/535. Also ran T-063+T-065 (foreground mode + control-socket bind, commit 86666bb, 14 tests) in prior wave.
+
 ### Iteration 16 — 2026-04-15 (Tier 3 W1 + restructure)
 - 2 parallel packets. T-062+T-064 (new crates/supervisor crate — daemonize double-fork+setsid + acquire_lock fd-lock + process-local registry for same-proc reacquire, commit ed85ca9, 9 tests + 1 ignored integ) and T-073+T-074+T-075 (ClaudeCodeOrchestrator detect+run with git-diff artifact + CavekitOrchestrator detect 4-heuristic, commit 471fa23, 26 tests). Then user-directed restructure: flatten crate paths, drop ark- prefix, nest multi-member families (engines/, orchestrators/, mux/, plugins/). git mv preserves 100% rename fidelity. Commit b996e5a. Workspace 481/481 pass (+36 vs T2 close). TIER_3_START_REF=5ac148f. Next: T-063 (supervisor --no-detach) + T-065 (control-socket bind) — only 2 unblocked, chain heavy.
 
