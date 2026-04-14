@@ -1,0 +1,121 @@
+# ark config — https://github.com/rlch/ark
+#
+# Layered precedence (lowest -> highest):
+#   1. Compiled-in defaults
+#   2. User config: $XDG_CONFIG_HOME/ark/config.toml   (this file)
+#   3. Project config: ./.ark/config.toml
+#   4. Environment vars: ARK_*  (see "env shortcuts" at the bottom)
+#   5. CLI flags
+#
+# Every key below is commented out — uncomment to override.  Unknown keys are
+# rejected at load time so typos surface early (cavekit-config.md R2).
+
+# ---------------------------------------------------------------------------
+# [defaults] — cross-cutting supervisor knobs
+# ---------------------------------------------------------------------------
+# [defaults]
+# orchestrator       = "auto"          # auto | cavekit | claude-code
+# engine             = "claude-code"
+# session_prefix     = "ark"
+# auto_close_on_done = true
+# auto_close_on_fail = false
+# auto_close_on_kill = true
+# stall_timeout_secs = 120
+# event_bus_capacity = 256             # in-memory event queue size
+
+# ---------------------------------------------------------------------------
+# [diff] — diff pane rendering
+# ---------------------------------------------------------------------------
+# [diff]
+# command     = "delta --paging=never --side-by-side --line-numbers"
+# debounce_ms = 300
+
+# ---------------------------------------------------------------------------
+# [engine.claude_code] — Claude Code engine knobs
+# ---------------------------------------------------------------------------
+# [engine.claude_code]
+# transcript_tail   = true
+# permission_policy = "auto_approve_all"   # ask | auto_approve_read | auto_approve_all
+# hook_transport    = "state_file"         # v1 fixed; socket reserved
+# inject_hooks = [
+#     "PostToolUse",
+#     "Stop",
+#     "PermissionRequest",
+#     "Notification",
+#     "TaskCompleted",
+#     "SessionEnd",
+# ]
+
+# ---------------------------------------------------------------------------
+# [orchestrator.cavekit] — Cavekit orchestrator knobs
+# ---------------------------------------------------------------------------
+# [orchestrator.cavekit]
+# watch_ralph_loop    = true
+# watch_impl_tracking = true
+# spawn_review_tab    = true
+# default_layout      = "builder"
+# review_layout       = "review"
+# review_on_phase     = "check"
+
+# ---------------------------------------------------------------------------
+# [orchestrator.claude_code] — Claude Code orchestrator knobs
+# ---------------------------------------------------------------------------
+# [orchestrator.claude_code]
+# default_layout = "classic"
+
+# ---------------------------------------------------------------------------
+# [mux.zellij] — Zellij multiplexer knobs
+# ---------------------------------------------------------------------------
+# [mux.zellij]
+# status_plugin_path = "~/.config/zellij/plugins/ark-status.wasm"
+# picker_plugin_path = "~/.config/zellij/plugins/ark-picker.wasm"
+# default_layout_dir = "~/.config/ark/layouts"
+
+# ---------------------------------------------------------------------------
+# [[hooks]] — user-defined commands fired on AgentEvent matches
+#
+# Each entry takes:
+#   cmd             (required)   shell command with {{var}} substitution
+#   on_event        (optional)   list of event kinds (OR within list)
+#   on_orchestrator (optional)   list of orchestrator slugs (OR)
+#   on_severity     (optional)   list of severities for finding events (OR)
+#
+# Empty filter list = match anything.  Filters across fields are AND'd.
+# Known template vars: id, name, event_kind, orchestrator, severity, tool,
+#                      outcome, phase.  Unknown vars are left literal.
+# ---------------------------------------------------------------------------
+
+# [[hooks]]
+# on_event = ["done"]
+# cmd      = "notify-send 'ark: {{name}} done'"
+
+# [[hooks]]
+# on_event = ["stall"]
+# cmd      = "say 'agent stalled'"
+
+# [[hooks]]
+# on_event    = ["review_comment", "finding"]
+# on_severity = ["P0"]
+# cmd         = "notify-send 'ark: P0 finding on {{name}}'"
+
+# ---------------------------------------------------------------------------
+# Env shortcuts (cavekit-config.md R5)
+# ---------------------------------------------------------------------------
+# Any config key may be overridden via ARK_* env vars.  Nested keys flatten
+# with double underscore:
+#
+#   ARK_DEFAULTS__ENGINE=claude-code         -> defaults.engine
+#   ARK_DIFF__DEBOUNCE_MS=500                -> diff.debounce_ms
+#   ARK_ENGINE__CLAUDE_CODE__TRANSCRIPT_TAIL=false
+#
+# Convenience shortcuts:
+#
+#   ARK_ORCHESTRATOR   = defaults.orchestrator
+#   ARK_ENGINE         = defaults.engine
+#   ARK_LOG            = tracing log filter (consumed by logging subsystem)
+#   ARK_CONFIG_PATH    = override for user config file
+#   ARK_STATE_DIR      = override for state directory
+#   ARK_CONFIG_DIR     = override for config directory
+#   ARK_RUNTIME_DIR    = override for runtime directory
+#
+# Arrays are NOT settable via env vars — use the TOML file instead.

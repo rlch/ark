@@ -8,11 +8,14 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+ark-core = { path = "../ark-core" }
 ark-types = { path = "../ark-types" }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+ulid = { workspace = true }
+anyhow = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -9,6 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 ark-types = { path = "../ark-types" }
+ark-core = { path = "../ark-core" }
 ratatui = { workspace = true }
 crossterm = { workspace = true, features = ["event-stream"] }
 tokio = { workspace = true }
@@ -17,6 +18,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+notify = { workspace = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
