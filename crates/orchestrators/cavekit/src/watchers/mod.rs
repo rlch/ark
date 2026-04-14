@@ -9,6 +9,9 @@
 //! Module layout (one file per kit requirement):
 //! - `impl_tracking` (T-077, R4): `context/impl/impl-*.md` markdown table
 //!   parser → `TaskDone` + `Progress` events.
+//! - `build_site` (T-078, R4): `context/plans/build-site*.md` total-task
+//!   extractor consumed by `impl_tracking` as the authoritative
+//!   `Progress.total`.
 //! - `ralph_loop` (T-079, R5): `.claude/ralph-loop.local.md` key/value
 //!   scanner → `Iteration` + `PhaseTransition` events.
 //! - `review_tab` (T-080, R6): consumes `PhaseTransition` events from the
@@ -18,11 +21,13 @@
 //!
 //! See cavekit-orchestrator-cavekit.md R4/R5/R6/R8.
 
+pub mod build_site;
 pub mod git_diff;
 pub mod impl_tracking;
 pub mod ralph_loop;
 pub mod review_tab;
 
+pub use build_site::extract_build_site_total;
 pub use git_diff::watch_git_diff;
 pub use impl_tracking::watch_impl_tracking;
 pub use ralph_loop::watch_ralph_loop;

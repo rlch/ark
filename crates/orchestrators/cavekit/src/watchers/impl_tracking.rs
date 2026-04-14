@@ -5,9 +5,15 @@
 //! - `Progress { done, total }` on any status change.
 //!
 //! Progress semantics (kit R4): `done = count(DONE) + 0.5 * count(PARTIAL)`
-//! (rounded down to `u32`). The `total` per this packet is the count of
-//! parseable rows across all `impl-*.md` files in `context/impl/` — T-078
-//! will swap in a build-site-derived total later.
+//! (rounded down to `u32`). The `total` per this packet comes from
+//! [`super::build_site::extract_build_site_total`] — a parse of the
+//! correlated `context/plans/build-site*.md` — falling back to the
+//! in-memory count of parseable rows across `context/impl/impl-*.md` when
+//! no build-site file is available or parseable (T-078).
+//!
+//! Build-site totals are re-read on every debounced re-parse. Build sites
+//! change rarely and files are small (hundreds of rows max), so no caching
+//! layer is warranted for v1.
 //!
 //! A 500ms debounce collapses bursts of filesystem events into a single
 //! re-parse (many editors issue several writes in close succession when
@@ -24,6 +30,8 @@ use std::time::Duration;
 use anyhow::Result;
 use ark_types::{AgentEvent, AgentId, CancellationToken, EventSink};
 use notify::{RecursiveMode, Watcher};
+
+use super::build_site::extract_build_site_total;
 
 /// Debounce window for coalescing filesystem event bursts into one re-parse.
 const DEBOUNCE: Duration = Duration::from_millis(500);
@@ -91,7 +99,7 @@ pub async fn watch_impl_tracking(
 
     // Initial parse so Progress reflects whatever's already on disk.
     let mut state: HashMap<String, String> = HashMap::new();
-    reparse_and_emit(&impl_dir, &id, &tx, &mut state).await;
+    reparse_and_emit(&cwd, &impl_dir, &id, &tx, &mut state).await;
 
     loop {
         tokio::select! {
@@ -113,7 +121,7 @@ pub async fn watch_impl_tracking(
                 // Drain any additional ticks queued up during the debounce
                 // window; they collapse into the single re-parse below.
                 while async_rx.try_recv().is_ok() {}
-                reparse_and_emit(&impl_dir, &id, &tx, &mut state).await;
+                reparse_and_emit(&cwd, &impl_dir, &id, &tx, &mut state).await;
             }
         }
     }
@@ -149,13 +157,20 @@ fn is_tracked_impl_filename(p: &Path) -> bool {
 
 /// Re-scan all `impl-*.md` files under `impl_dir`, diff against the prior
 /// state map, and emit events for the observed transitions.
+///
+/// `Progress.total` is derived from the build-site file(s) correlated with
+/// each impl filename via
+/// [`super::build_site::extract_build_site_total`]. When no build-site is
+/// resolvable we fall back to the in-memory row count (T-077 semantics).
 async fn reparse_and_emit(
+    cwd: &Path,
     impl_dir: &Path,
     id: &AgentId,
     tx: &EventSink,
     state: &mut HashMap<String, String>,
 ) {
     let mut rows: HashMap<String, (String, Option<String>)> = HashMap::new();
+    let mut impl_filenames: Vec<String> = Vec::new();
     let Ok(mut read_dir) = tokio::fs::read_dir(impl_dir).await else {
         return;
     };
@@ -163,6 +178,9 @@ async fn reparse_and_emit(
         let path = entry.path();
         if !is_tracked_impl_path(&path, impl_dir) {
             continue;
+        }
+        if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+            impl_filenames.push(name.to_string());
         }
         let Ok(contents) = tokio::fs::read_to_string(&path).await else {
             continue;
@@ -191,7 +209,8 @@ async fn reparse_and_emit(
         state.insert(task_id.clone(), status.clone());
     }
 
-    let total = rows.len() as u32;
+    let in_memory_total = rows.len() as u32;
+    let total = resolve_build_site_total(cwd, &impl_filenames).unwrap_or(in_memory_total);
     let done_count = rows.values().filter(|(s, _)| s == DONE).count();
     let partial_count = rows.values().filter(|(s, _)| s == PARTIAL).count();
     // done = DONE + 0.5 * PARTIAL, floored to u32.
@@ -202,6 +221,31 @@ async fn reparse_and_emit(
         total,
         label: None,
     });
+}
+
+/// Resolve the build-site `Progress.total` for one-or-more observed impl
+/// filenames.
+///
+/// The list is sorted for determinism, then the first filename that
+/// resolves a non-`None` build-site total wins. This handles the canonical
+/// single-impl case directly and gives predictable behaviour when multiple
+/// impl files are present (e.g. an overview + domain splits): the first
+/// alphabetical match that corresponds to an existing build-site drives
+/// the total. Returns `None` when no impl filename resolves — the caller
+/// falls back to the in-memory row count (T-077 semantics).
+fn resolve_build_site_total(cwd: &Path, impl_filenames: &[String]) -> Option<u32> {
+    if impl_filenames.is_empty() {
+        return None;
+    }
+    let mut sorted: Vec<&str> = impl_filenames.iter().map(|s| s.as_str()).collect();
+    sorted.sort_unstable();
+    sorted.dedup();
+    for name in sorted {
+        if let Some(n) = extract_build_site_total(cwd, name) {
+            return Some(n);
+        }
+    }
+    None
 }
 
 /// Parse `| T-XXX | STATUS | notes |` rows out of a markdown document.
@@ -508,6 +552,123 @@ mod tests {
             .expect("expected a Progress");
         // Only T-002 DONE is parseable.
         assert_eq!(progress, (1, 1));
+
+        cancel.cancel();
+        let _ = tokio::time::timeout(StdDuration::from_secs(2), handle).await;
+    }
+
+    /// T-078 integration: Progress.total is sourced from the build-site
+    /// file, not the in-memory impl row count.
+    #[tokio::test]
+    async fn progress_total_uses_build_site_when_present() {
+        let tmp = TempDir::new().unwrap();
+        let impl_dir = tmp.path().join("context").join("impl");
+        let plans_dir = tmp.path().join("context").join("plans");
+        std::fs::create_dir_all(&impl_dir).unwrap();
+        std::fs::create_dir_all(&plans_dir).unwrap();
+
+        // Impl file has 2 rows (1 DONE, 1 PARTIAL) → in-memory total would
+        // be 2.
+        std::fs::write(
+            impl_dir.join("impl-gamma.md"),
+            "| Task | Status | Notes |\n\
+             | --- | --- | --- |\n\
+             | T-101 | DONE | done |\n\
+             | T-102 | PARTIAL | half |\n",
+        )
+        .unwrap();
+
+        // Matching build-site defines 7 tasks → that must drive Progress.total.
+        std::fs::write(
+            plans_dir.join("build-site-gamma.md"),
+            "| T-101 | a | S |\n\
+             | T-102 | b | S |\n\
+             | T-103 | c | S |\n\
+             | T-104 | d | S |\n\
+             | T-105 | e | S |\n\
+             | T-106 | f | S |\n\
+             | T-107 | g | S |\n",
+        )
+        .unwrap();
+
+        let (tx, mut rx) = channel(32);
+        let cancel = CancellationToken::new();
+        let id = make_id();
+
+        let handle = tokio::spawn(watch_impl_tracking(
+            tmp.path().to_path_buf(),
+            id.clone(),
+            tx.clone(),
+            cancel.clone(),
+            true,
+        ));
+
+        let events = wait_for(
+            &mut rx,
+            |e| matches!(e, AgentEvent::Progress { .. }),
+            StdDuration::from_secs(2),
+        )
+        .await;
+
+        let progress = events
+            .iter()
+            .find_map(|e| match e {
+                AgentEvent::Progress { done, total, .. } => Some((*done, *total)),
+                _ => None,
+            })
+            .expect("expected a Progress");
+        // done = 1 DONE + floor(0.5 * 1 PARTIAL) = 1; total from build-site = 7.
+        assert_eq!(progress, (1, 7));
+
+        cancel.cancel();
+        let _ = tokio::time::timeout(StdDuration::from_secs(2), handle).await;
+    }
+
+    /// T-078 fallback: when no build-site file exists, Progress.total falls
+    /// back to the in-memory row count (preserves T-077 behaviour).
+    #[tokio::test]
+    async fn progress_total_falls_back_to_in_memory_without_build_site() {
+        let tmp = TempDir::new().unwrap();
+        let impl_dir = tmp.path().join("context").join("impl");
+        std::fs::create_dir_all(&impl_dir).unwrap();
+        // Deliberately no context/plans/ directory.
+        std::fs::write(
+            impl_dir.join("impl-delta.md"),
+            "| Task | Status | Notes |\n\
+             | --- | --- | --- |\n\
+             | T-201 | DONE | one |\n\
+             | T-202 | BLOCKED | two |\n",
+        )
+        .unwrap();
+
+        let (tx, mut rx) = channel(32);
+        let cancel = CancellationToken::new();
+        let id = make_id();
+
+        let handle = tokio::spawn(watch_impl_tracking(
+            tmp.path().to_path_buf(),
+            id.clone(),
+            tx.clone(),
+            cancel.clone(),
+            true,
+        ));
+
+        let events = wait_for(
+            &mut rx,
+            |e| matches!(e, AgentEvent::Progress { .. }),
+            StdDuration::from_secs(2),
+        )
+        .await;
+
+        let progress = events
+            .iter()
+            .find_map(|e| match e {
+                AgentEvent::Progress { done, total, .. } => Some((*done, *total)),
+                _ => None,
+            })
+            .expect("expected a Progress");
+        // In-memory fallback: 2 rows.
+        assert_eq!(progress, (1, 2));
 
         cancel.cancel();
         let _ = tokio::time::timeout(StdDuration::from_secs(2), handle).await;
