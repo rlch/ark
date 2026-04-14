@@ -63,3 +63,7 @@ pub use kill::{DEFAULT_KILL_GRACE, kill_handler};
 // T-071: PID liveness + crash detection (cavekit-supervisor R5).
 pub mod crash;
 pub use crash::{adjust_status_if_crashed, detect_crashed, is_pid_alive};
+
+// T-072: auto-close policy on outcome (cavekit-supervisor R6).
+pub mod auto_close;
+pub use auto_close::{AutoClosePolicy, apply_auto_close_policy, collect_opened_tabs};
