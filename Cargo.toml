@@ -37,6 +37,7 @@ async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
 tempfile = "3"
 sha2 = "0.10"
+fd-lock = "4"
 
 [profile.release]
 opt-level = 3

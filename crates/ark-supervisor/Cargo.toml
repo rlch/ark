@@ -1,0 +1,35 @@
+[package]
+name = "ark-supervisor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ark-types = { path = "../ark-types" }
+ark-core = { path = "../ark-core" }
+nix = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+fd-lock = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+# Tiny helper binary exercised by the lock + daemon tests. It's a dev-
+# only fixture — kept inside the crate (rather than in tests/) so the
+# test code can reference its path via `cargo_bin`-style discovery via
+# `CARGO_BIN_EXE_<name>`.
+[[bin]]
+name = "ark-supervisor-testhelper"
+path = "src/bin/testhelper.rs"
+required-features = []
+# The helper is only useful during `cargo test` — we mark it as such by
+# only building when the test profile is active. Cargo doesn't have a
+# direct `dev-only` bin flag, so we gate via #[cfg] in the source file
+# and let the binary compile in all profiles (cheap, small).

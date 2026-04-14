@@ -116,11 +116,14 @@ impl StateLayout {
             .join(id.as_str())
     }
 
+    /// `$base/locks/` — directory that holds `{id}.lock` files.
+    pub fn locks_dir(&self) -> PathBuf {
+        self.base.join("locks")
+    }
+
     /// `$base/locks/{id}.lock`
     pub fn lock_path(&self, id: &AgentId) -> PathBuf {
-        self.base
-            .join("locks")
-            .join(format!("{}.lock", id.as_str()))
+        self.locks_dir().join(format!("{}.lock", id.as_str()))
     }
 
     /// `$runtime/agents/{id}.sock` — per-supervisor control socket.
@@ -246,6 +249,13 @@ mod tests {
                 .join("locks")
                 .join(format!("{}.lock", id.as_str()))
         );
+    }
+
+    #[test]
+    fn locks_dir_is_base_locks() {
+        let tmp = tempdir().expect("tempdir");
+        let layout = layout_with_base(tmp.path().to_path_buf());
+        assert_eq!(layout.locks_dir(), tmp.path().join("locks"));
     }
 
     #[test]
