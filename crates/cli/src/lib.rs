@@ -29,7 +29,7 @@ pub mod id_resolver;
 
 pub use cli::Cli;
 pub use commands::Commands;
-pub use ctx::{Ctx, detect_no_color, no_color_from_env};
+pub use ctx::{Ctx, detect_log_level, detect_no_color, log_level_from_env, no_color_from_env};
 pub use error::CliError;
 pub use exit::ExitCode;
 pub use id_resolver::{ResolveError, list_agent_ids, resolve_agent_id};
