@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use ark_types::{
-    AgentEvent, AgentId, AgentStatus, EventSink, Outcome, Phase, StateLayout, TabHandle,
+    AgentEvent, AgentId, AgentSpec, AgentStatus, EventSink, Outcome, Phase, StateLayout, TabHandle,
 };
 use chrono::Utc;
 use tokio::sync::broadcast::{Receiver, error::RecvError};
@@ -127,24 +127,33 @@ pub async fn state_writer(
 }
 
 /// Read-modify-write the agent's `status.json`, returning the new `phase`.
+///
+/// Lazy bootstrap: if `status.json` is missing AND the event is not
+/// `Started`, a minimal [`AgentStatus`] is synthesized (phase = `Running`,
+/// empty counts, a placeholder spec derived from `id`) so subsequent
+/// events are still rolled up instead of being dropped. If `Started`
+/// arrives later, its authoritative spec overlays the placeholder.
+/// During the short window before `Started`, status.json may report
+/// `phase = Running` with a stub spec — acceptable for v1 since events
+/// are demonstrably flowing.
 fn update_status(
     layout: &StateLayout,
     id: &AgentId,
     supervisor_pid: u32,
     event: &AgentEvent,
 ) -> std::io::Result<Phase> {
-    // Load current status; if missing, materialize from the event's spec
-    // (only Started carries a spec). If neither path applies, we cannot roll
-    // up a status snapshot — bail with a NotFound error so the caller logs.
+    // Load current status; if missing, bootstrap. Preferred path: Started
+    // carries the authoritative spec. Fallback: synthesize a stub so the
+    // rollup proceeds instead of dropping every event when the receiver
+    // missed Started (e.g. due to Lagged).
     let mut status = match read_status(layout, id)? {
         Some(s) => s,
         None => match event {
             AgentEvent::Started { spec } => AgentStatus::new(spec.clone(), supervisor_pid),
             _ => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "status.json missing and event has no spec to bootstrap from",
-                ));
+                let mut s = AgentStatus::new(stub_spec(id), supervisor_pid);
+                s.phase = Phase::Running;
+                s
             }
         },
     };
@@ -155,7 +164,11 @@ fn update_status(
 
     // Per-variant rollups.
     match event {
-        AgentEvent::Started { .. } => {
+        AgentEvent::Started { spec } => {
+            // Overlay Started's authoritative spec if we lazy-bootstrapped
+            // with a stub earlier; otherwise this is a fresh bootstrap and
+            // AgentStatus::new already populated the spec.
+            status.spec = spec.clone();
             status.phase = Phase::Starting;
         }
         AgentEvent::TabOpened { tab_handle, .. } => {
@@ -224,6 +237,24 @@ fn update_status(
     let phase = status.phase;
     write_status_atomic(layout, id, &status)?;
     Ok(phase)
+}
+
+/// Build a minimal placeholder [`AgentSpec`] from just the agent id.
+///
+/// Used exclusively by the lazy-bootstrap path when `status.json` is
+/// missing and the event does not carry a spec (every variant except
+/// `Started`). The placeholder is overwritten when `Started` arrives
+/// later; consumers reading status.json during the bootstrap window
+/// should treat these fields as stubs.
+fn stub_spec(id: &AgentId) -> AgentSpec {
+    AgentSpec::new(
+        id.clone(),
+        id.name(),
+        id.orchestrator(),
+        "",
+        std::path::PathBuf::new(),
+        Vec::new(),
+    )
 }
 
 fn push_unique_tab(handles: &mut Vec<TabHandle>, h: TabHandle) {
@@ -452,6 +483,146 @@ mod tests {
         assert_eq!(
             transitions, 1,
             "expected exactly 1 PhaseTransition, got {transitions}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lazy_bootstrap_before_started_then_started_overlays_spec() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = layout_in(dir.path().to_path_buf());
+        let id = AgentId::new("cavekit", "auth");
+        let cancel = CancellationToken::new();
+
+        let (tx, rx) = channel(64);
+        let _keepalive = tx.subscribe();
+
+        let writer = tokio::spawn({
+            let layout = layout.clone();
+            let id = id.clone();
+            let tx = tx.clone();
+            let cancel = cancel.clone();
+            async move { state_writer(rx, Some(tx), layout, id, 7777, cancel).await }
+        });
+
+        // Feed events with NO Started first. Consumer must lazy-bootstrap.
+        tx.send(AgentEvent::ToolUse {
+            id: id.clone(),
+            tool: "Read".into(),
+            input_summary: "foo.rs".into(),
+        })
+        .unwrap();
+        tx.send(AgentEvent::Message {
+            id: id.clone(),
+            role: MessageRole::Assistant,
+            summary: "hi".into(),
+        })
+        .unwrap();
+
+        // Wait until status.json exists and reports Running.
+        for _ in 0..200 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            if let Ok(Some(s)) = read_status(&layout, &id)
+                && s.phase == Phase::Running
+            {
+                break;
+            }
+        }
+        let mid = read_status(&layout, &id).unwrap().unwrap();
+        assert_eq!(mid.phase, Phase::Running, "pre-Started phase");
+        // Stub spec: engine is "" until Started overlays.
+        assert_eq!(mid.spec.engine, "", "stub spec engine should be empty");
+
+        // Now Started arrives late — its spec must overlay the stub.
+        let real_spec = sample_spec(&id);
+        tx.send(AgentEvent::Started {
+            spec: real_spec.clone(),
+        })
+        .unwrap();
+        tx.send(AgentEvent::Done {
+            id: id.clone(),
+            outcome: Outcome::Success { artifacts: vec![] },
+        })
+        .unwrap();
+
+        for _ in 0..200 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            if let Ok(Some(s)) = read_status(&layout, &id)
+                && s.phase == Phase::Done
+            {
+                break;
+            }
+        }
+
+        cancel.cancel();
+        let _ = writer.await.unwrap();
+
+        let s = read_status(&layout, &id).unwrap().unwrap();
+        assert_eq!(s.phase, Phase::Done);
+        assert_eq!(
+            s.spec.engine, "claude-code",
+            "Started must overlay stub spec with authoritative fields"
+        );
+        assert_eq!(s.spec.name, real_spec.name);
+    }
+
+    #[tokio::test]
+    async fn lazy_bootstrap_without_started_at_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = layout_in(dir.path().to_path_buf());
+        let id = AgentId::new("cavekit", "auth");
+        let cancel = CancellationToken::new();
+
+        let (tx, rx) = channel(64);
+        let _keepalive = tx.subscribe();
+
+        let writer = tokio::spawn({
+            let layout = layout.clone();
+            let id = id.clone();
+            let tx = tx.clone();
+            let cancel = cancel.clone();
+            async move { state_writer(rx, Some(tx), layout, id, 8888, cancel).await }
+        });
+
+        // Skip Started entirely.
+        tx.send(AgentEvent::ToolUse {
+            id: id.clone(),
+            tool: "Edit".into(),
+            input_summary: "bar.rs".into(),
+        })
+        .unwrap();
+        tx.send(AgentEvent::Done {
+            id: id.clone(),
+            outcome: Outcome::Success { artifacts: vec![] },
+        })
+        .unwrap();
+
+        for _ in 0..200 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            if let Ok(Some(s)) = read_status(&layout, &id)
+                && s.phase == Phase::Done
+            {
+                break;
+            }
+        }
+
+        cancel.cancel();
+        let _ = writer.await.unwrap();
+
+        let s = read_status(&layout, &id).unwrap().unwrap();
+        assert_eq!(
+            s.phase,
+            Phase::Done,
+            "Done outcome must still apply even when Started was missed"
+        );
+        assert!(
+            s.last_event_summary.contains("done"),
+            "summary should reflect the last event: {}",
+            s.last_event_summary
+        );
+        // last_event_at was updated from the stub default.
+        assert!(
+            (Utc::now() - s.last_event_at).num_seconds().abs() < 10,
+            "last_event_at should be recent"
         );
     }
 

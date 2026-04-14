@@ -6,12 +6,14 @@
 //! - Filters to a fixed whitelist of progress-relevant events; everything
 //!   else is dropped (debug-logged).
 //! - For each accepted event: serializes to JSON and calls
-//!   `mux.pipe("ark-status", json)` and `mux.pipe("ark-picker", json)`.
-//! - On pipe error (plugin absent), falls back to `mux.rename_tab` with a
-//!   short status string (e.g. `"[tool:Edit]"`, `"[done]"`). The rename
-//!   target tab is selected by event-derived `TabHandle` when the event
-//!   carries one (`TabOpened`, `TabClosed`); otherwise the fallback is
-//!   skipped silently — best-effort by spec.
+//!   `mux.pipe("ark-status", json)` and `mux.pipe("ark-picker", json)`
+//!   independently — a failure on one target MUST NOT short-circuit the
+//!   sibling. Both pipes are attempted for every accepted event.
+//! - Only when BOTH pipes fail does the consumer fall back to
+//!   `mux.rename_tab` with a short status string (e.g. `"[tool:Edit]"`,
+//!   `"[done]"`). The rename target tab is selected by event-derived
+//!   `TabHandle` when the event carries one (`TabOpened`, `TabClosed`);
+//!   otherwise the fallback is skipped silently — best-effort by spec.
 //! - Lagged: warn + continue. Closed/Cancel: `Ok(())`.
 
 use std::sync::Arc;
@@ -71,15 +73,23 @@ async fn handle_event<M: Multiplexer + ?Sized>(event: &AgentEvent, mux: &M) {
         }
     };
 
+    // Attempt BOTH pipes independently. A failure on one target must not
+    // prevent the sibling from receiving the event. Only when BOTH fail do
+    // we fall back to rename_tab.
+    let mut any_ok = false;
     for target in ["ark-status", "ark-picker"] {
-        if let Err(e) = mux.pipe(target, &payload).await {
-            warn!(target = target, error = %e, "status_pipe: pipe failed; falling back to rename_tab");
-            fallback_rename(event, mux).await;
-            // Once we've fallen back for this event, we don't try the
-            // sibling pipe — the same plugin set is typically missing for
-            // both, and rename has already happened.
-            return;
+        match mux.pipe(target, &payload).await {
+            Ok(()) => {
+                any_ok = true;
+            }
+            Err(e) => {
+                warn!(target = target, error = %e, "status_pipe: pipe failed");
+            }
         }
+    }
+    if !any_ok {
+        debug!("status_pipe: both pipes failed; attempting rename_tab fallback");
+        fallback_rename(event, mux).await;
     }
 }
 
@@ -167,12 +177,15 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
-    /// Configurable mock multiplexer: pipe can be made to fail, and all
-    /// calls are recorded.
+    /// Configurable mock multiplexer: pipe can be made to fail globally or
+    /// per-target, and all calls are recorded.
     #[derive(Default)]
     struct MockMux {
         calls: Mutex<Vec<String>>,
         pipe_fails: bool,
+        /// Targets that should fail the pipe call; everything else succeeds.
+        /// Ignored when `pipe_fails` is true (which fails all targets).
+        pipe_fail_targets: Vec<&'static str>,
         rename_fails: bool,
     }
 
@@ -215,6 +228,9 @@ mod tests {
             self.record(format!("pipe:{target}:{}", payload.len()));
             if self.pipe_fails {
                 anyhow::bail!("pipe intentionally fails");
+            }
+            if self.pipe_fail_targets.contains(&target) {
+                anyhow::bail!("pipe intentionally fails for target {target}");
             }
             Ok(())
         }
@@ -278,7 +294,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fallback_rename_when_pipe_fails() {
+    async fn fallback_rename_when_both_pipes_fail() {
         let mux = Arc::new(MockMux {
             pipe_fails: true,
             ..MockMux::default()
@@ -310,13 +326,130 @@ mod tests {
         }
 
         let calls = mux.calls();
+        // BOTH pipes must be attempted independently — a failure on one
+        // must not short-circuit the sibling.
         assert!(
             calls.iter().any(|c| c.starts_with("pipe:ark-status:")),
-            "first pipe attempt should still happen: {calls:?}"
+            "ark-status pipe must be attempted: {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|c| c.starts_with("pipe:ark-picker:")),
+            "ark-picker pipe must be attempted even though ark-status failed: {calls:?}"
         );
         assert!(
             calls.iter().any(|c| c.starts_with("rename:builder->")),
-            "fallback rename should fire: {calls:?}"
+            "fallback rename should fire only when BOTH pipes fail: {calls:?}"
+        );
+
+        cancel.cancel();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn asymmetric_pipe_failure_no_fallback() {
+        // ark-status fails, ark-picker succeeds. Event must still reach
+        // ark-picker and the rename fallback MUST NOT fire.
+        let mux = Arc::new(MockMux {
+            pipe_fail_targets: vec!["ark-status"],
+            ..MockMux::default()
+        });
+        let cancel = CancellationToken::new();
+        let (tx, rx) = channel(64);
+
+        let task = tokio::spawn({
+            let mux = mux.clone();
+            let cancel = cancel.clone();
+            async move { status_pipe(rx, mux, cancel).await }
+        });
+
+        // TabOpened carries a TabHandle — if the code incorrectly fell
+        // back on a single failure, rename_tab would be recorded.
+        tx.send(AgentEvent::TabOpened {
+            id: id(),
+            parent: None,
+            role: TabRole::Builder,
+            tab_handle: TabHandle::new("ark-cavekit-auth", 1, "builder"),
+            label: "main".into(),
+        })
+        .unwrap();
+
+        // Wait for both pipe attempts.
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            let c = mux.calls();
+            if c.iter().any(|c| c.starts_with("pipe:ark-picker:"))
+                && c.iter().any(|c| c.starts_with("pipe:ark-status:"))
+            {
+                break;
+            }
+        }
+        // Settle briefly so any erroneous rename has time to appear.
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+        let calls = mux.calls();
+        assert!(
+            calls.iter().any(|c| c.starts_with("pipe:ark-status:")),
+            "ark-status pipe must be attempted: {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|c| c.starts_with("pipe:ark-picker:")),
+            "ark-picker pipe must receive event despite ark-status failure: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c.starts_with("rename:")),
+            "rename_tab fallback MUST NOT fire when at least one pipe succeeded: {calls:?}"
+        );
+
+        cancel.cancel();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn both_pipes_fail_no_handle_debug_logs() {
+        // Both pipes fail but the event carries no TabHandle. Fallback is
+        // attempted and silently skipped (no rename_tab recorded) per the
+        // existing best-effort contract.
+        let mux = Arc::new(MockMux {
+            pipe_fails: true,
+            ..MockMux::default()
+        });
+        let cancel = CancellationToken::new();
+        let (tx, rx) = channel(64);
+
+        let task = tokio::spawn({
+            let mux = mux.clone();
+            let cancel = cancel.clone();
+            async move { status_pipe(rx, mux, cancel).await }
+        });
+
+        // ToolUse has no TabHandle — rename fallback should be skipped.
+        tx.send(AgentEvent::ToolUse {
+            id: id(),
+            tool: "Edit".into(),
+            input_summary: "x".into(),
+        })
+        .unwrap();
+
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            if mux.calls().len() >= 2 {
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+        let calls = mux.calls();
+        assert!(
+            calls.iter().any(|c| c.starts_with("pipe:ark-status:")),
+            "ark-status pipe must be attempted: {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|c| c.starts_with("pipe:ark-picker:")),
+            "ark-picker pipe must be attempted: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c.starts_with("rename:")),
+            "no rename should fire without a TabHandle: {calls:?}"
         );
 
         cancel.cancel();
