@@ -16,6 +16,20 @@
 //! today is a clap argument-validation failure at launch. The future
 //! `2` (explicit deny) is wired in T-054.
 //!
+//! ## Fail-open-for-permission invariant (R3, T-051)
+//!
+//! For [`HookEvent::PermissionRequest`], the process **ALWAYS** writes
+//! the allow payload to stdout before returning, regardless of any
+//! upstream failure (stdin read error, empty stdin, malformed JSON,
+//! missing agent state dir, JSONL write failure, zellij pipe failure).
+//! This is the fail-open-for-permission clause of R3 — claude must
+//! never block on a hook failure, so silence on stdout is never a
+//! permitted outcome when the event is `PermissionRequest`.
+//!
+//! Every early-return branch in [`run_with_state`] below flows through
+//! [`ensure_permission_allow`] so the invariant cannot be accidentally
+//! bypassed by adding a new fail-open branch.
+//!
 //! ## Budget
 //! Claude Code blocks its main loop while a hook runs (kit R1). The
 //! `<200ms` cap is a design target, not a runtime kill switch. `run`
@@ -29,7 +43,7 @@
 //! descriptors. `main.rs` passes `io::stdin().lock()` and
 //! `io::stdout().lock()`.
 
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -105,8 +119,8 @@ pub fn run_with_state<R: Read, W: Write>(
             error = %e,
             "stdin read failed; fail-open"
         );
-        // T-050 R3: malformed-stdin on PermissionRequest still emits allow.
-        maybe_emit_allow(cli, stdout);
+        // R3: stdin-read-error on PermissionRequest still emits allow.
+        emit_allow_swallow(cli, stdout);
         log_budget(cli, started);
         return Ok(HookOutcome::Allow);
     }
@@ -117,7 +131,7 @@ pub fn run_with_state<R: Read, W: Write>(
             event = %cli.event,
             "stdin empty; fail-open (R3 — never block claude)"
         );
-        maybe_emit_allow(cli, stdout);
+        emit_allow_swallow(cli, stdout);
         log_budget(cli, started);
         return Ok(HookOutcome::Allow);
     }
@@ -184,9 +198,11 @@ pub fn run_with_state<R: Read, W: Write>(
         }
     }
 
-    // T-050: on PermissionRequest, emit the allow payload AFTER the
-    // event/trace emission above so observability records the ask first.
-    maybe_emit_allow(cli, stdout);
+    // T-050 + T-051: on PermissionRequest, emit the allow payload AFTER
+    // the event/trace emission above so observability records the ask
+    // first. This is the final checkpoint that enforces the
+    // fail-open-for-permission invariant (R3).
+    emit_allow_swallow(cli, stdout);
 
     log_budget(cli, started);
     Ok(HookOutcome::Allow)
@@ -205,13 +221,29 @@ fn resolve_state_root() -> Option<PathBuf> {
     }
 }
 
-/// Emit the allow payload to `stdout` iff the current event is
-/// `PermissionRequest`. Wrapped errors are logged and swallowed.
-fn maybe_emit_allow<W: Write>(cli: &Cli, stdout: &mut W) {
-    if cli.event != HookEvent::PermissionRequest {
-        return;
+/// Ensure the allow payload has been written to `stdout` when the
+/// current event is `PermissionRequest`. No-op for every other event.
+///
+/// This is the single enforcement point for the
+/// **fail-open-for-permission** invariant documented at the top of this
+/// module (R3): every fail-open branch in [`run_with_state`] routes
+/// through [`emit_allow_swallow`] (a thin logging wrapper over this
+/// helper) so a PermissionRequest invocation always emits the allow
+/// payload before returning, regardless of any upstream failure.
+pub(crate) fn ensure_permission_allow<W: Write>(
+    event: HookEvent,
+    stdout: &mut W,
+) -> io::Result<()> {
+    if event != HookEvent::PermissionRequest {
+        return Ok(());
     }
-    if let Err(e) = write_allow_payload(&mut *stdout) {
+    write_allow_payload(&mut *stdout)
+}
+
+/// Call [`ensure_permission_allow`] and log-and-swallow any write error
+/// (R3: never propagate an error out of a fail-open branch).
+fn emit_allow_swallow<W: Write>(cli: &Cli, stdout: &mut W) {
+    if let Err(e) = ensure_permission_allow(cli.event, stdout) {
         warn!(
             agent = %cli.id,
             event = %cli.event,
@@ -428,5 +460,162 @@ mod tests {
     #[test]
     fn allow_outcome_exits_zero() {
         assert_eq!(HookOutcome::Allow.exit_code(), 0);
+    }
+
+    // -----------------------------------------------------------------
+    // T-051 regression tests: fail-open-for-permission (R3).
+    //
+    // Every early-return branch in `run_with_state` must emit the
+    // allow payload to stdout when the event is PermissionRequest —
+    // including stdin-read-error, empty stdin, malformed JSON, missing
+    // agent state dir, and zellij pipe failures (pipe is already
+    // fail-open internally, but we assert the stdout contract end-to-end).
+    // -----------------------------------------------------------------
+
+    /// Reader that always returns an I/O error on read.
+    struct ErroringReader;
+
+    impl Read for ErroringReader {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "simulated stdin read failure",
+            ))
+        }
+    }
+
+    #[test]
+    fn stdin_read_error_on_permission_request_still_emits_allow() {
+        let cli = cli_for(HookEvent::PermissionRequest);
+        let mut stdin = ErroringReader;
+        let mut stdout: Vec<u8> = Vec::new();
+        let outcome = run_with_state(&cli, &mut stdin, &mut stdout, None).expect("run ok");
+        assert_eq!(outcome, HookOutcome::Allow);
+        assert_eq!(outcome.exit_code(), 0);
+        assert_eq!(std::str::from_utf8(&stdout).unwrap(), ALLOW_PAYLOAD_JSON);
+    }
+
+    #[test]
+    fn stdin_read_error_on_non_permission_writes_nothing_to_stdout() {
+        // Sanity: non-permission events never write to stdout even on
+        // fail-open paths — only PermissionRequest gets the allow emission.
+        let cli = cli_for(HookEvent::PostToolUse);
+        let mut stdin = ErroringReader;
+        let mut stdout: Vec<u8> = Vec::new();
+        let outcome = run_with_state(&cli, &mut stdin, &mut stdout, None).expect("run ok");
+        assert_eq!(outcome, HookOutcome::Allow);
+        assert!(
+            stdout.is_empty(),
+            "non-permission stdin-error must write nothing to stdout: {stdout:?}"
+        );
+    }
+
+    #[test]
+    fn missing_state_dir_on_permission_request_still_emits_allow() {
+        // state_root exists (tempdir) but the agent dir inside it does not.
+        // The writer's fail-open path should run, and stdout MUST still
+        // receive the allow payload.
+        let tmp = TempDir::new().unwrap();
+        let cli = cli_for(HookEvent::PermissionRequest);
+        let payload = r#"{"session_id":"s1","cwd":"/tmp","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
+        let (outcome, stdout) =
+            run_sandboxed(&cli, payload.as_bytes(), Some(tmp.path().to_path_buf()));
+        assert_eq!(outcome, HookOutcome::Allow);
+        assert_eq!(std::str::from_utf8(&stdout).unwrap(), ALLOW_PAYLOAD_JSON);
+        // JSONL write was skipped (agent dir missing).
+        assert!(!cli.id.state_dir(tmp.path()).join("hooks").exists());
+    }
+
+    #[test]
+    fn zellij_pipe_failure_on_permission_request_still_emits_allow() {
+        // In the unit-test environment `zellij` is not guaranteed to be on
+        // PATH. `pipe_to_zellij` is fail-open, so a pipe failure on a
+        // PermissionRequest run must not suppress the allow emission.
+        let tmp = TempDir::new().unwrap();
+        let cli = cli_for(HookEvent::PermissionRequest);
+        fs::create_dir_all(cli.id.state_dir(tmp.path())).unwrap();
+
+        let payload = r#"{"session_id":"s1","cwd":"/tmp","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
+        let (outcome, stdout) =
+            run_sandboxed(&cli, payload.as_bytes(), Some(tmp.path().to_path_buf()));
+        assert_eq!(outcome, HookOutcome::Allow);
+        assert_eq!(std::str::from_utf8(&stdout).unwrap(), ALLOW_PAYLOAD_JSON);
+    }
+
+    #[test]
+    fn zellij_pipe_failure_on_post_tool_use_still_writes_jsonl_no_stdout() {
+        // Pipe failure must not affect JSONL writes or cause a stdout
+        // emission on non-permission events.
+        let tmp = TempDir::new().unwrap();
+        let cli = cli_for(HookEvent::PostToolUse);
+        fs::create_dir_all(cli.id.state_dir(tmp.path())).unwrap();
+
+        let payload = r#"{"session_id":"s1","cwd":"/tmp","hook_event_name":"PostToolUse","tool_name":"Edit","tool_input":{"file_path":"/x"}}"#;
+        let (outcome, stdout) =
+            run_sandboxed(&cli, payload.as_bytes(), Some(tmp.path().to_path_buf()));
+        assert_eq!(outcome, HookOutcome::Allow);
+        assert!(stdout.is_empty(), "no stdout for non-permission events");
+
+        let path = cli
+            .id
+            .state_dir(tmp.path())
+            .join("hooks")
+            .join("PostToolUse.jsonl");
+        assert!(path.is_file(), "JSONL write survived pipe failure");
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(!contents.is_empty());
+    }
+
+    #[test]
+    fn ensure_permission_allow_is_noop_for_non_permission_events() {
+        for ev in [
+            HookEvent::PostToolUse,
+            HookEvent::Stop,
+            HookEvent::Notification,
+            HookEvent::SessionEnd,
+            HookEvent::TaskCompleted,
+        ] {
+            let mut buf: Vec<u8> = Vec::new();
+            ensure_permission_allow(ev, &mut buf).expect("no-op cannot fail");
+            assert!(
+                buf.is_empty(),
+                "ensure_permission_allow wrote bytes for non-permission event {ev}: {buf:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ensure_permission_allow_emits_exact_bytes_for_permission() {
+        let mut buf: Vec<u8> = Vec::new();
+        ensure_permission_allow(HookEvent::PermissionRequest, &mut buf).expect("write ok");
+        assert_eq!(std::str::from_utf8(&buf).unwrap(), ALLOW_PAYLOAD_JSON);
+    }
+
+    #[test]
+    fn run_never_returns_err_on_any_stdin_variant() {
+        // `main.rs` turns `Err` into exit 0, so this test locks in that
+        // `run_with_state` itself never returns `Err` for the stdin
+        // fail-open classes — defence in depth. If this ever fails,
+        // the top-level catch in `main.rs` is the only thing between
+        // us and exit 2.
+        let cli_perm = cli_for(HookEvent::PermissionRequest);
+        let cli_post = cli_for(HookEvent::PostToolUse);
+
+        for cli in [&cli_perm, &cli_post] {
+            // stdin read error
+            let mut r = ErroringReader;
+            let mut w: Vec<u8> = Vec::new();
+            assert!(run_with_state(cli, &mut r, &mut w, None).is_ok());
+
+            // empty
+            let mut r = Cursor::new(Vec::<u8>::new());
+            let mut w: Vec<u8> = Vec::new();
+            assert!(run_with_state(cli, &mut r, &mut w, None).is_ok());
+
+            // malformed JSON
+            let mut r = Cursor::new(b"{garbage".to_vec());
+            let mut w: Vec<u8> = Vec::new();
+            assert!(run_with_state(cli, &mut r, &mut w, None).is_ok());
+        }
     }
 }
