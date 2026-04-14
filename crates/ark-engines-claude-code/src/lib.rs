@@ -14,3 +14,6 @@ pub mod settings;
 pub use settings::{
     InjectAction, InjectError, InjectReport, RestoreError, inject_hooks, restore_settings,
 };
+
+pub mod preflight;
+pub use preflight::*;
