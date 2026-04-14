@@ -16,18 +16,23 @@
 //!   scanner → `Iteration` + `PhaseTransition` events.
 //! - `review_tab` (T-080, R6): consumes `PhaseTransition` events from the
 //!   bus and spawns/closes a review tab via the multiplexer.
+//! - `codex_findings` (T-081, R7): `context/impl/impl-review-findings.md`
+//!   markdown table parser → `ReviewComment` events (dedup by F-ID) +
+//!   rollup API.
 //! - `git_diff` (T-082, R8): `.git/index` watch + 5s poll →
 //!   `git diff --numstat HEAD` → `FileEdited` events.
 //!
-//! See cavekit-orchestrator-cavekit.md R4/R5/R6/R8.
+//! See cavekit-orchestrator-cavekit.md R4/R5/R6/R7/R8.
 
 pub mod build_site;
+pub mod codex_findings;
 pub mod git_diff;
 pub mod impl_tracking;
 pub mod ralph_loop;
 pub mod review_tab;
 
 pub use build_site::extract_build_site_total;
+pub use codex_findings::{Finding, FindingsRollup, parse_findings, rollup, watch_codex_findings};
 pub use git_diff::watch_git_diff;
 pub use impl_tracking::watch_impl_tracking;
 pub use ralph_loop::watch_ralph_loop;
