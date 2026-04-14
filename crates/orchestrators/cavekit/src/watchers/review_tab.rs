@@ -145,19 +145,33 @@ where
                             // Review phase → review phase: dedupe, no-op.
                             (Some(_), true) => {}
                             // Leaving review phase with a tab open: close it.
+                            //
+                            // F-423: do NOT clear local state or emit TabClosed
+                            // unless mux.close_tab succeeds. Otherwise supervisors
+                            // (see F-086 tab_registry) would drop a tab that's
+                            // still live in the mux, leaking it. On failure we
+                            // keep the handle and log; the next review→non-review
+                            // transition will retry the close.
                             (Some(_), false) => {
-                                let handle = open_tab.take().expect("some");
-                                if let Err(e) = mux.close_tab(&handle).await {
-                                    tracing::warn!(
-                                        error = %e,
-                                        tab = %handle,
-                                        "watch_phase_and_review: close_tab failed",
-                                    );
+                                let handle = open_tab.as_ref().expect("some").clone();
+                                match mux.close_tab(&handle).await {
+                                    Ok(()) => {
+                                        // Clear local state only on success.
+                                        open_tab = None;
+                                        let _ = tx.send(AgentEvent::TabClosed {
+                                            id: id.clone(),
+                                            tab_handle: handle,
+                                        });
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            error = %e,
+                                            tab = %handle,
+                                            "watch_phase_and_review: close_tab failed; keeping handle for retry, NOT emitting TabClosed",
+                                        );
+                                        // open_tab intentionally preserved.
+                                    }
                                 }
-                                let _ = tx.send(AgentEvent::TabClosed {
-                                    id: id.clone(),
-                                    tab_handle: handle,
-                                });
                             }
                             // No tab, non-review phase: nothing to do.
                             (None, false) => {}
@@ -203,6 +217,9 @@ mod tests {
         created: Mutex<Vec<(String, String, PathBuf)>>,
         closed: Mutex<Vec<TabHandle>>,
         next_index: Mutex<u32>,
+        // F-423: when non-empty, each call to close_tab pops one from the
+        // front. An entry of `true` means "fail this call".
+        close_failures: Mutex<std::collections::VecDeque<bool>>,
     }
 
     impl StubMux {
@@ -211,6 +228,7 @@ mod tests {
                 created: Mutex::new(Vec::new()),
                 closed: Mutex::new(Vec::new()),
                 next_index: Mutex::new(1),
+                close_failures: Mutex::new(std::collections::VecDeque::new()),
             }
         }
 
@@ -220,6 +238,12 @@ mod tests {
 
         fn closed(&self) -> Vec<TabHandle> {
             self.closed.lock().unwrap().clone()
+        }
+
+        /// Schedule per-invocation close_tab outcomes. `[true, false]` means
+        /// the first call errors, the second succeeds.
+        fn set_close_failures(&self, failures: Vec<bool>) {
+            *self.close_failures.lock().unwrap() = failures.into();
         }
     }
 
@@ -248,6 +272,15 @@ mod tests {
             Ok(TabHandle::new(session, tab_index, name))
         }
         async fn close_tab(&self, handle: &TabHandle) -> Result<()> {
+            let fail = self
+                .close_failures
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(false);
+            if fail {
+                return Err(anyhow::anyhow!("stub close_tab: simulated failure"));
+            }
             self.closed.lock().unwrap().push(handle.clone());
             Ok(())
         }
@@ -711,6 +744,104 @@ mod tests {
             mux.created().len(),
             1,
             "expected the watcher to recover from Lagged and still spawn",
+        );
+
+        cancel.cancel();
+        let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    }
+
+    // ------- F-423 regression ----------------------------------------------
+
+    /// F-423: when `mux.close_tab` fails, the watcher must NOT emit
+    /// `TabClosed` (that would desync supervisors from F-086 tab_registry),
+    /// must keep the handle in local state, and must retry on the next
+    /// review→non-review transition. Re-entering review while the handle is
+    /// still tracked must NOT spawn a second tab.
+    #[tokio::test]
+    async fn close_tab_failure_retries_without_emitting_tabclosed() {
+        let mux = Arc::new(StubMux::new());
+        // First close_tab errors, second succeeds.
+        mux.set_close_failures(vec![true, false]);
+
+        let mux_dyn: Arc<dyn Multiplexer> = mux.clone();
+        let (tx, mut rx_out) = channel(64);
+        let rx_in = tx.subscribe();
+        let cancel = CancellationToken::new();
+        let id = make_id();
+
+        let handle = tokio::spawn(watch_phase_and_review(
+            PathBuf::from("/tmp"),
+            id.clone(),
+            rx_in,
+            mux_dyn,
+            "ark".to_string(),
+            tx.clone(),
+            cancel.clone(),
+            true,
+        ));
+
+        // 1. building -> reviewing: spawn the review tab.
+        tx.send(phase(&id, Some("building"), "reviewing"))
+            .expect("send 1");
+        let _ = wait_for(
+            &mut rx_out,
+            |e| matches!(e, AgentEvent::TabOpened { .. }),
+            Duration::from_secs(2),
+        )
+        .await;
+        assert_eq!(mux.created().len(), 1);
+
+        // 2. reviewing -> building: close_tab returns Err. MUST NOT emit
+        //    TabClosed. Drain briefly and assert.
+        tx.send(phase(&id, Some("reviewing"), "building"))
+            .expect("send 2");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let events_after_first_close = drain(&mut rx_out);
+        assert!(
+            !events_after_first_close
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TabClosed { .. })),
+            "expected NO TabClosed after failed close_tab; got {events_after_first_close:?}"
+        );
+        // No successful close was recorded.
+        assert_eq!(
+            mux.closed().len(),
+            0,
+            "closed list should only contain successful closes; got {:?}",
+            mux.closed()
+        );
+
+        // 3. building -> reviewing again: handle still tracked → MUST NOT
+        //    spawn a new tab (existing one still "live" from watcher's POV).
+        tx.send(phase(&id, Some("building"), "reviewing"))
+            .expect("send 3");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            mux.created().len(),
+            1,
+            "no new tab should spawn while handle is still tracked",
+        );
+
+        // 4. reviewing -> building: close_tab succeeds this time → emit
+        //    TabClosed, clear handle.
+        tx.send(phase(&id, Some("reviewing"), "building"))
+            .expect("send 4");
+        let got = wait_for(
+            &mut rx_out,
+            |e| matches!(e, AgentEvent::TabClosed { .. }),
+            Duration::from_secs(2),
+        )
+        .await;
+        assert!(
+            got.iter()
+                .any(|e| matches!(e, AgentEvent::TabClosed { .. })),
+            "expected TabClosed after successful retry; got {got:?}"
+        );
+        assert_eq!(
+            mux.closed().len(),
+            1,
+            "one successful close; got {:?}",
+            mux.closed()
         );
 
         cancel.cancel();

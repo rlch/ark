@@ -136,7 +136,18 @@ async fn scan_and_emit(
         return;
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    for (path, adds, dels) in parse_numstat(&stdout) {
+    let rows = parse_numstat(&stdout);
+
+    // F-424: build the set of paths currently in numstat so we can drop any
+    // path that reverted to clean. Without this, a file cycle
+    //   (a,d) -> clean -> (a,d)
+    // suppresses the third transition as a duplicate of the first, violating
+    // the "emit when observed numstat changes from last observation" contract.
+    let current: std::collections::HashSet<PathBuf> =
+        rows.iter().map(|(p, _, _)| p.clone()).collect();
+    last.retain(|p, _| current.contains(p));
+
+    for (path, adds, dels) in rows {
         match last.get(&path) {
             Some(&prev) if prev == (adds, dels) => continue,
             _ => {}
@@ -463,6 +474,132 @@ mod tests {
             .expect("join timeout")
             .expect("join");
         result.expect("watcher ok");
+    }
+
+    // ---- F-424 regression ----
+
+    /// F-424: a file cycling (a,d) → clean → same (a,d) must emit FileEdited
+    /// on the third observation. Prior bug: `last` retained the stale entry
+    /// from step 1, so step 3 was suppressed as a duplicate.
+    ///
+    /// We exercise `scan_and_emit` directly across three git states (rather
+    /// than relying on the 5s poll ticker) for determinism.
+    #[tokio::test]
+    async fn reemits_after_clean_revert_cycle() {
+        let tmp = TempDir::new().unwrap();
+        init_repo(tmp.path());
+        let readme = tmp.path().join("README.md");
+
+        let (tx, mut rx) = channel(64);
+        let id = make_id();
+        let mut last: HashMap<PathBuf, (u32, u32)> = HashMap::new();
+
+        // t1: modify README with (adds=3, dels=1) relative to HEAD.
+        //     HEAD content is "seed\n" (1 line). Write 3 new lines + drop
+        //     "seed" → adds=3, dels=1.
+        std::fs::write(&readme, "a\nb\nc\n").unwrap();
+        scan_and_emit(tmp.path(), &id, &tx, &mut last).await;
+        let t1 = drain(&mut rx);
+        let t1_edit = t1.iter().find_map(|e| match e {
+            AgentEvent::FileEdited {
+                path,
+                additions,
+                deletions,
+                ..
+            } if path.ends_with("README.md") => Some((*additions, *deletions)),
+            _ => None,
+        });
+        assert_eq!(
+            t1_edit,
+            Some((3, 1)),
+            "t1: expected FileEdited(3,1); got {t1:?}"
+        );
+        assert_eq!(last.get(&PathBuf::from("README.md")), Some(&(3u32, 1u32)));
+
+        // t2: revert the worktree to HEAD → README no longer in numstat.
+        //     `last` MUST drop the stale entry; no event should fire.
+        git(tmp.path(), &["checkout", "--", "README.md"]);
+        scan_and_emit(tmp.path(), &id, &tx, &mut last).await;
+        let t2 = drain(&mut rx);
+        let t2_edits: Vec<_> = t2
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::FileEdited { .. }))
+            .collect();
+        assert!(
+            t2_edits.is_empty(),
+            "t2: expected no events after revert; got {t2_edits:?}"
+        );
+        assert!(
+            !last.contains_key(&PathBuf::from("README.md")),
+            "t2: last must drop README entry after revert; still has {last:?}",
+        );
+
+        // t3: re-apply the identical (3,1) modification. The bug was that
+        //     `last` still held (3,1) and suppressed this. Post-fix, last was
+        //     cleared in t2, so t3 emits again.
+        std::fs::write(&readme, "a\nb\nc\n").unwrap();
+        scan_and_emit(tmp.path(), &id, &tx, &mut last).await;
+        let t3 = drain(&mut rx);
+        let t3_edit = t3.iter().find_map(|e| match e {
+            AgentEvent::FileEdited {
+                path,
+                additions,
+                deletions,
+                ..
+            } if path.ends_with("README.md") => Some((*additions, *deletions)),
+            _ => None,
+        });
+        assert_eq!(
+            t3_edit,
+            Some((3, 1)),
+            "t3: expected re-emission of FileEdited(3,1) after revert cycle; got {t3:?}"
+        );
+    }
+
+    /// F-424 supporting case: staging a tracked change and then cleaning it
+    /// out must also drop `last`. `git diff HEAD` considers both worktree
+    /// and index changes, so staging an edit counts as present; undoing it
+    /// entirely (worktree + index clean) should remove the entry.
+    #[tokio::test]
+    async fn staged_then_cleaned_drops_last_entry() {
+        let tmp = TempDir::new().unwrap();
+        init_repo(tmp.path());
+        let readme = tmp.path().join("README.md");
+
+        let (tx, mut rx) = channel(32);
+        let id = make_id();
+        let mut last: HashMap<PathBuf, (u32, u32)> = HashMap::new();
+
+        // Stage a modification.
+        std::fs::write(&readme, "seed\nextra\n").unwrap();
+        git(tmp.path(), &["add", "README.md"]);
+        scan_and_emit(tmp.path(), &id, &tx, &mut last).await;
+        let staged = drain(&mut rx);
+        assert!(
+            staged
+                .iter()
+                .any(|e| matches!(e, AgentEvent::FileEdited { .. })),
+            "expected FileEdited while staged; got {staged:?}"
+        );
+        assert!(last.contains_key(&PathBuf::from("README.md")));
+
+        // Fully clean it (reset + checkout).
+        git(tmp.path(), &["reset", "HEAD", "README.md"]);
+        git(tmp.path(), &["checkout", "--", "README.md"]);
+        scan_and_emit(tmp.path(), &id, &tx, &mut last).await;
+        let cleaned = drain(&mut rx);
+        let edits: Vec<_> = cleaned
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::FileEdited { .. }))
+            .collect();
+        assert!(
+            edits.is_empty(),
+            "expected no events after full clean; got {edits:?}"
+        );
+        assert!(
+            !last.contains_key(&PathBuf::from("README.md")),
+            "last must drop README on clean; still {last:?}",
+        );
     }
 
     // ---- parser tests ----
