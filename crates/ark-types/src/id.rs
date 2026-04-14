@@ -46,6 +46,12 @@ impl AgentId {
     }
 
     /// Parse an existing id, validating shape and character set.
+    ///
+    /// Shape is strictly `{orchestrator}-{name}-{ulid}` — exactly two `-`
+    /// separators. Extra hyphens inside segments are rejected (`sanitize`
+    /// collapses them to `_`, so a correctly-constructed id never has more
+    /// than two). This keeps `orchestrator()/name()/ulid()` accurate after
+    /// a round-trip parse.
     pub fn parse(s: &str) -> Result<Self, AgentIdParseError> {
         if s.is_empty() {
             return Err(AgentIdParseError::Empty);
@@ -53,13 +59,14 @@ impl AgentId {
         if !s.bytes().all(is_id_byte) {
             return Err(AgentIdParseError::UnsafeCharacters(s.to_string()));
         }
-        let (rest, ulid_str) = s
-            .rsplit_once('-')
-            .ok_or_else(|| AgentIdParseError::MissingSegments(s.to_string()))?;
-        if rest.is_empty() || ulid_str.is_empty() {
+        if s.matches('-').count() != 2 {
             return Err(AgentIdParseError::MissingSegments(s.to_string()));
         }
-        if !rest.contains('-') {
+        let mut parts = s.splitn(3, '-');
+        let orchestrator = parts.next().unwrap_or("");
+        let name = parts.next().unwrap_or("");
+        let ulid_str = parts.next().unwrap_or("");
+        if orchestrator.is_empty() || name.is_empty() || ulid_str.is_empty() {
             return Err(AgentIdParseError::MissingSegments(s.to_string()));
         }
         Ulid::from_string(&ulid_str.to_uppercase())
@@ -209,6 +216,18 @@ mod tests {
         assert!(matches!(
             AgentId::parse("foo/bar-baz-01jx7z8k6x9y2zt4abcdef0123"),
             Err(AgentIdParseError::UnsafeCharacters(_))
+        ));
+    }
+
+    #[test]
+    fn parse_rejects_extra_hyphens() {
+        // cavekit-foo-bar-<ulid> has three hyphens — would mis-compute
+        // name/ulid via splitn. Must reject. (F-036)
+        let ulid = Ulid::new().to_string().to_lowercase();
+        let bad = format!("cavekit-foo-bar-{ulid}");
+        assert!(matches!(
+            AgentId::parse(&bad),
+            Err(AgentIdParseError::MissingSegments(_))
         ));
     }
 

@@ -29,10 +29,12 @@ pub enum ApprovalPolicy {
 ///
 /// Each engine stashes its own state (settings backup path, joinset,
 /// tailer task) behind `Box<dyn Any + Send + Sync>`. The supervisor only
-/// needs to round-trip it back to `teardown`.
+/// needs to round-trip it back to `teardown`. Fields are private so callers
+/// cannot bypass the abstraction; accessors expose the engine name and
+/// `downcast` consumes the handle to reclaim the state.
 pub struct EngineHandle {
-    pub engine_name: &'static str,
-    pub state: Box<dyn Any + Send + Sync>,
+    engine_name: &'static str,
+    state: Box<dyn Any + Send + Sync>,
 }
 
 impl EngineHandle {
@@ -42,6 +44,11 @@ impl EngineHandle {
             engine_name,
             state: Box::new(state),
         }
+    }
+
+    /// Slug of the engine that minted this handle.
+    pub fn engine_name(&self) -> &'static str {
+        self.engine_name
     }
 
     /// Attempt to reclaim the engine-specific state as `S`. Returns the
@@ -163,7 +170,7 @@ mod tests {
             .install_observability(Path::new("/tmp/cwd"), sink)
             .await
             .unwrap();
-        assert_eq!(handle.engine_name, "mock");
+        assert_eq!(handle.engine_name(), "mock");
 
         // Downcast round-trip.
         let state = handle.downcast::<MockState>().expect("downcast mock state");
@@ -174,7 +181,7 @@ mod tests {
     fn engine_handle_downcast_mismatch_returns_self() {
         let handle = EngineHandle::new("mock", 42u32);
         let err = handle.downcast::<String>().unwrap_err();
-        assert_eq!(err.engine_name, "mock");
+        assert_eq!(err.engine_name(), "mock");
     }
 
     #[test]
