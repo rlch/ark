@@ -333,6 +333,68 @@ pub fn build_zellij_command(plan: &ZellijSpawn) -> Command {
     c
 }
 
+/// F-522: Derive a collision-free zellij session name for `id`.
+///
+/// `AgentId::session_name()` intentionally drops the ULID suffix for
+/// human readability, so `cavekit+auth` spawned twice would clash on
+/// the same session. We append the LAST 8 chars of the lowercase ULID —
+/// the trailing portion carries the random bits (a ULID's first 10
+/// encoded chars are timestamp-derived, so two agents spawned in the
+/// same millisecond would share that prefix). Format: `{base}-{ulid8}`.
+pub fn unique_session_name(id: &AgentId) -> String {
+    let base = id.session_name();
+    let ulid = id.ulid();
+    // Last 8 chars of the 26-char Crockford-encoded ULID — random
+    // portion, so two same-millisecond spawns still diverge.
+    let len = ulid.chars().count();
+    let skip = len.saturating_sub(8);
+    let suffix: String = ulid.chars().skip(skip).collect();
+    if suffix.is_empty() {
+        base
+    } else {
+        format!("{base}-{suffix}")
+    }
+}
+
+/// F-523: Brief grace-period check that a just-spawned zellij child
+/// hasn't immediately exited with an error. Polls `try_wait()` every
+/// ~50ms for up to 500ms. Returns `Some(CliError::Internal)` if the
+/// child exited non-zero inside the window, otherwise `None`.
+///
+/// This is a heuristic — zellij forks its own detached daemon, so a
+/// healthy spawn also "exits" (code 0) within the window after forking.
+/// Both "still alive after 500ms" and "exited with code 0" are treated
+/// as success; only a non-zero exit counts as failure.
+pub fn zellij_startup_failure(child: &mut std::process::Child) -> Option<CliError> {
+    const GRACE_MS: u64 = 500;
+    const POLL_MS: u64 = 50;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(GRACE_MS);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if status.success() {
+                    return None;
+                }
+                let code = status.code().unwrap_or(-1);
+                return Some(CliError::Internal {
+                    reason: format!("zellij exited with code {code} before session came up"),
+                });
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(POLL_MS));
+            }
+            Err(e) => {
+                return Some(CliError::Internal {
+                    reason: format!("wait on zellij child: {e}"),
+                });
+            }
+        }
+    }
+}
+
 /// Preflight: `zellij` must be on PATH. Returns `PreflightFail`
 /// with a clear reason when the binary is missing. No-op on success.
 pub fn require_zellij_on_path() -> Result<(), CliError> {
@@ -396,15 +458,36 @@ pub fn run(args: SpawnArgs, ctx: &Ctx) -> Result<(), CliError> {
     // plan, and spawn the subprocess via `build_zellij_command`.
     // `Command::spawn()` (not `.status()`) because the parent agent
     // is typically already inside zellij and must not block.
-    let session = spec.id.session_name();
+    //
+    // F-522: the session name returned by `AgentId::session_name()`
+    // deliberately drops the ULID suffix (`ark-{orchestrator}-{name}`),
+    // which means two agents sharing orchestrator+name collide on the
+    // same zellij session. We override here at the CLI layer — rather
+    // than editing ark-types — by appending an 8-char ULID prefix so
+    // the final session is `{base}-{ulid8}`, human-readable but unique.
+    let session = unique_session_name(&spec.id);
     let plan = zellij_plan(|k| std::env::var(k).ok(), &session, args.layout.as_deref());
     let mut zcmd = build_zellij_command(&plan);
     zcmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    zcmd.spawn().map_err(|e| CliError::Internal {
+    let mut child = zcmd.spawn().map_err(|e| CliError::Internal {
         reason: format!("launch zellij: {e}"),
     })?;
+
+    // F-523: `Command::spawn()` only confirms the child forked. zellij
+    // may still exec-fail, layout-parse-fail, or otherwise die before
+    // the session is listenable. Poll briefly with `try_wait()`; if
+    // the child has already exited non-zero inside the grace window we
+    // treat this as a spawn failure, clean up the agent state dir we
+    // just created, and surface an Internal error. A ~500ms grace is
+    // enough to catch fast failures (missing layout, bad config) while
+    // staying snappy for the success path — zellij is still alive at
+    // the end of the window because it forks its own detached daemon.
+    if let Some(err) = zellij_startup_failure(&mut child) {
+        let _ = std::fs::remove_dir_all(spec.id.state_dir(&ctx.state_dir));
+        return Err(err);
+    }
 
     // Supervisor spawn is STUBBED until the `ark-supervisor` binary
     // lands (see T-062 / T-069). We print a warning so the operator
@@ -915,5 +998,86 @@ mod tests {
             }
         }
         assert!(matches!(got, Err(CliError::PreflightFail { .. })));
+    }
+
+    // --- F-522: unique session name carries a ULID fragment ----------
+
+    #[test]
+    fn unique_session_name_appends_ulid_prefix() {
+        // Two agents sharing orchestrator+name must NOT collide on the
+        // same zellij session. The CLI-level override appends an 8-char
+        // ULID prefix after `AgentId::session_name()`'s `{orch}-{name}`
+        // base, which guarantees distinct per-spawn identity.
+        let a = AgentId::new("cavekit", "auth");
+        let b = AgentId::new("cavekit", "auth");
+        assert_ne!(a, b, "two freshly-minted ids must differ");
+        let sa = unique_session_name(&a);
+        let sb = unique_session_name(&b);
+        assert_ne!(sa, sb, "session names must diverge when ids differ");
+        // Shape: `ark-cavekit-auth-<8 chars from ULID>`
+        assert!(sa.starts_with("ark-cavekit-auth-"));
+        let suffix = sa.strip_prefix("ark-cavekit-auth-").unwrap();
+        assert_eq!(suffix.len(), 8, "ULID fragment should be 8 chars");
+        // And the 8-char suffix must be the tail of the lowercase ULID.
+        assert!(a.ulid().ends_with(suffix));
+    }
+
+    // --- F-523: zellij_startup_failure cleans up on fast-exit --------
+
+    #[test]
+    fn zellij_startup_failure_none_for_successful_exit() {
+        // `/usr/bin/true` exits 0 immediately — the helper must treat this
+        // as a successful spawn (zellij daemonizes by forking, so a
+        // clean exit 0 from the launcher wrapper is normal).
+        let mut child = Command::new("/usr/bin/true")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn /usr/bin/true");
+        let got = zellij_startup_failure(&mut child);
+        assert!(got.is_none(), "exit 0 must be treated as success");
+    }
+
+    #[test]
+    fn zellij_startup_failure_reports_nonzero_exit() {
+        // `/usr/bin/false` exits 1 immediately — must surface as
+        // CliError::Internal with a "zellij exited" reason.
+        let mut child = Command::new("/usr/bin/false")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn /usr/bin/false");
+        let got = zellij_startup_failure(&mut child);
+        match got {
+            Some(CliError::Internal { reason }) => {
+                assert!(
+                    reason.contains("zellij exited"),
+                    "expected zellij-exit reason, got {reason:?}"
+                );
+            }
+            other => panic!("expected Internal err, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zellij_startup_failure_success_when_still_alive() {
+        // A child that sleeps longer than the grace window is
+        // considered alive — the helper must return None without
+        // killing the process. We reap it afterwards so the test
+        // doesn't leak a zombie.
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sleep 2")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn sleep");
+        let got = zellij_startup_failure(&mut child);
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(got.is_none(), "still-alive child must be treated as ok");
     }
 }

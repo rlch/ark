@@ -332,3 +332,45 @@ Four tests: `check_config_file_ok_when_absent` (no file → Ok with "absent"), `
 ## Test Delta — Cycle 7
 
 ark-cli: 231 baseline → 236 lib + 2 integration = 238 total (+5 net: 1 F-519 rename/tighten of `run_fail_produces_generic`→`run_fail_produces_preflight_fail` keeps count stable, +1 `delta_missing_on_empty_path_is_warn` for F-520, +4 `check_config_file_*` tests for F-521 → net +5 on top of the renamed test). Workspace-wide `cargo test --workspace -- --test-threads=1` continues to report the same pre-existing `ark-orchestrators-cavekit::watchers::{codex_findings, ralph_loop}` + `ark-engines-claude-code` flakes flagged in cycles 3 / 5 / 6 — entirely outside `doctor.rs`. `cargo test -p ark-cli` is green end-to-end. Zero new build warnings.
+
+## Tier 4 — Cycle 8 (Codex)
+
+### F-522 — P1 spawn session name must be unique per agent (FIXED)
+
+**Source:** codex
+**Tier:** 4
+**Severity:** P1
+**Status:** fixed
+**Location:** crates/cli/src/commands/spawn.rs (`run`, new `unique_session_name`)
+
+**Description:** `ark spawn` derived the zellij session name from `spec.id.session_name()`, which intentionally drops the ULID suffix for readability — format `ark-{orchestrator}-{name}`. Two agents spawned with the same orchestrator+name (e.g. two `claude-code/auth` sessions) therefore collided on the same zellij session: the second `setsid zellij -s ark-claude-code-auth` would either attach to the existing session or exec-fail, violating R2's 1:1 agent↔session guarantee.
+
+**Resolution:** Added `unique_session_name(&AgentId) -> String` at the CLI layer — rather than editing `AgentId::session_name()` in ark-types (which other call sites depend on) — that appends the LAST 8 chars of the lowercase ULID to the base. Format: `{ark-orch-name}-{ulid8}`. The tail of a 26-char Crockford-encoded ULID carries the random bits; using the head would alias two same-millisecond spawns. `run()` now calls `unique_session_name(&spec.id)` instead of `spec.id.session_name()` when building the `ZellijSpawn` plan. New test `unique_session_name_appends_ulid_prefix` spawns two fresh `AgentId`s for the same orchestrator+name and asserts (a) the raw ids differ, (b) the resulting session names diverge, (c) the suffix is exactly 8 chars, and (d) the 8-char suffix is a tail of the id's lowercase ULID.
+
+### F-523 — P2 spawn must verify zellij actually started (FIXED)
+
+**Source:** codex
+**Tier:** 4
+**Severity:** P2
+**Status:** fixed
+**Location:** crates/cli/src/commands/spawn.rs (`run`, new `zellij_startup_failure`)
+
+**Description:** After `Command::spawn()` for `setsid zellij -s …`, `run()` proceeded to print `spawned {id}` and exit. `spawn()` only confirms the child forked — zellij could still exec-fail, layout-parse-fail, or otherwise die before the session was listenable. The user got a false "spawned" message plus an orphaned `spec.json` on disk, and `ark list` then reported a live agent that never existed.
+
+**Resolution:** Added `zellij_startup_failure(&mut Child) -> Option<CliError>` that polls `child.try_wait()` every 50ms for up to 500ms. If the child has exited with a non-zero code inside the grace window → return `CliError::Internal { reason: "zellij exited with code N before session came up" }`. Clean exit (code 0) and "still alive after grace" both count as success — zellij's daemonize pattern forks a detached child and the launcher wrapper returns 0 quickly, which is normal. `run()` invokes the helper immediately after `zcmd.spawn()`; on failure it calls `std::fs::remove_dir_all(spec.id.state_dir(&ctx.state_dir))` to remove the agent dir the preceding `write_spec_json` just created (so a failed spawn leaves zero orphan state, mirroring the F-503 preflight-fail guarantee), then returns the error. Three tests: `zellij_startup_failure_none_for_successful_exit` (`/usr/bin/true` → None), `zellij_startup_failure_reports_nonzero_exit` (`/usr/bin/false` → Internal with "zellij exited" reason), `zellij_startup_failure_success_when_still_alive` (sleep-2 child → None, then killed/reaped so no zombie leaks).
+
+### F-524 — P2 `sh -c` wrapper detection must handle multi-flag variants (FIXED)
+
+**Source:** codex
+**Tier:** 4
+**Severity:** P2
+**Status:** fixed
+**Location:** crates/cli/src/commands/config.rs (`build_editor_argv_tail`, new `is_shell_c_wrapper`)
+
+**Description:** F-515's detector only matched the exact 3-token shape `sh|bash -c <script>`. Common real-world variants like `sh -eu -c "vim \"$1\""` (set strict mode) or `bash --noprofile -c "nvim \"$1\""` (skip login profile) were false-negatives — they fell through to the plain-append branch, so the config path landed at `$0` instead of `$1` and the inner script's `"$1"` expansion was empty → editor opened nothing. Additionally, the detector rejected `zsh`/`dash` outright, even though they implement identical `-c` positional semantics.
+
+**Resolution:** Extracted the detection into a new `is_shell_c_wrapper(&[String]) -> bool` helper with broader rules: (1) basename of `parts[0]` must be one of `sh`, `bash`, `zsh`, `dash`, `ash`, `ksh`; (2) the LAST occurrence of `-c` in `parts` must be followed by exactly one token, and that token must be the final element (the inline script). Rule (2) correctly handles arbitrary flags before `-c` (e.g. `sh -eu -c …`, `bash --noprofile -c …`) while rejecting shapes where `-c` is followed by multiple positional script args. Four tests updated/added: `editor_argv_tail_sh_with_leading_flags_still_wrapper` (replaces the old `sh_without_dash_c_is_not_wrapper` that's now inverted by F-524's semantics — the 4-token `sh -eu -c "vim \"$1\""` shape IS a wrapper now), `editor_argv_tail_bash_with_noprofile_still_wrapper` (bash + `--noprofile` flag), `editor_argv_tail_non_shell_bin_is_not_wrapper` (guard: `myeditor -c scriptlet` stays non-wrapper), `editor_argv_tail_dash_c_not_last_flag_is_not_wrapper` (guard: `sh -c "…" extra` has `-c` not-at-penultimate → non-wrapper).
+
+## Test Delta — Cycle 8
+
+ark-cli: 236 baseline → 243 lib + 2 integration = 245 total (+7 net: +1 F-522 `unique_session_name_appends_ulid_prefix`, +3 F-523 `zellij_startup_failure_*` tests, +3 F-524 tests beyond the renamed-and-inverted F-515 test). Slightly over the +3-5 target — the extra tests give each helper its own happy-path + failure-path + guard coverage rather than folding them together. Workspace-wide `cargo test --workspace -- --test-threads=1` was **fully green this cycle** (all 17 test binaries passed) — the prior flaky `ark-orchestrators-cavekit::watchers::*` + `ark-engines-claude-code` tests recovered under the slower `--test-threads=1` pacing. `cargo test -p ark-cli` is green end-to-end. Zero new build warnings. `cargo fmt --all` clean.

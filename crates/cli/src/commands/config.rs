@@ -219,19 +219,31 @@ fn run_show(ctx: &Ctx) -> Result<(), CliError> {
     Ok(())
 }
 
-/// F-515: decide the trailing argv (after the parsed EDITOR words) for
-/// the editor spawn. For a `sh -c "<script>"` / `bash -c "<script>"`
-/// wrapper the shell consumes subsequent argv entries as `$0, $1, $2,
-/// …`; if we merely append the config path it becomes `$0` (the
-/// wrapper's "script name") instead of `$1`, so the user's `"$1"`
-/// reference in the inner command expands to empty and the editor
-/// opens nothing. When we recognize that pattern (exactly three tokens:
-/// `sh|bash`, `-c`, `<script>`) we prepend a dummy `"ark-edit"` so the
-/// path lands at `$1`. Every other EDITOR shape just appends the path.
+/// F-515 / F-524: decide the trailing argv (after the parsed EDITOR
+/// words) for the editor spawn. For a POSIX-style shell wrapper (e.g.
+/// `sh -c "<script>"`, `bash --noprofile -c "<script>"`, `sh -eu -c
+/// "vim $1"`) the shell consumes subsequent argv entries as
+/// `$0, $1, $2, …`; if we merely append the config path it becomes
+/// `$0` (the wrapper's "script name") instead of `$1`, so the user's
+/// `"$1"` reference expands to empty and the editor opens nothing.
+///
+/// F-524 broadens the original F-515 detector — which only matched the
+/// exact 3-token `sh|bash -c <script>` shape — to also cover shells
+/// with extra flags before `-c` and additional shell basenames in
+/// common use. Detection rules:
+///
+/// 1. `parts[0]` basename must be one of `sh`, `bash`, `zsh`, `dash`,
+///    `ash`, `ksh` (the POSIX-ish family that treats trailing argv as
+///    `$0, $1, …` to `-c`).
+/// 2. The LAST `-c` occurrence must be followed by exactly one more
+///    token, and that token must be the final element of `parts` (the
+///    inline script). This rules out `sh -x -c "vim" --foo` which
+///    passes extra non-positional args to the script.
+///
+/// Every other EDITOR shape (e.g. `vim +100`, `nvim --nofork`) falls
+/// through to the plain "just append the path" branch.
 fn build_editor_argv_tail(parts: &[String], path: &std::path::Path) -> Vec<std::ffi::OsString> {
-    let is_sh_c_wrapper =
-        parts.len() == 3 && (parts[0] == "sh" || parts[0] == "bash") && parts[1] == "-c";
-    if is_sh_c_wrapper {
+    if is_shell_c_wrapper(parts) {
         vec![
             std::ffi::OsString::from("ark-edit"),
             path.as_os_str().to_os_string(),
@@ -239,6 +251,33 @@ fn build_editor_argv_tail(parts: &[String], path: &std::path::Path) -> Vec<std::
     } else {
         vec![path.as_os_str().to_os_string()]
     }
+}
+
+/// F-524: does `parts` look like a POSIX shell wrapper whose final
+/// element is the inline script passed via `-c`? See
+/// [`build_editor_argv_tail`] for the full rule set.
+fn is_shell_c_wrapper(parts: &[String]) -> bool {
+    if parts.len() < 3 {
+        return false;
+    }
+    // Basename check — strip any directory prefix so `/bin/bash` still
+    // counts as bash.
+    let basename = std::path::Path::new(&parts[0])
+        .file_name()
+        .and_then(|os| os.to_str())
+        .unwrap_or(parts[0].as_str());
+    let is_shell_bin = matches!(basename, "sh" | "bash" | "zsh" | "dash" | "ash" | "ksh");
+    if !is_shell_bin {
+        return false;
+    }
+    // Find the LAST occurrence of `-c`.
+    let last_c = match parts.iter().rposition(|p| p == "-c") {
+        Some(i) => i,
+        None => return false,
+    };
+    // Need exactly one more token after `-c`, and it must be the
+    // final element (the inline script).
+    last_c + 1 == parts.len() - 1
 }
 
 /// `ark config edit` — spawn `$EDITOR` on the user config file.
@@ -775,13 +814,57 @@ mod tests {
     }
 
     #[test]
-    fn editor_argv_tail_sh_without_dash_c_is_not_wrapper() {
-        // F-515: guard against false positives — a longer argv that
-        // happens to start with `sh` must NOT get the dummy $0 treatment.
-        let parts: Vec<String> = vec!["sh".into(), "-x".into(), "-c".into(), "vim \"$1\"".into()];
+    fn editor_argv_tail_sh_with_leading_flags_still_wrapper() {
+        // F-524: broader detector — any POSIX shell invocation whose
+        // final argv element follows a `-c` flag is a wrapper, even
+        // when extra shell flags precede `-c`. This was previously
+        // (F-515) false-negative — the exact 3-token rule missed it.
+        let parts: Vec<String> = vec!["sh".into(), "-eu".into(), "-c".into(), "vim \"$1\"".into()];
         let tail = build_editor_argv_tail(&parts, std::path::Path::new("/tmp/a.toml"));
-        // Only three-token `sh -c <script>` qualifies; this 4-token
-        // form falls through to the plain append branch.
+        assert_eq!(tail.len(), 2);
+        assert_eq!(tail[0], std::ffi::OsString::from("ark-edit"));
+        assert_eq!(tail[1], std::ffi::OsString::from("/tmp/a.toml"));
+    }
+
+    #[test]
+    fn editor_argv_tail_bash_with_noprofile_still_wrapper() {
+        // F-524: `bash --noprofile -c "…"` is a common wrapper shape
+        // that the F-515 detector missed — now covered.
+        let parts: Vec<String> = vec![
+            "bash".into(),
+            "--noprofile".into(),
+            "-c".into(),
+            "nvim \"$1\"".into(),
+        ];
+        let tail = build_editor_argv_tail(&parts, std::path::Path::new("/tmp/x.toml"));
+        assert_eq!(tail.len(), 2);
+        assert_eq!(tail[0], std::ffi::OsString::from("ark-edit"));
+        assert_eq!(tail[1], std::ffi::OsString::from("/tmp/x.toml"));
+    }
+
+    #[test]
+    fn editor_argv_tail_non_shell_bin_is_not_wrapper() {
+        // F-524 guard: only the POSIX shell family qualifies. A random
+        // binary with `-c` as its last flag (e.g. some hypothetical
+        // `myeditor -c scriptlet`) must NOT get the dummy $0 treatment.
+        let parts: Vec<String> = vec!["myeditor".into(), "-c".into(), "scriptlet".into()];
+        let tail = build_editor_argv_tail(&parts, std::path::Path::new("/tmp/a.toml"));
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0], std::ffi::OsString::from("/tmp/a.toml"));
+    }
+
+    #[test]
+    fn editor_argv_tail_dash_c_not_last_flag_is_not_wrapper() {
+        // F-524 guard: if `-c` is NOT followed by exactly one final
+        // token (extra args present), fall through. This protects
+        // shapes like `sh -c "…" --foo` (positional script args).
+        let parts: Vec<String> = vec![
+            "sh".into(),
+            "-c".into(),
+            "vim \"$1\"".into(),
+            "extra".into(),
+        ];
+        let tail = build_editor_argv_tail(&parts, std::path::Path::new("/tmp/a.toml"));
         assert_eq!(tail.len(), 1);
         assert_eq!(tail[0], std::ffi::OsString::from("/tmp/a.toml"));
     }
