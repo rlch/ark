@@ -1,6 +1,9 @@
 //! ark-core — shared traits and runtime primitives for ark.
 //!
 //! - `config` — placeholder `Config` (T-018 fills the schema).
+//! - `consumers` — supervisor broadcast-bus consumer tasks
+//!   (`state_writer`, `status_pipe`, `hook_dispatcher`) per
+//!   cavekit-supervisor.md R2.
 //! - `control_socket` — per-supervisor unix control socket primitive
 //!   (cavekit-hook-ipc.md R4, cavekit-supervisor.md R7).
 //! - `engine` — `Engine` trait + `EngineHandle` + `ApprovalPolicy`
@@ -17,6 +20,7 @@
 //!   (cavekit-types-state-events.md R6).
 
 pub mod config;
+pub mod consumers;
 pub mod control_socket;
 pub mod engine;
 pub mod events_log;
@@ -26,6 +30,7 @@ pub mod socket_paths;
 pub mod status_writer;
 
 pub use config::Config;
+pub use consumers::{hook_dispatcher, state_writer, status_pipe};
 pub use control_socket::{
     ControlListener, Response, gc_stale_socket, handle_single_request, unlink_if_exists,
 };
