@@ -281,3 +281,54 @@ ark-cli: 224 baseline → 227 passing in lib unittests + 2 integration = 229 tot
 ## Test Delta — Cycle 6
 
 ark-cli: 229 baseline → 231 lib + 2 integration = 233 total (+4 net: F-516 rewrote 3 `zellij_plan_*` and 3 `build_zellij_command_*` tests for −1 count versus cycle-4 since the two variants merged, then +5 F-518 tests → net +4). Full-workspace `cargo test --workspace -- --test-threads=1` continues to report the same pre-existing `ark-orchestrators-cavekit::watchers::*` + `ark-engines-claude-code` failures from cycle-3 / cycle-5 (ralph_loop flaky, etc.) — entirely outside any file touched this cycle. `cargo test -p ark-cli` is green end-to-end.
+
+## Tier 4 — Cycle 7 (Codex)
+
+### F-519 — P1 doctor must exit with PreflightFail code (2), not Generic (1) (FIXED)
+
+**Source:** codex
+**Tier:** 4
+**Severity:** P1
+**Status:** fixed
+**Location:** crates/cli/src/commands/doctor.rs (`run`, new `failed_summary` helper)
+
+**Description:** `ark doctor` mapped any aggregated `Status::Fail` to `CliError::Generic` (exit code 1). The exit-code contract in `exit.rs` reserves exit 2 for `PreflightFail` — "preflight / dependency missing" — which is exactly what doctor failures represent (zellij missing, state-dir unwritable, etc.). CI scripts that key off `$?` to distinguish dependency issues from other runtime errors couldn't tell a doctor failure from an unrelated panic.
+
+**Resolution:** Replaced the `CliError::Generic` arm with `CliError::PreflightFail { reason }`, where `reason` is produced by a new `failed_summary(&rs)` helper. The helper enumerates the failed check names into a single reason string — e.g. `"3 checks failed: zellij, claude, state-dir"` — so the operator sees exactly which preflight gates failed without having to re-read the table. Updated the `run_fail_produces_generic` test (renamed `run_fail_produces_preflight_fail`) to assert `matches!(err, CliError::PreflightFail { .. })`, `err.code() == ExitCode::PreflightFail.code()` (== 2), and that the summary string contains each failing name but not passing names. Also updated the module docstring to reflect the new exit contract.
+
+### F-520 — P2 doctor must check for `delta` binary (FIXED)
+
+**Source:** codex
+**Tier:** 4
+**Severity:** P2
+**Status:** fixed
+**Location:** crates/cli/src/commands/doctor.rs (new `check_delta_binary`, `run_all`)
+
+**Description:** `run_all` probed zellij and claude but never checked for `delta`, the renderer `ark pane diff` prefers. On a host without delta, doctor rubber-stamped the environment as healthy and the first `ark pane diff` silently fell back to plain rendering with no warning from the diagnostics pass.
+
+**Resolution:** Added `check_delta_binary()` mirroring the `check_zellij`/`check_claude` pattern (PATH probe via `which`, `delta --version` parsed through the shared `parse_version`). Because `ark pane diff` still works without delta (just uses fallback rendering), absence is surfaced as **Warn**, not Fail — Fail would misleadingly mark the whole environment broken and trigger the new F-519 PreflightFail exit. Added to `run_all` immediately after `check_claude` so the three PATH-dependency probes sit together at the top of the diagnostic table. Test `delta_missing_on_empty_path_is_warn` mirrors the zellij/claude equivalents: empty `PATH` via the `ENV_LOCK`-guarded `EnvGuard`, assert `Status::Warn`, assert no auto-fix (user must install).
+
+### F-521 — P2 doctor must validate config.toml contents (FIXED)
+
+**Source:** codex
+**Tier:** 4
+**Severity:** P2
+**Status:** fixed
+**Location:** crates/cli/src/commands/doctor.rs (new `check_config_file`, `user_config_path`, `run_all`)
+
+**Description:** Doctor only checked the config **directory** existed and was writable. The file's **contents** were never validated, so a malformed `config.toml` (invalid TOML syntax, or schema-valid TOML with out-of-range values) slipped past doctor and blew up the first `ark config show` or any command whose dispatch calls `ConfigLoader::load::<Config>()`.
+
+**Resolution:** Added `check_config_file(&ctx)`. Contract:
+
+1. If the file is **absent** → Ok with message "`<path>` absent — defaults apply". Per cavekit-cli R1, absent user config is a legitimate state (defaults fill in).
+2. If present → read + syntactic TOML parse via `toml::Value`; on parse error → Fail with the exact parser message.
+3. If TOML parses → round-trip through `ConfigLoader::new().with_user_path(Some(path)).load::<Config>()`, mirroring the F-508 pattern used by `config set`. Project + env layers are deliberately skipped so a bogus env override can't fail the doctor pass. Schema error → Fail with the loader error message.
+4. All good → Ok with "valid `<path>`".
+
+Honors `ARK_CONFIG_PATH` via a new `user_config_path(ctx)` helper — same precedence as the `config` subcommand's equivalent in `commands/config.rs`, so all four config-related surfaces (show / get / set / doctor) resolve identically. Wired into `run_all` immediately after `check_config_dir`. Also pulled in `ark_config::{ConfigLoader, schema::Config}` and added a local `ARK_CONFIG_PATH_ENV` constant (duplicated rather than exported from `commands::config` so this file's test story stays self-contained).
+
+Four tests: `check_config_file_ok_when_absent` (no file → Ok with "absent"), `check_config_file_ok_when_valid` (empty-but-parseable file → Ok with "valid"), `check_config_file_fails_on_invalid_toml` (unbalanced bracket `[unterminated\n...` → Fail with "invalid TOML"), `check_config_file_honors_ark_config_path_override` (broken file at override path; ctx.config_dir has nothing → Fail pointing at the override path). All four acquire `ENV_LOCK` and use an `EnvGuard` to set/unset `ARK_CONFIG_PATH` so they're race-free with the other env-touching tests.
+
+## Test Delta — Cycle 7
+
+ark-cli: 231 baseline → 236 lib + 2 integration = 238 total (+5 net: 1 F-519 rename/tighten of `run_fail_produces_generic`→`run_fail_produces_preflight_fail` keeps count stable, +1 `delta_missing_on_empty_path_is_warn` for F-520, +4 `check_config_file_*` tests for F-521 → net +5 on top of the renamed test). Workspace-wide `cargo test --workspace -- --test-threads=1` continues to report the same pre-existing `ark-orchestrators-cavekit::watchers::{codex_findings, ralph_loop}` + `ark-engines-claude-code` flakes flagged in cycles 3 / 5 / 6 — entirely outside `doctor.rs`. `cargo test -p ark-cli` is green end-to-end. Zero new build warnings.

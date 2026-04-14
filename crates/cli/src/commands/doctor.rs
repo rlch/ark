@@ -6,8 +6,9 @@
 //! Each check produces a [`CheckResult`] with status Ok / Warn /
 //! Fail. Default rendering is a compact table with glyphs
 //! (✓ ⚠ ✗, plain ASCII when `ctx.no_color`). `--json` emits a
-//! machine-readable array. Exit is 0 when every check is Ok, else
-//! [`CliError::Generic`].
+//! machine-readable array. Exit is 0 when every check is Ok or
+//! Warn, and [`CliError::PreflightFail`] (exit code 2) when any
+//! check fails (F-519).
 //!
 //! The zellij / claude preflight helpers in `mux/zellij` and
 //! `engines/claude-code` both require async executors / an
@@ -24,6 +25,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use ark_config::{ConfigLoader, schema::Config};
 use ark_types::{AgentId, AgentSpec, StateLayout};
 use clap::Args;
 use nix::sys::signal::kill as nix_kill;
@@ -35,6 +37,11 @@ use crate::error::CliError;
 
 /// Minimum zellij version required (mirrors mux/zellij R6).
 const MIN_ZELLIJ: (u32, u32, u32) = (0, 44, 1);
+
+/// Env var that overrides the user config file location (mirrors
+/// `crates/cli/src/commands/config.rs`). F-521 honors this when
+/// locating the file to validate.
+const ARK_CONFIG_PATH_ENV: &str = "ARK_CONFIG_PATH";
 
 /// Arguments for `ark doctor`.
 #[derive(Debug, Args)]
@@ -247,6 +254,29 @@ fn check_claude() -> CheckResult {
     }
 }
 
+/// F-520: `delta` is the preferred renderer for `ark pane diff`.
+/// Absence is NOT fatal — diff falls back to plain rendering —
+/// so we emit Warn, not Fail, when the binary is missing.
+fn check_delta_binary() -> CheckResult {
+    match which("delta") {
+        None => CheckResult::warn(
+            "delta",
+            "delta not on PATH — ark pane diff will use fallback rendering \
+             (install: brew install git-delta)",
+        ),
+        Some(p) => {
+            let line = run_version(&p).unwrap_or_default();
+            match parse_version(&line) {
+                None => CheckResult::warn(
+                    "delta",
+                    format!("found {} but could not parse --version", p.display()),
+                ),
+                Some(v) => CheckResult::ok("delta", format!("{}.{}.{} on PATH", v.0, v.1, v.2)),
+            }
+        }
+    }
+}
+
 /// Probe-and-remove to test directory writability.
 fn is_writable(dir: &Path) -> bool {
     if !dir.is_dir() {
@@ -325,6 +355,68 @@ fn check_config_dir(ctx: &Ctx) -> CheckResult {
             "config-dir",
             format!("config_dir not writable: {}", ctx.config_dir.display()),
         )
+    }
+}
+
+/// Resolve the user config file path honoring `ARK_CONFIG_PATH`
+/// (mirrors the CLI's `config` subcommand resolution — see F-502).
+fn user_config_path(ctx: &Ctx) -> PathBuf {
+    if let Some(p) = std::env::var_os(ARK_CONFIG_PATH_ENV)
+        && !p.is_empty()
+    {
+        return PathBuf::from(p);
+    }
+    ctx.config_dir.join("config.toml")
+}
+
+/// F-521: validate the CONTENTS of `config.toml` (not just the
+/// directory). An invalid TOML file, or one that parses but fails
+/// schema validation, breaks every later subcommand that calls
+/// `ConfigLoader::load::<Config>()`. Doctor should surface that
+/// early instead of letting the first `ark config show` blow up.
+///
+/// Contract:
+/// - File missing → Ok ("absent — defaults will apply"). The spec
+///   (cavekit-cli R1) treats absent user config as a legitimate
+///   configuration, not a problem.
+/// - File present + invalid TOML syntax → Fail with parse error.
+/// - File present + valid TOML but schema-invalid → Fail with
+///   the `ConfigLoader` error (mirrors the F-508 pattern used in
+///   `config set`).
+/// - File present + valid → Ok.
+fn check_config_file(ctx: &Ctx) -> CheckResult {
+    let path = user_config_path(ctx);
+    if !path.exists() {
+        return CheckResult::ok(
+            "config-file",
+            format!("{} absent — defaults apply", path.display()),
+        );
+    }
+    let raw = match fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            return CheckResult::fail("config-file", format!("read {}: {e}", path.display()));
+        }
+    };
+    // Step 1: syntactic TOML parse.
+    if let Err(e) = raw.parse::<toml::Value>() {
+        return CheckResult::fail(
+            "config-file",
+            format!("invalid TOML in {}: {e}", path.display()),
+        );
+    }
+    // Step 2: schema validation via the same loader used by
+    // `config show`/`set`. Project + env layers are intentionally
+    // skipped so a bogus env override can't trip the doctor pass.
+    let validated = ConfigLoader::new()
+        .with_user_path(Some(path.clone()))
+        .load::<Config>();
+    match validated {
+        Ok(_) => CheckResult::ok("config-file", format!("valid {}", path.display())),
+        Err(e) => CheckResult::fail(
+            "config-file",
+            format!("schema error in {}: {e}", path.display()),
+        ),
     }
 }
 
@@ -593,9 +685,11 @@ pub(crate) fn run_all(ctx: &Ctx) -> Vec<CheckResult> {
     let mut rs = Vec::new();
     rs.push(check_zellij());
     rs.push(check_claude());
+    rs.push(check_delta_binary());
     rs.push(check_runtime_dir(ctx));
     rs.push(check_state_dir(ctx));
     rs.push(check_config_dir(ctx));
+    rs.push(check_config_file(ctx));
     rs.push(check_editor());
     rs.extend(check_orphan_sockets(&layout));
     rs.extend(check_stale_locks(&layout));
@@ -623,10 +717,30 @@ fn aggregate_status(rs: &[CheckResult]) -> Status {
     }
 }
 
+/// F-519: summarize failed check names into a single reason string
+/// e.g. `"3 checks failed: zellij, claude, state-dir"`. Used when
+/// mapping aggregate Fail → [`CliError::PreflightFail`].
+fn failed_summary(rs: &[CheckResult]) -> String {
+    let failed: Vec<&str> = rs
+        .iter()
+        .filter(|r| r.status == Status::Fail)
+        .map(|r| r.name.as_str())
+        .collect();
+    if failed.is_empty() {
+        // Defensive — should never be reached because this helper is
+        // only called when aggregate_status == Fail, but keep the
+        // fallback so a drift elsewhere doesn't produce a panicky
+        // message.
+        return "one or more checks failed".to_string();
+    }
+    format!("{} checks failed: {}", failed.len(), failed.join(", "))
+}
+
 /// Dispatch `ark doctor` (T-091).
 ///
-/// - Default: render table, exit 0 on all-Ok else [`CliError::Generic`].
-/// - `--json`: emit array, exit 0 on all-Ok else Generic (same).
+/// - Default: render table, exit 0 on all-Ok-or-Warn, else
+///   [`CliError::PreflightFail`] (exit code 2, F-519).
+/// - `--json`: emit array, same exit policy.
 /// - `--fix`: iterate fixes after the report, with y/N prompts
 ///   (auto-accepted when `--yes`). Warn-only results do NOT fail
 ///   the command; only Fail results do.
@@ -663,8 +777,12 @@ pub fn run(args: DoctorArgs, ctx: &Ctx) -> Result<(), CliError> {
     }
 
     match aggregate_status(&rs) {
-        Status::Fail => Err(CliError::Generic {
-            reason: "one or more checks failed".to_string(),
+        // F-519: doctor failures are preflight/dependency failures —
+        // map to exit code 2, not the generic exit 1. The reason
+        // string enumerates which checks failed so CI logs point
+        // straight at the missing dependency.
+        Status::Fail => Err(CliError::PreflightFail {
+            reason: failed_summary(&rs),
         }),
         // Warn-only is still a zero exit — spec: "Warn-only
         // result → Ok (exit 0)".
@@ -919,15 +1037,122 @@ mod tests {
         assert!(flow.is_ok());
     }
 
+    // F-519: aggregate Fail must map to PreflightFail (exit 2),
+    // NOT Generic (exit 1). The failure reason must enumerate the
+    // failing check names so CI output points at the missing dep.
     #[test]
-    fn run_fail_produces_generic() {
-        let rs = vec![CheckResult::fail("x", "boom")];
+    fn run_fail_produces_preflight_fail() {
+        use crate::exit::ExitCode;
+        let rs = vec![
+            CheckResult::fail("zellij", "missing"),
+            CheckResult::ok("claude", "1.0"),
+            CheckResult::fail("state-dir", "unwritable"),
+        ];
         let agg = aggregate_status(&rs);
+        assert_eq!(agg, Status::Fail);
         let flow: Result<(), CliError> = match agg {
-            Status::Fail => Err(CliError::Generic { reason: "x".into() }),
+            Status::Fail => Err(CliError::PreflightFail {
+                reason: failed_summary(&rs),
+            }),
             _ => Ok(()),
         };
-        assert!(matches!(flow, Err(CliError::Generic { .. })));
+        let err = flow.expect_err("aggregate Fail must produce an error");
+        assert!(matches!(err, CliError::PreflightFail { .. }), "{err:?}");
+        assert_eq!(err.code(), ExitCode::PreflightFail.code());
+        assert_eq!(err.code(), 2);
+        // Summary must enumerate the failing checks.
+        let msg = err.to_string();
+        assert!(msg.contains("2 checks failed"), "{msg}");
+        assert!(msg.contains("zellij"), "{msg}");
+        assert!(msg.contains("state-dir"), "{msg}");
+        assert!(!msg.contains("claude"), "{msg}");
+    }
+
+    // F-520: doctor must check for the `delta` binary. Missing
+    // delta is a Warn (fallback rendering still works) — NOT a Fail.
+    #[test]
+    fn delta_missing_on_empty_path_is_warn() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let empty = tempdir().unwrap();
+        let _p = EnvGuard::set("PATH", empty.path().to_str().unwrap());
+        let r = check_delta_binary();
+        assert_eq!(r.status, Status::Warn, "{r:?}");
+        assert!(r.message.contains("delta"), "{r:?}");
+        // Absence is fixable by install, not by doctor — no auto-fix.
+        assert!(r.fix.is_none(), "{r:?}");
+    }
+
+    // F-521: valid + absent + malformed config files.
+    #[test]
+    fn check_config_file_ok_when_absent() {
+        let tmp = tempfile::Builder::new()
+            .prefix("arkd-f521abs")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let ctx = test_ctx(tmp.path());
+        // No config.toml yet.
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Ensure no ARK_CONFIG_PATH override leaks in from the env.
+        let _guard = EnvGuard::set(ARK_CONFIG_PATH_ENV, "");
+        let r = check_config_file(&ctx);
+        assert_eq!(r.status, Status::Ok, "{r:?}");
+        assert!(r.message.contains("absent"), "{r:?}");
+    }
+
+    #[test]
+    fn check_config_file_ok_when_valid() {
+        let tmp = tempfile::Builder::new()
+            .prefix("arkd-f521ok")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let ctx = test_ctx(tmp.path());
+        fs::create_dir_all(&ctx.config_dir).unwrap();
+        // Minimal but schema-valid TOML — defaults fill the rest.
+        fs::write(ctx.config_dir.join("config.toml"), "").unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::set(ARK_CONFIG_PATH_ENV, "");
+        let r = check_config_file(&ctx);
+        assert_eq!(r.status, Status::Ok, "{r:?}");
+        assert!(r.message.contains("valid"), "{r:?}");
+    }
+
+    #[test]
+    fn check_config_file_fails_on_invalid_toml() {
+        let tmp = tempfile::Builder::new()
+            .prefix("arkd-f521bad")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let ctx = test_ctx(tmp.path());
+        fs::create_dir_all(&ctx.config_dir).unwrap();
+        // Unbalanced bracket → parser error.
+        fs::write(
+            ctx.config_dir.join("config.toml"),
+            "[unterminated\nkey = \"val\"\n",
+        )
+        .unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::set(ARK_CONFIG_PATH_ENV, "");
+        let r = check_config_file(&ctx);
+        assert_eq!(r.status, Status::Fail, "{r:?}");
+        assert!(r.message.contains("invalid TOML"), "{r:?}");
+    }
+
+    #[test]
+    fn check_config_file_honors_ark_config_path_override() {
+        // Write a broken config at the override path; ctx.config_dir
+        // has no config.toml. F-521 must follow the override.
+        let tmp = tempfile::Builder::new()
+            .prefix("arkd-f521env")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let ctx = test_ctx(tmp.path());
+        let alt = tmp.path().join("alt-config.toml");
+        fs::write(&alt, "[bad\n").unwrap();
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = EnvGuard::set(ARK_CONFIG_PATH_ENV, alt.to_str().unwrap());
+        let r = check_config_file(&ctx);
+        assert_eq!(r.status, Status::Fail, "{r:?}");
+        assert!(r.message.contains(alt.to_str().unwrap()), "{r:?}");
     }
 
     // ---- config-dir auto-create via --fix ----
