@@ -40,11 +40,16 @@
 //! stdin (no tool_name extractable) — defaults to `ask` (no allow
 //! written). The exit code stays 0 on every path.
 //!
-//! **Observability invariant**: `PermissionAsked` is still emitted to
-//! JSONL + zellij pipe + tracing on *every* `PermissionRequest` hook,
-//! regardless of whether the allow payload is ultimately written. This
-//! satisfies T-054 R3 ("always emit the trace pair") and is what the
-//! reviewer UI subscribes to.
+//! **Observability invariant**: `PermissionAsked` AND
+//! `PermissionResolved` are emitted to JSONL + zellij pipe + tracing on
+//! *every* `PermissionRequest` hook, regardless of whether the allow
+//! payload is ultimately written. This satisfies T-054 R3 ("always
+//! emit the trace pair"), cavekit-engine-claude-code R3, and
+//! cavekit-hook-ipc R2 (PermissionRequest.jsonl per-event audit log),
+//! and is what the reviewer UI subscribes to. The Asked event is
+//! always logged first, then Resolved, so downstream consumers can
+//! rely on the file ordering. F-053 added the Resolved half of the
+//! pair (previously only Asked was emitted).
 //!
 //! ## Budget
 //! Claude Code blocks its main loop while a hook runs (kit R1). The
@@ -140,7 +145,14 @@ pub fn run_with_state<R: Read, W: Write>(
             error = %e,
             "stdin read failed; fail-open"
         );
-        maybe_emit_permission_decision(cli, stdout, state_root.as_deref(), None, true);
+        if let Some(decision) =
+            maybe_emit_permission_decision(cli, stdout, state_root.as_deref(), None, true)
+        {
+            // F-053: always emit PermissionResolved alongside the
+            // policy decision so the Asked+Resolved pair in the audit
+            // log is complete.
+            emit_permission_resolved_trace(&cli.id, state_root.as_deref(), "unknown", decision);
+        }
         log_budget(cli, started);
         return Ok(HookOutcome::Allow);
     }
@@ -151,7 +163,13 @@ pub fn run_with_state<R: Read, W: Write>(
             event = %cli.event,
             "stdin empty; fail-open (R3 — never block claude)"
         );
-        maybe_emit_permission_decision(cli, stdout, state_root.as_deref(), None, true);
+        if let Some(decision) =
+            maybe_emit_permission_decision(cli, stdout, state_root.as_deref(), None, true)
+        {
+            // F-053: always emit PermissionResolved alongside the
+            // policy decision.
+            emit_permission_resolved_trace(&cli.id, state_root.as_deref(), "unknown", decision);
+        }
         log_budget(cli, started);
         return Ok(HookOutcome::Allow);
     }
@@ -238,13 +256,27 @@ pub fn run_with_state<R: Read, W: Write>(
     // missing tool / unreadable policy all fail SAFE to Ask (no write).
     // Malformed stdin also forces Ask so we never auto-approve a
     // request we couldn't validate.
-    maybe_emit_permission_decision(
+    let decision = maybe_emit_permission_decision(
         cli,
         stdout,
         state_root.as_deref(),
         parsed_tool_name.as_deref(),
         parse_failed,
     );
+
+    // F-053: always emit a PermissionResolved trace for every
+    // PermissionRequest invocation so the audit log (JSONL + zellij
+    // pipe) carries the Asked→Resolved pair regardless of policy.
+    // Per cavekit-engine-claude-code R3 + cavekit-hook-ipc R2.
+    // The `tool` string MUST match the Asked-side string: that side
+    // used `payload.tool_name.unwrap_or("unknown")` (valid parse) or
+    // the synthesized "unknown" (malformed JSON via
+    // `emit_permission_asked_trace`). `parsed_tool_name` is None in
+    // both failure paths, so the same fallback applies.
+    if let Some(decision) = decision {
+        let tool = parsed_tool_name.as_deref().unwrap_or("unknown");
+        emit_permission_resolved_trace(&cli.id, state_root.as_deref(), tool, decision);
+    }
 
     log_budget(cli, started);
     Ok(HookOutcome::Allow)
@@ -292,6 +324,45 @@ fn emit_permission_asked_trace(id: &AgentId, state_root: Option<&Path>, tool: &s
     let _ = pipe_to_zellij(TARGET_ARK_PICKER, &payload_str);
 }
 
+/// F-053 fix: emit the matching `PermissionResolved` trace after
+/// [`maybe_emit_permission_decision`] has decided. Mirrors the
+/// Asked-side fan-out (JSONL + zellij pipe + tracing) so the audit log
+/// always carries the Asked→Resolved pair for every PermissionRequest
+/// hook, regardless of whether the allow payload was actually written.
+///
+/// Per cavekit-engine-claude-code R3 + cavekit-hook-ipc R2: always emit
+/// PermissionAsked + PermissionResolved for every permission hook,
+/// regardless of policy. The `tool` string MUST match the one used in
+/// the Asked event so downstream consumers can correlate the pair.
+fn emit_permission_resolved_trace(
+    id: &AgentId,
+    state_root: Option<&Path>,
+    tool: &str,
+    decision: PermissionDecision,
+) {
+    let ev = ark_types::AgentEvent::PermissionResolved {
+        id: id.clone(),
+        tool: tool.to_string(),
+        decision,
+    };
+    let serialized = serde_json::to_value(&ev).unwrap_or_else(
+        |_| serde_json::json!({ "kind": "permission_resolved", "serialize_failed": true }),
+    );
+    info!(
+        agent = %id,
+        event = "PermissionRequest",
+        kind = "permission_resolved",
+        detail = %serialized,
+        "emitted permission_resolved trace"
+    );
+    if let Some(root) = state_root {
+        let _ = append_event_jsonl(root, id, HookEvent::PermissionRequest, &serialized);
+    }
+    let payload_str = serde_json::to_string(&serialized).unwrap_or_else(|_| String::from("{}"));
+    let _ = pipe_to_zellij(TARGET_ARK_STATUS, &payload_str);
+    let _ = pipe_to_zellij(TARGET_ARK_PICKER, &payload_str);
+}
+
 /// Policy-aware replacement for the old `ensure_permission_allow` /
 /// `emit_allow_swallow` pair (F-044).
 ///
@@ -308,7 +379,12 @@ fn emit_permission_asked_trace(id: &AgentId, state_root: Option<&Path>, tool: &s
 /// the documented "malformed stdin defaults to Ask" fail-SAFE
 /// contract (F-044).
 ///
-/// Non-permission events are a no-op.
+/// Non-permission events are a no-op and return `None`.
+///
+/// For PermissionRequest events, returns `Some(decision)` so the caller
+/// can emit a matching `PermissionResolved` trace (F-053) — the
+/// Asked+Resolved pair is the single source of truth for the permission
+/// audit log per cavekit-engine-claude-code R3 + cavekit-hook-ipc R2.
 ///
 /// This is the single enforcement point for the fail-SAFE policy
 /// contract (F-044): every branch in [`run_with_state`] routes
@@ -320,9 +396,9 @@ pub(crate) fn maybe_emit_permission_decision<W: Write>(
     state_root: Option<&Path>,
     tool_name: Option<&str>,
     force_ask: bool,
-) {
+) -> Option<PermissionDecision> {
     if cli.event != HookEvent::PermissionRequest {
-        return;
+        return None;
     }
 
     // Resolve policy (fail-SAFE: any error or forced override → Ask).
@@ -385,6 +461,8 @@ pub(crate) fn maybe_emit_permission_decision<W: Write>(
             );
         }
     }
+
+    Some(decision)
 }
 
 /// Short static label for an [`AgentEvent`], matching the serde
@@ -962,6 +1040,330 @@ mod tests {
         assert!(
             buf.is_empty(),
             "force_ask must override auto_approve_all: {buf:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // F-053: every PermissionRequest must emit BOTH PermissionAsked and
+    // PermissionResolved events to JSONL + zellij pipe, regardless of
+    // policy. Per cavekit-engine-claude-code R3 + cavekit-hook-ipc R2.
+    // -----------------------------------------------------------------
+
+    /// Read the PermissionRequest JSONL file for `cli` under `root`.
+    /// Returns the parsed lines (as JSON Values) in file order.
+    fn read_permission_jsonl(root: &Path, cli: &Cli) -> Vec<serde_json::Value> {
+        let path = cli
+            .id
+            .state_dir(root)
+            .join("hooks")
+            .join("PermissionRequest.jsonl");
+        if !path.is_file() {
+            return Vec::new();
+        }
+        let contents = fs::read_to_string(&path).expect("read jsonl");
+        contents
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("parse jsonl line"))
+            .collect()
+    }
+
+    /// Extract the `kind` serde discriminant from a serialized AgentEvent.
+    fn kind_of(v: &serde_json::Value) -> &str {
+        v.get("kind").and_then(|k| k.as_str()).unwrap_or("")
+    }
+
+    #[test]
+    fn f053_return_type_is_some_for_permission_events() {
+        // The helper must return Some(decision) for PermissionRequest so
+        // the caller can fan out the matching Resolved trace.
+        let tmp = TempDir::new().unwrap();
+        let cli = cli_for(HookEvent::PermissionRequest);
+        seed_policy(tmp.path(), &cli, PermissionPolicy::AutoApproveAll);
+        let mut buf: Vec<u8> = Vec::new();
+        let out =
+            maybe_emit_permission_decision(&cli, &mut buf, Some(tmp.path()), Some("Edit"), false);
+        assert_eq!(out, Some(PermissionDecision::Allowed));
+    }
+
+    #[test]
+    fn f053_return_type_is_none_for_non_permission_events() {
+        // Non-permission events must return None so the caller skips
+        // the Resolved emission.
+        for ev in [
+            HookEvent::PostToolUse,
+            HookEvent::Stop,
+            HookEvent::Notification,
+            HookEvent::SessionEnd,
+            HookEvent::TaskCompleted,
+        ] {
+            let cli = cli_for(ev);
+            let mut buf: Vec<u8> = Vec::new();
+            let out = maybe_emit_permission_decision(&cli, &mut buf, None, Some("Read"), false);
+            assert_eq!(out, None, "event {ev} should return None");
+        }
+    }
+
+    #[test]
+    fn f053_ask_policy_emits_asked_then_resolved_deferred() {
+        // ask + valid payload → JSONL has Asked then Resolved(Deferred).
+        let tmp = TempDir::new().unwrap();
+        let cli = cli_for(HookEvent::PermissionRequest);
+        seed_policy(tmp.path(), &cli, PermissionPolicy::Ask);
+        let payload = r#"{"session_id":"s1","cwd":"/tmp","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
+        let (_, stdout) = run_sandboxed(&cli, payload.as_bytes(), Some(tmp.path().to_path_buf()));
+        assert!(stdout.is_empty(), "ask policy must not write allow payload");
+
+        let lines = read_permission_jsonl(tmp.path(), &cli);
+        assert_eq!(
+            lines.len(),
+            2,
+            "expected Asked + Resolved, got {} lines: {:#?}",
+            lines.len(),
+            lines
+        );
+        assert_eq!(kind_of(&lines[0]), "permission_asked");
+        assert_eq!(kind_of(&lines[1]), "permission_resolved");
+        assert_eq!(lines[0].get("tool").and_then(|t| t.as_str()), Some("Bash"));
+        assert_eq!(lines[1].get("tool").and_then(|t| t.as_str()), Some("Bash"));
+        assert_eq!(
+            lines[1].get("decision").and_then(|d| d.as_str()),
+            Some("deferred")
+        );
+    }
+
+    #[test]
+    fn f053_auto_approve_read_read_tool_emits_resolved_allowed() {
+        let tmp = TempDir::new().unwrap();
+        let cli = cli_for(HookEvent::PermissionRequest);
+        seed_policy(tmp.path(), &cli, PermissionPolicy::AutoApproveRead);
+        let payload = r#"{"session_id":"s1","cwd":"/tmp","hook_event_name":"PermissionRequest","tool_name":"Read","tool_input":{"file_path":"/x"}}"#;
+        let (_, stdout) = run_sandboxed(&cli, payload.as_bytes(), Some(tmp.path().to_path_buf()));
+        assert_eq!(std::str::from_utf8(&stdout).unwrap(), ALLOW_PAYLOAD_JSON);
+
+        let lines = read_permission_jsonl(tmp.path(), &cli);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(kind_of(&lines[0]), "permission_asked");
+        assert_eq!(kind_of(&lines[1]), "permission_resolved");
+        assert_eq!(lines[0].get("tool").and_then(|t| t.as_str()), Some("Read"));
+        assert_eq!(lines[1].get("tool").and_then(|t| t.as_str()), Some("Read"));
+        assert_eq!(
+            lines[1].get("decision").and_then(|d| d.as_str()),
+            Some("allowed")
+        );
+    }
+
+    #[test]
+    fn f053_auto_approve_read_edit_tool_emits_resolved_deferred() {
+        let tmp = TempDir::new().unwrap();
+        let cli = cli_for(HookEvent::PermissionRequest);
+        seed_policy(tmp.path(), &cli, PermissionPolicy::AutoApproveRead);
+        let payload = r#"{"session_id":"s1","cwd":"/tmp","hook_event_name":"PermissionRequest","tool_name":"Edit","tool_input":{"file_path":"/x"}}"#;
+        let (_, stdout) = run_sandboxed(&cli, payload.as_bytes(), Some(tmp.path().to_path_buf()));
+        assert!(stdout.is_empty(), "auto_approve_read must defer Edit");
+
+        let lines = read_permission_jsonl(tmp.path(), &cli);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(kind_of(&lines[0]), "permission_asked");
+        assert_eq!(kind_of(&lines[1]), "permission_resolved");
+        assert_eq!(lines[0].get("tool").and_then(|t| t.as_str()), Some("Edit"));
+        assert_eq!(lines[1].get("tool").and_then(|t| t.as_str()), Some("Edit"));
+        assert_eq!(
+            lines[1].get("decision").and_then(|d| d.as_str()),
+            Some("deferred")
+        );
+    }
+
+    #[test]
+    fn f053_auto_approve_all_edit_tool_emits_resolved_allowed() {
+        let tmp = TempDir::new().unwrap();
+        let cli = cli_for(HookEvent::PermissionRequest);
+        seed_policy(tmp.path(), &cli, PermissionPolicy::AutoApproveAll);
+        let payload = r#"{"session_id":"s1","cwd":"/tmp","hook_event_name":"PermissionRequest","tool_name":"Edit","tool_input":{"file_path":"/x"}}"#;
+        let (_, stdout) = run_sandboxed(&cli, payload.as_bytes(), Some(tmp.path().to_path_buf()));
+        assert_eq!(std::str::from_utf8(&stdout).unwrap(), ALLOW_PAYLOAD_JSON);
+
+        let lines = read_permission_jsonl(tmp.path(), &cli);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(kind_of(&lines[0]), "permission_asked");
+        assert_eq!(kind_of(&lines[1]), "permission_resolved");
+        assert_eq!(lines[0].get("tool").and_then(|t| t.as_str()), Some("Edit"));
+        assert_eq!(lines[1].get("tool").and_then(|t| t.as_str()), Some("Edit"));
+        assert_eq!(
+            lines[1].get("decision").and_then(|d| d.as_str()),
+            Some("allowed")
+        );
+    }
+
+    #[test]
+    fn f053_missing_policy_file_emits_resolved_deferred() {
+        // Missing policy file → defaults to ask → Resolved(Deferred),
+        // no stdout.
+        let tmp = TempDir::new().unwrap();
+        let cli = cli_for(HookEvent::PermissionRequest);
+        fs::create_dir_all(cli.id.state_dir(tmp.path())).unwrap();
+
+        let payload = r#"{"session_id":"s1","cwd":"/tmp","hook_event_name":"PermissionRequest","tool_name":"Read","tool_input":{"file_path":"/x"}}"#;
+        let (_, stdout) = run_sandboxed(&cli, payload.as_bytes(), Some(tmp.path().to_path_buf()));
+        assert!(stdout.is_empty());
+
+        let lines = read_permission_jsonl(tmp.path(), &cli);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(kind_of(&lines[0]), "permission_asked");
+        assert_eq!(kind_of(&lines[1]), "permission_resolved");
+        assert_eq!(
+            lines[1].get("decision").and_then(|d| d.as_str()),
+            Some("deferred")
+        );
+    }
+
+    #[test]
+    fn f053_malformed_stdin_emits_resolved_deferred_with_unknown_tool() {
+        // Malformed JSON + PermissionRequest → Asked(unknown) already
+        // existed; F-053 adds Resolved(unknown, Deferred) alongside.
+        // force_ask path: no stdout, but JSONL must have both events.
+        let tmp = TempDir::new().unwrap();
+        let cli = cli_for(HookEvent::PermissionRequest);
+        seed_policy(tmp.path(), &cli, PermissionPolicy::AutoApproveAll);
+
+        let (_, stdout) = run_sandboxed(&cli, b"{not json", Some(tmp.path().to_path_buf()));
+        assert!(stdout.is_empty(), "force_ask must override");
+
+        let lines = read_permission_jsonl(tmp.path(), &cli);
+        assert_eq!(
+            lines.len(),
+            2,
+            "expected Asked + Resolved for malformed stdin"
+        );
+        assert_eq!(kind_of(&lines[0]), "permission_asked");
+        assert_eq!(kind_of(&lines[1]), "permission_resolved");
+        // Both events must carry tool="unknown" (Asked + Resolved
+        // string must match so downstream can correlate the pair).
+        assert_eq!(
+            lines[0].get("tool").and_then(|t| t.as_str()),
+            Some("unknown")
+        );
+        assert_eq!(
+            lines[1].get("tool").and_then(|t| t.as_str()),
+            Some("unknown")
+        );
+        assert_eq!(
+            lines[1].get("decision").and_then(|d| d.as_str()),
+            Some("deferred")
+        );
+    }
+
+    #[test]
+    fn f053_non_permission_events_do_not_emit_resolved() {
+        // Non-PermissionRequest events must not emit Resolved
+        // (maybe_emit returns None, run_with_state skips the trace).
+        let tmp = TempDir::new().unwrap();
+        let cli = cli_for(HookEvent::PostToolUse);
+        fs::create_dir_all(cli.id.state_dir(tmp.path())).unwrap();
+        let payload = r#"{"session_id":"s1","cwd":"/tmp","hook_event_name":"PostToolUse","tool_name":"Edit","tool_input":{"file_path":"/x"}}"#;
+        let (_, _) = run_sandboxed(&cli, payload.as_bytes(), Some(tmp.path().to_path_buf()));
+
+        // PermissionRequest JSONL must not be created.
+        let jsonl = cli
+            .id
+            .state_dir(tmp.path())
+            .join("hooks")
+            .join("PermissionRequest.jsonl");
+        assert!(
+            !jsonl.exists(),
+            "non-permission event must not touch PermissionRequest.jsonl"
+        );
+    }
+
+    #[test]
+    fn f053_ordering_invariant_asked_before_resolved() {
+        // Dedicated line-ordering check: whatever the policy, Asked
+        // MUST appear in the JSONL strictly before Resolved.
+        let tmp = TempDir::new().unwrap();
+        let cli = cli_for(HookEvent::PermissionRequest);
+        seed_policy(tmp.path(), &cli, PermissionPolicy::AutoApproveAll);
+        let payload = r#"{"session_id":"s1","cwd":"/tmp","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
+        run_sandboxed(&cli, payload.as_bytes(), Some(tmp.path().to_path_buf()));
+
+        let path = cli
+            .id
+            .state_dir(tmp.path())
+            .join("hooks")
+            .join("PermissionRequest.jsonl");
+        let contents = fs::read_to_string(&path).unwrap();
+        let asked_pos = contents
+            .find("permission_asked")
+            .expect("Asked line present");
+        let resolved_pos = contents
+            .find("permission_resolved")
+            .expect("Resolved line present");
+        assert!(
+            asked_pos < resolved_pos,
+            "Asked ({asked_pos}) must precede Resolved ({resolved_pos}) in JSONL"
+        );
+    }
+
+    #[test]
+    fn f053_empty_stdin_permission_event_emits_resolved_deferred() {
+        // Empty stdin + PermissionRequest → force_ask path. Asked is
+        // not emitted for this branch (pre-existing behavior) but
+        // Resolved MUST still fire so the policy decision is auditable.
+        let tmp = TempDir::new().unwrap();
+        let cli = cli_for(HookEvent::PermissionRequest);
+        seed_policy(tmp.path(), &cli, PermissionPolicy::AutoApproveAll);
+        fs::create_dir_all(cli.id.state_dir(tmp.path())).unwrap();
+        let (_, stdout) = run_sandboxed(&cli, b"", Some(tmp.path().to_path_buf()));
+        assert!(stdout.is_empty());
+
+        let lines = read_permission_jsonl(tmp.path(), &cli);
+        // At least one permission_resolved line must be present.
+        let resolved = lines
+            .iter()
+            .find(|v| kind_of(v) == "permission_resolved")
+            .expect("Resolved must be emitted on empty stdin PermissionRequest");
+        assert_eq!(
+            resolved.get("tool").and_then(|t| t.as_str()),
+            Some("unknown")
+        );
+        assert_eq!(
+            resolved.get("decision").and_then(|d| d.as_str()),
+            Some("deferred")
+        );
+    }
+
+    #[test]
+    fn f053_stdin_read_error_permission_event_emits_resolved_deferred() {
+        // stdin read error + PermissionRequest → force_ask path.
+        // Resolved MUST still fire per F-053.
+        struct ErroringReader;
+        impl Read for ErroringReader {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "simulated"))
+            }
+        }
+        let tmp = TempDir::new().unwrap();
+        let cli = cli_for(HookEvent::PermissionRequest);
+        seed_policy(tmp.path(), &cli, PermissionPolicy::AutoApproveAll);
+        fs::create_dir_all(cli.id.state_dir(tmp.path())).unwrap();
+
+        let mut stdin = ErroringReader;
+        let mut stdout: Vec<u8> = Vec::new();
+        run_with_state(
+            &cli,
+            &mut stdin,
+            &mut stdout,
+            Some(tmp.path().to_path_buf()),
+        )
+        .expect("run ok");
+        assert!(stdout.is_empty());
+
+        let lines = read_permission_jsonl(tmp.path(), &cli);
+        let resolved = lines
+            .iter()
+            .find(|v| kind_of(v) == "permission_resolved")
+            .expect("Resolved must be emitted on stdin read error PermissionRequest");
+        assert_eq!(
+            resolved.get("decision").and_then(|d| d.as_str()),
+            Some("deferred")
         );
     }
 }
