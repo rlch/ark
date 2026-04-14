@@ -13,7 +13,7 @@
 //!   (fail-open per R3 — stdin, state, pipes must never block claude).
 //!   Exit `2` is reserved for exactly two paths:
 //!   (a) clap argument-validation failure at launch — a setup-time bug
-//!       in the engine-injected hook config and must be loud;
+//!   in the engine-injected hook config and must be loud;
 //!   (b) future explicit `PermissionRequest` deny (T-050).
 //!   The skeleton itself never produces `2`; clap's own parse-failure
 //!   path is the only way this crate exits non-zero today.
@@ -29,8 +29,10 @@
 
 pub mod cli;
 pub mod event;
+pub mod payload;
 pub mod run;
 
 pub use cli::Cli;
 pub use event::HookEvent;
+pub use payload::{FILE_EDIT_TOOLS, HookPayload, SUMMARY_MAX_CHARS, payload_to_events};
 pub use run::{HOOK_BUDGET_MS, run};

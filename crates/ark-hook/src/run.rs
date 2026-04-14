@@ -30,6 +30,7 @@ use anyhow::Context;
 use tracing::{info, warn};
 
 use crate::cli::Cli;
+use crate::payload::{HookPayload, payload_to_events};
 
 /// Hook running-time budget in milliseconds (cavekit-hook-ipc.md R1).
 pub const HOOK_BUDGET_MS: u128 = 200;
@@ -97,15 +98,35 @@ pub fn run<R: Read>(cli: &Cli, mut stdin: R) -> anyhow::Result<HookOutcome> {
         return Ok(HookOutcome::Allow);
     }
 
-    // T-047 will replace this with a typed `HookPayload` parse.
-    match serde_json::from_str::<serde_json::Value>(&buf) {
-        Ok(value) => {
+    // T-047: typed parse + translation. JSONL persistence (T-048) and
+    // zellij pipe forwarding (T-049) still live downstream — this task
+    // only emits the derived AgentEvents via tracing for observability.
+    match serde_json::from_str::<HookPayload>(&buf) {
+        Ok(payload) => {
             info!(
                 agent = %cli.id,
                 event = %cli.event,
                 bytes = buf.len(),
-                top_level_kind = json_kind(&value),
-                "hook payload received (skeleton — translation lands in T-047)"
+                session_id = %payload.session_id,
+                cwd = %payload.cwd.display(),
+                tool_name = payload.tool_name.as_deref().unwrap_or(""),
+                "hook payload parsed"
+            );
+            let events = payload_to_events(&payload, &cli.id, cli.event);
+            for ev in &events {
+                info!(
+                    agent = %cli.id,
+                    event = %cli.event,
+                    kind = agent_event_kind(ev),
+                    detail = %serde_json::to_string(ev).unwrap_or_default(),
+                    "translated agent event"
+                );
+            }
+            info!(
+                agent = %cli.id,
+                event = %cli.event,
+                emitted = events.len(),
+                "hook translation complete"
             );
         }
         Err(e) => {
@@ -114,13 +135,40 @@ pub fn run<R: Read>(cli: &Cli, mut stdin: R) -> anyhow::Result<HookOutcome> {
                 event = %cli.event,
                 error = %e,
                 bytes = buf.len(),
-                "stdin not valid JSON; fail-open"
+                "stdin not valid HookPayload; fail-open"
             );
         }
     }
 
     log_budget(cli, started);
     Ok(HookOutcome::Allow)
+}
+
+/// Short static label for an [`AgentEvent`], matching the serde
+/// `kind` discriminant. Kept local to `run` since logging is the only
+/// consumer today.
+fn agent_event_kind(ev: &ark_types::event::AgentEvent) -> &'static str {
+    use ark_types::event::AgentEvent::*;
+    match ev {
+        Started { .. } => "started",
+        TabOpened { .. } => "tab_opened",
+        TabClosed { .. } => "tab_closed",
+        Progress { .. } => "progress",
+        TaskDone { .. } => "task_done",
+        Iteration { .. } => "iteration",
+        PhaseTransition { .. } => "phase_transition",
+        ToolUse { .. } => "tool_use",
+        Message { .. } => "message",
+        FileEdited { .. } => "file_edited",
+        ReviewComment { .. } => "review_comment",
+        PermissionAsked { .. } => "permission_asked",
+        PermissionResolved { .. } => "permission_resolved",
+        Stall { .. } => "stall",
+        Log { .. } => "log",
+        Error { .. } => "error",
+        Done { .. } => "done",
+        _ => "unknown",
+    }
 }
 
 fn log_budget(cli: &Cli, started: Instant) {
@@ -142,17 +190,6 @@ fn log_budget(cli: &Cli, started: Instant) {
             budget_ms = HOOK_BUDGET_MS,
             "hook within budget"
         );
-    }
-}
-
-fn json_kind(v: &serde_json::Value) -> &'static str {
-    match v {
-        serde_json::Value::Null => "null",
-        serde_json::Value::Bool(_) => "bool",
-        serde_json::Value::Number(_) => "number",
-        serde_json::Value::String(_) => "string",
-        serde_json::Value::Array(_) => "array",
-        serde_json::Value::Object(_) => "object",
     }
 }
 

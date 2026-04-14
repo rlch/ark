@@ -18,6 +18,7 @@ path = "src/lib.rs"
 [dependencies]
 ark-types = { path = "../ark-types" }
 clap = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
