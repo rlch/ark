@@ -48,6 +48,10 @@ use ark_core::{Orchestrator, World};
 use ark_types::{AgentEvent, AgentSpec, Outcome, TabRole};
 use async_trait::async_trait;
 
+// Watchers (T-077 / T-079 / T-082). Exposed as standalone async fns for
+// future wiring in T-083; see `watchers/mod.rs`.
+pub mod watchers;
+
 // ----------------------------------------------------------------- detect ----
 
 /// Return `true` when `cwd` matches any of the cavekit detection heuristics.

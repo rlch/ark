@@ -191,6 +191,7 @@ dependencies = [
  "ark-core",
  "ark-types",
  "async-trait",
+ "notify",
  "tempfile",
  "tokio",
  "tracing",
