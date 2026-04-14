@@ -38,3 +38,9 @@ pub use permission::{
     POLICY_FILE_NAME, ParsePermissionPolicyError, PermissionPolicy, READ_ONLY_TOOLS, decide,
     emit_permission_events, read_policy_file, read_policy_for_agent, write_policy_file,
 };
+
+// T-069 addition: thin Engine-trait composition over this crate's primitives
+// (settings + permission + handle). See `engine.rs` module docs for the
+// scope constraints.
+pub mod engine;
+pub use engine::ClaudeCodeEngine;

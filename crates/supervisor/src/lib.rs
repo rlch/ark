@@ -48,4 +48,6 @@ pub use signals::{ControlSocketGuard, SignalTaskHandle, install_signal_handlers}
 pub mod factory;
 pub mod orchestration;
 pub use factory::{build_engine, build_multiplexer, build_orchestrator};
-pub use orchestration::{SupervisorMode, finalize_state, outcome_exit_code, run_supervisor};
+pub use orchestration::{
+    SupervisorMode, finalize_state, outcome_exit_code, run_supervisor, run_supervisor_with,
+};
