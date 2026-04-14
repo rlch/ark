@@ -8,8 +8,8 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-ark-types = { path = "../ark-types" }
-ark-core = { path = "../ark-core" }
+ark-types = { path = "../types" }
+ark-core = { path = "../core" }
 nix = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

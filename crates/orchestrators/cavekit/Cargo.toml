@@ -1,5 +1,5 @@
 [package]
-name = "ark-orchestrators-claude-code"
+name = "ark-orchestrators-cavekit"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,11 +8,10 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-ark-types = { path = "../ark-types" }
-ark-core = { path = "../ark-core" }
+ark-types = { path = "../../types" }
+ark-core = { path = "../../core" }
 async-trait = { workspace = true }
 tokio = { workspace = true }
-tokio-util = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 

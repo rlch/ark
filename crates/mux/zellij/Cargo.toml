@@ -1,5 +1,5 @@
 [package]
-name = "ark-core"
+name = "ark-mux-zellij"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,19 +8,15 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-ark-types = { path = "../ark-types" }
-ark-config = { path = "../ark-config" }
+ark-core = { path = "../../core" }
+ark-types = { path = "../../types" }
 tokio = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-chrono = { workspace = true }
 async-trait = { workspace = true }
-anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-interprocess = { workspace = true }
-nix = { workspace = true }
-tokio-util = { workspace = true }
+ulid = { workspace = true }
+anyhow = { workspace = true }
+minijinja = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

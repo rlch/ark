@@ -1,5 +1,5 @@
 [package]
-name = "ark-hook"
+name = "ark-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,23 +7,20 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
-[[bin]]
-name = "ark-hook"
-path = "src/main.rs"
-
-[lib]
-name = "ark_hook"
-path = "src/lib.rs"
-
 [dependencies]
-ark-types = { path = "../ark-types" }
-clap = { workspace = true }
+ark-types = { path = "../types" }
+ark-config = { path = "../config" }
+tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+chrono = { workspace = true }
+async-trait = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
+interprocess = { workspace = true }
+nix = { workspace = true }
+tokio-util = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

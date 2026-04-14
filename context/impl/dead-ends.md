@@ -12,7 +12,7 @@ Track failed approaches and deliberately-deferred codex findings so future itera
 
 ### F-058 / F-061 — P1 Command Injection in hook_dispatcher (deferred by user 2026-04-14)
 
-**Location:** crates/ark-core/src/consumers/hook_dispatcher.rs (approx L88, HookEntry::render → sh -c)
+**Location:** crates/core/src/consumers/hook_dispatcher.rs (approx L88, HookEntry::render → sh -c)
 
 **Finding:** HookEntry::render interpolates untrusted AgentEvent fields (tool name, file path, agent name, permission decision) into a command string that is then executed via `sh -c`. A malicious filename or tool name containing shell metacharacters (`;`, `$()`, backticks, etc.) would execute arbitrary shell syntax inside the configured hook.
 
@@ -24,7 +24,7 @@ Track failed approaches and deliberately-deferred codex findings so future itera
 
 ### F-059 / F-062 — P1 Data Loss in restore_settings (deferred by user 2026-04-14)
 
-**Location:** crates/ark-engines-claude-code/src/settings.rs (approx L250, restore_settings)
+**Location:** crates/engines/claude-code/src/settings.rs (approx L250, restore_settings)
 
 **Finding:** `restore_settings()` deletes `settings.local.json` when no `.ark-backup` exists. If EngineHandle::teardown runs on a worktree with a user-managed `.claude/settings.local.json` that was never backed up (edge case: inject failed mid-write, or the user manually removed the backup), the user's config is silently deleted.
 
@@ -34,7 +34,7 @@ Track failed approaches and deliberately-deferred codex findings so future itera
 
 ### F-060 / F-063 — P2 Missing PermissionAsked on stdin-error + empty-stdin (deferred by user 2026-04-14)
 
-**Location:** crates/ark-hook/src/run.rs (approx L121, fail-open stdin branches)
+**Location:** crates/hook/src/run.rs (approx L121, fail-open stdin branches)
 
 **Finding:** Regression from F-053 fix. The stdin-read-error and empty-stdin fail-open branches now emit PermissionResolved but skip PermissionAsked. Breaks the "always emit the trace pair" invariant that F-053 itself introduced.
 
