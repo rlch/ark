@@ -1,5 +1,15 @@
 layout {
-    tab name="{{name}}" {
-        pane
+    tab name="{{ name }}" cwd="{{ cwd }}" {
+        pane split_direction="horizontal" {
+            pane size="70%" name="agent" {
+                command "{{ agent_cmd }}"
+                {% for a in agent_args %}args "{{ a }}"
+                {% endfor %}
+            }
+            pane name="log" {
+                command "ark"
+                args "pane" "log" "--id" "{{ id }}"
+            }
+        }
     }
 }

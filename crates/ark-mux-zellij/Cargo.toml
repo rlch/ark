@@ -16,6 +16,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 ulid = { workspace = true }
 anyhow = { workspace = true }
+minijinja = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

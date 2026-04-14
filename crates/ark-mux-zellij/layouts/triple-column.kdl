@@ -1,5 +1,19 @@
 layout {
-    tab name="{{name}}" {
-        pane
+    tab name="{{ name }}" cwd="{{ cwd }}" {
+        pane split_direction="vertical" {
+            pane size="50%" name="agent" {
+                command "{{ agent_cmd }}"
+                {% for a in agent_args %}args "{{ a }}"
+                {% endfor %}
+            }
+            pane size="30%" name="diff" {
+                command "ark"
+                args "pane" "diff" "--cwd" "{{ cwd }}"
+            }
+            pane size="20%" name="git" {
+                command "ark"
+                args "pane" "git" "--cwd" "{{ cwd }}"
+            }
+        }
     }
 }

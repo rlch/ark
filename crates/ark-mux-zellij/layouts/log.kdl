@@ -1,5 +1,8 @@
 layout {
-    tab name="{{name}}" {
-        pane
+    tab name="{{ name }}" cwd="{{ cwd }}" {
+        pane name="log" {
+            command "ark"
+            args "pane" "log" "--id" "{{ id }}"
+        }
     }
 }
