@@ -1,18 +1,27 @@
-//! `ark pane` — scaffold only.
+//! `ark pane` — cavekit-cli R7 routing.
 //!
-//! Real routing: T-092 (cavekit-cli R7). The individual pane widgets
-//! (`diff`, `git`, `log`) are already implemented in the `ark-pane`
-//! crate (T-040/T-041/T-042); T-092 just wires the CLI subcommands to
-//! those widget entry points.
+//! The individual pane widgets (`diff`, `git`, `log`) live in the
+//! `ark-pane` crate (T-040/T-041/T-042). T-092 wires the CLI
+//! subcommands to those widget entry points and handles AgentId
+//! resolution for `ark pane log`.
 //!
-//! For T-084 we only scaffold the nested subcommand surface.
+//! All three widgets are async (tokio + crossterm event-stream). We
+//! spin up a short-lived current-thread runtime per invocation and
+//! `block_on` the widget future — the pane binary is expected to hold
+//! the terminal for as long as the user keeps it open.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use ark_types::StateLayout;
 use clap::{Args, Subcommand};
 
 use crate::ctx::Ctx;
 use crate::error::CliError;
+use crate::id_resolver::{ResolveError, resolve_agent_id};
+
+/// Default debounce window for `ark pane diff` (cavekit-pane-commands R1).
+const DIFF_DEBOUNCE_MS: u64 = 300;
 
 /// Arguments for `ark pane`.
 #[derive(Debug, Args)]
@@ -78,9 +87,82 @@ pub struct LogArgs {
     pub id: String,
 }
 
-/// Stub handler — replaced by T-092.
-pub fn run(_args: PaneArgs, _ctx: &Ctx) -> Result<(), CliError> {
-    Err(CliError::not_yet_wired("pane", "T-092"))
+/// Dispatch an `ark pane <sub>` invocation to the matching `ark-pane`
+/// widget. Widgets are async, so we build a local current-thread
+/// tokio runtime here and drive them to completion.
+pub fn run(args: PaneArgs, _ctx: &Ctx) -> Result<(), CliError> {
+    match args.command {
+        PaneCommand::Diff(a) => run_diff(a),
+        PaneCommand::Git(a) => run_git(a),
+        PaneCommand::Log(a) => run_log(a),
+    }
+}
+
+/// Build a fresh current-thread tokio runtime. A fresh runtime per
+/// invocation keeps the CLI shell simple — no shared executor state.
+fn build_runtime() -> Result<tokio::runtime::Runtime, CliError> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| CliError::Internal {
+            reason: format!("tokio runtime build failed: {e}"),
+        })
+}
+
+fn run_diff(args: DiffArgs) -> Result<(), CliError> {
+    let rt = build_runtime()?;
+    rt.block_on(ark_pane::diff::run(args.cwd, DIFF_DEBOUNCE_MS))
+        .map_err(widget_err)
+}
+
+fn run_git(args: GitArgs) -> Result<(), CliError> {
+    let rt = build_runtime()?;
+    rt.block_on(ark_pane::git::run(args.cwd))
+        .map_err(widget_err)
+}
+
+fn run_log(args: LogArgs) -> Result<(), CliError> {
+    let layout = StateLayout::from_env().map_err(|e| CliError::ConfigError {
+        reason: format!("state layout: {e}"),
+    })?;
+    let id = resolve_agent_id(&args.id, &layout).map_err(|e| map_resolve_err(&args.id, e))?;
+    let rt = build_runtime()?;
+    rt.block_on(ark_pane::log::run(Arc::new(layout), id, None))
+        .map_err(widget_err)
+}
+
+/// Map any widget-returned `anyhow::Error` into a `CliError::Internal`.
+/// Widget-level failures (terminal setup, notify watcher, git spawn
+/// problems) are unclassified from the CLI's perspective — they are
+/// bugs or environment oddities, never user-input errors.
+fn widget_err(e: anyhow::Error) -> CliError {
+    CliError::Internal {
+        reason: e.to_string(),
+    }
+}
+
+/// Map `ResolveError` from the id-resolver into the user-facing
+/// `CliError::{NotFound, Ambiguous}` variants. Ambiguity variants
+/// share exit code 3 with NotFound (see `error.rs`), but carry the
+/// candidate list so the human sees what to disambiguate.
+fn map_resolve_err(query: &str, e: ResolveError) -> CliError {
+    match e {
+        ResolveError::NotFound { .. } => CliError::NotFound {
+            what: format!("agent \"{query}\""),
+        },
+        ResolveError::AmbiguousPrefix { candidates, .. }
+        | ResolveError::AmbiguousSubstring { candidates, .. }
+        | ResolveError::AmbiguousName { candidates, .. } => CliError::Ambiguous {
+            what: format!("agent \"{query}\""),
+            candidates: candidates
+                .iter()
+                .map(|id| id.as_str().to_string())
+                .collect(),
+        },
+        ResolveError::Io(io) => CliError::NotFound {
+            what: format!("agent \"{query}\" ({io})"),
+        },
+    }
 }
 
 #[cfg(test)]
@@ -157,16 +239,143 @@ mod tests {
         );
     }
 
-    #[test]
-    fn run_returns_not_yet_wired() {
-        let args = Host::try_parse_from(["pane", "git"]).unwrap().args;
-        let err = run(args, &Ctx::default()).expect_err("stub");
-        assert!(matches!(
-            err,
-            CliError::NotYetWired {
-                subcommand: "pane",
-                task: "T-092",
-            }
-        ));
+    // ---------- dispatch / error-mapping tests ----------
+    //
+    // Widgets own real terminals + tokio runtimes; we can't drive the
+    // async entry points end-to-end inside a unit test without staking
+    // a TTY. So the tests below exercise the pure plumbing: error
+    // mapping from `ResolveError` → `CliError`, and the widget-error
+    // shim. Live widget runs are covered by the `ark-pane` crate tests
+    // and manual QA against zellij layouts.
+
+    use crate::id_resolver::ResolveError;
+    use ark_types::{AgentId, StateLayout};
+    use std::path::PathBuf as PB;
+    use tempfile::tempdir;
+    use ulid::Ulid;
+
+    fn layout_with_base(base: PB) -> StateLayout {
+        let runtime = base.join("runtime");
+        let config = base.join("config");
+        StateLayout::new(base, runtime, config)
     }
+
+    fn fixed_id(name: &str) -> AgentId {
+        let ulid = Ulid::from_string("01JX7Z8K6X9Y2ZT4ABCDEF0123").expect("ulid");
+        AgentId::from_parts("cavekit", name, ulid)
+    }
+
+    #[test]
+    fn widget_err_maps_to_internal() {
+        let e = widget_err(anyhow::anyhow!("boom"));
+        match e {
+            CliError::Internal { reason } => assert!(reason.contains("boom")),
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_err_not_found_maps_to_cli_not_found() {
+        let e = map_resolve_err(
+            "missing",
+            ResolveError::NotFound {
+                query: "missing".into(),
+            },
+        );
+        match e {
+            CliError::NotFound { what } => assert!(what.contains("missing")),
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_err_ambiguous_prefix_maps_to_cli_ambiguous() {
+        let a = fixed_id("alpha");
+        let b = fixed_id("beta");
+        let e = map_resolve_err(
+            "a",
+            ResolveError::AmbiguousPrefix {
+                query: "a".into(),
+                candidates: vec![a.clone(), b.clone()],
+            },
+        );
+        match e {
+            CliError::Ambiguous { what, candidates } => {
+                assert!(what.contains("\"a\""));
+                assert_eq!(candidates.len(), 2);
+                assert!(candidates.iter().any(|c| c == a.as_str()));
+                assert!(candidates.iter().any(|c| c == b.as_str()));
+            }
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_err_ambiguous_substring_maps_to_cli_ambiguous() {
+        let a = fixed_id("foo");
+        let e = map_resolve_err(
+            "f",
+            ResolveError::AmbiguousSubstring {
+                query: "f".into(),
+                candidates: vec![a],
+            },
+        );
+        assert!(matches!(e, CliError::Ambiguous { .. }));
+    }
+
+    #[test]
+    fn resolve_err_ambiguous_name_maps_to_cli_ambiguous() {
+        let a = fixed_id("alpha");
+        let e = map_resolve_err(
+            "x",
+            ResolveError::AmbiguousName {
+                query: "x".into(),
+                candidates: vec![a],
+            },
+        );
+        assert!(matches!(e, CliError::Ambiguous { .. }));
+    }
+
+    #[test]
+    fn resolve_err_io_maps_to_cli_not_found() {
+        let e = map_resolve_err(
+            "x",
+            ResolveError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "nope",
+            )),
+        );
+        assert!(matches!(e, CliError::NotFound { .. }));
+    }
+
+    #[test]
+    fn run_log_unknown_id_returns_not_found() {
+        // Point state layout at an empty tempdir so resolver returns
+        // NotFound before the widget gets a chance to touch the
+        // terminal. This also exercises `run_log`'s happy-path wiring
+        // through `resolve_agent_id`.
+        let tmp = tempdir().expect("tempdir");
+        let base = tmp.path().to_path_buf();
+        // Force StateLayout::from_env to resolve under our tempdir by
+        // setting ARK_STATE_DIR for the duration of the call. We use
+        // unsafe env mutation guarded by a mutex to avoid racing with
+        // other tests.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: single-threaded access guarded by ENV_LOCK above.
+        unsafe {
+            std::env::set_var("ARK_STATE_DIR", &base);
+        }
+        let args = LogArgs {
+            id: "does-not-exist".into(),
+        };
+        let err = run_log(args).expect_err("no agent");
+        // SAFETY: still holding ENV_LOCK.
+        unsafe {
+            std::env::remove_var("ARK_STATE_DIR");
+        }
+        assert!(matches!(err, CliError::NotFound { .. }));
+    }
+
+    // Process-wide env mutation needs serialization across tests.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 }
