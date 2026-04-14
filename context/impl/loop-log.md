@@ -36,6 +36,9 @@ last_edited: "2026-04-14"
 
 Overall: 45/134 (34%). Next: Tier 2 (engine-claude-code + event-bus consumers, 16 tasks).
 
+### Iteration 15 — 2026-04-14 (Tier 2 Codex tier-gate)
+- Codex review vs a083009. Cycle 1: F-044 (P1 ark-hook bypasses permission_policy — security) + F-045/F-046/F-047 (P2s). Fixed in commits 3f17fd1 (F-044: promoted PermissionPolicy to ark-types, maybe_emit_permission_decision gates stdout per policy) + dd393ca (F-045 both-targets pipe, F-046 strip all ark hooks on re-inject, F-047 lazy status bootstrap). Cycle 2: F-053 (P1 missing PermissionResolved pair) + F-054 (P2 late-Started phase regression). Fixed in c9411f2 + 1849b67. Cycle 3 verify surfaced 3 NEW findings: F-058/F-061 (P1 command injection in hook_dispatcher sh -c render, latent from T-061), F-059/F-062 (P1 restore_settings deletes user-managed settings.local.json when no backup, latent from T-052), F-060/F-063 (P2 regression from F-053 fix: stdin-read-fail + empty-stdin branches emit Resolved without Asked). **Deferred by user decision — advance to Tier 3 per 2-cycle policy.** F-058, F-059, F-060 tracked in dead-ends.md for Tier 3+ sweep. Tier 2 complete: 16/16 tasks DONE, 445/445 workspace tests, gate-ADVISORY.
+
 ### Iteration 14 — 2026-04-14 (Tier 2 W4 — closeout)
 - 2 parallel packets. T-051 (ark-hook fail-open-for-permission invariant audit + 8 regression tests, commit fa50341, now 55/55 in crate; ensure_permission_allow helper routes every fail-open branch), T-054 (permission policy enum + decide + emit_permission_events + policy file read/write, commit 7ff4aaf, 16 new tests in ark-engines-claude-code; no ark-config dep, callers parse String at boundary). **TIER 2 COMPLETE 16/16.** Workspace 405/405 pass (+140 vs Tier 1 close). Next: Codex tier-gate review vs a083009.
 
