@@ -36,6 +36,12 @@ last_edited: "2026-04-14"
 
 Overall: 45/134 (34%). Next: Tier 2 (engine-claude-code + event-bus consumers, 16 tasks).
 
+### Iteration 14 — 2026-04-14 (Tier 2 W4 — closeout)
+- 2 parallel packets. T-051 (ark-hook fail-open-for-permission invariant audit + 8 regression tests, commit fa50341, now 55/55 in crate; ensure_permission_allow helper routes every fail-open branch), T-054 (permission policy enum + decide + emit_permission_events + policy file read/write, commit 7ff4aaf, 16 new tests in ark-engines-claude-code; no ark-config dep, callers parse String at boundary). **TIER 2 COMPLETE 16/16.** Workspace 405/405 pass (+140 vs Tier 1 close). Next: Codex tier-gate review vs a083009.
+
+### Iteration 13 — 2026-04-14 (Tier 2 W3)
+- 2 parallel packets. T-048+T-049+T-050 (ark-hook writer.rs/pipe.rs/allow.rs + run.rs rewrite taking &mut impl Write for stdout, commit bc4b144, 47 tests in crate; state-root injection via run_with_state test seam; pipe_with fn injection for zellij-free tests; ALLOW_PAYLOAD_JSON const locked byte-equal), T-056+T-057 (stall_watcher + EngineHandle with JoinSet+restore_settings teardown, commit e3b545c, 50/50 in crate; chrono + tokio test-util added). Workspace 381/381. Next: W4 close tier with T-051+T-054.
+
 ### Iteration 12 — 2026-04-14 (Tier 2 W2)
 - 3 parallel packets. T-047 (ark-hook typed payload parser + translator, commit 8ac7df2, 17 new tests = 29 total in crate), T-053+T-055 (transcript tailer + done watcher, commit 69c3445, notify-based inotify + JSONL parser, DoneSignal enum + mpsc done_watcher; assumed encoded-cwd = "/"→"-" overridable via ARK_CLAUDE_PROJECTS_DIR), T-058 (preflight with injectable test fn, commit d0bfec6, 7 tests, no `which` dep — uses env PATH walk + HOME). Workspace 352/352 pass. Next: Tier 2 W3 = T-048/T-049/T-050 (hook JSONL + pipe + allow payload) and T-056/T-057 (stall watcher + EngineHandle).
 
