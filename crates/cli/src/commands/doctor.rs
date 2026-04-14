@@ -262,51 +262,46 @@ fn is_writable(dir: &Path) -> bool {
     }
 }
 
-fn check_runtime_dir(ctx: &Ctx) -> CheckResult {
-    if ctx.runtime_dir.as_os_str().is_empty() {
-        return CheckResult::fail("runtime-dir", "runtime_dir unset");
+/// F-504: non-mutating writable check for `state_dir`/`runtime_dir`.
+///
+/// Contract:
+/// - dir missing → Fail with status="missing" and FixAction::CreateDir
+///   (the fix is only applied under `--fix`).
+/// - dir present but unwritable → Fail with no auto-fix (permission
+///   issue — user decides).
+/// - dir present + writable → Ok.
+///
+/// Writability is probed with a tempfile INSIDE the existing dir; we
+/// never `create_dir_all` during diagnosis.
+fn check_dir_writable(name: &'static str, dir: &Path) -> CheckResult {
+    if dir.as_os_str().is_empty() {
+        return CheckResult::fail(name, format!("{name} unset"));
     }
-    // Create runtime dir if missing — harmless, it's the expected
-    // home for sockets.
-    if !ctx.runtime_dir.exists() && fs::create_dir_all(&ctx.runtime_dir).is_err() {
+    if !dir.exists() {
         return CheckResult::fail(
-            "runtime-dir",
-            format!("cannot create {}", ctx.runtime_dir.display()),
-        );
-    }
-    if is_writable(&ctx.runtime_dir) {
-        CheckResult::ok(
-            "runtime-dir",
-            format!("writable {}", ctx.runtime_dir.display()),
+            name,
+            format!("missing {} (create with --fix)", dir.display()),
         )
+        .with_fix(FixAction::CreateDir(dir.to_path_buf()));
+    }
+    if is_writable(dir) {
+        CheckResult::ok(name, format!("writable {}", dir.display()))
     } else {
-        CheckResult::fail(
-            "runtime-dir",
-            format!("not writable {}", ctx.runtime_dir.display()),
-        )
+        CheckResult::fail(name, format!("not writable {}", dir.display()))
     }
+}
+
+fn check_runtime_dir(ctx: &Ctx) -> CheckResult {
+    check_dir_writable("runtime-dir", &ctx.runtime_dir)
 }
 
 fn check_state_dir(ctx: &Ctx) -> CheckResult {
-    if ctx.state_dir.as_os_str().is_empty() {
-        return CheckResult::fail("state-dir", "state_dir unset");
-    }
-    if !ctx.state_dir.exists() && fs::create_dir_all(&ctx.state_dir).is_err() {
-        return CheckResult::fail(
-            "state-dir",
-            format!("cannot create {}", ctx.state_dir.display()),
-        );
-    }
-    if is_writable(&ctx.state_dir) {
-        CheckResult::ok("state-dir", format!("writable {}", ctx.state_dir.display()))
-    } else {
-        CheckResult::fail(
-            "state-dir",
-            format!("not writable {}", ctx.state_dir.display()),
-        )
-    }
+    check_dir_writable("state-dir", &ctx.state_dir)
 }
 
+/// F-507: config_dir must probe writability, not just existence.
+/// A read-only config_dir breaks `ark config edit`/`set`; doctor should
+/// surface that rather than rubber-stamp as Ok.
 fn check_config_dir(ctx: &Ctx) -> CheckResult {
     if ctx.config_dir.as_os_str().is_empty() {
         return CheckResult::fail("config-dir", "config_dir unset");
@@ -318,10 +313,19 @@ fn check_config_dir(ctx: &Ctx) -> CheckResult {
         )
         .with_fix(FixAction::CreateDir(ctx.config_dir.clone()));
     }
-    CheckResult::ok(
-        "config-dir",
-        format!("present {}", ctx.config_dir.display()),
-    )
+    if is_writable(&ctx.config_dir) {
+        CheckResult::ok(
+            "config-dir",
+            format!("writable {}", ctx.config_dir.display()),
+        )
+    } else {
+        // Warn (not Fail): reading config still works; only `ark config
+        // edit`/`set` will fail until the user fixes permissions.
+        CheckResult::warn(
+            "config-dir",
+            format!("config_dir not writable: {}", ctx.config_dir.display()),
+        )
+    }
 }
 
 fn check_editor() -> CheckResult {
@@ -997,5 +1001,136 @@ mod tests {
     #[allow(dead_code)]
     fn _permissions_ext_touch(p: &Path) {
         let _ = fs::metadata(p).map(|m| m.permissions().mode());
+    }
+
+    // ---- F-504: doctor must NOT mutate state during diagnosis ----
+
+    #[test]
+    fn check_runtime_dir_missing_does_not_create_dir() {
+        let tmp = tempfile::Builder::new()
+            .prefix("arkd-f504r")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let ctx = test_ctx(tmp.path());
+        // runtime_dir does not exist yet.
+        assert!(!ctx.runtime_dir.exists());
+        let r = check_runtime_dir(&ctx);
+        assert_eq!(r.status, Status::Fail);
+        assert!(
+            !ctx.runtime_dir.exists(),
+            "diagnosis must NOT create the dir"
+        );
+        assert!(matches!(r.fix, Some(FixAction::CreateDir(_))));
+    }
+
+    #[test]
+    fn check_state_dir_missing_does_not_create_dir() {
+        let tmp = tempfile::Builder::new()
+            .prefix("arkd-f504s")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let ctx = test_ctx(tmp.path());
+        assert!(!ctx.state_dir.exists());
+        let r = check_state_dir(&ctx);
+        assert_eq!(r.status, Status::Fail);
+        assert!(!ctx.state_dir.exists(), "diagnosis must NOT create the dir");
+        assert!(matches!(r.fix, Some(FixAction::CreateDir(_))));
+    }
+
+    #[test]
+    fn check_state_dir_fix_creates_missing_dir() {
+        let tmp = tempfile::Builder::new()
+            .prefix("arkd-f504sf")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let ctx = test_ctx(tmp.path());
+        let r = check_state_dir(&ctx);
+        assert_eq!(r.status, Status::Fail);
+        run_fixes(&[r], true).unwrap();
+        assert!(ctx.state_dir.is_dir(), "--fix should materialize the dir");
+    }
+
+    #[test]
+    fn check_state_dir_writable_when_present() {
+        let tmp = tempfile::Builder::new()
+            .prefix("arkd-f504sw")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let ctx = test_ctx(tmp.path());
+        fs::create_dir_all(&ctx.state_dir).unwrap();
+        let r = check_state_dir(&ctx);
+        assert_eq!(r.status, Status::Ok, "{r:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_state_dir_fails_without_auto_fix_when_unwritable() {
+        let tmp = tempfile::Builder::new()
+            .prefix("arkd-f504sro")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let ctx = test_ctx(tmp.path());
+        fs::create_dir_all(&ctx.state_dir).unwrap();
+        let mut perms = fs::metadata(&ctx.state_dir).unwrap().permissions();
+        perms.set_mode(0o500); // r-x, no write
+        fs::set_permissions(&ctx.state_dir, perms).unwrap();
+
+        let r = check_state_dir(&ctx);
+
+        // Restore so tempdir cleanup works.
+        let mut restore = fs::metadata(&ctx.state_dir).unwrap().permissions();
+        restore.set_mode(0o755);
+        fs::set_permissions(&ctx.state_dir, restore).ok();
+
+        if nix::unistd::Uid::effective().is_root() {
+            return;
+        }
+
+        assert_eq!(r.status, Status::Fail);
+        // Unwritable (but existing) dir must NOT carry a CreateDir fix
+        // — that would be a no-op on an existing dir.
+        assert!(r.fix.is_none(), "unwritable existing dir has no auto-fix");
+    }
+
+    // ---- F-507: config_dir writability probe ----
+
+    #[test]
+    fn check_config_dir_ok_when_writable() {
+        let tmp = tempfile::Builder::new()
+            .prefix("arkd-f507ok")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let ctx = test_ctx(tmp.path());
+        fs::create_dir_all(&ctx.config_dir).unwrap();
+        let r = check_config_dir(&ctx);
+        assert_eq!(r.status, Status::Ok, "{r:?}");
+        assert!(r.message.contains("writable"), "{r:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_config_dir_warns_when_not_writable() {
+        let tmp = tempfile::Builder::new()
+            .prefix("arkd-f507ro")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let ctx = test_ctx(tmp.path());
+        fs::create_dir_all(&ctx.config_dir).unwrap();
+        let mut perms = fs::metadata(&ctx.config_dir).unwrap().permissions();
+        perms.set_mode(0o500);
+        fs::set_permissions(&ctx.config_dir, perms).unwrap();
+
+        let r = check_config_dir(&ctx);
+
+        let mut restore = fs::metadata(&ctx.config_dir).unwrap().permissions();
+        restore.set_mode(0o755);
+        fs::set_permissions(&ctx.config_dir, restore).ok();
+
+        if nix::unistd::Uid::effective().is_root() {
+            return;
+        }
+
+        assert_eq!(r.status, Status::Warn);
+        assert!(r.message.contains("not writable"), "{r:?}");
     }
 }

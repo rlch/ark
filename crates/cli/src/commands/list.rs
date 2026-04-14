@@ -301,12 +301,20 @@ fn map_resolve_err(e: ResolveError, query: &str) -> CliError {
 }
 
 /// Build the row-set for either all agents or a single one.
-fn gather_rows(layout: &StateLayout, only: Option<&AgentId>) -> Vec<Row> {
+///
+/// F-505: a genuine IO failure from `list_agent_ids` (e.g. unreadable
+/// `agents_root`) is surfaced as `CliError::Generic`, not silently
+/// swallowed into an empty list. Missing `agents_root` is already
+/// treated as empty inside `list_agent_ids` itself.
+fn gather_rows(layout: &StateLayout, only: Option<&AgentId>) -> Result<Vec<Row>, CliError> {
     let ids: Vec<AgentId> = match only {
         Some(id) => vec![id.clone()],
-        None => list_agent_ids(layout).unwrap_or_default(),
+        None => list_agent_ids(layout).map_err(|err| CliError::Generic {
+            reason: format!("read agents_root: {err}"),
+        })?,
     };
-    ids.into_iter()
+    Ok(ids
+        .into_iter()
         .map(|id| {
             let sock = layout.agent_socket_path(&id);
             match query_status(&sock) {
@@ -314,7 +322,7 @@ fn gather_rows(layout: &StateLayout, only: Option<&AgentId>) -> Vec<Row> {
                 None => Row::Orphan(id),
             }
         })
-        .collect()
+        .collect())
 }
 
 /// Non-watch dispatch path — render once and return.
@@ -339,7 +347,7 @@ fn run_once(args: &ListArgs, ctx: &Ctx) -> Result<(), CliError> {
     // ID branch: resolve + single-agent query.
     if let Some(query) = args.id.as_deref() {
         let resolved = resolve_agent_id(query, &layout).map_err(|e| map_resolve_err(e, query))?;
-        let rows = gather_rows(&layout, Some(&resolved));
+        let rows = gather_rows(&layout, Some(&resolved))?;
         let rows = filter_rows(rows, args);
         let stdout = std::io::stdout();
         let mut h = stdout.lock();
@@ -355,7 +363,7 @@ fn run_once(args: &ListArgs, ctx: &Ctx) -> Result<(), CliError> {
     }
 
     // List branch: enumerate all.
-    let rows = gather_rows(&layout, None);
+    let rows = gather_rows(&layout, None)?;
     let rows = filter_rows(rows, args);
     let stdout = std::io::stdout();
     let mut h = stdout.lock();
@@ -729,7 +737,7 @@ mod tests {
         let id = AgentId::from_parts("cavekit", "dead", ulid_a());
         seed_agent(&layout, &id);
 
-        let rows = gather_rows(&layout, None);
+        let rows = gather_rows(&layout, None).expect("gather");
         assert_eq!(rows.len(), 1);
         assert!(matches!(rows[0], Row::Orphan(_)));
         assert_eq!(rows[0].phase_str(), "orphan");
@@ -788,5 +796,55 @@ mod tests {
     fn format_uptime_compact_under_minute() {
         let now = chrono::Utc::now();
         assert_eq!(format_uptime_since(now), "0s");
+    }
+
+    // ---------- F-505: unreadable agents_root surfaces as CliError::Generic ----------
+
+    #[cfg(unix)]
+    #[test]
+    fn gather_rows_surfaces_io_failure_when_agents_root_unreadable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::Builder::new()
+            .prefix("arklist-perm")
+            .tempdir_in("/tmp")
+            .expect("tempdir");
+        let ctx = layout_ctx(tmp.path().to_path_buf());
+        let layout = StateLayout::new(
+            ctx.state_dir.clone(),
+            ctx.runtime_dir.clone(),
+            ctx.config_dir.clone(),
+        );
+        // Create agents_root first, then chmod 000 to force EACCES on
+        // read_dir. Missing dir is handled separately (returns empty).
+        let agents_root = layout.agents_root();
+        fs::create_dir_all(&agents_root).expect("mkdir agents_root");
+        let mut perms = fs::metadata(&agents_root).expect("meta").permissions();
+        perms.set_mode(0o000);
+        fs::set_permissions(&agents_root, perms).expect("chmod 000");
+
+        let result = gather_rows(&layout, None);
+
+        // Restore perms so tempdir can be cleaned up.
+        let mut restore = fs::metadata(&agents_root).expect("meta").permissions();
+        restore.set_mode(0o755);
+        fs::set_permissions(&agents_root, restore).ok();
+
+        // root+writable test environments may bypass mode 000; skip the
+        // assertion gracefully there rather than produce a false failure.
+        if nix::unistd::Uid::effective().is_root() {
+            return;
+        }
+
+        match result {
+            Err(CliError::Generic { reason }) => {
+                assert!(
+                    reason.contains("agents_root"),
+                    "reason should mention agents_root: {reason}"
+                );
+            }
+            Err(other) => panic!("expected Generic, got {other:?}"),
+            Ok(rows) => panic!("expected Err, got Ok({rows:?})"),
+        }
     }
 }

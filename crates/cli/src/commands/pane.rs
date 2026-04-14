@@ -159,8 +159,8 @@ fn map_resolve_err(query: &str, e: ResolveError) -> CliError {
                 .map(|id| id.as_str().to_string())
                 .collect(),
         },
-        ResolveError::Io(io) => CliError::NotFound {
-            what: format!("agent \"{query}\" ({io})"),
+        ResolveError::Io(io) => CliError::Generic {
+            reason: format!("resolve: {io}"),
         },
     }
 }
@@ -337,7 +337,8 @@ mod tests {
     }
 
     #[test]
-    fn resolve_err_io_maps_to_cli_not_found() {
+    fn resolve_err_io_maps_to_cli_generic() {
+        // F-506: preserve real IO failures; don't masquerade as NotFound.
         let e = map_resolve_err(
             "x",
             ResolveError::Io(std::io::Error::new(
@@ -345,7 +346,13 @@ mod tests {
                 "nope",
             )),
         );
-        assert!(matches!(e, CliError::NotFound { .. }));
+        match e {
+            CliError::Generic { reason } => {
+                assert!(reason.contains("resolve"), "reason: {reason}");
+                assert!(reason.contains("nope"), "reason: {reason}");
+            }
+            other => panic!("expected Generic, got {other:?}"),
+        }
     }
 
     #[test]
