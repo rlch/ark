@@ -1,6 +1,6 @@
 ---
 created: "2026-04-14"
-last_edited: "2026-04-14T01:00:00Z"
+last_edited: "2026-04-15T04:00:00Z"
 ---
 
 # Implementation Overview
@@ -15,11 +15,15 @@ Build site: context/plans/build-site.md (134 tasks, 7 tiers).
 | 1 | 28 | 28 | ✅ COMPLETE |
 | 2 | 16 | 16 | ✅ COMPLETE |
 | 3 | 22 | 22 | ✅ COMPLETE |
-| 4 | 0 | 10 | pending |
+| 4 | 10 | 10 | ✅ COMPLETE (pre-gate) |
 | 5 | 0 | 16 | pending |
 | 6 | 0 | 26 | pending |
 
-**Overall: 83/134 tasks done (62%) · 658 tests passing**
+**Overall: 94/134 tasks done (70%) · 197 ark-cli tests + workspace green**
+
+Tier 4 landed 2026-04-15 across commits 3e681da → 1a03779. Order: T-084 scaffold, T-086 (pre-existing), T-085 exit-codes, T-085-fdn CliError expansion (foundation), T-092 pane routing, T-093 env-vars, T-089 kill, T-090 config, T-088 list, T-091 doctor, T-087 spawn. Codex tier-4 gate review pending — TIER_4_START_REF = 538fa42.
+
+Deferrals from T-087 spawn (noted in commit body, picked up in Tier 5/6): supervisor-binary launch (waits on T-062/T-069 binary target), --no-detach log-tail (waits on supervisor), actual zellij subprocess invocation (supervisor side per R2), file lock $STATE/locks/{id}.lock (T-064).
 
 **Crate test breakdown:**
 - ark-types: 85 (foundation types)
@@ -45,7 +49,7 @@ Build site: context/plans/build-site.md (134 tasks, 7 tiers).
 | orchestrator-cavekit | 9 | T-075-T-083 complete (detect + run + 5 watchers + build-site extractor + done resolver) | (pending) |
 | orchestrator-claude-code | 2 | T-073 detect + T-074 run DONE | (pending) |
 | supervisor | 13 | all 22 supervisor/lifecycle/socket tasks — daemonize, lock, socket, commands, signals, orchestration, kill, crash, auto-close, audit log | (impl-supervisor.md pending) |
-| cli | 0 | TIER-4 pending | (pending) |
+| cli | 10 | TIER-4 COMPLETE (pre-gate) — T-084 scaffold, T-085 exit-codes, T-086 id-resolver, T-087 spawn (partial, supervisor-launch stubbed), T-088 list, T-089 kill, T-090 config, T-091 doctor, T-092 pane routing, T-093 env-vars | (pending) |
 | plugin-status | 0 | TIER-5 pending | (pending) |
 | plugin-picker | 0 | TIER-5 pending | (pending) |
 | testing | 0 | TIER-6 pending | (pending) |
