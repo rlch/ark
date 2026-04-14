@@ -630,10 +630,21 @@ fn aggregate_status(rs: &[CheckResult]) -> Status {
 /// - `--fix`: iterate fixes after the report, with y/N prompts
 ///   (auto-accepted when `--yes`). Warn-only results do NOT fail
 ///   the command; only Fail results do.
+/// - `--json --fix` (F-513): JSON mode is read-only. Fixes are
+///   SKIPPED and a one-line warning is emitted to stderr so the
+///   stdout JSON array stays machine-parseable and no state is
+///   mutated.
 pub fn run(args: DoctorArgs, ctx: &Ctx) -> Result<(), CliError> {
     let rs = run_all(ctx);
 
     if args.json {
+        // F-513: JSON mode is read-only. If the caller also passed
+        // `--fix`, emit a stderr warning and skip the fix pass so
+        // stdout stays pure machine-readable output and disk state
+        // is unchanged.
+        if args.fix {
+            eprintln!("warning: --fix ignored in --json mode");
+        }
         let stdout = io::stdout();
         let mut h = stdout.lock();
         emit_json(&mut h, &rs)?;
@@ -643,12 +654,12 @@ pub fn run(args: DoctorArgs, ctx: &Ctx) -> Result<(), CliError> {
         render_table(&mut h, &rs, ctx.no_color).map_err(|e| CliError::Generic {
             reason: format!("write: {e}"),
         })?;
-    }
 
-    if args.fix {
-        run_fixes(&rs, args.yes).map_err(|e| CliError::Generic {
-            reason: format!("fix: {e}"),
-        })?;
+        if args.fix {
+            run_fixes(&rs, args.yes).map_err(|e| CliError::Generic {
+                reason: format!("fix: {e}"),
+            })?;
+        }
     }
 
     match aggregate_status(&rs) {
@@ -1129,5 +1140,70 @@ mod tests {
 
         assert_eq!(r.status, Status::Warn);
         assert!(r.message.contains("not writable"), "{r:?}");
+    }
+
+    // ---- F-513: --json --fix must skip fixes ----
+
+    /// Snapshot every path (relative to `root`) and its type so we can
+    /// assert that `--json --fix` left the filesystem untouched.
+    fn snapshot_tree(root: &Path) -> Vec<String> {
+        fn walk(dir: &Path, out: &mut Vec<String>) {
+            if let Ok(rd) = fs::read_dir(dir) {
+                for e in rd.flatten() {
+                    let p = e.path();
+                    let kind = if p.is_dir() { "d" } else { "f" };
+                    out.push(format!("{kind}:{}", p.display()));
+                    if p.is_dir() {
+                        walk(&p, out);
+                    }
+                }
+            }
+        }
+        let mut v = Vec::new();
+        walk(root, &mut v);
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn json_fix_combo_skips_fixes_and_leaves_state_untouched() {
+        // Seed a runtime dir containing an orphan socket — that's
+        // the cheapest fixable Warn. Without F-513, run() would
+        // apply DeleteSocket and the file would vanish; with the
+        // fix, JSON mode is read-only so the file survives.
+        let tmp = tempfile::Builder::new()
+            .prefix("arkd-f513")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let ctx = test_ctx(tmp.path());
+        fs::create_dir_all(&ctx.state_dir).unwrap();
+        fs::create_dir_all(&ctx.config_dir).unwrap();
+        fs::create_dir_all(&ctx.runtime_dir).unwrap();
+        seed_agents_dir(&ctx.runtime_dir);
+        let sock = ctx.runtime_dir.join("agents").join("cavekit-ghost-99.sock");
+        fs::File::create(&sock).unwrap();
+
+        let before = snapshot_tree(tmp.path());
+
+        // --json + --fix + --yes: fix pass should be SKIPPED.
+        let args = DoctorArgs {
+            fix: true,
+            yes: true,
+            json: true,
+        };
+        // run() may return Err (Generic) when aggregated status is
+        // Fail (e.g. zellij/claude missing on the test host). That's
+        // unrelated to the fix-skipping property we're asserting.
+        let _ = run(args, &ctx);
+
+        let after = snapshot_tree(tmp.path());
+        assert_eq!(
+            before, after,
+            "--json --fix must not mutate disk state; before={before:?} after={after:?}"
+        );
+        assert!(
+            sock.exists(),
+            "orphan socket must still exist after --json --fix"
+        );
     }
 }

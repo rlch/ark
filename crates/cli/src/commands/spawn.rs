@@ -14,6 +14,9 @@
 //!   daemonize crate, no nix).
 //! - Zellij is invoked as a subprocess — in-session uses `zellij
 //!   action new-tab`, new-session uses `zellij --session`.
+//! - Zellij invocation is factored through `build_zellij_command`
+//!   so tests can introspect argv without actually spawning a
+//!   process (F-511).
 //! - All parsing / detection helpers are pure functions so the
 //!   tests don't touch the filesystem unless they want to.
 
@@ -267,9 +270,12 @@ pub fn inside_zellij<F: Fn(&str) -> Option<String>>(getter: F) -> bool {
 /// The two zellij invocation modes R2 calls out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ZellijPlan {
-    /// In-session: `zellij action new-tab --name <session>`.
-    Attach { session: String },
-    /// New detached session: `zellij --session <s> [--layout <p>]`.
+    /// In-session: `zellij action new-tab [--layout <p>] --name <session>`.
+    Attach {
+        session: String,
+        layout: Option<String>,
+    },
+    /// New detached session: `zellij --session <s> [--layout <p>] attach --create`.
     NewSession {
         session: String,
         layout: Option<String>,
@@ -285,6 +291,7 @@ pub fn zellij_plan<F: Fn(&str) -> Option<String>>(
     if inside_zellij(getter) {
         ZellijPlan::Attach {
             session: session.to_string(),
+            layout: layout.map(ToString::to_string),
         }
     } else {
         ZellijPlan::NewSession {
@@ -292,6 +299,37 @@ pub fn zellij_plan<F: Fn(&str) -> Option<String>>(
             layout: layout.map(ToString::to_string),
         }
     }
+}
+
+/// Build the `zellij` [`Command`] for a given [`ZellijPlan`].
+///
+/// Factored out so tests can introspect argv without actually
+/// spawning a subprocess (F-511).
+///
+/// - [`ZellijPlan::Attach`] (agent is already inside a zellij
+///   session): `zellij action new-tab --layout <path> --name
+///   <session>`. `--layout` is omitted when the plan has no layout.
+/// - [`ZellijPlan::NewSession`] (outside any session): `zellij
+///   --session <name> [--layout <path>] attach --create`.
+pub fn build_zellij_command(plan: &ZellijPlan) -> Command {
+    let mut c = Command::new("zellij");
+    match plan {
+        ZellijPlan::Attach { session, layout } => {
+            c.arg("action").arg("new-tab");
+            if let Some(p) = layout {
+                c.arg("--layout").arg(p);
+            }
+            c.arg("--name").arg(session);
+        }
+        ZellijPlan::NewSession { session, layout } => {
+            c.arg("--session").arg(session);
+            if let Some(p) = layout {
+                c.arg("--layout").arg(p);
+            }
+            c.arg("attach").arg("--create");
+        }
+    }
+    c
 }
 
 /// Preflight: `zellij` must be on PATH. Returns `PreflightFail`
@@ -313,7 +351,7 @@ pub fn require_zellij_on_path() -> Result<(), CliError> {
 
 // ------------------------------------------------------------- handler ------
 
-/// `ark spawn` — T-087.
+/// `ark spawn` — T-087 + F-511.
 ///
 /// Happy path:
 /// 1. Resolve orchestrator (read-only detect on cwd).
@@ -322,10 +360,12 @@ pub fn require_zellij_on_path() -> Result<(), CliError> {
 /// 4. Preflight zellij on PATH — F-503: run BEFORE any filesystem
 ///    mutation so preflight failure leaves zero orphan state.
 /// 5. Build spec, mint AgentId, write spec.json.
-/// 6. (Stubbed) supervisor fork — a future packet lands the real
-///    `ark-supervisor` binary and replaces the warning with an
-///    actual detached `Command::spawn`.
-/// 7. Print `spawned {id} -> Ctrl+o w to switch`.
+/// 6. Launch zellij via `build_zellij_command` (F-511). The child
+///    process is detached via `Command::spawn()` so the parent
+///    (likely running inside zellij itself) is not blocked.
+/// 7. Supervisor fork is STILL stubbed — the real `ark-supervisor`
+///    binary lands under T-062 / T-069.
+/// 8. Print `spawned {id} -> Ctrl+o w to switch`.
 pub fn run(args: SpawnArgs, ctx: &Ctx) -> Result<(), CliError> {
     let orchestrator = resolve_orchestrator(args.orchestrator, &args.cwd);
     let name = derive_name(args.name.as_deref(), &args.cwd);
@@ -351,6 +391,20 @@ pub fn run(args: SpawnArgs, ctx: &Ctx) -> Result<(), CliError> {
     let spec_path = write_spec_json(&ctx.state_dir, &spec)?;
     tracing::debug!(path = %spec_path.display(), "wrote spec.json");
 
+    // F-511: actually launch zellij. We snapshot the env, pick a
+    // plan, and spawn the subprocess via `build_zellij_command`.
+    // `Command::spawn()` (not `.status()`) because the parent agent
+    // is typically already inside zellij and must not block.
+    let session = spec.id.session_name();
+    let plan = zellij_plan(|k| std::env::var(k).ok(), &session, args.layout.as_deref());
+    let mut zcmd = build_zellij_command(&plan);
+    zcmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    zcmd.spawn().map_err(|e| CliError::Internal {
+        reason: format!("launch zellij: {e}"),
+    })?;
+
     // Supervisor spawn is STUBBED until the `ark-supervisor` binary
     // lands (see T-062 / T-069). We print a warning so the operator
     // isn't surprised when nothing appears in `ark list`.
@@ -362,8 +416,9 @@ pub fn run(args: SpawnArgs, ctx: &Ctx) -> Result<(), CliError> {
 
     println!("spawned {} -> Ctrl+o w to switch", spec.id);
     if args.no_detach {
-        // `--no-detach` would tail logs — requires a live supervisor.
-        eprintln!("warning: --no-detach has no effect without a supervisor (stubbed)");
+        // `--no-detach` would tail logs — real log-tail is still
+        // deferred until the supervisor exists.
+        eprintln!("note: --no-detach log-tail deferred until supervisor lands");
     }
     Ok(())
 }
@@ -667,6 +722,7 @@ mod tests {
             plan,
             ZellijPlan::Attach {
                 session: "ark-cavekit-auth".into(),
+                layout: Some("builder".into()),
             }
         );
     }
@@ -726,6 +782,88 @@ mod tests {
     #[test]
     fn inside_zellij_unset_is_false() {
         assert!(!inside_zellij(|_| None));
+    }
+
+    // --- build_zellij_command argv shape (F-511) -----------------------
+
+    fn argv_of(cmd: &Command) -> Vec<String> {
+        std::iter::once(cmd.get_program().to_string_lossy().into_owned())
+            .chain(cmd.get_args().map(|a| a.to_string_lossy().into_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn build_zellij_command_inside_session_attaches_with_layout() {
+        // ZellijPlan::Attach { session, layout: Some(..) } should
+        // produce: zellij action new-tab --layout <p> --name <session>.
+        let cmd = build_zellij_command(&ZellijPlan::Attach {
+            session: "ark-cavekit-auth".into(),
+            layout: Some("/tmp/builder.kdl".into()),
+        });
+        assert_eq!(
+            argv_of(&cmd),
+            vec![
+                "zellij",
+                "action",
+                "new-tab",
+                "--layout",
+                "/tmp/builder.kdl",
+                "--name",
+                "ark-cavekit-auth",
+            ]
+        );
+    }
+
+    #[test]
+    fn build_zellij_command_inside_session_without_layout_omits_layout_arg() {
+        let cmd = build_zellij_command(&ZellijPlan::Attach {
+            session: "ark-cavekit-auth".into(),
+            layout: None,
+        });
+        assert_eq!(
+            argv_of(&cmd),
+            vec!["zellij", "action", "new-tab", "--name", "ark-cavekit-auth"]
+        );
+    }
+
+    #[test]
+    fn build_zellij_command_new_session_attaches_create_with_layout() {
+        // ZellijPlan::NewSession { session, layout: Some(..) } should
+        // produce: zellij --session <s> --layout <p> attach --create.
+        let cmd = build_zellij_command(&ZellijPlan::NewSession {
+            session: "ark-cavekit-auth".into(),
+            layout: Some("/tmp/builder.kdl".into()),
+        });
+        assert_eq!(
+            argv_of(&cmd),
+            vec![
+                "zellij",
+                "--session",
+                "ark-cavekit-auth",
+                "--layout",
+                "/tmp/builder.kdl",
+                "attach",
+                "--create",
+            ]
+        );
+    }
+
+    #[test]
+    fn build_zellij_command_new_session_without_layout_omits_layout_arg() {
+        let cmd = build_zellij_command(&ZellijPlan::NewSession {
+            session: "ark-cavekit-auth".into(),
+            layout: None,
+        });
+        assert_eq!(
+            argv_of(&cmd),
+            vec![
+                "zellij",
+                "--session",
+                "ark-cavekit-auth",
+                "attach",
+                "--create",
+            ]
+        );
     }
 
     // --- require_zellij_on_path error variant -------------------------

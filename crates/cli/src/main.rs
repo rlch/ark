@@ -9,35 +9,27 @@
 //! T-093 (cavekit-cli R8): honor `ARK_LOG` / `RUST_LOG` for the tracing
 //! subscriber filter, and resolve `ARK_STATE_DIR` / `ARK_CONFIG_DIR` /
 //! `ARK_RUNTIME_DIR` into the [`Ctx`] via [`Ctx::from_env`].
+//!
+//! F-512: clap parsing runs BEFORE `Ctx::from_env()` so that
+//! `--help` / `--version` succeed even in environments without
+//! `$HOME` / `$XDG_CONFIG_HOME` (clap exits 0 before our code
+//! runs). `Ctx::from_env()` is only consulted for the NO_COLOR
+//! flag on help rendering via a pre-parse; the authoritative ctx
+//! used by subcommands is built after parse succeeds.
 
 use ark_cli::{Cli, Ctx};
 use clap::FromArgMatches;
 use tracing_subscriber::EnvFilter;
 
 fn main() {
-    let ctx = match Ctx::from_env() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("ark: failed to resolve state dirs: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    // Initialise tracing as early as possible so later code can emit
-    // events. EnvFilter::new never panics; it just surfaces invalid
-    // directives at parse time via the fallback below.
-    let filter = EnvFilter::try_new(&ctx.log_level).unwrap_or_else(|_| EnvFilter::new("info"));
-    // `.try_init()` because tests may have already set a subscriber;
-    // in the binary path this is the first call and always succeeds.
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .try_init();
-
-    // Build the clap command with NO_COLOR awareness, then hand it
-    // real argv. `get_matches()` handles --version / --help on its own
-    // (exiting 0) before we ever see them.
-    let cmd = Cli::command_with_no_color_aware(ctx.no_color);
+    // F-512: parse clap args FIRST. `--help` / `--version` exit 0
+    // from inside clap before we ever return from this call, so
+    // they never trigger `Ctx::from_env()`. We read `NO_COLOR` from
+    // the process env directly here (cheap, no dir resolution) to
+    // drive help coloring; full ctx (state/config/runtime dirs) is
+    // resolved only AFTER a subcommand has successfully parsed.
+    let no_color_for_help = std::env::var_os("NO_COLOR").is_some();
+    let cmd = Cli::command_with_no_color_aware(no_color_for_help);
     let matches = cmd.get_matches();
     let cli = match Cli::from_arg_matches(&matches) {
         Ok(c) => c,
@@ -46,6 +38,27 @@ fn main() {
             e.exit();
         }
     };
+
+    // Now that we know a real subcommand was requested, resolve the
+    // runtime context (state/config/runtime dirs, log level).
+    let ctx = match Ctx::from_env() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("ark: failed to resolve state dirs: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    // Initialise tracing after ctx is built so we honor ARK_LOG.
+    // EnvFilter::new never panics; it just surfaces invalid
+    // directives at parse time via the fallback below.
+    let filter = EnvFilter::try_new(&ctx.log_level).unwrap_or_else(|_| EnvFilter::new("info"));
+    // `.try_init()` because tests may have already set a subscriber;
+    // in the binary path this is the first call and always succeeds.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
 
     if let Err(err) = cli.command.run(&ctx) {
         eprintln!("ark: {err}");

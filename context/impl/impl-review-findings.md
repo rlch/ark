@@ -167,3 +167,45 @@ Pre-existing flaky failure in `ark-engines-claude-code::transcript::tests::appen
 ## Test Delta — Cycle 3
 
 ark-cli: 212 baseline → 217 passing (+5 new tests: 2 for F-508, 3 for F-510; F-509 is purely test-infra plumbing and adds no new assertions — verified instead by clean parallel runs). Full-workspace serial run (`cargo test --workspace -- --test-threads=1`) green end-to-end. One unrelated flaky failure in `ark-orchestrators-cavekit::watchers::ralph_loop` was observed once under full-workspace load and cleared on rerun; not in any file touched this cycle.
+
+## Tier 4 — Cycle 4 (Codex)
+
+### F-511 — P1 `ark spawn` must actually launch zellij (FIXED)
+
+**Source:** codex
+**Tier:** 4
+**Severity:** P1
+**Status:** fixed
+**Location:** crates/cli/src/commands/spawn.rs (`run`, new `build_zellij_command`, `ZellijPlan::Attach`)
+
+**Description:** `run()` computed a `ZellijPlan` (and unit-tested the branching logic) but never actually invoked zellij. After writing `spec.json` and printing the supervisor-stub warning, the handler returned `Ok` without opening any tab/session, so `ark spawn` was a no-op end-to-end. The T-087 commit body had documented this as deferred pending supervisor-side invocation, but cavekit-cli R2 intends `spawn` to actually launch zellij on the spawn side.
+
+**Resolution:** Added `build_zellij_command(plan: &ZellijPlan) -> std::process::Command` so argv construction is pure and testable without spawning a process. `ZellijPlan::Attach` now also carries `layout: Option<String>` (the in-session `new-tab` supports `--layout` for parity with the new-session branch). `run()` snapshots the real process env, picks a plan via the existing `zellij_plan` helper, builds the command, redirects stdio to `/dev/null`, and calls `Command::spawn()` (NOT `.status()`) so the parent agent — typically already inside zellij — does not block. Spawn failure maps to `CliError::Internal { reason: "launch zellij: {e}" }`; the `zellij` missing case is already caught upstream by `require_zellij_on_path()` (F-503). `--no-detach` now logs "note: --no-detach log-tail deferred until supervisor lands" and returns — real log tailing is still pending the supervisor binary. Added four unit tests on `build_zellij_command`: in-session with layout, in-session without layout, new-session with layout, new-session without layout — each asserts the exact argv the Command carries (program + args). Existing `zellij_plan_inside_session_attaches` updated to expect the new `layout` field on `Attach`.
+
+### F-512 — P2 `--help`/`--version` must not require env resolution (FIXED)
+
+**Source:** codex
+**Tier:** 4
+**Severity:** P2
+**Status:** fixed
+**Location:** crates/cli/src/main.rs, crates/cli/tests/cli_help.rs (new integration harness)
+
+**Description:** `main()` called `Ctx::from_env()` BEFORE clap parsing. In an environment without `$HOME` / `$XDG_CONFIG_HOME` / `$ARK_*` (e.g. minimal container, `env -i`, CI runners stripping env, restricted `sudo -u`), `ark --help` and `ark --version` exited 1 with "ark: failed to resolve state dirs: …" instead of clap's help output. That's a discoverability regression — the two flags that exist specifically to answer "does this binary work at all" didn't.
+
+**Resolution:** Reordered `main()` so clap parsing runs first. clap itself handles `--help` / `--version` during `get_matches()` and exits 0 before our code returns, so those flags no longer touch `Ctx::from_env()`. The `no_color` flag used to build the help-rendering command is now read directly via `std::env::var_os("NO_COLOR").is_some()` at the top of `main()` (cheap, no dir resolution). `Ctx::from_env()` and `tracing_subscriber` init both moved to AFTER a subcommand parses successfully, so their side effects only run on real command execution. Added `crates/cli/tests/cli_help.rs` (new tests directory for the crate) with two `#[cfg(unix)]` integration tests that spawn `env!("CARGO_BIN_EXE_ark")` via `std::process::Command` with `.env_clear()`: `help_succeeds_with_empty_env` asserts exit 0 + `"Usage:"` in stdout, `version_succeeds_with_empty_env` asserts exit 0 + `"ark <version>"` prefix.
+
+### F-513 — P2 doctor `--json --fix` must skip fixes in JSON mode (FIXED)
+
+**Source:** codex
+**Tier:** 4
+**Severity:** P2
+**Status:** fixed
+**Location:** crates/cli/src/commands/doctor.rs (`run`)
+
+**Description:** With `--json --fix` set together, `run()` first emitted the JSON array, then called `run_fixes()`, which prompted on stderr (or auto-applied with `--yes`) and mutated disk state (delete socket / remove lock / create dir). So stdout was JSON but the process simultaneously tore down runtime files — violating the implicit "JSON mode is read-only" contract that every downstream script (and cron doctor, and monitoring agent) depends on.
+
+**Resolution:** In JSON mode, `run_fixes()` is now skipped entirely. When the caller passed `--fix` anyway, a single stderr line `"warning: --fix ignored in --json mode"` is emitted so the behavior isn't silent. Table mode retains the unchanged `table + run_fixes` ordering. Added `json_fix_combo_skips_fixes_and_leaves_state_untouched`: seeds a runtime dir with an orphan `.sock` file, snapshots every path + type under the test root, runs `run()` with `DoctorArgs { fix: true, yes: true, json: true }`, snapshots again, asserts the two snapshots are identical AND that the orphan socket still exists. A tiny `snapshot_tree` helper walks the test root (recursive, sorted) to make the before/after comparison deterministic.
+
+## Test Delta — Cycle 4
+
+ark-cli: 217 baseline → 224 passing (+7: 4 new `build_zellij_command` tests for F-511, 2 integration tests in `crates/cli/tests/cli_help.rs` for F-512, 1 for F-513; existing `zellij_plan_inside_session_attaches` updated for the new `ZellijPlan::Attach.layout` field — test count unchanged by that edit). Full-workspace `cargo test --workspace -- --test-threads=1` green end-to-end.
