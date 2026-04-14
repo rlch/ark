@@ -1,1 +1,3 @@
-pub fn placeholder() {}
+pub mod id;
+
+pub use id::{AgentId, AgentIdParseError};
