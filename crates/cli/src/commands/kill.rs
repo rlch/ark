@@ -16,7 +16,8 @@
 //!   2. Connect to `${runtime}/agents/{id}.sock` as a `UnixStream`.
 //!   3. Write one NDJSON line, read one NDJSON line back.
 //!   4. Map response `ok:true` -> stdout `killed {id}`; `ok:false`
-//!      -> `CliError::Generic`; ENOENT/refused -> `OrphanOrDead`.
+//!      -> `CliError::Generic`. ENOENT/refused means the supervisor
+//!      is already gone — warn + `Ok(())` (idempotent per R4).
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -50,7 +51,12 @@ pub struct KillArgs {
     #[arg(long)]
     pub force: bool,
 
-    /// Keep worktree (currently the default in v1; reserved).
+    /// Keep worktree (redundant: v1 default is to preserve).
+    ///
+    /// v1 default is to PRESERVE worktrees on kill (cavekit-cli R4);
+    /// this flag is redundant with the default but kept so scripts
+    /// can document intent. `--force` alone does NOT imply worktree
+    /// removal.
     #[arg(long = "keep-worktree")]
     pub keep_worktree: bool,
 }
@@ -61,15 +67,19 @@ pub struct KillArgs {
 /// Invariant: `force` flips the envelope to `ForceKill`; the
 /// worktree flag only applies on the default `Kill` path (mirrors
 /// the supervisor's current `KillArgs` struct).
-fn build_request(force: bool, keep_worktree: bool) -> Value {
+///
+/// v1 policy (cavekit-cli R4): worktrees are PRESERVED by default.
+/// Neither the default path nor `--keep-worktree` requests removal.
+/// The `keep_worktree` parameter is accepted for API symmetry but
+/// `remove_worktree` is always emitted as `false` until a future
+/// `--remove-worktree` flag lands.
+fn build_request(force: bool, _keep_worktree: bool) -> Value {
     if force {
         json!({ "cmd": "ForceKill" })
     } else {
-        // Supervisor's KillArgs uses `remove_worktree`. The CLI flag
-        // is `--keep-worktree` (opt-in to preserve). Invert here.
         json!({
             "cmd": "Kill",
-            "args": { "remove_worktree": !keep_worktree }
+            "args": { "remove_worktree": false }
         })
     }
 }
@@ -95,18 +105,29 @@ fn map_resolve_err(e: ResolveError, query: &str) -> CliError {
     }
 }
 
-/// Map a socket-connect `io::Error` to the right `CliError` variant.
-/// `NotFound` / `ConnectionRefused` indicate an orphaned agent dir
-/// with no live supervisor listening — steer the user at `ark doctor`.
-fn map_connect_err(err: std::io::Error, id: &str) -> CliError {
+/// Outcome of attempting to connect to the supervisor socket.
+enum ConnectOutcome {
+    /// Supervisor is already gone — treat as idempotent success.
+    AlreadyDead,
+    /// Connection failed for some other reason — surface as error.
+    Err(CliError),
+}
+
+/// Map a socket-connect `io::Error` to a [`ConnectOutcome`].
+///
+/// `NotFound` / `ConnectionRefused` means the supervisor is not
+/// listening — per cavekit-cli R4, `ark kill` is idempotent against
+/// already-dead agents, so we map these to `AlreadyDead` and let the
+/// caller print a warning + return `Ok(())`. Every other errno
+/// (permission denied, resource exhaustion, etc.) is surfaced as
+/// `CliError::Generic`.
+fn map_connect_err(err: std::io::Error) -> ConnectOutcome {
     use std::io::ErrorKind;
     match err.kind() {
-        ErrorKind::NotFound | ErrorKind::ConnectionRefused => CliError::OrphanOrDead {
-            reason: format!("no live supervisor for {id}; try `ark doctor`"),
-        },
-        _ => CliError::Generic {
+        ErrorKind::NotFound | ErrorKind::ConnectionRefused => ConnectOutcome::AlreadyDead,
+        _ => ConnectOutcome::Err(CliError::Generic {
             reason: format!("connect supervisor socket: {err}"),
-        },
+        }),
     }
 }
 
@@ -146,7 +167,21 @@ pub fn run(args: KillArgs, ctx: &Ctx) -> Result<(), CliError> {
     let resolved = resolve_agent_id(&args.id, &layout).map_err(|e| map_resolve_err(e, &args.id))?;
 
     let sock = layout.agent_socket_path(&resolved);
-    let stream = UnixStream::connect(&sock).map_err(|e| map_connect_err(e, resolved.as_str()))?;
+    let stream = match UnixStream::connect(&sock) {
+        Ok(s) => s,
+        Err(e) => match map_connect_err(e) {
+            ConnectOutcome::AlreadyDead => {
+                // Idempotent: repeated kills against a dead agent
+                // succeed silently with a warning (cavekit-cli R4).
+                eprintln!(
+                    "warning: agent {} is already dead; nothing to do",
+                    resolved.as_str()
+                );
+                return Ok(());
+            }
+            ConnectOutcome::Err(err) => return Err(err),
+        },
+    };
 
     let req = build_request(args.force, args.keep_worktree);
     let resp = exchange(stream, &req)?;
@@ -212,15 +247,18 @@ mod tests {
     // ---------- build_request shape ----------
 
     #[test]
-    fn build_request_default_is_kill_with_remove_worktree_true() {
-        // Default: no --keep-worktree => remove_worktree = true.
+    fn build_request_default_preserves_worktree() {
+        // v1 default (cavekit-cli R4): worktrees are PRESERVED.
+        // No --keep-worktree => remove_worktree = false.
         let v = build_request(false, false);
         assert_eq!(v["cmd"], "Kill");
-        assert_eq!(v["args"]["remove_worktree"], serde_json::Value::Bool(true));
+        assert_eq!(v["args"]["remove_worktree"], serde_json::Value::Bool(false));
     }
 
     #[test]
-    fn build_request_keep_worktree_sets_remove_false() {
+    fn build_request_keep_worktree_redundantly_preserves() {
+        // --keep-worktree is redundant with the default but must
+        // still emit remove_worktree=false.
         let v = build_request(false, true);
         assert_eq!(v["cmd"], "Kill");
         assert_eq!(v["args"]["remove_worktree"], serde_json::Value::Bool(false));
@@ -310,8 +348,10 @@ mod tests {
     }
 
     #[test]
-    fn run_returns_orphan_when_socket_missing() {
+    fn run_is_idempotent_when_socket_missing() {
         // Agent dir exists; socket does not — supervisor is dead.
+        // F-501: kill against a dead agent is idempotent — run()
+        // must return Ok(()) after warning to stderr.
         // Use /tmp so the socket path stays under SUN_LEN on macOS
         // (TMPDIR resolves to long /var/folders/... paths there).
         let tmp = tempfile::Builder::new()
@@ -332,19 +372,30 @@ mod tests {
             force: false,
             keep_worktree: false,
         };
-        let err = run(args, &ctx).expect_err("no socket");
-        match err {
-            CliError::OrphanOrDead { reason } => {
-                assert!(
-                    reason.contains("ark doctor"),
-                    "reason should steer at doctor: {reason}"
-                );
-                assert!(
-                    reason.contains(id.as_str()),
-                    "reason should include id: {reason}"
-                );
-            }
-            other => panic!("expected OrphanOrDead, got {other:?}"),
+        run(args, &ctx).expect("already-dead agent kill must succeed idempotently");
+    }
+
+    #[test]
+    fn map_connect_err_maps_not_found_to_already_dead() {
+        let e = std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert!(matches!(map_connect_err(e), ConnectOutcome::AlreadyDead));
+    }
+
+    #[test]
+    fn map_connect_err_maps_connection_refused_to_already_dead() {
+        let e = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
+        assert!(matches!(map_connect_err(e), ConnectOutcome::AlreadyDead));
+    }
+
+    #[test]
+    fn map_connect_err_maps_permission_denied_to_generic() {
+        let e = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        match map_connect_err(e) {
+            ConnectOutcome::Err(CliError::Generic { .. }) => {}
+            other => panic!(
+                "expected Generic err, got other variant: {:?}",
+                matches!(other, ConnectOutcome::AlreadyDead)
+            ),
         }
     }
 }

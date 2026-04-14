@@ -316,11 +316,12 @@ pub fn require_zellij_on_path() -> Result<(), CliError> {
 /// `ark spawn` — T-087.
 ///
 /// Happy path:
-/// 1. Resolve orchestrator.
+/// 1. Resolve orchestrator (read-only detect on cwd).
 /// 2. Derive name.
-/// 3. Parse env + hooks.
-/// 4. Build spec, mint AgentId, write spec.json.
-/// 5. Preflight zellij on PATH.
+/// 3. Parse env + hooks (pure, no I/O).
+/// 4. Preflight zellij on PATH — F-503: run BEFORE any filesystem
+///    mutation so preflight failure leaves zero orphan state.
+/// 5. Build spec, mint AgentId, write spec.json.
 /// 6. (Stubbed) supervisor fork — a future packet lands the real
 ///    `ark-supervisor` binary and replaces the warning with an
 ///    actual detached `Command::spawn`.
@@ -330,6 +331,11 @@ pub fn run(args: SpawnArgs, ctx: &Ctx) -> Result<(), CliError> {
     let name = derive_name(args.name.as_deref(), &args.cwd);
     let env = parse_env(&args.env).map_err(|reason| CliError::Generic { reason })?;
     let hooks = parse_hooks(&args.hook).map_err(|reason| CliError::Generic { reason })?;
+
+    // F-503: preflight BEFORE any filesystem mutation. If zellij is
+    // missing, the user gets a clean PreflightFail with no orphan
+    // spec.json / agent dir to clean up by hand.
+    require_zellij_on_path()?;
 
     let spec = build_spec(
         orchestrator,
@@ -344,9 +350,6 @@ pub fn run(args: SpawnArgs, ctx: &Ctx) -> Result<(), CliError> {
 
     let spec_path = write_spec_json(&ctx.state_dir, &spec)?;
     tracing::debug!(path = %spec_path.display(), "wrote spec.json");
-
-    // Preflight zellij before we tell the user the agent is alive.
-    require_zellij_on_path()?;
 
     // Supervisor spawn is STUBBED until the `ark-supervisor` binary
     // lands (see T-062 / T-069). We print a warning so the operator
@@ -725,6 +728,71 @@ mod tests {
     }
 
     // --- require_zellij_on_path error variant -------------------------
+
+    #[test]
+    fn run_preflight_fail_leaves_state_untouched() {
+        // F-503: when zellij is missing from PATH, run() must bail
+        // BEFORE writing spec.json / creating the agent dir. Assert
+        // agents_root contents are unchanged across the call.
+        use std::sync::Mutex;
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let state = TempDir::new().unwrap();
+        let config = TempDir::new().unwrap();
+        let runtime = TempDir::new().unwrap();
+        let ctx = Ctx {
+            no_color: true,
+            log_level: "info".into(),
+            state_dir: state.path().to_path_buf(),
+            config_dir: config.path().to_path_buf(),
+            runtime_dir: runtime.path().to_path_buf(),
+        };
+
+        // Snapshot agents_root contents (empty or absent == 0 entries).
+        let agents_root = state.path().join("agents");
+        let count_before = std::fs::read_dir(&agents_root)
+            .map(|it| it.count())
+            .unwrap_or(0);
+
+        let args = SpawnArgs {
+            orchestrator: OrchestratorChoice::ClaudeCode,
+            engine: EngineChoice::ClaudeCode,
+            cwd: state.path().to_path_buf(),
+            name: Some("preflighttest".into()),
+            layout: None,
+            env: Vec::new(),
+            detach: true,
+            no_detach: false,
+            hook: Vec::new(),
+            cmd: vec!["claude".into()],
+        };
+
+        let prior = std::env::var_os("PATH");
+        unsafe {
+            std::env::set_var("PATH", "/nonexistent-path-for-ark-test");
+        }
+        let got = run(args, &ctx);
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("PATH", v),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+        assert!(
+            matches!(got, Err(CliError::PreflightFail { .. })),
+            "expected PreflightFail, got {got:?}"
+        );
+
+        // Post-condition: agents_root entry count is unchanged.
+        let count_after = std::fs::read_dir(&agents_root)
+            .map(|it| it.count())
+            .unwrap_or(0);
+        assert_eq!(
+            count_before, count_after,
+            "preflight-fail path must not mutate agents_root"
+        );
+    }
 
     #[test]
     fn require_zellij_missing_returns_preflight_fail() {

@@ -80,8 +80,23 @@ pub enum ConfigCommand {
     },
 }
 
+/// Env var that overrides the user config file location.
+/// ark-config crate already documents this env var as the single-file
+/// override (see `crates/config/src/lib.rs` RESERVED_ENV_VARS).
+const ARK_CONFIG_PATH_ENV: &str = "ARK_CONFIG_PATH";
+
 /// Path of the user config file for a given ctx.
+///
+/// Precedence: `$ARK_CONFIG_PATH` (when set and non-empty) wins over
+/// the default `{ctx.config_dir}/config.toml`. This lets a caller
+/// point all four config subcommands at an alternate TOML file
+/// without mutating ctx / the directory layout.
 fn user_config_path(ctx: &Ctx) -> PathBuf {
+    if let Some(p) = std::env::var_os(ARK_CONFIG_PATH_ENV)
+        && !p.is_empty()
+    {
+        return PathBuf::from(p);
+    }
     ctx.config_dir.join("config.toml")
 }
 
@@ -485,6 +500,87 @@ mod tests {
         let err = insert_dotted(&mut t, "a..b", toml::Value::Integer(1))
             .expect_err("empty segment rejected");
         assert!(matches!(err, CliError::ConfigError { .. }));
+    }
+
+    #[test]
+    fn user_config_path_honors_ark_config_path_env() {
+        // F-502: when ARK_CONFIG_PATH is set, it overrides the
+        // default {ctx.config_dir}/config.toml for all four
+        // subcommands.
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_for(tmp.path());
+        let override_path = tmp.path().join("custom").join("override.toml");
+
+        let prior = std::env::var_os(ARK_CONFIG_PATH_ENV);
+        // Safety: guarded by ENV_LOCK.
+        unsafe {
+            std::env::set_var(ARK_CONFIG_PATH_ENV, &override_path);
+        }
+        let got = user_config_path(&ctx);
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var(ARK_CONFIG_PATH_ENV, v),
+                None => std::env::remove_var(ARK_CONFIG_PATH_ENV),
+            }
+        }
+        assert_eq!(got, override_path);
+    }
+
+    #[test]
+    fn user_config_path_falls_back_to_ctx_config_dir() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_for(tmp.path());
+
+        let prior = std::env::var_os(ARK_CONFIG_PATH_ENV);
+        // Safety: guarded by ENV_LOCK.
+        unsafe {
+            std::env::remove_var(ARK_CONFIG_PATH_ENV);
+        }
+        let got = user_config_path(&ctx);
+        unsafe {
+            if let Some(v) = prior {
+                std::env::set_var(ARK_CONFIG_PATH_ENV, v);
+            }
+        }
+        assert_eq!(got, ctx.config_dir.join("config.toml"));
+    }
+
+    #[test]
+    fn set_writes_to_ark_config_path_override() {
+        // Higher-level regression for F-502: run_set must write to
+        // the path indicated by ARK_CONFIG_PATH, not the ctx dir.
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        // Ctx dir is distinct from the override target so a stray
+        // write to config_dir/config.toml wouldn't satisfy the assert.
+        let ctx_dir = tmp.path().join("ctxdir");
+        std::fs::create_dir_all(&ctx_dir).unwrap();
+        let ctx = ctx_for(&ctx_dir);
+        let override_path = tmp.path().join("alt").join("override.toml");
+
+        let prior = std::env::var_os(ARK_CONFIG_PATH_ENV);
+        // Safety: guarded by ENV_LOCK.
+        unsafe {
+            std::env::set_var(ARK_CONFIG_PATH_ENV, &override_path);
+        }
+        let result = run_set(&ctx, "defaults.orchestrator", "\"cavekit\"");
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var(ARK_CONFIG_PATH_ENV, v),
+                None => std::env::remove_var(ARK_CONFIG_PATH_ENV),
+            }
+        }
+        result.expect("set ok");
+        assert!(
+            override_path.exists(),
+            "set must write to ARK_CONFIG_PATH override"
+        );
+        assert!(
+            !ctx_dir.join("config.toml").exists(),
+            "set must NOT fall back to ctx.config_dir when env is set"
+        );
     }
 
     #[test]
