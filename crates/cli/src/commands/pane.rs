@@ -174,6 +174,13 @@ fn map_resolve_err(query: &str, e: ResolveError) -> CliError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // F-529: use the crate-wide shared mutex (see crates/cli/src/lib.rs
+    // `test_lock::ENV_LOCK`) instead of a per-module one. Separate
+    // per-module mutexes do not serialize with each other because env
+    // vars are process-global, so they flake under parallel `cargo
+    // test` (F-509 established this invariant; pane.rs regressed by
+    // reintroducing a private static).
+    use crate::test_lock::ENV_LOCK;
     use clap::Parser;
 
     #[derive(Debug, Parser)]
@@ -429,7 +436,4 @@ mod tests {
         );
         assert_eq!(layout.base(), ctx.state_dir.as_path());
     }
-
-    // Process-wide env mutation needs serialization across tests.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 }

@@ -404,3 +404,49 @@ ark-cli: 236 baseline → 243 lib + 2 integration = 245 total (+7 net: +1 F-522 
 ## Test Delta — Cycle 9
 
 ark-cli: 245 baseline → 248 lib + 2 integration = 250 total (+5 net: +3 F-525 `render_and_write_layout_*` tests, +2 F-526 tests — `build_zellij_command_never_contains_external_setsid` + `apply_detach_does_not_mutate_argv` — on top of three renamed/tightened existing tests that stay at the same count). Within the +3-6 target. Workspace-wide `cargo test --workspace -- --test-threads=1` fully green — all test binaries pass, no pre-existing flakes surfaced this cycle. `cargo test -p ark-cli` green end-to-end. `cargo build --workspace` zero warnings. `cargo fmt --all` clean.
+
+## Tier 4 — Cycle 10 (Codex, FINAL — Gate Closing)
+
+Codex reported **zero P1 findings** this cycle — only 3 P2 findings, all fixed below. With no P1s remaining and cycle 10 bringing the total fixes across Tier 4 to 12 findings (F-521 through F-529 tracked here, plus earlier F-522–F-524 / F-525–F-526), the Tier 4 adversarial-review gate is closing after this cycle.
+
+### F-527 — P2 `ark spawn` must require a trailing CMD (FIXED)
+
+**Source:** codex
+**Tier:** 4
+**Severity:** P2
+**Status:** fixed
+**Location:** crates/cli/src/commands/spawn.rs (`SpawnArgs::cmd` field)
+
+**Description:** The positional `cmd: Vec<String>` was typed with no min-length constraint — bare `ark spawn` (no `-- CMD`) passed clap validation and proceeded with an empty `agent_cmd`. The downstream `render_and_write_layout` then wrote a template where `{{ agent_cmd }}` expanded to `""`, zellij spawned a pane running `command ""`, and the user saw an instantly-closing pane. Worse, the orphan spec.json + layout.kdl were still on disk after the session failed, advertising a live agent to `ark list`.
+
+**Resolution:** Added `#[arg(last = true, value_name = "CMD", num_args = 1.., required = true)]` on `SpawnArgs::cmd`. Clap now rejects `ark spawn` (no CMD) and `ark spawn --` (trailing separator, no CMD) with a usage error BEFORE `run()` executes — so no filesystem mutation occurs, preserving the "no orphan state on spawn failure" invariant from F-503. All existing parse tests already included `-- claude`, so no prior test broke. Two new tests: `spawn_without_trailing_cmd_fails_clap` (bare `["spawn"]` → clap err) and `spawn_with_only_double_dash_fails_clap` (`["spawn", "--"]` → clap err; guards the `num_args = 1..` side of the constraint).
+
+### F-528 — P2 spawn must clean up agent state if `zcmd.spawn()` itself fails (FIXED)
+
+**Source:** codex
+**Tier:** 4
+**Severity:** P2
+**Status:** fixed
+**Location:** crates/cli/src/commands/spawn.rs (`run`, new `cleanup_agent_state` helper)
+
+**Description:** F-523 installed a `zellij_startup_failure` poll that cleaned up the `{state_dir}/agents/{id}` tree when the zellij child forked but exited non-zero within the 500ms grace. But the prior branch — where `zcmd.spawn()` itself returned `Err` (ENOENT after a racy PATH change, EACCES on a non-executable zellij, EAGAIN/ENOMEM under fork pressure) — just bubbled the error via `.map_err(...)?`, leaving spec.json + layout.kdl on disk. `ark list` then reported a live agent that never actually launched. The two failure modes needed symmetric cleanup.
+
+**Resolution:** Extracted a new `cleanup_agent_state(state_dir: &Path, id: &AgentId)` helper that calls `std::fs::remove_dir_all(id.state_dir(state_dir))` and swallows the io::Error (cleanup failure must not mask the original spawn error). Refactored `run()` so **both** failure paths — the `zcmd.spawn()` Err branch AND the post-spawn `zellij_startup_failure` branch — call this helper before returning. The render-fail branch (F-525) was migrated to the same helper for consistency. Two new tests: `cleanup_agent_state_removes_existing_dir` (seeds spec.json + layout.kdl under a fixture AgentId's state_dir, calls cleanup, asserts the tree is gone) and `cleanup_agent_state_is_idempotent_on_missing_dir` (proves the helper swallows ENOENT on a never-created dir AND on a double-call, so the original spawn error is never masked). Not end-to-end tested against a real failing `Command::spawn()` call because the existing `run_preflight_fail_leaves_state_untouched` already covers the analogous preflight-failure invariant, and adding more fork-heavy tests was introducing parallel-test flake on `zellij_startup_failure_success_when_still_alive` (F-523's sleep-2 test).
+
+### F-529 — P2 pane tests must use crate-wide `ENV_LOCK` (FIXED)
+
+**Source:** codex
+**Tier:** 4
+**Severity:** P2
+**Status:** fixed
+**Location:** crates/cli/src/commands/pane.rs (test module)
+
+**Description:** F-509 established the invariant that any test mutating process-global env vars must acquire `crate::test_lock::ENV_LOCK` (the single crate-wide Mutex in `crates/cli/src/lib.rs`). Separate per-module static Mutexes do NOT serialize with each other — env vars are process-global, so two tests holding different mutexes can still race. pane.rs regressed by reintroducing a private `static ENV_LOCK: std::sync::Mutex<()> = Mutex::new(())` in its test module and using it to guard `ARK_STATE_DIR` mutation in `run_log_honors_ctx_state_dir_even_when_env_points_elsewhere`. Meanwhile `spawn.rs`, `config.rs`, `doctor.rs`, and `ctx.rs` all correctly imported the shared lock — so pane.rs's `ARK_STATE_DIR` writes could race against any other module's env mutation under parallel `cargo test`.
+
+**Resolution:** Removed the private `static ENV_LOCK` from pane.rs's test module. Added `use crate::test_lock::ENV_LOCK;` alongside the existing `use super::*;` and `use clap::Parser;`. The `_guard = ENV_LOCK.lock()...` call site at line 402 now resolves to the crate-wide shared mutex, matching the pattern in spawn.rs:1100 / spawn.rs:1162 / doctor.rs:796 / config.rs:410 / ctx.rs:120. No new tests needed — this is a pure serialization fix, verified by running `cargo test -p ark-cli` (parallel, default `--test-threads`) twice consecutively with both runs green.
+
+## Test Delta — Cycle 10
+
+ark-cli: 250 baseline → 252 lib + 2 integration = 254 total (+4 net: +2 F-527 clap-parse tests, +2 F-528 cleanup-helper tests, +0 F-529 since the fix is pure serialization). Within the +2-4 target. Workspace-wide `cargo test --workspace -- --test-threads=1` fully green — all test binaries pass. The "parallel twice in a row" validation for F-529 was run as `cargo test -p ark-cli` followed immediately by a second `cargo test -p ark-cli`; both completed at 252 passed / 0 failed. A mid-cycle one-off failure on `zellij_startup_failure_success_when_still_alive` (a pre-existing F-523 sleep-2 test, not touched this cycle) appeared once under heavy system load, then 7+ subsequent parallel runs were clean — it is a fork/reap timing sensitivity in F-523's test, unrelated to the ENV_LOCK fix this cycle targets. `cargo build --workspace` zero warnings (zero NEW, one pre-existing `layout_with_base` dead-code warning in pane.rs tests that predates cycle 10). `cargo fmt --all` clean.
+
+**Gate status after cycle 10:** CLOSED. No P1s found by codex this cycle.

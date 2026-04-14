@@ -137,7 +137,12 @@ pub struct SpawnArgs {
     pub hook: Vec<String>,
 
     /// Positional command to run in the agent pane — everything after `--`.
-    #[arg(last = true, value_name = "CMD")]
+    ///
+    /// F-527: `num_args = 1..` + `required = true` make clap reject an
+    /// empty CMD with a usage error before `run()` executes. Without
+    /// this, `ark spawn` (no `-- CMD`) would proceed with an empty
+    /// `agent_cmd`, rendering a broken layout that zellij rejects.
+    #[arg(last = true, value_name = "CMD", num_args = 1.., required = true)]
     pub cmd: Vec<String>,
 }
 
@@ -526,6 +531,24 @@ pub fn render_and_write_layout(ctx: &Ctx, spec: &AgentSpec) -> Result<PathBuf, C
     Ok(path)
 }
 
+/// F-528: Shared cleanup after any spawn-time failure.
+///
+/// When zellij fails to launch — whether `Command::spawn()` itself
+/// returns `Err` (e.g. ENOENT after a racy `PATH` change, permission
+/// denied on the binary) or the child forks but exits non-zero before
+/// the session is listenable — we must remove the `{state_dir}/agents/{id}`
+/// directory we wrote spec.json + layout.kdl into, so `ark list` does not
+/// report an orphan agent that never existed.
+///
+/// This is the "no orphan state on spawn failure" invariant shared by
+/// F-503 (preflight), F-525 (render), F-523 (startup poll), and now
+/// F-528 (spawn syscall). Errors from `remove_dir_all` are swallowed
+/// — if the state dir cannot be removed, surfacing the original spawn
+/// error is more useful to the operator than a secondary I/O error.
+pub fn cleanup_agent_state(state_dir: &Path, id: &AgentId) {
+    let _ = std::fs::remove_dir_all(id.state_dir(state_dir));
+}
+
 // ------------------------------------------------------------- handler ------
 
 /// `ark spawn` — T-087 + F-511.
@@ -577,7 +600,7 @@ pub fn run(args: SpawnArgs, ctx: &Ctx) -> Result<(), CliError> {
     let layout_path = match render_and_write_layout(ctx, &spec) {
         Ok(p) => p,
         Err(e) => {
-            let _ = std::fs::remove_dir_all(spec.id.state_dir(&ctx.state_dir));
+            cleanup_agent_state(&ctx.state_dir, &spec.id);
             return Err(e);
         }
     };
@@ -611,9 +634,23 @@ pub fn run(args: SpawnArgs, ctx: &Ctx) -> Result<(), CliError> {
     zcmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    let mut child = zcmd.spawn().map_err(|e| CliError::Internal {
-        reason: format!("launch zellij: {e}"),
-    })?;
+    // F-528: `zcmd.spawn()` itself can fail (ENOENT after racy PATH
+    // change, EACCES on a non-executable binary, EAGAIN / ENOMEM under
+    // fork pressure). The prior code returned the error directly and
+    // left spec.json + layout.kdl on disk, an orphan that `ark list`
+    // would then advertise as a live agent. Route the error through
+    // the same `cleanup_agent_state` helper the startup-poll branch
+    // uses so the "no orphan state on spawn failure" invariant holds
+    // for BOTH failure modes.
+    let mut child = match zcmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            cleanup_agent_state(&ctx.state_dir, &spec.id);
+            return Err(CliError::Internal {
+                reason: format!("launch zellij: {e}"),
+            });
+        }
+    };
 
     // F-523: `Command::spawn()` only confirms the child forked. zellij
     // may still exec-fail, layout-parse-fail, or otherwise die before
@@ -625,7 +662,7 @@ pub fn run(args: SpawnArgs, ctx: &Ctx) -> Result<(), CliError> {
     // staying snappy for the success path — zellij is still alive at
     // the end of the window because it forks its own detached daemon.
     if let Some(err) = zellij_startup_failure(&mut child) {
-        let _ = std::fs::remove_dir_all(spec.id.state_dir(&ctx.state_dir));
+        cleanup_agent_state(&ctx.state_dir, &spec.id);
         return Err(err);
     }
 
@@ -1334,6 +1371,67 @@ mod tests {
             }
             other => panic!("expected Generic, got {other:?}"),
         }
+    }
+
+    // --- F-527: cmd positional is required by clap --------------------
+
+    #[test]
+    fn spawn_without_trailing_cmd_fails_clap() {
+        // F-527: bare `ark spawn` (no `-- CMD`) must be rejected by clap
+        // with a usage error BEFORE `run()` executes — otherwise the
+        // downstream path proceeds with an empty agent_cmd and renders a
+        // broken layout.
+        let res = Host::try_parse_from(["spawn"]);
+        assert!(res.is_err(), "empty cmd must fail parse");
+    }
+
+    #[test]
+    fn spawn_with_only_double_dash_fails_clap() {
+        // F-527: `ark spawn --` (trailing separator, no command) is
+        // equally invalid — num_args = 1.. rejects the zero-arg case.
+        let res = Host::try_parse_from(["spawn", "--"]);
+        assert!(res.is_err(), "trailing -- with no cmd must fail parse");
+    }
+
+    // --- F-528: cleanup helper wipes agent state ---------------------
+
+    #[test]
+    fn cleanup_agent_state_removes_existing_dir() {
+        // F-528: on any spawn failure (`Command::spawn()` Err OR the
+        // post-spawn startup poll detecting non-zero exit), `run()`
+        // must call `cleanup_agent_state` so the `{state_dir}/agents/{id}`
+        // tree (holding spec.json + layout.kdl that the earlier
+        // write_spec_json + render_and_write_layout calls produced) is
+        // removed. Otherwise `ark list` would surface an orphan agent
+        // that never actually launched.
+        let state = TempDir::new().unwrap();
+        let id = AgentId::new("cavekit", "orphan");
+        let dir = id.state_dir(state.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("spec.json"), b"{}").unwrap();
+        std::fs::write(dir.join("layout.kdl"), b"layout {}").unwrap();
+        assert!(dir.exists());
+        cleanup_agent_state(state.path(), &id);
+        assert!(!dir.exists(), "cleanup must remove the agent state dir");
+    }
+
+    #[test]
+    fn cleanup_agent_state_is_idempotent_on_missing_dir() {
+        // F-528: cleanup_agent_state must swallow remove errors so a
+        // double-call (or a call before the dir was ever created, e.g.
+        // if `write_spec_json` itself failed before creating the dir)
+        // does not mask the original spawn error with a secondary I/O
+        // failure.
+        let state = TempDir::new().unwrap();
+        let id = AgentId::new("cavekit", "never");
+        // Call before the dir exists — must not panic.
+        cleanup_agent_state(state.path(), &id);
+        // Create, remove, remove again.
+        let dir = id.state_dir(state.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        cleanup_agent_state(state.path(), &id);
+        assert!(!dir.exists());
+        cleanup_agent_state(state.path(), &id);
     }
 
     #[test]
