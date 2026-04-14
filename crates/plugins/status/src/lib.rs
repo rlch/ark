@@ -36,11 +36,13 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 pub mod chip;
+pub mod fs_scan;
 
 pub use chip::{
     CHIP_SEPARATOR_WIDTH, Chip, Phase, Severity, build_chip, char_display_width, fit_chips,
     phase_from_str, phase_icon, phase_severity,
 };
+pub use fs_scan::{merge_fs_scan, resolve_state_dir, scan_state_dir};
 
 /// Registered plugin name used by supervisors when targeting `zellij pipe --name`.
 ///
@@ -146,6 +148,24 @@ pub struct Status {
     /// arrives; render handles that by not pinning anything.
     #[allow(dead_code)]
     pub(crate) focused_session: Option<String>,
+    /// Tri-state flag tracking whether `PermissionType::FullHdAccess` was
+    /// granted (R4 fallback scanning).
+    ///
+    /// - `None` — request pending (permission-result event not yet seen).
+    /// - `Some(false)` — user denied, or zellij rejected the request.
+    /// - `Some(true)` — granted; `Event::Timer` will run the fs scan.
+    ///
+    /// The timer branch only scans when `Some(true)`. This keeps the plugin
+    /// from retrying (and logging) on every 1 Hz tick when the user has
+    /// declined filesystem access — pipe-only operation is a supported mode
+    /// per R4's "skip if no fs perm".
+    #[allow(dead_code)]
+    pub(crate) fs_permission: Option<bool>,
+    /// Latch set the first time we skip the fs scan for lack of permission,
+    /// so wasm-side logging only fires once rather than every tick. Host
+    /// tests don't exercise this; it's a wasm-only quality-of-life guard.
+    #[allow(dead_code)]
+    pub(crate) fs_permission_warned: bool,
 }
 
 /// Public, host-testable accessor for the cached focused session name.
@@ -209,6 +229,7 @@ pub(crate) fn evict_stale(
 #[cfg(target_arch = "wasm32")]
 mod wasm_plugin {
     use super::chip::{CHIP_SEPARATOR_WIDTH, Chip, Severity, build_chip, fit_chips};
+    use super::fs_scan::{merge_fs_scan, resolve_state_dir, scan_state_dir};
     use super::{EVICTION_TTL_MS, Status, evict_stale, ingest_pipe_payload};
     use zellij_tile::prelude::*;
 
@@ -239,11 +260,13 @@ mod wasm_plugin {
 
     impl ZellijPlugin for Status {
         fn load(&mut self, _configuration: std::collections::BTreeMap<String, String>) {
-            // R1: request only the minimal permission the plugin needs — read
-            // incoming `zellij pipe` payloads from supervisors. Granted
-            // asynchronously; the result arrives via
+            // R1: request the pipe-ingestion permission. R4 optionally adds
+            // `FullHdAccess` for the `$XDG_STATE_HOME/ark/agents/*/status.json`
+            // fallback scan — requesting it here is best-effort; the plugin
+            // still works as pipe-only if the user denies it.
+            // Both grants/denials surface via
             // `EventType::PermissionRequestResult`.
-            request_permission(&[PermissionType::ReadCliPipes]);
+            request_permission(&[PermissionType::ReadCliPipes, PermissionType::FullHdAccess]);
 
             // R1: subscribe to the 1 Hz timer (freshness ticks — R2 uses it
             // to redraw / evict when no pipe message arrived) and permission
@@ -268,18 +291,49 @@ mod wasm_plugin {
                     let now = now_ms();
                     let evicted = evict_stale(&mut self.cache, now, EVICTION_TTL_MS);
                     self.last_eviction_at = now;
+
+                    // R4: optional filesystem fallback. Skip entirely if the
+                    // `FullHdAccess` permission was denied or is still
+                    // pending — avoids retrying a denied syscall every tick.
+                    let fs_changed = if self.fs_permission == Some(true) {
+                        let state_dir = resolve_state_dir(|k| std::env::var(k).ok());
+                        if state_dir.as_os_str().is_empty() {
+                            false
+                        } else {
+                            let scanned = scan_state_dir(&state_dir);
+                            merge_fs_scan(&mut self.cache, scanned)
+                        }
+                    } else {
+                        if !self.fs_permission_warned && self.fs_permission == Some(false) {
+                            // One-shot warn so operators spot missing perm in
+                            // the zellij log without 1 Hz spam.
+                            eprintln!(
+                                "{}: FullHdAccess denied; fs fallback scan disabled",
+                                super::PLUGIN_NAME
+                            );
+                            self.fs_permission_warned = true;
+                        }
+                        false
+                    };
+
                     // Re-arm for the next 1 Hz tick.
                     set_timeout(TIMER_INTERVAL_SECS);
                     // Redraw only when something actually changed; the 1 Hz
                     // render will otherwise be driven by pipe arrivals (R2:
                     // "redraw triggered on every pipe message").
-                    evicted > 0
+                    evicted > 0 || fs_changed
                 }
                 Event::PermissionRequestResult(status) => {
                     // `PermissionStatus::Granted` is the happy path; any
                     // other variant (present + future) is treated as a
-                    // denial so render can surface a warning.
-                    self.permission_denied = !matches!(status, PermissionStatus::Granted);
+                    // denial so render can surface a warning. The same grant
+                    // state also gates the R4 fs fallback scan — zellij
+                    // reports a single status for the whole request batch,
+                    // so granting implies both `ReadCliPipes` and
+                    // `FullHdAccess` are available.
+                    let granted = matches!(status, PermissionStatus::Granted);
+                    self.permission_denied = !granted;
+                    self.fs_permission = Some(granted);
                     true
                 }
                 Event::SessionUpdate(session_infos, _resurrectable) => {
