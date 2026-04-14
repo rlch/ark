@@ -15,15 +15,15 @@ Build site: context/plans/build-site.md (134 tasks, 7 tiers).
 | 1 | 28 | 28 | ✅ COMPLETE |
 | 2 | 16 | 16 | ✅ COMPLETE |
 | 3 | 22 | 22 | ✅ COMPLETE |
-| 4 | 10 | 10 | ✅ COMPLETE (pre-gate) |
+| 4 | 10 | 10 | ✅ COMPLETE (post-gate) |
 | 5 | 0 | 16 | pending |
 | 6 | 0 | 26 | pending |
 
 **Overall: 94/134 tasks done (70%) · 197 ark-cli tests + workspace green**
 
-Tier 4 landed 2026-04-15 across commits 3e681da → 1a03779. Order: T-084 scaffold, T-086 (pre-existing), T-085 exit-codes, T-085-fdn CliError expansion (foundation), T-092 pane routing, T-093 env-vars, T-089 kill, T-090 config, T-088 list, T-091 doctor, T-087 spawn. Codex tier-4 gate review pending — TIER_4_START_REF = 538fa42.
+Tier 4 landed 2026-04-15 across commits 3e681da → 1a03779 (build) + 10 codex gate cycles 3e681da → 0fc47dd. Build order: T-084 scaffold, T-086 (pre-existing), T-085 exit-codes, T-085-fdn CliError expansion (foundation), T-092 pane routing, T-093 env-vars, T-089 kill, T-090 config, T-088 list, T-091 doctor, T-087 spawn. Codex gate fixed 30 findings (F-500–F-529) across 10 cycles. Cycle 10 returned zero P1s — gate closed. TIER_4_START_REF = 538fa42.
 
-Deferrals from T-087 spawn (noted in commit body, picked up in Tier 5/6): supervisor-binary launch (waits on T-062/T-069 binary target), --no-detach log-tail (waits on supervisor), actual zellij subprocess invocation (supervisor side per R2), file lock $STATE/locks/{id}.lock (T-064).
+Deferrals from T-087 spawn (noted in commit bodies, picked up in Tier 5/6): supervisor-binary launch (waits on T-062/T-069 binary target), --no-detach log-tail (waits on supervisor), file lock $STATE/locks/{id}.lock (T-064). Layout KDL rendering IS implemented (F-525). Zellij session creation IS implemented (F-516).
 
 **Crate test breakdown:**
 - ark-types: 85 (foundation types)
