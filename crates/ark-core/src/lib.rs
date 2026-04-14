@@ -26,7 +26,9 @@ pub mod socket_paths;
 pub mod status_writer;
 
 pub use config::Config;
-pub use control_socket::{ControlListener, Response, handle_single_request, unlink_if_exists};
+pub use control_socket::{
+    ControlListener, Response, gc_stale_socket, handle_single_request, unlink_if_exists,
+};
 pub use engine::{ApprovalPolicy, Engine, EngineHandle};
 pub use events_log::{EventLogHandle, EventLogReader, EventLogWriter, EventRecord};
 pub use multiplexer::Multiplexer;

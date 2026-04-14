@@ -183,6 +183,89 @@ pub fn unlink_if_exists(path: &Path) {
     }
 }
 
+/// Stale-socket reachability check. Attempts to `connect()` within `timeout`;
+/// on `ECONNREFUSED` or immediate peer-closed-on-handshake, the socket file is
+/// presumed orphaned (supervisor died without cleanup) and this helper unlinks
+/// it. Precedent: kakoune `kak -l` GCs dead sessions this way
+/// (cavekit-hook-ipc.md R4, T-044).
+///
+/// Returns:
+///   - `Ok(true)` if the socket was alive (connect succeeded)
+///   - `Ok(false)` if the socket was unreachable and was unlinked
+///   - `Err(_)` for IO failures that don't match the dead-socket pattern
+///     (e.g. permission-denied) — caller decides how to surface
+pub async fn gc_stale_socket(path: &Path, timeout: std::time::Duration) -> anyhow::Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    // If the path exists but is not a socket, it's leftover from an aborted
+    // bind — unlink + report dead. Also handles exotic file types cheaply
+    // before we spend a connect() attempt on them.
+    if let Ok(meta) = std::fs::metadata(path) {
+        use std::os::unix::fs::FileTypeExt;
+        if !meta.file_type().is_socket() {
+            debug!(
+                ?path,
+                "path exists but is not a unix socket; unlinking as stale"
+            );
+            unlink_if_exists(path);
+            return Ok(false);
+        }
+    }
+
+    let name = path
+        .to_fs_name::<GenericFilePath>()
+        .with_context(|| format!("compute fs-name for socket path {}", path.display()))?;
+
+    let connect = <Stream as interprocess::local_socket::traits::tokio::Stream>::connect(name);
+    match tokio::time::timeout(timeout, connect).await {
+        Ok(Ok(_stream)) => Ok(true),
+        Ok(Err(err)) => {
+            let kind = err.kind();
+            // Any "peer unavailable" shape → treat as stale and unlink.
+            // ENOTSOCK (raw OS 38 on Linux/macOS) lands here when a regular
+            // file masquerades at the path — rare now that the metadata
+            // check above handles it, but keep the fallback.
+            if matches!(
+                kind,
+                std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::NotFound
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::UnexpectedEof
+            ) || err.raw_os_error() == Some(libc_enotsock())
+            {
+                debug!(?path, %err, "stale control socket; unlinking");
+                unlink_if_exists(path);
+                Ok(false)
+            } else {
+                Err(err).with_context(|| format!("probe control socket {}", path.display()))
+            }
+        }
+        Err(_) => {
+            debug!(
+                ?path,
+                ?timeout,
+                "control socket probe timed out; treating as stale"
+            );
+            unlink_if_exists(path);
+            Ok(false)
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn libc_enotsock() -> i32 {
+    88
+}
+
+#[cfg(not(target_os = "linux"))]
+fn libc_enotsock() -> i32 {
+    // Linux: ENOTSOCK = 88. macOS/BSDs: ENOTSOCK = 38.
+    // We only probe against sockets, so any mismatch falls through to Err.
+    38
+}
+
 /// Read one NDJSON request, dispatch to `handler`, write the response, flush,
 /// close. Caller spawns this per connection in its serve loop.
 ///
@@ -491,5 +574,48 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(2), server)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn gc_stale_socket_missing_path_is_ok_false() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("ghost.sock");
+        let alive = gc_stale_socket(&path, Duration::from_millis(100))
+            .await
+            .unwrap();
+        assert!(!alive, "missing path should report dead");
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn gc_stale_socket_bare_file_is_unlinked() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("stale.sock");
+        // A plain file at the socket path simulates a crashed supervisor's
+        // leftover: it exists on disk but nothing is listening on it.
+        std::fs::write(&path, b"").unwrap();
+        assert!(path.exists());
+
+        let alive = gc_stale_socket(&path, Duration::from_millis(100))
+            .await
+            .unwrap();
+        assert!(!alive, "dead socket should report false");
+        assert!(!path.exists(), "dead socket should be unlinked");
+    }
+
+    #[tokio::test]
+    async fn gc_stale_socket_live_listener_reports_alive() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("live.sock");
+        let listener = ControlListener::bind(&path).await.unwrap();
+        let sock_path = listener.path().to_path_buf();
+
+        let alive = gc_stale_socket(&sock_path, Duration::from_millis(500))
+            .await
+            .unwrap();
+        assert!(alive, "bound socket should report alive");
+        assert!(sock_path.exists(), "live socket must not be unlinked");
+
+        drop(listener);
     }
 }
