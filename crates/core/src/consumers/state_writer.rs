@@ -243,10 +243,13 @@ fn update_status(
             }
         }
         AgentEvent::Done { outcome, .. } => {
+            // F-088: Killed and Timeout are distinct terminal phases; do
+            // NOT collapse them into Done (which means "successful").
             status.phase = match outcome {
                 Outcome::Success { .. } => Phase::Done,
                 Outcome::Failed { .. } => Phase::Failed,
-                Outcome::Killed | Outcome::Timeout => Phase::Done,
+                Outcome::Killed => Phase::Killed,
+                Outcome::Timeout => Phase::Timeout,
                 Outcome::Crashed { .. } => Phase::Crashed,
             };
         }
@@ -294,6 +297,8 @@ fn phase_slug(p: Phase) -> &'static str {
         Phase::Done => "done",
         Phase::Failed => "failed",
         Phase::Crashed => "crashed",
+        Phase::Killed => "killed",
+        Phase::Timeout => "timeout",
     }
 }
 
@@ -307,6 +312,8 @@ fn parse_phase(slug: &str) -> Option<Phase> {
         "done" => Phase::Done,
         "failed" => Phase::Failed,
         "crashed" => Phase::Crashed,
+        "killed" => Phase::Killed,
+        "timeout" => Phase::Timeout,
         _ => return None,
     })
 }

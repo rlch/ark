@@ -13,6 +13,13 @@ use crate::spec::AgentSpec;
 ///
 /// Phases are emitted as `PhaseTransition` events as well; see
 /// cavekit-types-state-events.md R6.
+///
+/// # Terminal phases
+///
+/// `Done`, `Failed`, `Crashed`, `Killed`, and `Timeout` are terminal.
+/// F-088: `Killed` and `Timeout` must NOT be conflated with `Done` —
+/// forced/timeout termination is not a successful outcome, and picker /
+/// `ark list` surfaces need the distinction.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
@@ -24,6 +31,10 @@ pub enum Phase {
     Done,
     Failed,
     Crashed,
+    /// Forced termination via `ark kill` / SIGTERM grace expiry.
+    Killed,
+    /// Orchestrator-driven timeout (e.g. stall detector escalated).
+    Timeout,
 }
 
 /// Rollup of review findings by severity. See
@@ -126,6 +137,8 @@ mod tests {
             (Phase::Done, "\"done\""),
             (Phase::Failed, "\"failed\""),
             (Phase::Crashed, "\"crashed\""),
+            (Phase::Killed, "\"killed\""),
+            (Phase::Timeout, "\"timeout\""),
         ];
         for (phase, expected) in cases {
             let json = serde_json::to_string(&phase).expect("ser");
@@ -133,6 +146,16 @@ mod tests {
             let back: Phase = serde_json::from_str(&json).expect("de");
             assert_eq!(back, phase);
         }
+    }
+
+    /// F-088 regression: Killed and Timeout are distinct from Done.
+    #[test]
+    fn killed_and_timeout_are_distinct_from_done() {
+        assert_ne!(Phase::Killed, Phase::Done);
+        assert_ne!(Phase::Timeout, Phase::Done);
+        assert_ne!(Phase::Killed, Phase::Timeout);
+        assert_ne!(Phase::Killed, Phase::Failed);
+        assert_ne!(Phase::Timeout, Phase::Failed);
     }
 
     #[test]

@@ -11,7 +11,7 @@
 use std::any::Any;
 use std::path::{Path, PathBuf};
 
-use ark_types::EventSink;
+use ark_types::{AgentId, EventSink};
 use async_trait::async_trait;
 
 /// Policy for auto-approving engine permission prompts.
@@ -80,8 +80,14 @@ pub trait Engine: Send + Sync + 'static {
     /// Install per-pane hooks, transcript watchers, etc. Must be idempotent —
     /// safe to invoke twice on the same `cwd`. Runs before the orchestrator
     /// launches the agent process so no early events are lost.
+    ///
+    /// `id` is the authoritative [`AgentId`] from the supervisor's
+    /// [`ark_types::AgentSpec`]. Engines MUST key hook commands / transcript
+    /// routing / log context on this id (never fabricate a synthetic one)
+    /// so events flow under the identity the supervisor is listening for.
     async fn install_observability(
         &self,
+        id: &AgentId,
         cwd: &Path,
         sink: EventSink,
     ) -> anyhow::Result<EngineHandle>;
@@ -113,6 +119,7 @@ mod tests {
 
     struct MockState {
         installed_at: PathBuf,
+        installed_for: AgentId,
     }
 
     #[async_trait]
@@ -123,6 +130,7 @@ mod tests {
 
         async fn install_observability(
             &self,
+            id: &AgentId,
             cwd: &Path,
             _sink: EventSink,
         ) -> anyhow::Result<EngineHandle> {
@@ -130,6 +138,7 @@ mod tests {
                 "mock",
                 MockState {
                     installed_at: cwd.to_path_buf(),
+                    installed_for: id.clone(),
                 },
             ))
         }
@@ -166,8 +175,9 @@ mod tests {
         assert!(engine.transcript_path(Path::new("/tmp")).is_none());
 
         let (sink, _rx) = tokio::sync::broadcast::channel::<ark_types::AgentEvent>(8);
+        let id = AgentId::new("cavekit", "mock");
         let handle = engine
-            .install_observability(Path::new("/tmp/cwd"), sink)
+            .install_observability(&id, Path::new("/tmp/cwd"), sink)
             .await
             .unwrap();
         assert_eq!(handle.engine_name(), "mock");
@@ -175,6 +185,7 @@ mod tests {
         // Downcast round-trip.
         let state = handle.downcast::<MockState>().expect("downcast mock state");
         assert_eq!(state.installed_at, PathBuf::from("/tmp/cwd"));
+        assert_eq!(state.installed_for, id);
     }
 
     #[test]

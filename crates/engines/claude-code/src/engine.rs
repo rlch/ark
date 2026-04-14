@@ -38,7 +38,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use ark_core::engine::{ApprovalPolicy, Engine, EngineHandle as CoreEngineHandle};
-use ark_types::{EventSink, PermissionPolicy};
+use ark_types::{AgentId, EventSink, PermissionPolicy};
 use async_trait::async_trait;
 
 use crate::handle::EngineHandle as ClaudeHandle;
@@ -71,37 +71,19 @@ impl Engine for ClaudeCodeEngine {
 
     async fn install_observability(
         &self,
+        id: &AgentId,
         cwd: &Path,
         _sink: EventSink,
     ) -> Result<CoreEngineHandle> {
-        // The supervisor is responsible for handing us the `AgentId` via the
-        // `spec` before it invokes `install_observability`, but the trait
-        // signature does not carry one. For v1 we encode the worktree path
-        // into a stable synthetic id — the hook marker only needs something
-        // stable per-cwd to make re-installs idempotent. A follow-up packet
-        // refines this contract; for T-069 this is enough plumbing for the
-        // supervisor smoke tests.
-        //
-        // NOTE: we do NOT emit the ark-hook entries from a fake id in
-        // production — callers that want real observability should invoke
-        // `crate::settings::inject_hooks` directly with the real spec id.
-        // The supervisor does exactly that (it calls `inject_hooks` before
-        // handing the handle back into `teardown`).
-        //
-        // We still produce a valid `ClaudeHandle` so teardown restores
-        // `.claude/settings.local.json` correctly.
-        let slug = synthesize_slug(cwd);
-        let synthetic_id = ark_types::AgentId::new("claude-code", &slug);
+        // The supervisor passes the authoritative `AgentId` from the spec
+        // (see [`Engine::install_observability`] contract). We key every
+        // hook command + the teardown handle on that id so events published
+        // by `ark-hook` flow under the identity the supervisor is listening
+        // for (cavekit-engines-claude-code R1 / F-085).
+        inject_hooks(cwd, id, DEFAULT_HOOK_EVENTS, env!("CARGO_PKG_VERSION"))
+            .with_context(|| format!("inject ark hooks into {}", cwd.display()))?;
 
-        inject_hooks(
-            cwd,
-            &synthetic_id,
-            DEFAULT_HOOK_EVENTS,
-            env!("CARGO_PKG_VERSION"),
-        )
-        .with_context(|| format!("inject ark hooks into {}", cwd.display()))?;
-
-        let handle = ClaudeHandle::new(cwd.to_path_buf(), synthetic_id);
+        let handle = ClaudeHandle::new(cwd.to_path_buf(), id.clone());
 
         Ok(CoreEngineHandle::new("claude-code", handle))
     }
@@ -136,24 +118,6 @@ impl Engine for ClaudeCodeEngine {
             .with_context(|| format!("write permission policy under {}", cwd.display()))?;
         Ok(())
     }
-}
-
-/// Derive a stable 26-char ULID-shaped slug from `cwd` so [`AgentId::new`]
-/// accepts it. `AgentId::new` produces a fresh ULID suffix per call — which
-/// is fine for our synthetic "claude-code-{cwd-hash}" id since it only
-/// namespaces the hooks-marker; idempotency is enforced by the marker's
-/// checksum, not by the id.
-fn synthesize_slug(cwd: &Path) -> String {
-    let base = cwd
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("worktree");
-    // Sanitize to AgentId-friendly characters.
-    base.chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-        .take(16)
-        .collect::<String>()
-        .to_lowercase()
 }
 
 #[cfg(test)]
@@ -193,8 +157,9 @@ mod tests {
 
         let engine = ClaudeCodeEngine::new();
         let (sink, _rx) = ark_types::channel(8);
+        let id = AgentId::new("cavekit", "install-roundtrip");
         let handle = engine
-            .install_observability(&cwd, sink)
+            .install_observability(&id, &cwd, sink)
             .await
             .expect("install");
         assert_eq!(handle.engine_name(), "claude-code");
@@ -214,6 +179,43 @@ mod tests {
                 .join("settings.local.json.ark-backup")
                 .exists()
         );
+    }
+
+    /// F-085 regression: the injected ark-hook command must contain the
+    /// REAL agent id the supervisor passed in — not a synthetic fabricated
+    /// one. Hook events emitted by the real Claude Code process must be
+    /// keyed on the id the supervisor is subscribed to.
+    #[tokio::test]
+    async fn install_observability_injects_real_agent_id_into_hook_cmd() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path().to_path_buf();
+        std::fs::create_dir_all(cwd.join(".claude")).unwrap();
+
+        let engine = ClaudeCodeEngine::new();
+        let (sink, _rx) = ark_types::channel(8);
+        let real_id = AgentId::new("cavekit", "f085-regression");
+        let real_id_str = real_id.as_str().to_string();
+
+        let handle = engine
+            .install_observability(&real_id, &cwd, sink)
+            .await
+            .expect("install");
+
+        // Read back the injected settings.local.json and confirm the hook
+        // command wires the REAL id.
+        let raw = std::fs::read_to_string(cwd.join(".claude").join("settings.local.json"))
+            .expect("settings.local.json written");
+        assert!(
+            raw.contains(&format!("ark-hook --id {real_id_str}")),
+            "expected hook command keyed on real id `{real_id_str}`, got: {raw}"
+        );
+
+        // And confirm the returned handle remembers the same id (used at
+        // teardown for log context + hook stripping).
+        let inner = handle
+            .downcast::<ClaudeHandle>()
+            .expect("downcast claude handle");
+        assert_eq!(inner.agent_id(), &real_id);
     }
 
     #[tokio::test]

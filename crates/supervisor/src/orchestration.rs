@@ -54,7 +54,9 @@ use tracing::{debug, info, warn};
 
 use crate::commands::{SupervisorCommandCtx, SupervisorCommandHandler};
 use crate::control_socket::{ControlCommandHandler, bind_control_socket, shutdown};
+use crate::kill::{TabRegistry, apply_tab_event, new_tab_registry};
 use crate::lock::{LockGuard, acquire_lock};
+use crate::signals::install_signal_handlers;
 
 /// Which boot path reached [`run_supervisor`].
 ///
@@ -186,6 +188,44 @@ pub async fn run_supervisor_with(
         .context("bind control socket")?;
     debug!(path = %socket_handle.path().display(), "R3 step 3: control socket bound");
 
+    // F-087: install the SIGTERM/SIGINT handler now that the control socket
+    // exists. `install_signal_handlers` returns a `SignalTaskHandle` we MUST
+    // keep alive for the whole run — dropping it aborts the signal task. On
+    // normal exit (end of this fn) the Drop fires and aborts cleanly.
+    let _signal_task = install_signal_handlers(socket_handle.path().to_path_buf(), cancel.clone())
+        .await
+        .context("install signal handlers")?;
+    debug!("F-087: SIGTERM/SIGINT handlers installed");
+
+    // F-086: shared tab registry — populated by a long-running bus
+    // subscriber that mutates on every TabOpened / TabClosed. `kill_handler`
+    // reads this at grace expiry to close every still-open tab. Must be
+    // subscribed BEFORE any TabOpened can be emitted (hence: before step 10
+    // install_observability and before step 13 orchestrator.run).
+    let tab_registry: TabRegistry = new_tab_registry();
+    let tab_registry_feeder = {
+        let mut rx = events.subscribe();
+        let registry = tab_registry.clone();
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    recv = rx.recv() => match recv {
+                        Ok(ev) => apply_tab_event(&registry, &ev),
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            warn!(
+                                skipped = n,
+                                "tab registry feeder: bus lag; tab set may be stale"
+                            );
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            }
+        })
+    };
+
     // ---- Step 4: logging ----
     // Assumed installed by daemonize/foreground. A global tracing
     // subscriber can only be set once process-wide, and either the daemon
@@ -264,8 +304,11 @@ pub async fn run_supervisor_with(
     debug!("R3 step 9: consumer tasks spawned");
 
     // ---- Step 10: install observability ----
+    //
+    // F-085: thread the real `spec.id` through so the engine keys its hook
+    // commands / handle on the identity the supervisor subscribes to.
     let engine_handle = engine
-        .install_observability(&spec.cwd, events.clone())
+        .install_observability(&spec.id, &spec.cwd, events.clone())
         .await
         .context("engine install_observability")?;
     debug!(
@@ -336,6 +379,16 @@ pub async fn run_supervisor_with(
     cancel.cancel();
     drain_consumers(&mut consumers, std::time::Duration::from_secs(5)).await;
     debug!("R3 step 14: consumers drained");
+
+    // F-086: the tab-registry feeder task is cancelled via the shared
+    // cancel token above. Drop its JoinHandle once the bus is closed —
+    // `abort` is a no-op if the task has already exited.
+    tab_registry_feeder.abort();
+    let _ = tab_registry_feeder.await;
+    // Registry itself is retained by nothing here post-drain; `_tab_registry`
+    // exists only so `kill_handler` paths outside the happy path (a real
+    // SIGTERM mid-run) can see non-empty state. On clean exit we drop it.
+    drop(tab_registry);
 
     // ---- Step 15: engine teardown ----
     if let Err(err) = engine.teardown(engine_handle).await {
@@ -441,10 +494,14 @@ pub fn finalize_state(
             s
         }
     };
+    // F-088: Killed and Timeout are distinct terminal states from Done.
+    // Conflating them with Done misreports forced/timeout termination as
+    // success on `ark list` / picker surfaces.
     status.phase = match outcome {
         Outcome::Success { .. } => Phase::Done,
         Outcome::Failed { .. } => Phase::Failed,
-        Outcome::Killed | Outcome::Timeout => Phase::Done,
+        Outcome::Killed => Phase::Killed,
+        Outcome::Timeout => Phase::Timeout,
         Outcome::Crashed { .. } => Phase::Crashed,
     };
     status.last_event_at = chrono::Utc::now();
@@ -506,6 +563,7 @@ mod tests {
         }
         async fn install_observability(
             &self,
+            _id: &ark_types::AgentId,
             _cwd: &std::path::Path,
             _sink: ark_types::EventSink,
         ) -> Result<ark_core::engine::EngineHandle> {
@@ -666,6 +724,54 @@ mod tests {
         StateLayout::new(base.join("state"), base.join("rt"), base.join("cfg"))
     }
 
+    /// F-087 regression: `run_supervisor_with` installs SIGTERM/SIGINT
+    /// handlers via `signals::install_signal_handlers` so a real signal
+    /// unwinds the run cleanly. Pre-fix, the T-067 code path was dead —
+    /// a real signal left the socket stale and no cancel fired.
+    ///
+    /// The direct behavioural verification of the signal path lives in
+    /// [`crate::signals::tests::sigterm_unlinks_socket_and_cancels`] which
+    /// exercises the exact `install_signal_handlers` API against a raised
+    /// SIGTERM. This test adds an integration-level assertion that
+    /// `run_supervisor_with` actually reaches and succeeds the handler-
+    /// install call: if the step silently no-op'd or the call returned
+    /// `Err`, `run_supervisor_with` would propagate the error and this
+    /// test would fail.
+    ///
+    /// We do NOT raise an actual signal here — cross-test signal raising
+    /// (signal_hook delivers to EVERY registered handler in the process)
+    /// causes flaky interactions with `crate::signals::tests::*` which
+    /// already raise SIGTERM/SIGINT on the same test binary.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_supervisor_with_installs_signal_handlers_without_error() {
+        let tmp = short_tempdir();
+        let layout = layout_at(tmp.path());
+        let spec = sample_spec();
+
+        let result = run_supervisor_with(
+            spec.clone(),
+            SupervisorMode::Foreground,
+            Config::placeholder(),
+            layout.clone(),
+            Box::new(StubEngine),
+            Box::new(InstantSuccessOrchestrator),
+            Arc::new(StubMux),
+            false,
+        )
+        .await
+        .expect("run_supervisor_with ok (signal handler install path must not error)");
+        assert!(matches!(result, Outcome::Success { .. }));
+
+        // Socket must be unlinked on the way out — same invariant the
+        // signal handler's `unlink_if_exists` path protects on SIGTERM.
+        let sock = layout.agent_socket_path(&spec.id);
+        assert!(
+            !sock.exists(),
+            "socket must be unlinked after clean shutdown: {}",
+            sock.display()
+        );
+    }
+
     #[test]
     fn finalize_state_success_maps_to_done() {
         let tmp = short_tempdir();
@@ -715,6 +821,34 @@ mod tests {
         .expect("finalize");
         let s = ark_core::read_status(&layout, &id).unwrap().unwrap();
         assert_eq!(s.phase, Phase::Crashed);
+    }
+
+    /// F-088 regression: Outcome::Killed → Phase::Killed (not Done).
+    #[test]
+    fn finalize_state_killed_maps_to_killed() {
+        let tmp = short_tempdir();
+        let layout = layout_at(tmp.path());
+        let id = AgentId::new("cavekit", "killed");
+        StateLayout::ensure_dir_0700(&layout.agent_dir(&id)).unwrap();
+        finalize_state(&layout, &id, 42, &Outcome::Killed).expect("finalize");
+        let s = ark_core::read_status(&layout, &id).unwrap().unwrap();
+        assert_eq!(s.phase, Phase::Killed);
+        assert_ne!(s.phase, Phase::Done, "must not be misreported as success");
+        assert!(s.last_event_summary.contains("killed"));
+    }
+
+    /// F-088 regression: Outcome::Timeout → Phase::Timeout (not Done).
+    #[test]
+    fn finalize_state_timeout_maps_to_timeout() {
+        let tmp = short_tempdir();
+        let layout = layout_at(tmp.path());
+        let id = AgentId::new("cavekit", "timeout");
+        StateLayout::ensure_dir_0700(&layout.agent_dir(&id)).unwrap();
+        finalize_state(&layout, &id, 42, &Outcome::Timeout).expect("finalize");
+        let s = ark_core::read_status(&layout, &id).unwrap().unwrap();
+        assert_eq!(s.phase, Phase::Timeout);
+        assert_ne!(s.phase, Phase::Done, "must not be misreported as success");
+        assert!(s.last_event_summary.contains("timeout"));
     }
 
     #[test]

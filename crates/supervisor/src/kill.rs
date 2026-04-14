@@ -23,19 +23,24 @@
 //!
 //! # Tab teardown
 //!
-//! The handler subscribes to the event bus (via the provided `EventSink`
-//! → a new receiver) and tracks every `TabOpened` / `TabClosed` pair it
-//! observed up to the point `kill_handler` was called. Callers MUST
-//! construct `kill_handler` by first taking the full receiver stream so
-//! the grace-expiry path can enumerate still-open tabs.
+//! `kill_handler` does NOT subscribe to the event bus itself — if it did,
+//! every `TabOpened` emitted *before* kill time would be invisible and the
+//! R4 "close every still-open tab" contract would break (see F-086).
+//!
+//! Instead the caller (orchestration.rs `run_supervisor_with`) maintains a
+//! long-lived `Arc<Mutex<Vec<TabHandle>>>` populated by its persistent bus
+//! subscriber: `TabOpened` appends, `TabClosed` removes. At SIGTERM the
+//! caller hands the same Arc into [`kill_handler`] and the grace-expiry
+//! path closes whatever remains open. Callers MUST keep the registry's
+//! feeding subscriber alive for the lifetime of the supervisor so tabs
+//! opened *any time* before kill are represented.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
 use ark_core::Multiplexer;
 use ark_types::{AgentEvent, AgentId, EventSink, LogLevel, Outcome, TabHandle};
-use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
@@ -43,6 +48,44 @@ use tracing::{debug, warn};
 ///
 /// Overridable from `config.defaults.kill_grace` (Tier 4 wiring).
 pub const DEFAULT_KILL_GRACE: Duration = Duration::from_secs(10);
+
+/// Shared tab registry feeding [`kill_handler`]: a [`Vec<TabHandle>`] behind
+/// an `Arc<Mutex>` that the caller mutates on every `TabOpened` /
+/// `TabClosed` event observed on its persistent bus subscriber.
+///
+/// The caller (orchestration.rs `run_supervisor_with`) spawns a long-lived
+/// task that owns a `broadcast::Receiver` for the full life of the run,
+/// mutating this registry as events arrive. At kill time the same Arc is
+/// handed into [`kill_handler`] which iterates whatever is still open.
+///
+/// This replaces the pre-F-086 design where `kill_handler` subscribed to
+/// the bus at kill time — which was unable to see `TabOpened` events
+/// emitted earlier in the run.
+pub type TabRegistry = Arc<Mutex<Vec<TabHandle>>>;
+
+/// Construct an empty [`TabRegistry`] suitable for feeding [`kill_handler`].
+pub fn new_tab_registry() -> TabRegistry {
+    Arc::new(Mutex::new(Vec::new()))
+}
+
+/// Apply a single [`AgentEvent`] to the shared registry: append on
+/// [`AgentEvent::TabOpened`], remove on [`AgentEvent::TabClosed`], ignore
+/// everything else. Safe to call from the caller's persistent bus loop.
+pub fn apply_tab_event(registry: &TabRegistry, ev: &AgentEvent) {
+    match ev {
+        AgentEvent::TabOpened { tab_handle, .. } => {
+            let mut g = registry.lock().expect("tab_registry lock poisoned");
+            if !g.iter().any(|h| h == tab_handle) {
+                g.push(tab_handle.clone());
+            }
+        }
+        AgentEvent::TabClosed { tab_handle, .. } => {
+            let mut g = registry.lock().expect("tab_registry lock poisoned");
+            g.retain(|h| h != tab_handle);
+        }
+        _ => {}
+    }
+}
 
 /// Handle a SIGTERM / "gracefully kill" request.
 ///
@@ -52,8 +95,8 @@ pub const DEFAULT_KILL_GRACE: Duration = Duration::from_secs(10);
 ///    externally-owned signal (the `orchestrator_done` token).
 /// 3. If grace expires: emit `Log { level: Warn, line: "grace expired" }`
 ///    and a synthetic `Done { outcome: Killed }` (the "Kill event" per
-///    kit) on the bus. Close every tab the agent opened via `TabOpened`
-///    that was not subsequently `TabClosed`.
+///    kit) on the bus. Close every tab in `tab_registry` (populated by
+///    the caller's persistent bus subscriber).
 /// 4. Return `Outcome::Killed`.
 ///
 /// # Parameters
@@ -64,10 +107,11 @@ pub const DEFAULT_KILL_GRACE: Duration = Duration::from_secs(10);
 ///   expires, this handler shortcuts the tab-teardown path and simply
 ///   returns `Outcome::Killed`.
 /// * `event_bus` — sender half of the supervisor event bus. Used to
-///   publish the grace-expired `Log` + synthetic `Done` events, AND
-///   subscribed to *before* step 1 to track `TabOpened` / `TabClosed`.
+///   publish the grace-expired `Log` + synthetic `Done` events.
 /// * `mux` — the active multiplexer; `close_tab` is called on every
 ///   still-open tab after grace expires.
+/// * `tab_registry` — shared open-tab state populated by the caller's
+///   long-running bus subscriber. See [`TabRegistry`] / F-086.
 /// * `agent_id` — supervisor's agent id (for synthesised events).
 /// * `grace` — max wait before escalating. Use [`DEFAULT_KILL_GRACE`]
 ///   for R4's 10s default.
@@ -77,13 +121,10 @@ pub async fn kill_handler(
     orchestrator_done: CancellationToken,
     event_bus: EventSink,
     mux: Arc<dyn Multiplexer>,
+    tab_registry: TabRegistry,
     agent_id: AgentId,
     grace: Duration,
 ) -> Result<Outcome> {
-    // Snapshot already-subscribed receiver so TabOpened / TabClosed events
-    // flowing in while we wait for grace are observed.
-    let mut rx = event_bus.subscribe();
-
     // Step 1: signal cancel to orchestrator + consumers.
     cancel.cancel();
     debug!(
@@ -92,18 +133,13 @@ pub async fn kill_handler(
         "kill_handler: cancel fired; awaiting orchestrator"
     );
 
-    // Track open tabs we observe from the event stream.
-    let mut open_tabs: Vec<TabHandle> = Vec::new();
-
     let grace_expired = tokio::select! {
         biased;
         _ = orchestrator_done.cancelled() => {
             debug!(agent = agent_id.as_str(), "kill_handler: orchestrator returned before grace");
             false
         }
-        _ = collect_tabs_until(&mut rx, &mut open_tabs, grace) => {
-            true
-        }
+        _ = tokio::time::sleep(grace) => true,
     };
 
     if !grace_expired {
@@ -135,7 +171,13 @@ pub async fn kill_handler(
         warn!(%err, "kill_handler: could not emit Kill (Done/Killed) event");
     }
 
-    // Step 4: close every still-open tab.
+    // Step 4: close every still-open tab (snapshot the registry under the
+    // lock, then release before the async close_tab calls so the lock is
+    // not held across await points).
+    let open_tabs: Vec<TabHandle> = {
+        let g = tab_registry.lock().expect("tab_registry lock poisoned");
+        g.clone()
+    };
     if open_tabs.is_empty() {
         debug!(
             agent = agent_id.as_str(),
@@ -155,49 +197,6 @@ pub async fn kill_handler(
     }
 
     Ok(Outcome::Killed)
-}
-
-/// Subscribe-loop helper: drains events from `rx` for `window`, mutating
-/// `open_tabs` on every observed `TabOpened` / `TabClosed` pair.
-///
-/// Returns when `window` elapses, regardless of recv activity.
-async fn collect_tabs_until(
-    rx: &mut tokio::sync::broadcast::Receiver<AgentEvent>,
-    open_tabs: &mut Vec<TabHandle>,
-    window: Duration,
-) {
-    let deadline = tokio::time::Instant::now() + window;
-    loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            return;
-        }
-        match tokio::time::timeout(remaining, rx.recv()).await {
-            Err(_) => return, // timeout reached
-            Ok(Ok(ev)) => merge_tab_event(open_tabs, &ev),
-            Ok(Err(RecvError::Lagged(n))) => {
-                warn!(
-                    skipped = n,
-                    "kill_handler: event bus lag during grace window; tab set may be incomplete"
-                );
-            }
-            Ok(Err(RecvError::Closed)) => return,
-        }
-    }
-}
-
-fn merge_tab_event(open_tabs: &mut Vec<TabHandle>, ev: &AgentEvent) {
-    match ev {
-        AgentEvent::TabOpened { tab_handle, .. } => {
-            if !open_tabs.iter().any(|h| h == tab_handle) {
-                open_tabs.push(tab_handle.clone());
-            }
-        }
-        AgentEvent::TabClosed { tab_handle, .. } => {
-            open_tabs.retain(|h| h != tab_handle);
-        }
-        _ => {}
-    }
 }
 
 #[cfg(test)]
@@ -262,6 +261,7 @@ mod tests {
         let done = CancellationToken::new();
         let (tx, _rx) = channel(16);
         let mux = StubMux::new();
+        let registry = new_tab_registry();
 
         // Trip orchestrator_done immediately — kill_handler should
         // shortcut and return Killed without waiting.
@@ -272,6 +272,7 @@ mod tests {
             done,
             tx,
             mux.clone(),
+            registry,
             agent(),
             Duration::from_secs(5),
         )
@@ -286,53 +287,88 @@ mod tests {
         );
     }
 
+    /// F-086: kill with empty tab_registry returns Killed with zero
+    /// `close_tab` calls.
     #[tokio::test]
-    async fn grace_expires_closes_tabs_and_emits_events() {
+    async fn kill_with_empty_registry_closes_nothing() {
+        let cancel = CancellationToken::new();
+        let done = CancellationToken::new();
+        let (tx, _rx) = channel(8);
+        let mux = StubMux::new();
+        let registry = new_tab_registry();
+
+        let outcome = kill_handler(
+            cancel.clone(),
+            done,
+            tx,
+            mux.clone(),
+            registry,
+            agent(),
+            Duration::from_millis(120),
+        )
+        .await
+        .expect("ok");
+
+        assert!(matches!(outcome, Outcome::Killed));
+        assert!(cancel.is_cancelled());
+        assert!(
+            mux.closed().is_empty(),
+            "empty registry → no close calls, got {:?}",
+            mux.closed()
+        );
+    }
+
+    /// F-086: kill with a pre-populated registry containing TabOpened-
+    /// derived handles closes each of them and emits both the Warn log
+    /// and the synthetic Done/Killed event.
+    #[tokio::test]
+    async fn kill_with_two_open_tabs_closes_both_and_emits_events() {
         let cancel = CancellationToken::new();
         let done = CancellationToken::new();
         let (tx, mut rx) = channel(32);
         let mux = StubMux::new();
 
-        let id = agent();
         let tab_a = TabHandle::new("ark-cavekit-kill", 1, "builder");
         let tab_b = TabHandle::new("ark-cavekit-kill", 2, "log");
 
-        // Fire TabOpened for two tabs BEFORE kill_handler subscribes —
-        // kill_handler subscribes inside, so those won't be seen. Fire
-        // them during the grace window instead.
-        let tx2 = tx.clone();
-        let id2 = id.clone();
-        let emit = tokio::spawn(async move {
-            // small delay so kill_handler has subscribed.
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            let _ = tx2.send(AgentEvent::TabOpened {
-                id: id2.clone(),
+        // Pre-populate registry via apply_tab_event to match how the
+        // caller's persistent bus loop would feed it (simulating events
+        // seen BEFORE kill fires).
+        let registry = new_tab_registry();
+        let id = agent();
+        apply_tab_event(
+            &registry,
+            &AgentEvent::TabOpened {
+                id: id.clone(),
                 parent: None,
                 role: TabRole::Builder,
                 tab_handle: tab_a.clone(),
                 label: "builder".into(),
-            });
-            let _ = tx2.send(AgentEvent::TabOpened {
-                id: id2.clone(),
+            },
+        );
+        apply_tab_event(
+            &registry,
+            &AgentEvent::TabOpened {
+                id: id.clone(),
                 parent: None,
                 role: TabRole::Log,
                 tab_handle: tab_b.clone(),
                 label: "log".into(),
-            });
-        });
+            },
+        );
+        assert_eq!(registry.lock().unwrap().len(), 2);
 
-        // Short grace so the test finishes fast.
         let outcome = kill_handler(
             cancel.clone(),
             done,
             tx.clone(),
             mux.clone(),
+            registry,
             id.clone(),
-            Duration::from_millis(300),
+            Duration::from_millis(120),
         )
         .await
         .expect("ok");
-        emit.await.unwrap();
 
         assert!(matches!(outcome, Outcome::Killed));
 
@@ -363,80 +399,96 @@ mod tests {
         assert!(saw_kill, "expected synthetic Done/Killed event");
     }
 
+    /// F-086: A TabClosed event removes the handle from the registry, so
+    /// kill_handler does not re-close it when grace expires.
     #[tokio::test]
-    async fn grace_expires_with_no_tabs_still_returns_killed() {
+    async fn tab_closed_before_kill_removed_from_registry_not_closed_again() {
         let cancel = CancellationToken::new();
         let done = CancellationToken::new();
-        let (tx, _rx) = channel(8);
+        let (tx, _rx) = channel(16);
         let mux = StubMux::new();
-
-        let outcome = kill_handler(
-            cancel.clone(),
-            done,
-            tx,
-            mux.clone(),
-            agent(),
-            Duration::from_millis(120),
-        )
-        .await
-        .expect("ok");
-
-        assert!(matches!(outcome, Outcome::Killed));
-        assert!(cancel.is_cancelled());
-        assert!(
-            mux.closed().is_empty(),
-            "no tabs opened → no close calls, got {:?}",
-            mux.closed()
-        );
-    }
-
-    #[tokio::test]
-    async fn tab_closed_during_grace_removes_from_close_set() {
-        let cancel = CancellationToken::new();
-        let done = CancellationToken::new();
-        let (tx, _rx) = channel(32);
-        let mux = StubMux::new();
-
+        let registry = new_tab_registry();
         let id = agent();
         let tab = TabHandle::new("ark-cavekit-kill", 1, "builder");
-        let tab_clone = tab.clone();
 
-        let tx2 = tx.clone();
-        let id2 = id.clone();
-        let emit = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(30)).await;
-            let _ = tx2.send(AgentEvent::TabOpened {
-                id: id2.clone(),
+        // Pre-populate: open then close.
+        apply_tab_event(
+            &registry,
+            &AgentEvent::TabOpened {
+                id: id.clone(),
                 parent: None,
                 role: TabRole::Builder,
-                tab_handle: tab_clone.clone(),
+                tab_handle: tab.clone(),
                 label: "builder".into(),
-            });
-            tokio::time::sleep(Duration::from_millis(30)).await;
-            let _ = tx2.send(AgentEvent::TabClosed {
-                id: id2.clone(),
-                tab_handle: tab_clone,
-            });
-        });
+            },
+        );
+        apply_tab_event(
+            &registry,
+            &AgentEvent::TabClosed {
+                id: id.clone(),
+                tab_handle: tab.clone(),
+            },
+        );
+        assert!(registry.lock().unwrap().is_empty());
 
         let outcome = kill_handler(
             cancel,
             done,
-            tx.clone(),
+            tx,
             mux.clone(),
+            registry,
             id,
-            Duration::from_millis(200),
+            Duration::from_millis(80),
         )
         .await
         .expect("ok");
-        emit.await.unwrap();
-
         assert!(matches!(outcome, Outcome::Killed));
         assert!(
             mux.closed().is_empty(),
-            "tab was closed during grace → not re-closed, got {:?}",
+            "already-closed tab must NOT be re-closed, got {:?}",
             mux.closed()
         );
+    }
+
+    /// F-086 regression: tabs opened BEFORE kill_handler is called MUST
+    /// still be closed. Pre-fix, kill_handler subscribed inside and could
+    /// not see historical events.
+    #[tokio::test]
+    async fn tabs_opened_before_kill_are_still_closed_at_grace_expiry() {
+        let cancel = CancellationToken::new();
+        let done = CancellationToken::new();
+        let (tx, _rx) = channel(16);
+        let mux = StubMux::new();
+        let registry = new_tab_registry();
+        let id = agent();
+
+        // Simulate the caller's long-running bus subscriber observing a
+        // TabOpened event BEFORE kill_handler is called.
+        apply_tab_event(
+            &registry,
+            &AgentEvent::TabOpened {
+                id: id.clone(),
+                parent: None,
+                role: TabRole::Builder,
+                tab_handle: TabHandle::new("ark-cavekit-kill", 1, "builder"),
+                label: "builder".into(),
+            },
+        );
+
+        // Kill fires AFTER the event has already been consumed.
+        let outcome = kill_handler(
+            cancel,
+            done,
+            tx,
+            mux.clone(),
+            registry,
+            id,
+            Duration::from_millis(60),
+        )
+        .await
+        .expect("ok");
+        assert!(matches!(outcome, Outcome::Killed));
+        assert_eq!(mux.closed().len(), 1, "pre-kill TabOpened must be closed");
     }
 
     #[tokio::test]
@@ -448,6 +500,7 @@ mod tests {
         let done = CancellationToken::new();
         let (tx, _rx) = channel(16);
         let mux = StubMux::new();
+        let registry = new_tab_registry();
 
         let slow_orchestrator = {
             let cancel = cancel.clone();
@@ -467,7 +520,15 @@ mod tests {
         };
 
         let id = agent();
-        let killer = kill_handler(cancel, done, tx, mux, id, Duration::from_millis(100));
+        let killer = kill_handler(
+            cancel,
+            done,
+            tx,
+            mux,
+            registry,
+            id,
+            Duration::from_millis(100),
+        );
 
         let (killer_out, orch_out) = tokio::join!(killer, slow_orchestrator);
         assert!(matches!(killer_out.expect("ok"), Outcome::Killed));

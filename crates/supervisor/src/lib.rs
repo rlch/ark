@@ -58,7 +58,7 @@ pub use orchestration::{
 
 // T-070: SIGTERM kill handler (cavekit-supervisor R4).
 pub mod kill;
-pub use kill::{DEFAULT_KILL_GRACE, kill_handler};
+pub use kill::{DEFAULT_KILL_GRACE, TabRegistry, apply_tab_event, kill_handler, new_tab_registry};
 
 // T-071: PID liveness + crash detection (cavekit-supervisor R5).
 pub mod crash;
