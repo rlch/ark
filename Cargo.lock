@@ -101,6 +101,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "ark-config",
+ "ark-mux-zellij",
  "ark-orchestrators-cavekit",
  "ark-orchestrators-claude-code",
  "ark-pane",

@@ -374,3 +374,33 @@ ark-cli: 231 baseline → 236 lib + 2 integration = 238 total (+5 net: 1 F-519 r
 ## Test Delta — Cycle 8
 
 ark-cli: 236 baseline → 243 lib + 2 integration = 245 total (+7 net: +1 F-522 `unique_session_name_appends_ulid_prefix`, +3 F-523 `zellij_startup_failure_*` tests, +3 F-524 tests beyond the renamed-and-inverted F-515 test). Slightly over the +3-5 target — the extra tests give each helper its own happy-path + failure-path + guard coverage rather than folding them together. Workspace-wide `cargo test --workspace -- --test-threads=1` was **fully green this cycle** (all 17 test binaries passed) — the prior flaky `ark-orchestrators-cavekit::watchers::*` + `ark-engines-claude-code` tests recovered under the slower `--test-threads=1` pacing. `cargo test -p ark-cli` is green end-to-end. Zero new build warnings. `cargo fmt --all` clean.
+
+## Tier 4 — Cycle 9 (Codex)
+
+### F-525 — P1 spawn must render KDL layout template before launching zellij (FIXED)
+
+**Source:** codex
+**Tier:** 4
+**Severity:** P1
+**Status:** fixed
+**Location:** crates/cli/src/commands/spawn.rs (`run`, new `render_and_write_layout`), crates/cli/Cargo.toml (+ `ark-mux-zellij` dep)
+
+**Description:** `ark spawn` previously handed the raw `--layout` stem (e.g. `"builder"`) straight to `zellij --layout`. But layouts shipped by `ark-mux-zellij` (`builder.kdl`, `classic.kdl`, etc.) are minijinja templates containing `{{ cwd }}`, `{{ agent_cmd }}`, `{{ agent_args }}`, `{{ name }}`, `{{ id }}` — zellij itself rejects unexpanded Jinja tokens as a KDL parse error. The CLI skipped rendering entirely, meaning no real spawn against the shipped templates could work (locked decision #3 in cavekit-layouts: "templates are rendered before launch").
+
+**Resolution:** Added `render_and_write_layout(ctx, spec) -> Result<PathBuf, CliError>` that (1) resolves the layout stem-or-path via `ark_mux_zellij::LayoutResolver::new(Some(config_dir/layouts))` — user override precedence over the 6 shipped templates; (2) renders the template source through `ark_mux_zellij::render_layout` with a `LayoutVars { cwd: spec.cwd.display(), agent_cmd: spec.cmd[0].clone().unwrap_or_default(), agent_args: spec.cmd[1..].to_vec(), id: spec.id.to_string(), name: spec.name.clone() }`; (3) writes the rendered KDL to `{state_dir}/agents/{id}/layout.kdl`. `run()` now calls this immediately after `write_spec_json`, passes the rendered path (not the stem) into `zellij_plan`, and on any render failure cleans up the agent dir to preserve the "no orphan state on spawn failure" invariant (matching F-503 / F-523). Layout fallback when `spec.layout` is `None`: `default_layout_for_orchestrator(&spec.orchestrator)` — `"builder"` for cavekit, `"classic"` for claude-code (cavekit-layouts R6). Reuses the existing ark-mux-zellij sync API — no new minijinja dep in ark-cli, no wrapper, no async surface pulled through. Three tests: `render_and_write_layout_substitutes_and_persists` (user override `mytpl.kdl` under `{config_dir}/layouts/` with `{{ name }}` / `{{ cwd }}` / `{{ agent_cmd }}` → rendered file exists at the expected path, no `{{` / `}}` remain, substitutions present), `render_and_write_layout_uses_embedded_shipped_when_no_override` (spec.layout=None with orchestrator=cavekit → shipped `builder.kdl` rendered with `tab name="auth"` / `cwd="/tmp/w"`), `render_and_write_layout_unknown_stem_is_generic_error` (garbage stem surfaces as `CliError::Generic` with "resolve layout" in the reason; nothing written).
+
+### F-526 — P2 spawn must not hard-depend on external `setsid` binary (FIXED)
+
+**Source:** codex
+**Tier:** 4
+**Severity:** P2
+**Status:** fixed
+**Location:** crates/cli/src/commands/spawn.rs (`build_zellij_command`, new `apply_detach`, `run`)
+
+**Description:** `build_zellij_command` emitted `setsid zellij -s <name> --layout <path>` — always shelling out to the external `setsid(1)` binary. macOS does not ship `setsid` by default (it's on Linux via util-linux but absent from BSD userland), so on macOS even a valid zellij install produced "No such file or directory" at spawn time. The external binary dependency was unnecessary: `setsid(2)` is a POSIX syscall that every `nix` target already exposes via `nix::unistd::setsid`, and the codebase already uses exactly that pattern in `crates/supervisor/src/daemon.rs`.
+
+**Resolution:** Dropped `"setsid"` from the argv. `build_zellij_command` now returns `Command::new("zellij")` with pure zellij args. Added `apply_detach(&mut Command)` which wires a `pre_exec` closure calling `nix::unistd::setsid()` — treating `EPERM` (already session leader) as a no-op, forwarding any other errno via `std::io::Error::from_raw_os_error`. `run()` calls `apply_detach(&mut zcmd)` between construction and `spawn()`. Works identically on Linux + macOS + BSD. Tests updated: `build_zellij_command_setsid_with_layout` → `build_zellij_command_with_layout` (argv is `["zellij", "-s", "…", "--layout", "…"]`, no external setsid); `build_zellij_command_setsid_without_layout_omits_layout_arg` → `build_zellij_command_without_layout_omits_layout_arg`; `build_zellij_command_inside_zellij_env_still_emits_setsid` → `build_zellij_command_inside_zellij_env_still_creates_session` (asserts argv[0] is `zellij`, argv[1] is `-s`, and no `setsid`/`new-tab`/`attach` appear). Two new tests: `build_zellij_command_never_contains_external_setsid` (regression guard on macOS) and `apply_detach_does_not_mutate_argv` (applying `apply_detach` to a Command must not add/remove/reorder argv; pre_exec wiring is a side-channel that doesn't surface in `Command::get_args`).
+
+## Test Delta — Cycle 9
+
+ark-cli: 245 baseline → 248 lib + 2 integration = 250 total (+5 net: +3 F-525 `render_and_write_layout_*` tests, +2 F-526 tests — `build_zellij_command_never_contains_external_setsid` + `apply_detach_does_not_mutate_argv` — on top of three renamed/tightened existing tests that stay at the same count). Within the +3-6 target. Workspace-wide `cargo test --workspace -- --test-threads=1` fully green — all test binaries pass, no pre-existing flakes surfaced this cycle. `cargo test -p ark-cli` green end-to-end. `cargo build --workspace` zero warnings. `cargo fmt --all` clean.

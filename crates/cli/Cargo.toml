@@ -21,6 +21,7 @@ ark-pane = { path = "../pane" }
 ark-config = { path = "../config" }
 ark-orchestrators-cavekit = { path = "../orchestrators/cavekit" }
 ark-orchestrators-claude-code = { path = "../orchestrators/claude-code" }
+ark-mux-zellij = { path = "../mux/zellij" }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

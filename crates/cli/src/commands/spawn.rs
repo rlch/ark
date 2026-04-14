@@ -13,15 +13,22 @@
 //! - Supervisor launch uses `std::process::Command` (no fork, no
 //!   daemonize crate, no nix).
 //! - Zellij is invoked as a subprocess — always a dedicated
-//!   per-agent session via `setsid zellij -s <name> --layout <path>`
+//!   per-agent session via `zellij -s <name> --layout <path>`
 //!   (R2: 1:1 agent↔session). The inside-vs-outside-zellij
 //!   distinction collapses at spawn time (F-516 / F-517).
-//! - `setsid` detaches zellij from the caller's controlling TTY so
-//!   `spawn()` with null stdio works cleanly; zellij forks its own
-//!   daemon and the user can attach later with `zellij attach`.
+//! - TTY detach uses a POSIX-native `pre_exec(setsid)` via `nix`
+//!   (F-526) rather than shelling out to the external `setsid(1)`
+//!   binary, which macOS does not ship by default. Factored into
+//!   [`apply_detach`] so call sites stay one line.
 //! - Zellij invocation is factored through `build_zellij_command`
 //!   so tests can introspect argv without actually spawning a
 //!   process (F-511).
+//! - KDL layouts are minijinja templates (F-525). The handler
+//!   resolves the layout stem to its template (user override in
+//!   `{config_dir}/layouts/` or an embedded shipped layout),
+//!   renders it with `{cwd, agent_cmd, agent_args, id, name}`,
+//!   writes the rendered KDL to `{state_dir}/agents/{id}/layout.kdl`,
+//!   and hands THAT path to zellij via `--layout`.
 //! - All parsing / detection helpers are pure functions so the
 //!   tests don't touch the filesystem unless they want to.
 
@@ -29,6 +36,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use ark_mux_zellij::{
+    LayoutResolver, LayoutSource, LayoutVars, default_layout_for_orchestrator, render_layout,
+};
 use ark_types::{AgentId, AgentSpec};
 use clap::Args;
 
@@ -316,21 +326,45 @@ pub fn zellij_plan<F: Fn(&str) -> Option<String>>(
 
 /// Build the command for a given [`ZellijSpawn`] plan.
 ///
-/// Always emits `setsid zellij -s <session> [--layout <path>]`.
-/// `setsid` detaches zellij from the caller's controlling TTY so
-/// `Command::spawn()` with null stdio completes cleanly — zellij
-/// itself forks a detached daemon; `setsid`'s only job is to hand
-/// it a fresh session id so it doesn't exit when the parent's TTY
-/// goes away. This is the same invocation used by
-/// `crates/mux/zellij/src/mux.rs` for outside-zellij first-spawn
-/// (F-517).
+/// F-526: the argv is now pure `zellij -s <session> [--layout <path>]` —
+/// the external `setsid` binary was dropped because macOS does not ship
+/// it on a default install, which caused spawn to fail with "No such file
+/// or directory" even when zellij itself was installed. Detaching from
+/// the caller's controlling TTY is handled POSIX-natively by
+/// [`apply_detach`] via `pre_exec(nix::unistd::setsid)`, which works
+/// identically on Linux and macOS.
 pub fn build_zellij_command(plan: &ZellijSpawn) -> Command {
-    let mut c = Command::new("setsid");
-    c.arg("zellij").arg("-s").arg(&plan.session);
+    let mut c = Command::new("zellij");
+    c.arg("-s").arg(&plan.session);
     if let Some(p) = &plan.layout {
         c.arg("--layout").arg(p);
     }
     c
+}
+
+/// F-526: POSIX-native detach — wire `pre_exec(setsid)` on the command
+/// so the spawned child becomes the leader of a brand-new session,
+/// divorced from the caller's controlling TTY. Mirrors what the external
+/// `setsid(1)` binary would have done but avoids the runtime dependency
+/// on it (which macOS doesn't ship by default).
+///
+/// Safe to call any number of times per Command: pre_exec closures stack
+/// and `setsid()` is idempotent — a process already session leader gets
+/// a harmless `EPERM` which we ignore, since `zellij` itself then forks
+/// its daemon and the parent will exit normally.
+pub fn apply_detach(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    unsafe {
+        cmd.pre_exec(|| {
+            // Already-leader produces EPERM; treat as no-op. Any other
+            // error surfaces to the parent via the pre_exec contract.
+            match nix::unistd::setsid() {
+                Ok(_) => Ok(()),
+                Err(nix::errno::Errno::EPERM) => Ok(()),
+                Err(e) => Err(std::io::Error::from_raw_os_error(e as i32)),
+            }
+        });
+    }
 }
 
 /// F-522: Derive a collision-free zellij session name for `id`.
@@ -412,6 +446,86 @@ pub fn require_zellij_on_path() -> Result<(), CliError> {
     }
 }
 
+/// F-525: Resolve + render + persist the KDL layout template.
+///
+/// A zellij "layout" is not a static KDL file — it's a minijinja template
+/// that needs `{{ cwd }}`, `{{ agent_cmd }}`, `{{ agent_args }}` etc.
+/// substituted per spawn. Prior cycles handed the raw stem (e.g.
+/// `"builder"`) straight to `zellij --layout`, which made zellij bail on
+/// the unexpanded `{{…}}` tokens.
+///
+/// Resolution:
+/// 1. If `spec.layout` is `None`, use
+///    [`default_layout_for_orchestrator`] (e.g. `"builder"` for cavekit,
+///    `"classic"` for claude-code).
+/// 2. Hand that stem-or-path to [`LayoutResolver`] with
+///    `user_root = {config_dir}/layouts/`. The resolver handles stem →
+///    user-override → embedded-shipped precedence (cavekit-layouts R1).
+/// 3. Render the template source with [`render_layout`], supplying
+///    `cwd` (from `spec.cwd`), `agent_cmd` (`spec.cmd[0]` or empty),
+///    `agent_args` (`spec.cmd[1..]`), `id` (`spec.id`), `name`
+///    (`spec.name`).
+/// 4. Write the rendered KDL to `{state_dir}/agents/{id}/layout.kdl`.
+///
+/// Returns the absolute path of the rendered file. On any failure
+/// (resolver, template, write) returns `CliError::Generic` with the
+/// underlying reason.
+pub fn render_and_write_layout(ctx: &Ctx, spec: &AgentSpec) -> Result<PathBuf, CliError> {
+    // Determine the stem or explicit path.
+    let fallback = default_layout_for_orchestrator(&spec.orchestrator);
+    let stem_or_path: String = spec.layout.clone().unwrap_or_else(|| fallback.to_string());
+
+    // User override root: `{config_dir}/layouts/`. Passing it
+    // unconditionally is safe — LayoutResolver checks existence per-file.
+    let user_root = Some(ctx.config_dir.join("layouts"));
+    let resolver = LayoutResolver::new(user_root);
+    let source = resolver
+        .resolve(&stem_or_path)
+        .map_err(|e| CliError::Generic {
+            reason: format!("resolve layout `{stem_or_path}`: {e}"),
+        })?;
+    let template_src = match &source {
+        LayoutSource::User { contents, .. } => contents.as_str(),
+        LayoutSource::Embedded { contents, .. } => contents.as_str(),
+        LayoutSource::Path { contents, .. } => contents.as_str(),
+    };
+
+    // Build the bounded variable surface. `agent_cmd` is the first argv
+    // token (empty when spec.cmd is empty — callers like `ark spawn`
+    // without a `--` tail); `agent_args` is everything after.
+    let agent_cmd = spec.cmd.first().cloned().unwrap_or_default();
+    let agent_args: Vec<String> = if spec.cmd.len() > 1 {
+        spec.cmd[1..].to_vec()
+    } else {
+        Vec::new()
+    };
+    let vars = LayoutVars {
+        cwd: spec.cwd.display().to_string(),
+        agent_cmd,
+        agent_args,
+        id: spec.id.to_string(),
+        name: spec.name.clone(),
+    };
+
+    let rendered = render_layout(template_src, &vars).map_err(|e| CliError::Generic {
+        reason: format!("render layout template: {e}"),
+    })?;
+
+    // Destination: `{state_dir}/agents/{id}/layout.kdl`. Parent dir is
+    // created by write_spec_json earlier in run(), but we defensively
+    // create_dir_all here so the helper is safe to call in isolation
+    // (and in tests).
+    let dir = spec.id.state_dir(&ctx.state_dir);
+    std::fs::create_dir_all(&dir).map_err(|e| CliError::Generic {
+        reason: format!("create {}: {e}", dir.display()),
+    })?;
+    let path = dir.join("layout.kdl");
+    std::fs::write(&path, &rendered).map_err(|e| CliError::Generic {
+        reason: format!("write {}: {e}", path.display()),
+    })?;
+    Ok(path)
+}
+
 // ------------------------------------------------------------- handler ------
 
 /// `ark spawn` — T-087 + F-511.
@@ -454,6 +568,21 @@ pub fn run(args: SpawnArgs, ctx: &Ctx) -> Result<(), CliError> {
     let spec_path = write_spec_json(&ctx.state_dir, &spec)?;
     tracing::debug!(path = %spec_path.display(), "wrote spec.json");
 
+    // F-525: render the KDL layout template with per-spawn variable
+    // substitution and persist it to `{state}/agents/{id}/layout.kdl`.
+    // The rendered path — not the raw stem — is what we pass to
+    // `zellij --layout`. If the render fails we clean up the agent dir
+    // we just created (matching F-503 / F-523's "no orphan state on
+    // spawn failure" invariant).
+    let layout_path = match render_and_write_layout(ctx, &spec) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(spec.id.state_dir(&ctx.state_dir));
+            return Err(e);
+        }
+    };
+    tracing::debug!(path = %layout_path.display(), "wrote rendered layout");
+
     // F-511: actually launch zellij. We snapshot the env, pick a
     // plan, and spawn the subprocess via `build_zellij_command`.
     // `Command::spawn()` (not `.status()`) because the parent agent
@@ -465,9 +594,20 @@ pub fn run(args: SpawnArgs, ctx: &Ctx) -> Result<(), CliError> {
     // same zellij session. We override here at the CLI layer — rather
     // than editing ark-types — by appending an 8-char ULID prefix so
     // the final session is `{base}-{ulid8}`, human-readable but unique.
+    //
+    // F-525: the plan's layout is the RENDERED KDL path, not the raw
+    // stem that came in on the CLI.
     let session = unique_session_name(&spec.id);
-    let plan = zellij_plan(|k| std::env::var(k).ok(), &session, args.layout.as_deref());
+    let layout_str = layout_path.to_string_lossy().into_owned();
+    let plan = zellij_plan(
+        |k| std::env::var(k).ok(),
+        &session,
+        Some(layout_str.as_str()),
+    );
     let mut zcmd = build_zellij_command(&plan);
+    // F-526: detach via pre_exec(setsid) instead of shelling out to
+    // the external `setsid(1)` (which macOS doesn't ship).
+    apply_detach(&mut zcmd);
     zcmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -866,9 +1006,10 @@ mod tests {
     }
 
     #[test]
-    fn build_zellij_command_setsid_with_layout() {
-        // F-516/F-517: always `setsid zellij -s <name> --layout <path>`,
+    fn build_zellij_command_with_layout() {
+        // F-516/F-517: always `zellij -s <name> --layout <path>`,
         // regardless of whether we were launched from inside zellij.
+        // F-526: argv is pure zellij — no external `setsid` prefix.
         let cmd = build_zellij_command(&ZellijSpawn {
             session: "ark-cavekit-auth".into(),
             layout: Some("/tmp/builder.kdl".into()),
@@ -876,7 +1017,6 @@ mod tests {
         assert_eq!(
             argv_of(&cmd),
             vec![
-                "setsid",
                 "zellij",
                 "-s",
                 "ark-cavekit-auth",
@@ -887,22 +1027,55 @@ mod tests {
     }
 
     #[test]
-    fn build_zellij_command_setsid_without_layout_omits_layout_arg() {
+    fn build_zellij_command_without_layout_omits_layout_arg() {
+        // F-526: no external `setsid` prefix.
         let cmd = build_zellij_command(&ZellijSpawn {
             session: "ark-cavekit-auth".into(),
             layout: None,
         });
-        assert_eq!(
-            argv_of(&cmd),
-            vec!["setsid", "zellij", "-s", "ark-cavekit-auth"]
+        assert_eq!(argv_of(&cmd), vec!["zellij", "-s", "ark-cavekit-auth"]);
+    }
+
+    #[test]
+    fn build_zellij_command_never_contains_external_setsid() {
+        // F-526 regression guard: the external `setsid(1)` binary is
+        // not on macOS by default. The argv must start with `zellij`
+        // directly; TTY detach is handled by `apply_detach`'s pre_exec.
+        let cmd = build_zellij_command(&ZellijSpawn {
+            session: "ark-cavekit-auth".into(),
+            layout: Some("/tmp/b.kdl".into()),
+        });
+        let argv = argv_of(&cmd);
+        assert_eq!(argv[0], "zellij", "argv[0] must be zellij, not setsid");
+        assert!(
+            !argv.iter().any(|a| a == "setsid"),
+            "argv must not reference external setsid: {argv:?}"
         );
     }
 
     #[test]
-    fn build_zellij_command_inside_zellij_env_still_emits_setsid() {
+    fn apply_detach_does_not_mutate_argv() {
+        // F-526: wiring pre_exec must leave the argv pure. We can't
+        // directly introspect the pre_exec closure via std::process::Command,
+        // so we verify the observable side: applying `apply_detach` to
+        // a command does NOT add/remove/reorder argv entries.
+        let mut cmd = build_zellij_command(&ZellijSpawn {
+            session: "ark-cavekit-auth".into(),
+            layout: Some("/tmp/b.kdl".into()),
+        });
+        let before = argv_of(&cmd);
+        apply_detach(&mut cmd);
+        let after = argv_of(&cmd);
+        assert_eq!(before, after);
+        assert_eq!(after[0], "zellij");
+    }
+
+    #[test]
+    fn build_zellij_command_inside_zellij_env_still_creates_session() {
         // Guard against regression: even when the env getter reports
-        // $ZELLIJ is set, the produced command must be the setsid
-        // session-creator, NOT `zellij action new-tab`.
+        // $ZELLIJ is set, the produced command must be the session-
+        // creator, NOT `zellij action new-tab`.
+        // F-526: argv is pure zellij — detach is wired separately.
         let plan = zellij_plan(
             |k| (k == "ZELLIJ").then(|| "1".to_string()),
             "ark-cavekit-auth",
@@ -910,10 +1083,11 @@ mod tests {
         );
         let cmd = build_zellij_command(&plan);
         let argv = argv_of(&cmd);
-        assert_eq!(argv[0], "setsid");
-        assert_eq!(argv[1], "zellij");
+        assert_eq!(argv[0], "zellij");
+        assert_eq!(argv[1], "-s");
         assert!(!argv.iter().any(|a| a == "new-tab"));
         assert!(!argv.iter().any(|a| a == "attach"));
+        assert!(!argv.iter().any(|a| a == "setsid"));
     }
 
     // --- require_zellij_on_path error variant -------------------------
@@ -1058,6 +1232,107 @@ mod tests {
                 );
             }
             other => panic!("expected Internal err, got {other:?}"),
+        }
+    }
+
+    // --- F-525: layout template render + write -----------------------
+
+    fn tempdir_ctx() -> (TempDir, TempDir, TempDir, Ctx) {
+        let state = TempDir::new().unwrap();
+        let config = TempDir::new().unwrap();
+        let runtime = TempDir::new().unwrap();
+        let ctx = Ctx {
+            no_color: true,
+            log_level: "info".into(),
+            state_dir: state.path().to_path_buf(),
+            config_dir: config.path().to_path_buf(),
+            runtime_dir: runtime.path().to_path_buf(),
+        };
+        (state, config, runtime, ctx)
+    }
+
+    #[test]
+    fn render_and_write_layout_substitutes_and_persists() {
+        // F-525: a user-override layout template under
+        // `{config_dir}/layouts/mytpl.kdl` is resolved, rendered with
+        // {{ cwd }} / {{ agent_cmd }} / {{ name }} substituted, and the
+        // result written to `{state_dir}/agents/{id}/layout.kdl`.
+        let (_state, _config, _runtime, ctx) = tempdir_ctx();
+        let layouts_dir = ctx.config_dir.join("layouts");
+        std::fs::create_dir_all(&layouts_dir).unwrap();
+        std::fs::write(
+            layouts_dir.join("mytpl.kdl"),
+            r#"layout { tab name="{{ name }}" cwd="{{ cwd }}" { pane { command "{{ agent_cmd }}" } } }"#,
+        )
+        .unwrap();
+
+        let spec = build_spec(
+            "cavekit",
+            "claude-code",
+            "authsvc",
+            PathBuf::from("/tmp/work"),
+            vec!["claude".into(), "--resume".into()],
+            BTreeMap::new(),
+            Some("mytpl".into()),
+            Vec::new(),
+        );
+        let path = render_and_write_layout(&ctx, &spec).expect("render+write");
+        assert!(path.exists());
+        assert_eq!(path, spec.id.state_dir(&ctx.state_dir).join("layout.kdl"));
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains(r#"cwd="/tmp/work""#), "body: {body}");
+        assert!(body.contains(r#"name="authsvc""#), "body: {body}");
+        assert!(body.contains(r#"command "claude""#), "body: {body}");
+        // No unexpanded template tokens should remain.
+        assert!(!body.contains("{{"), "body still has `{{`: {body}");
+        assert!(!body.contains("}}"), "body still has `}}`: {body}");
+    }
+
+    #[test]
+    fn render_and_write_layout_uses_embedded_shipped_when_no_override() {
+        // F-525: absent a user override, the shipped `builder.kdl`
+        // template renders cleanly for a cavekit spawn.
+        let (_state, _config, _runtime, ctx) = tempdir_ctx();
+        let spec = build_spec(
+            "cavekit",
+            "claude-code",
+            "auth",
+            PathBuf::from("/tmp/w"),
+            vec!["claude".into()],
+            BTreeMap::new(),
+            None, // no explicit layout → default_layout_for_orchestrator("cavekit") == "builder"
+            Vec::new(),
+        );
+        let path = render_and_write_layout(&ctx, &spec).expect("render+write shipped");
+        assert!(path.exists());
+        let body = std::fs::read_to_string(&path).unwrap();
+        // builder.kdl contains `tab name="{{ name }}"` → after render,
+        // `tab name="auth"`.
+        assert!(body.contains(r#"tab name="auth""#), "body: {body}");
+        assert!(body.contains(r#"cwd="/tmp/w""#), "body: {body}");
+    }
+
+    #[test]
+    fn render_and_write_layout_unknown_stem_is_generic_error() {
+        // F-525: a garbage stem surfaces as CliError::Generic — no silent
+        // fall-through, and nothing is written to disk.
+        let (_state, _config, _runtime, ctx) = tempdir_ctx();
+        let spec = build_spec(
+            "cavekit",
+            "claude-code",
+            "auth",
+            PathBuf::from("/tmp/w"),
+            vec!["claude".into()],
+            BTreeMap::new(),
+            Some("definitely-not-a-layout-xyz".into()),
+            Vec::new(),
+        );
+        let err = render_and_write_layout(&ctx, &spec).unwrap_err();
+        match err {
+            CliError::Generic { reason } => {
+                assert!(reason.contains("resolve layout"), "reason: {reason}");
+            }
+            other => panic!("expected Generic, got {other:?}"),
         }
     }
 
