@@ -36,5 +36,8 @@ last_edited: "2026-04-14"
 
 Overall: 45/134 (34%). Next: Tier 2 (engine-claude-code + event-bus consumers, 16 tasks).
 
+### Iteration 12 — 2026-04-14 (Tier 2 W2)
+- 3 parallel packets. T-047 (ark-hook typed payload parser + translator, commit 8ac7df2, 17 new tests = 29 total in crate), T-053+T-055 (transcript tailer + done watcher, commit 69c3445, notify-based inotify + JSONL parser, DoneSignal enum + mpsc done_watcher; assumed encoded-cwd = "/"→"-" overridable via ARK_CLAUDE_PROJECTS_DIR), T-058 (preflight with injectable test fn, commit d0bfec6, 7 tests, no `which` dep — uses env PATH walk + HOME). Workspace 352/352 pass. Next: Tier 2 W3 = T-048/T-049/T-050 (hook JSONL + pipe + allow payload) and T-056/T-057 (stall watcher + EngineHandle).
+
 ### Iteration 11 — 2026-04-14 (Tier 2 W1)
 - 3 parallel packets. T-046 (ark-hook skeleton, commit a7a289c, 12 tests, 6 files), T-052 (settings.local.json injection, commit 9370e71, 12 tests, sha256 checksum + .ark-backup + deep-merge), T-059+T-060+T-061 (consumers state_writer/status_pipe/hook_dispatcher, commit 2c43e37, 10 tests, ark-core+=ark-config dep no cycle, F-037 closed Lagged(n) warn-log in every recv loop). Packet A paused for solution-set fork on clap exit-2 behavior; user picked B (keep Cli::parse, exit 2 only on arg-validation = loud setup bug; all runtime errors still fail-open). Build P, tests 308/308 workspace. Next: T-047 (hook payload parser, deps T-046+T-005 met) + T-053 (transcript tailer, deps T-052+T-005 met) + T-058 (engine preflight, deps T-046 met).
