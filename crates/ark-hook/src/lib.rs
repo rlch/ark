@@ -27,12 +27,20 @@
 //! - T-050 → PermissionRequest stdout writer + explicit-deny exit 2
 //! - T-051 → expanded fail-open behavior
 
+pub mod allow;
 pub mod cli;
 pub mod event;
 pub mod payload;
+pub mod pipe;
 pub mod run;
+pub mod writer;
 
+pub use allow::{ALLOW_PAYLOAD_JSON, write_allow_payload};
 pub use cli::Cli;
 pub use event::HookEvent;
 pub use payload::{FILE_EDIT_TOOLS, HookPayload, SUMMARY_MAX_CHARS, payload_to_events};
-pub use run::{HOOK_BUDGET_MS, run};
+pub use pipe::{
+    PIPE_PAYLOAD_MAX_BYTES, TARGET_ARK_PICKER, TARGET_ARK_STATUS, pipe_to_zellij, pipe_with,
+};
+pub use run::{HOOK_BUDGET_MS, HookOutcome, run};
+pub use writer::{append_event_jsonl, event_file_path};

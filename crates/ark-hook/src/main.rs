@@ -29,7 +29,7 @@ fn main() -> ExitCode {
     // intentional and matches clap defaults.
     let cli = Cli::parse();
 
-    match run(&cli, io::stdin().lock()) {
+    match run(&cli, io::stdin().lock(), io::stdout().lock()) {
         Ok(outcome) => ExitCode::from(outcome.exit_code() as u8),
         Err(e) => {
             // Top-level fail-open: log the error chain and exit 0 so we
