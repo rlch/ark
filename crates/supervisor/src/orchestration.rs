@@ -176,6 +176,10 @@ pub async fn run_supervisor_with(
             pid: nix::unistd::Pid::from_raw(supervisor_pid as i32),
             cancel: cancel.clone(),
             event_bus: events.clone(),
+            // Audit log (T-068) wires in as part of a Tier 4 touch; leave
+            // None here so the T-069 smoke test suite stays behaviour-
+            // equivalent.
+            audit: None,
         }));
     let socket_handle = bind_control_socket(&state_layout, &spec.id, command_handler.clone())
         .await

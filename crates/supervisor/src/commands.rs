@@ -63,6 +63,7 @@ use serde_json::Value as JsonValue;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
+use crate::audit_log::AuditLogger;
 use crate::control_socket::ControlCommandHandler;
 
 /// Signature of the pluggable signal sender.
@@ -93,6 +94,11 @@ pub struct SupervisorCommandCtx {
     /// struct).
     #[allow(dead_code)]
     pub event_bus: EventSink,
+    /// Optional audit logger (T-068). When `Some`, every handled command
+    /// is recorded to `$STATE/control.log` as a JSONL line per
+    /// cavekit-hook-ipc.md R5. Defaults to `None` to keep the T-066 test
+    /// suite untouched; T-069 / production wiring injects one.
+    pub audit: Option<Arc<AuditLogger>>,
 }
 
 impl std::fmt::Debug for SupervisorCommandCtx {
@@ -152,22 +158,43 @@ impl SupervisorCommandHandler {
             other => Response::err(format!("unknown command: {other}")),
         }
     }
+
+    /// Optional audit log — emit one JSONL line per dispatch when the
+    /// context carries an [`AuditLogger`].
+    fn audit_record(&self, req: &JsonValue, resp: &JsonValue) {
+        if let Some(logger) = &self.ctx.audit
+            && let Err(err) = logger.record(&self.ctx.agent_id, req, resp)
+        {
+            warn!(
+                agent = self.ctx.agent_id.as_str(),
+                %err,
+                "audit log write failed"
+            );
+        }
+    }
 }
 
 impl ControlCommandHandler for SupervisorCommandHandler {
     fn handle(&self, req: JsonValue) -> Pin<Box<dyn Future<Output = JsonValue> + Send + '_>> {
         Box::pin(async move {
+            // Keep a clone of the raw request for the audit log; deserialize
+            // into a typed Request for dispatch. Malformed requests still
+            // land in the audit log — the "what was asked" side is useful
+            // even when parsing fails.
+            let raw = req.clone();
             let parsed = match serde_json::from_value::<Request>(req) {
                 Ok(r) => r,
                 Err(e) => {
-                    return serde_json::to_value(Response::<JsonValue>::err(format!(
-                        "malformed request: {e}"
-                    )))
-                    .expect("serialize err response");
+                    let resp = Response::<JsonValue>::err(format!("malformed request: {e}"));
+                    let resp_val = serde_json::to_value(&resp).expect("serialize err response");
+                    self.audit_record(&raw, &resp_val);
+                    return resp_val;
                 }
             };
             let resp = self.dispatch(parsed).await;
-            serde_json::to_value(resp).expect("serialize response")
+            let resp_val = serde_json::to_value(resp).expect("serialize response");
+            self.audit_record(&raw, &resp_val);
+            resp_val
         })
     }
 }
@@ -431,8 +458,30 @@ mod tests {
             pid: Pid::from_raw(12345),
             cancel: cancel.clone(),
             event_bus: tx,
+            audit: None,
         };
         (ctx, cancel)
+    }
+
+    /// Variant that attaches an [`AuditLogger`] writing to
+    /// `{state_root}/control.log`. Used by the T-068 tests.
+    fn make_ctx_with_audit(
+        id: AgentId,
+        layout: StateLayout,
+        state_root: std::path::PathBuf,
+    ) -> (SupervisorCommandCtx, CancellationToken, Arc<AuditLogger>) {
+        let cancel = CancellationToken::new();
+        let (tx, _rx) = default_channel();
+        let logger = Arc::new(AuditLogger::new(state_root));
+        let ctx = SupervisorCommandCtx {
+            agent_id: id,
+            state_layout: layout,
+            pid: Pid::from_raw(12345),
+            cancel: cancel.clone(),
+            event_bus: tx,
+            audit: Some(logger.clone()),
+        };
+        (ctx, cancel, logger)
     }
 
     async fn bind_and_connect(
@@ -741,5 +790,78 @@ mod tests {
         assert_eq!(resp["data"]["phase"], JsonValue::String("running".into()));
 
         crate::shutdown(handle).await.unwrap();
+    }
+
+    // -------- T-068 audit log integration -----------------------------
+
+    fn read_audit_lines(path: &Path) -> Vec<JsonValue> {
+        let raw = std::fs::read_to_string(path).expect("read audit log");
+        raw.lines()
+            .map(|l| serde_json::from_str::<JsonValue>(l).expect("parse"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn audit_none_does_not_create_log_file() {
+        // Canary: pre-T-068 tests used `audit: None`; verify no log file
+        // is materialised in that path.
+        let tmp = short_tempdir();
+        let layout = layout_at(tmp.path());
+        let id = AgentId::new("cavekit", "nolog");
+        let (ctx, _cancel) = make_ctx(id, layout);
+        let h = SupervisorCommandHandler::new(ctx);
+
+        let _ = h.handle(serde_json::json!({ "cmd": "Ping" })).await;
+        let log = tmp.path().join("state").join("control.log");
+        assert!(!log.exists(), "no audit log expected when audit: None");
+    }
+
+    #[tokio::test]
+    async fn audit_records_request_and_response_per_dispatch() {
+        let tmp = short_tempdir();
+        let layout = layout_at(tmp.path());
+        let id = AgentId::new("cavekit", "logit");
+        let state_root = tmp.path().join("state");
+        let (ctx, _cancel, _logger) = make_ctx_with_audit(id.clone(), layout, state_root.clone());
+        let h = SupervisorCommandHandler::new(ctx);
+
+        let _ = h.handle(serde_json::json!({ "cmd": "Ping" })).await;
+        let _ = h
+            .handle(serde_json::json!({ "cmd": "Bogus", "args": {} }))
+            .await;
+
+        let lines = read_audit_lines(&state_root.join("control.log"));
+        assert_eq!(lines.len(), 2, "one line per dispatch");
+        assert_eq!(lines[0]["cmd"]["cmd"], JsonValue::String("Ping".into()));
+        assert_eq!(lines[0]["response"]["ok"], JsonValue::Bool(true));
+        assert_eq!(lines[1]["cmd"]["cmd"], JsonValue::String("Bogus".into()));
+        assert_eq!(lines[1]["response"]["ok"], JsonValue::Bool(false));
+        assert_eq!(
+            lines[0]["agent_id"],
+            JsonValue::String(id.as_str().to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_records_malformed_requests() {
+        let tmp = short_tempdir();
+        let layout = layout_at(tmp.path());
+        let id = AgentId::new("cavekit", "malform");
+        let state_root = tmp.path().join("state");
+        let (ctx, _cancel, _logger) = make_ctx_with_audit(id, layout, state_root.clone());
+        let h = SupervisorCommandHandler::new(ctx);
+
+        // Missing "cmd" triggers the malformed path.
+        let _ = h.handle(serde_json::json!({ "oops": true })).await;
+
+        let lines = read_audit_lines(&state_root.join("control.log"));
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["response"]["ok"], JsonValue::Bool(false));
+        assert!(
+            lines[0]["response"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("malformed")
+        );
     }
 }

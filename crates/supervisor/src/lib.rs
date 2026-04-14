@@ -44,6 +44,10 @@ pub use commands::{SignalSender, SupervisorCommandCtx, SupervisorCommandHandler}
 pub mod signals;
 pub use signals::{ControlSocketGuard, SignalTaskHandle, install_signal_handlers};
 
+// T-068: control-socket audit log (cavekit-hook-ipc R5 audit log bullet).
+pub mod audit_log;
+pub use audit_log::AuditLogger;
+
 // T-069: factory + full R3 boot sequence.
 pub mod factory;
 pub mod orchestration;
@@ -51,3 +55,11 @@ pub use factory::{build_engine, build_multiplexer, build_orchestrator};
 pub use orchestration::{
     SupervisorMode, finalize_state, outcome_exit_code, run_supervisor, run_supervisor_with,
 };
+
+// T-070: SIGTERM kill handler (cavekit-supervisor R4).
+pub mod kill;
+pub use kill::{DEFAULT_KILL_GRACE, kill_handler};
+
+// T-071: PID liveness + crash detection (cavekit-supervisor R5).
+pub mod crash;
+pub use crash::{adjust_status_if_crashed, detect_crashed, is_pid_alive};
