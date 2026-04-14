@@ -34,7 +34,9 @@ pub mod review_tab;
 pub use build_site::extract_build_site_total;
 pub use codex_findings::{Finding, FindingsRollup, parse_findings, rollup, watch_codex_findings};
 pub use git_diff::watch_git_diff;
-pub use impl_tracking::watch_impl_tracking;
+pub use impl_tracking::{
+    ImplTrackingSnapshot, spawn_impl_tracking_with_snapshot, watch_impl_tracking,
+};
 pub use ralph_loop::watch_ralph_loop;
 pub use review_tab::{
     default_review_phase_matcher, watch_phase_and_review, watch_phase_and_review_with,

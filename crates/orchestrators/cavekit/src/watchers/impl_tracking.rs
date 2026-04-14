@@ -25,13 +25,79 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc as std_mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use ark_types::{AgentEvent, AgentId, CancellationToken, EventSink};
 use notify::{RecursiveMode, Watcher};
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
 
 use super::build_site::extract_build_site_total;
+
+/// Snapshot of impl-tracking state, published via a `watch::Sender` each time
+/// the watcher re-parses. Consumed by the done-signal resolver in
+/// `CavekitOrchestrator::run` (R9) to decide `Success` / `Failed` outcomes.
+///
+/// `pending_task_ids` contains every task whose current status is `PENDING`
+/// or `IN PROGRESS`. These are the tasks that block a `Success` outcome:
+/// when `Stop`/`SessionEnd` arrives the resolver waits up to 60s for them to
+/// transition to `DONE` before giving up with `Failed`.
+///
+/// `total == 0` is the "no build-site observed" sentinel — the resolver
+/// treats it as a trivial `Success` with empty artifacts (R9 case d).
+#[derive(Clone, Debug)]
+pub struct ImplTrackingSnapshot {
+    pub done: u32,
+    pub total: u32,
+    pub pending_task_ids: Vec<String>,
+    pub last_updated: Instant,
+}
+
+impl Default for ImplTrackingSnapshot {
+    fn default() -> Self {
+        Self {
+            done: 0,
+            total: 0,
+            pending_task_ids: Vec::new(),
+            last_updated: Instant::now(),
+        }
+    }
+}
+
+/// Spawn the impl-tracking watcher and return a `watch::Receiver` of its
+/// latest snapshot plus the `JoinHandle` driving it.
+///
+/// Behaviour mirrors [`watch_impl_tracking`] — same event-bus emissions,
+/// same 500ms debounce, same build-site total resolution — but additionally
+/// publishes a [`ImplTrackingSnapshot`] on each re-parse. The orchestrator
+/// uses the snapshot channel to decide whether to return `Success` or
+/// `Failed` on engine `Stop`.
+///
+/// When `enabled = false` the watcher returns immediately and the snapshot
+/// channel stays at its initial default (`total = 0`), which the resolver
+/// interprets per R9 case d (unknown total → trivial Success).
+pub fn spawn_impl_tracking_with_snapshot(
+    cwd: PathBuf,
+    id: AgentId,
+    tx: EventSink,
+    cancel: CancellationToken,
+    enabled: bool,
+) -> (
+    watch::Receiver<ImplTrackingSnapshot>,
+    JoinHandle<Result<()>>,
+) {
+    let (snap_tx, snap_rx) = watch::channel(ImplTrackingSnapshot::default());
+    let handle = tokio::spawn(watch_impl_tracking_inner(
+        cwd,
+        id,
+        tx,
+        cancel,
+        enabled,
+        Some(snap_tx),
+    ));
+    (snap_rx, handle)
+}
 
 /// Debounce window for coalescing filesystem event bursts into one re-parse.
 const DEBOUNCE: Duration = Duration::from_millis(500);
@@ -43,13 +109,31 @@ const BLOCKED: &str = "BLOCKED";
 const IN_PROGRESS: &str = "IN PROGRESS";
 const PENDING: &str = "PENDING";
 
-/// Public entry point — see module docs.
+/// Public entry point — see module docs. Emits events on the bus only.
+///
+/// See [`spawn_impl_tracking_with_snapshot`] for the variant that also
+/// publishes a [`ImplTrackingSnapshot`] consumed by the orchestrator's
+/// done-signal resolver (R9).
 pub async fn watch_impl_tracking(
     cwd: PathBuf,
     id: AgentId,
     tx: EventSink,
     cancel: CancellationToken,
     enabled: bool,
+) -> Result<()> {
+    watch_impl_tracking_inner(cwd, id, tx, cancel, enabled, None).await
+}
+
+/// Shared internal body. `snap_tx` is `Some` for
+/// [`spawn_impl_tracking_with_snapshot`] callers and `None` for the legacy
+/// bus-only [`watch_impl_tracking`] entry point.
+async fn watch_impl_tracking_inner(
+    cwd: PathBuf,
+    id: AgentId,
+    tx: EventSink,
+    cancel: CancellationToken,
+    enabled: bool,
+    snap_tx: Option<watch::Sender<ImplTrackingSnapshot>>,
 ) -> Result<()> {
     if !enabled {
         return Ok(());
@@ -99,7 +183,7 @@ pub async fn watch_impl_tracking(
 
     // Initial parse so Progress reflects whatever's already on disk.
     let mut state: HashMap<String, String> = HashMap::new();
-    reparse_and_emit(&cwd, &impl_dir, &id, &tx, &mut state).await;
+    reparse_and_emit(&cwd, &impl_dir, &id, &tx, &mut state, snap_tx.as_ref()).await;
 
     loop {
         tokio::select! {
@@ -121,7 +205,7 @@ pub async fn watch_impl_tracking(
                 // Drain any additional ticks queued up during the debounce
                 // window; they collapse into the single re-parse below.
                 while async_rx.try_recv().is_ok() {}
-                reparse_and_emit(&cwd, &impl_dir, &id, &tx, &mut state).await;
+                reparse_and_emit(&cwd, &impl_dir, &id, &tx, &mut state, snap_tx.as_ref()).await;
             }
         }
     }
@@ -168,6 +252,7 @@ async fn reparse_and_emit(
     id: &AgentId,
     tx: &EventSink,
     state: &mut HashMap<String, String>,
+    snap_tx: Option<&watch::Sender<ImplTrackingSnapshot>>,
 ) {
     let mut rows: HashMap<String, (String, Option<String>)> = HashMap::new();
     let mut impl_filenames: Vec<String> = Vec::new();
@@ -221,6 +306,29 @@ async fn reparse_and_emit(
         total,
         label: None,
     });
+
+    // R9: publish a fresh snapshot if a snapshot sender was wired. We send
+    // unconditionally (even on "no change") so the resolver can observe
+    // liveness via `last_updated`.
+    if let Some(snap_tx) = snap_tx {
+        // "Pending" for R9 purposes = not-yet-DONE work that the orchestrator
+        // might still wait on. We treat PENDING and IN PROGRESS as blocking;
+        // BLOCKED and PARTIAL are not pending — the former is an explicit
+        // stop-the-line, the latter counts for half in Progress and isn't
+        // something the orchestrator should wait on a status flip for.
+        let mut pending: Vec<String> = rows
+            .iter()
+            .filter(|(_, (s, _))| s == PENDING || s == IN_PROGRESS)
+            .map(|(tid, _)| tid.clone())
+            .collect();
+        pending.sort();
+        let _ = snap_tx.send(ImplTrackingSnapshot {
+            done: done_units,
+            total,
+            pending_task_ids: pending,
+            last_updated: Instant::now(),
+        });
+    }
 }
 
 /// Resolve the build-site `Progress.total` for one-or-more observed impl

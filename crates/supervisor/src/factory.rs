@@ -13,28 +13,22 @@
 //! [`ark_types::ENGINES_V1`] / [`ark_types::ORCHESTRATORS_V1`] /
 //! [`ark_types::MUX_V1`]).
 //!
-//! ## Cavekit orchestrator stub
+//! ## Cavekit orchestrator
 //!
-//! [`ark_orchestrators_cavekit`] currently exposes only a `detect` fn —
-//! the full `Orchestrator` trait impl lands in T-076. For T-069 we ship a
-//! thin stub ([`CavekitOrchestratorStub`]) so `build_orchestrator("cavekit")`
-//! returns something that satisfies the trait. The stub delegates its
-//! `run` to `ClaudeCodeOrchestrator::run` — a methodology-free passthrough
-//! that does exactly what cavekit will do on the "builder" tab before
-//! review is wired in. The stub's `name()` is `"cavekit"` so downstream
-//! slug checks remain accurate. When T-076 introduces the real
-//! `CavekitOrchestrator`, swap this stub for it here and delete the
-//! placeholder struct.
+//! T-083 wires the real [`ark_orchestrators_cavekit::CavekitOrchestrator`]
+//! here (previously a stub delegating to `ClaudeCodeOrchestrator`). The
+//! full orchestrator spawns the R4–R8 watchers and runs the R9 done-signal
+//! resolver.
 
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
-use ark_core::{Config, Engine, Multiplexer, Orchestrator, World};
+use ark_core::{Config, Engine, Multiplexer, Orchestrator};
 use ark_engines_claude_code::engine::ClaudeCodeEngine;
 use ark_mux_zellij::ZellijMux;
+use ark_orchestrators_cavekit::CavekitOrchestrator;
 use ark_orchestrators_claude_code::ClaudeCodeOrchestrator;
-use ark_types::{AgentSpec, Outcome, is_v1_engine, is_v1_mux, is_v1_orchestrator};
-use async_trait::async_trait;
+use ark_types::{is_v1_engine, is_v1_mux, is_v1_orchestrator};
 
 // ---------------------------------------------------------------- engines ----
 
@@ -65,7 +59,7 @@ pub fn build_orchestrator(slug: &str, _config: &Config) -> Result<Box<dyn Orches
         ));
     }
     match slug {
-        "cavekit" => Ok(Box::new(CavekitOrchestratorStub::new())),
+        "cavekit" => Ok(Box::new(CavekitOrchestrator::new())),
         "claude-code" => Ok(Box::new(ClaudeCodeOrchestrator::new())),
         other => Err(anyhow!(
             "orchestrator slug `{other}` is v1-locked but has no factory branch — plumb it here"
@@ -88,43 +82,6 @@ pub fn build_multiplexer(slug: &str, _config: &Config) -> Result<Arc<dyn Multipl
         other => Err(anyhow!(
             "multiplexer slug `{other}` is v1-locked but has no factory branch — plumb it here"
         )),
-    }
-}
-
-// ---------------------------------- cavekit orchestrator v1 stub ------------
-
-/// Placeholder `Orchestrator` impl for the `"cavekit"` slug — delegates to
-/// [`ClaudeCodeOrchestrator`]'s builder-only run loop. Replace when T-076
-/// lands the real `CavekitOrchestrator`.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct CavekitOrchestratorStub;
-
-impl CavekitOrchestratorStub {
-    pub const fn new() -> Self {
-        Self
-    }
-}
-
-#[async_trait]
-impl Orchestrator for CavekitOrchestratorStub {
-    fn name(&self) -> &'static str {
-        "cavekit"
-    }
-
-    fn engine(&self) -> &'static str {
-        "claude-code"
-    }
-
-    fn detect(&self, cwd: &std::path::Path) -> bool {
-        ark_orchestrators_cavekit::detect(cwd)
-    }
-
-    async fn run(&self, spec: AgentSpec, world: World) -> Result<Outcome> {
-        // Delegate to the claude-code orchestrator's methodology-free
-        // passthrough (single builder tab, waits on engine Done, honors
-        // cancel). Matches the T-069 acceptance criterion that
-        // `build_orchestrator("cavekit")` returns a usable trait object.
-        ClaudeCodeOrchestrator::new().run(spec, world).await
     }
 }
 
@@ -203,10 +160,11 @@ mod tests {
     }
 
     #[test]
-    fn cavekit_stub_engine_slug_is_claude_code() {
-        // Concrete stub should agree with the Orchestrator trait surface.
-        let stub = CavekitOrchestratorStub::new();
-        assert_eq!(stub.name(), "cavekit");
-        assert_eq!(stub.engine(), "claude-code");
+    fn cavekit_orchestrator_engine_slug_is_claude_code() {
+        // The real CavekitOrchestrator (T-083) declares the claude-code
+        // engine, matching the factory's expectations.
+        let o = CavekitOrchestrator::new();
+        assert_eq!(o.name(), "cavekit");
+        assert_eq!(o.engine(), "claude-code");
     }
 }
