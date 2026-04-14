@@ -7,6 +7,22 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[lib]
+name = "ark_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "ark"
 path = "src/main.rs"
+
+[dependencies]
+ark-types = { path = "../types" }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+ulid = { workspace = true }

@@ -68,6 +68,11 @@ impl StateLayout {
         &self.config
     }
 
+    /// `$base/agents/` — root directory that contains one subdirectory per agent.
+    pub fn agents_root(&self) -> PathBuf {
+        self.base.join("agents")
+    }
+
     /// `$base/agents/{id}/`
     pub fn agent_dir(&self, id: &AgentId) -> PathBuf {
         id.state_dir(&self.base)
@@ -202,6 +207,13 @@ mod tests {
         assert_eq!(layout.base(), tmp.path().join("state"));
         assert_eq!(layout.runtime(), tmp.path().join("rt"));
         assert_eq!(layout.config(), tmp.path().join("cfg"));
+    }
+
+    #[test]
+    fn agents_root_is_base_agents() {
+        let tmp = tempdir().expect("tempdir");
+        let layout = layout_with_base(tmp.path().to_path_buf());
+        assert_eq!(layout.agents_root(), tmp.path().join("agents"));
     }
 
     #[test]
