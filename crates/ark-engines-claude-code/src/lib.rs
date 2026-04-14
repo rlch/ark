@@ -25,3 +25,9 @@ pub use transcript::{
 
 pub mod preflight;
 pub use preflight::*;
+
+pub mod stall;
+pub use stall::stall_watcher;
+
+pub mod handle;
+pub use handle::EngineHandle;
