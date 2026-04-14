@@ -6,10 +6,11 @@
 //! Currently implemented:
 //! - [`settings`] — `.claude/settings.local.json` injection (R1)
 //! - [`transcript`] — JSONL transcript tailer (R2)
+//! - [`permission`] — policy enforcement + always-on event pair (R3)
 //! - [`done`] — Stop / SessionEnd → `Done Success` watcher (R4)
+//! - [`stall`] — no-activity watcher (R5)
+//! - [`handle`] — engine lifecycle token (R6)
 //! - [`preflight`] — environment validation (R7)
-//!
-//! Future modules (separate tasks): `permission`, `stall`, `handle`.
 
 pub mod done;
 pub mod settings;
@@ -31,3 +32,9 @@ pub use stall::stall_watcher;
 
 pub mod handle;
 pub use handle::EngineHandle;
+
+pub mod permission;
+pub use permission::{
+    ParsePermissionPolicyError, PermissionPolicy, READ_ONLY_TOOLS, decide, emit_permission_events,
+    read_policy_file, write_policy_file,
+};
