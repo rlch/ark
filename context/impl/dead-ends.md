@@ -54,3 +54,11 @@ All three Tier 2 deferred findings were swept in one commit ("codex fixes F-058 
 - Malformed-JSON branch already had Asked from the F-053 work — added a regression test to lock it.
 
 **Tests (6 new):** `f060_stdin_read_error_emits_asked_then_resolved_pair`, `f060_empty_stdin_emits_asked_then_resolved_pair`, `f060_whitespace_only_stdin_emits_asked_then_resolved_pair`, `f060_malformed_json_still_emits_asked_then_resolved_pair`, `f060_valid_payload_still_emits_asked_then_resolved_pair`, `f060_ordering_in_stdin_read_error_branch`.
+
+## Flaky Tests (known parallel-execution issues)
+
+### crates/orchestrators/cavekit/src/watchers/impl_tracking.rs:777
+**Test:** `progress_total_falls_back_to_in_memory_without_build_site`
+**Symptom:** Under parallel `cargo test --workspace`, occasionally panics with "expected a Progress" because the notify→debounce→mpsc pipeline doesn't complete within the test's wait window under CPU pressure.
+**Workaround:** All tests pass with `cargo test --workspace -- --test-threads=1`. Not a real bug; test is timing-sensitive.
+**Fix plan (v1+):** Replace the wall-clock waits with polling-until-event-received pattern with a bounded retry. Similar flakiness may exist in `codex_findings::malformed_rows_do_not_panic` and `codex_findings::rewrite_with_same_ids_does_not_reemit` — verify under load.
