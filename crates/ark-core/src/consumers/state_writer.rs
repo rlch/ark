@@ -136,6 +136,14 @@ pub async fn state_writer(
 /// During the short window before `Started`, status.json may report
 /// `phase = Running` with a stub spec — acceptable for v1 since events
 /// are demonstrably flowing.
+///
+/// Late Started events fill in spec metadata but do NOT regress phase if
+/// the agent has already advanced. If the writer lazy-bootstrapped from
+/// an earlier non-Started event (setting phase = Running) and Started
+/// arrives afterward, we overlay Started's spec but preserve the
+/// already-advanced phase rather than snapping back to Starting. This
+/// also guards terminal phases (Done / Failed / Crashed) from being
+/// resurrected by an out-of-order Started. See F-054 (+F-047 cross-ref).
 fn update_status(
     layout: &StateLayout,
     id: &AgentId,
@@ -146,14 +154,19 @@ fn update_status(
     // carries the authoritative spec. Fallback: synthesize a stub so the
     // rollup proceeds instead of dropping every event when the receiver
     // missed Started (e.g. due to Lagged).
-    let mut status = match read_status(layout, id)? {
-        Some(s) => s,
+    //
+    // `freshly_created` distinguishes "we just made this status in this
+    // call" from "we loaded an existing status from disk". Only the
+    // fresh-from-Started case may legitimately set phase = Starting; a
+    // late Started over an already-advanced status must not regress.
+    let (mut status, freshly_created) = match read_status(layout, id)? {
+        Some(s) => (s, false),
         None => match event {
-            AgentEvent::Started { spec } => AgentStatus::new(spec.clone(), supervisor_pid),
+            AgentEvent::Started { spec } => (AgentStatus::new(spec.clone(), supervisor_pid), true),
             _ => {
                 let mut s = AgentStatus::new(stub_spec(id), supervisor_pid);
                 s.phase = Phase::Running;
-                s
+                (s, true)
             }
         },
     };
@@ -169,7 +182,15 @@ fn update_status(
             // with a stub earlier; otherwise this is a fresh bootstrap and
             // AgentStatus::new already populated the spec.
             status.spec = spec.clone();
-            status.phase = Phase::Starting;
+            // Phase semantics: Started means "the agent just came up".
+            // Only apply that if (a) we just created status this call
+            // (true fresh bootstrap) or (b) the loaded status is still
+            // in Starting (hasn't advanced yet). Otherwise a late Started
+            // would regress Running/Reviewing/Done/etc. back to Starting.
+            // See F-054 and F-047 cross-reference.
+            if freshly_created || status.phase == Phase::Starting {
+                status.phase = Phase::Starting;
+            }
         }
         AgentEvent::TabOpened { tab_handle, .. } => {
             push_unique_tab(&mut status.tab_handles, tab_handle.clone());
@@ -563,6 +584,163 @@ mod tests {
             "Started must overlay stub spec with authoritative fields"
         );
         assert_eq!(s.spec.name, real_spec.name);
+    }
+
+    #[tokio::test]
+    async fn late_started_does_not_regress_phase() {
+        // F-054: Bootstrap ToolUse → phase=Running. Late Started arrives.
+        // Spec must be overlaid, but phase must stay Running (not regress
+        // to Starting).
+        let dir = tempfile::tempdir().unwrap();
+        let layout = layout_in(dir.path().to_path_buf());
+        let id = AgentId::new("cavekit", "auth");
+
+        // Drive update_status directly so we can observe status.json
+        // after each event without racing the broadcast consumer.
+        StateLayout::ensure_dir_0700(&layout.agent_dir(&id)).unwrap();
+
+        // 1. Lazy bootstrap via ToolUse → phase=Running, stub spec.
+        let p1 = update_status(
+            &layout,
+            &id,
+            4242,
+            &AgentEvent::ToolUse {
+                id: id.clone(),
+                tool: "Read".into(),
+                input_summary: "foo.rs".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(p1, Phase::Running);
+        let s1 = read_status(&layout, &id).unwrap().unwrap();
+        assert_eq!(s1.phase, Phase::Running);
+        assert_eq!(s1.spec.engine, "", "stub spec engine should be empty");
+
+        // 2. Late Started → spec overlays but phase MUST stay Running.
+        let real_spec = sample_spec(&id);
+        let p2 = update_status(
+            &layout,
+            &id,
+            4242,
+            &AgentEvent::Started {
+                spec: real_spec.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            p2,
+            Phase::Running,
+            "late Started must NOT regress advanced phase to Starting"
+        );
+        let s2 = read_status(&layout, &id).unwrap().unwrap();
+        assert_eq!(s2.phase, Phase::Running);
+        assert_eq!(
+            s2.spec.engine, "claude-code",
+            "late Started must still overlay spec"
+        );
+        assert_eq!(s2.spec.name, real_spec.name);
+    }
+
+    #[tokio::test]
+    async fn toolue_started_done_final_phase_done() {
+        // F-054: ToolUse → Started → Done. Final phase must be Done, not
+        // Starting (i.e. Started never regressed, then Done applied).
+        let dir = tempfile::tempdir().unwrap();
+        let layout = layout_in(dir.path().to_path_buf());
+        let id = AgentId::new("cavekit", "auth");
+        StateLayout::ensure_dir_0700(&layout.agent_dir(&id)).unwrap();
+
+        update_status(
+            &layout,
+            &id,
+            1,
+            &AgentEvent::ToolUse {
+                id: id.clone(),
+                tool: "Read".into(),
+                input_summary: "x".into(),
+            },
+        )
+        .unwrap();
+        update_status(
+            &layout,
+            &id,
+            1,
+            &AgentEvent::Started {
+                spec: sample_spec(&id),
+            },
+        )
+        .unwrap();
+        update_status(
+            &layout,
+            &id,
+            1,
+            &AgentEvent::Done {
+                id: id.clone(),
+                outcome: Outcome::Success { artifacts: vec![] },
+            },
+        )
+        .unwrap();
+
+        let s = read_status(&layout, &id).unwrap().unwrap();
+        assert_eq!(s.phase, Phase::Done);
+    }
+
+    #[tokio::test]
+    async fn late_started_after_done_preserves_terminal() {
+        // F-054: Terminal phase (Done) must be preserved even if a
+        // straggling Started arrives afterward. Spec still overlays.
+        let dir = tempfile::tempdir().unwrap();
+        let layout = layout_in(dir.path().to_path_buf());
+        let id = AgentId::new("cavekit", "auth");
+        StateLayout::ensure_dir_0700(&layout.agent_dir(&id)).unwrap();
+
+        // Bootstrap directly via Done → phase=Done (first event, stub spec).
+        update_status(
+            &layout,
+            &id,
+            1,
+            &AgentEvent::ToolUse {
+                id: id.clone(),
+                tool: "Read".into(),
+                input_summary: "x".into(),
+            },
+        )
+        .unwrap();
+        update_status(
+            &layout,
+            &id,
+            1,
+            &AgentEvent::Done {
+                id: id.clone(),
+                outcome: Outcome::Success { artifacts: vec![] },
+            },
+        )
+        .unwrap();
+        let pre = read_status(&layout, &id).unwrap().unwrap();
+        assert_eq!(pre.phase, Phase::Done);
+
+        // Late Started after terminal.
+        let real_spec = sample_spec(&id);
+        update_status(
+            &layout,
+            &id,
+            1,
+            &AgentEvent::Started {
+                spec: real_spec.clone(),
+            },
+        )
+        .unwrap();
+
+        let s = read_status(&layout, &id).unwrap().unwrap();
+        assert_eq!(
+            s.phase,
+            Phase::Done,
+            "terminal phase must not be resurrected by late Started"
+        );
+        assert_eq!(
+            s.spec.engine, "claude-code",
+            "late Started must still overlay spec even over terminal phase"
+        );
     }
 
     #[tokio::test]
