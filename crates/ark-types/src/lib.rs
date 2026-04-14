@@ -2,6 +2,7 @@ pub mod env_paths;
 pub mod event;
 pub mod event_bus;
 pub mod id;
+pub mod permission;
 pub mod scope;
 pub mod spec;
 pub mod state_dir;
@@ -13,6 +14,10 @@ pub use event::{
 };
 pub use event_bus::{DEFAULT_CAPACITY, EventReceiver, EventSink, channel, default_channel};
 pub use id::{AgentId, AgentIdParseError};
+pub use permission::{
+    POLICY_FILE_NAME, ParsePermissionPolicyError, PermissionPolicy, READ_ONLY_TOOLS, decide,
+    emit_permission_events, read_policy_file, read_policy_for_agent, write_policy_file,
+};
 pub use scope::{
     ENGINES_V1, MUX_V1, ORCHESTRATORS_V1, is_v1_engine, is_v1_mux, is_v1_orchestrator,
 };

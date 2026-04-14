@@ -35,6 +35,6 @@ pub use handle::EngineHandle;
 
 pub mod permission;
 pub use permission::{
-    ParsePermissionPolicyError, PermissionPolicy, READ_ONLY_TOOLS, decide, emit_permission_events,
-    read_policy_file, write_policy_file,
+    POLICY_FILE_NAME, ParsePermissionPolicyError, PermissionPolicy, READ_ONLY_TOOLS, decide,
+    emit_permission_events, read_policy_file, read_policy_for_agent, write_policy_file,
 };
