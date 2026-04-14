@@ -33,3 +33,20 @@ pub use ctx::{Ctx, detect_log_level, detect_no_color, log_level_from_env, no_col
 pub use error::CliError;
 pub use exit::ExitCode;
 pub use id_resolver::{ResolveError, list_agent_ids, resolve_agent_id};
+
+/// Test-only process-env serialization lock (F-509).
+///
+/// All env-mutating tests across the crate (ctx.rs, config.rs, doctor.rs,
+/// spawn.rs, ...) MUST acquire this single mutex. Separate per-module
+/// mutexes do not serialize with each other because env vars are
+/// process-global, so they flake under parallel `cargo test`.
+///
+/// Gated on `#[cfg(test)]` so it never ships in the release binary.
+#[cfg(test)]
+pub(crate) mod test_lock {
+    use std::sync::Mutex;
+
+    /// Single shared lock for any test that mutates or observes
+    /// process-global env vars (PATH, HOME, EDITOR, ARK_*, etc.).
+    pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
+}

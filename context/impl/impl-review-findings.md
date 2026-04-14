@@ -125,3 +125,45 @@ Writability is still probed with a tempfile inside the existing dir. `check_runt
 ark-cli: 204 baseline → 212 passing (+8 new tests: 5 for F-504, 1 for F-505, 2 for F-507; F-506 flipped an existing assertion).
 
 Pre-existing flaky failure in `ark-engines-claude-code::transcript::tests::append_path_emits_initial_then_appended` observed on this commit; unrelated to the files touched here.
+
+## Tier 4 — Cycle 3 (Codex)
+
+### F-508 — P1 `ark config set` must validate before persisting (FIXED)
+
+**Source:** codex
+**Tier:** 4
+**Severity:** P1
+**Status:** fixed
+**Location:** crates/cli/src/commands/config.rs (`run_set`)
+
+**Description:** `run_set` serialized the edited in-memory `toml::Value` table and wrote it directly over the user config file, then returned `Ok`. Schema-invalid values (e.g. `ark config set diff.debounce_ms "nope"`) were persisted unchecked, leaving `config.toml` unreadable for later commands that call `ConfigLoader::load::<Config>()`.
+
+**Resolution:** `run_set` now writes the rendered TOML to a sibling temp file (`.config.toml.tmp.<pid>`), then validates it by building a fresh `ConfigLoader::new().with_user_path(Some(tmp))` and calling `.load::<Config>()`. On validation failure the temp is removed and the original file is left on disk untouched; a `CliError::ConfigError { reason: "invalid value for {key}: {figment err}" }` is returned. On success the temp is renamed atomically over the real file (`fs::rename`). The project/env layers are intentionally skipped during validation so an unrelated env override can't reject a legitimate edit. Added `set_rejects_schema_invalid_value_and_preserves_original_file` (confirms the original TOML is byte-identical after rejection and no temp leaks) and `set_accepts_schema_valid_value_via_validation_path` (regression for the happy path through the new validation pipeline).
+
+### F-509 — P1 consolidate process-env test lock across ark-cli (FIXED)
+
+**Source:** codex
+**Tier:** 4
+**Severity:** P1
+**Status:** fixed
+**Location:** crates/cli/src/lib.rs (new `test_lock` module), crates/cli/src/ctx.rs, crates/cli/src/commands/{config,doctor,spawn}.rs
+
+**Description:** Every module that exercised process-global env vars (`ctx.rs`, `config.rs`, `doctor.rs`, `spawn.rs`) declared its own private `static LOCK: Mutex<()>`. Since env vars are genuinely process-global, separate mutexes do not serialize with each other — parallel `cargo test -p ark-cli` could flake when one test flipped `PATH` while another was reading it (or similarly for `HOME`, `EDITOR`, `ARK_*`).
+
+**Resolution:** Added a single `#[cfg(test)] pub(crate) mod test_lock { pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(()); }` block in `crates/cli/src/lib.rs`. All four env-touching modules now `use crate::test_lock::ENV_LOCK;` and their private mutexes were deleted. The module is `#[cfg(test)]`-gated so the shared lock does not ship in release binaries. Verified by running `cargo test -p ark-cli` (parallel, no `--test-threads=1`) twice consecutively: both runs report 217 passed / 0 failed, confirming the flake window is closed.
+
+### F-510 — P2 `$EDITOR` parsing must handle quoted args (FIXED)
+
+**Source:** codex
+**Tier:** 4
+**Severity:** P2
+**Status:** fixed
+**Location:** crates/cli/src/commands/config.rs (`run_edit`)
+
+**Description:** The local `shlex_split` helper used `split_whitespace`, which mangles `EDITOR="/Applications/Sublime Text.app/Contents/SharedSupport/bin/subl --wait"` (splits the path in half at the space) and `EDITOR='sh -c "vim \$1"'` (drops quoting entirely). The original comment said shlex was avoided to keep the dep surface small, but T-087 already pulled the `shlex` crate into the workspace for hook argv parsing.
+
+**Resolution:** Replaced the local helper with `shlex::split(&editor)`, which follows POSIX shell word-splitting rules. `None` (unparseable input, e.g. unterminated quote) surfaces as `CliError::ConfigError { reason: "invalid $EDITOR syntax: <editor>" }` instead of silently degrading. Empty-argv remains a `ConfigError` ("$EDITOR is empty"). Added `editor_parses_quoted_path_with_spaces` and `editor_parses_sh_c_wrapper_with_nested_quotes` as positive regressions, plus `editor_invalid_syntax_returns_config_error` to cover the unparseable-input path via `run_edit`.
+
+## Test Delta — Cycle 3
+
+ark-cli: 212 baseline → 217 passing (+5 new tests: 2 for F-508, 3 for F-510; F-509 is purely test-infra plumbing and adds no new assertions — verified instead by clean parallel runs). Full-workspace serial run (`cargo test --workspace -- --test-threads=1`) green end-to-end. One unrelated flaky failure in `ark-orchestrators-cavekit::watchers::ralph_loop` was observed once under full-workspace load and cleared on rerun; not in any file touched this cycle.

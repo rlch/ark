@@ -117,12 +117,7 @@ impl Ctx {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    /// Serialize all tests that mutate process env. Must be held for the
-    /// duration of every test that calls `std::env::set_var` /
-    /// `remove_var` or indirectly reads env via `detect_*` / `from_env`.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::test_lock::ENV_LOCK;
 
     #[test]
     fn no_color_env_set_nonempty_is_true() {

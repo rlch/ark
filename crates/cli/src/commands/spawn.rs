@@ -373,6 +373,7 @@ pub fn run(args: SpawnArgs, ctx: &Ctx) -> Result<(), CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_lock::ENV_LOCK;
     use clap::Parser;
     use tempfile::TempDir;
 
@@ -734,9 +735,7 @@ mod tests {
         // F-503: when zellij is missing from PATH, run() must bail
         // BEFORE writing spec.json / creating the agent dir. Assert
         // agents_root contents are unchanged across the call.
-        use std::sync::Mutex;
-        static LOCK: Mutex<()> = Mutex::new(());
-        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         let state = TempDir::new().unwrap();
         let config = TempDir::new().unwrap();
@@ -798,9 +797,7 @@ mod tests {
     fn require_zellij_missing_returns_preflight_fail() {
         // Run the helper with a blanked PATH so `zellij` cannot be
         // found, then restore. The variant must be PreflightFail.
-        use std::sync::Mutex;
-        static LOCK: Mutex<()> = Mutex::new(());
-        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var_os("PATH");
         unsafe {
             std::env::set_var("PATH", "/nonexistent-path-for-ark-test");

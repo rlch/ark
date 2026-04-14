@@ -664,14 +664,11 @@ pub fn run(args: DoctorArgs, ctx: &Ctx) -> Result<(), CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_lock::ENV_LOCK;
     use clap::Parser;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
-    use std::sync::Mutex;
     use tempfile::tempdir;
-
-    /// Serialize env-mutating tests.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[derive(Debug, Parser)]
     struct Host {

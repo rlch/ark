@@ -230,8 +230,12 @@ fn run_edit(ctx: &Ctx) -> Result<(), CliError> {
         })?;
     }
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
-    // Split the editor string so `EDITOR="code --wait"` works.
-    let parts = shlex_split(&editor);
+    // Split the editor string via POSIX shell rules so quoted paths
+    // (`"/Applications/Sublime Text.app/.../subl" --wait`) and
+    // sh-c wrappers (`sh -c "vim \$1"`) parse correctly (F-510).
+    let parts = shlex::split(&editor).ok_or_else(|| CliError::ConfigError {
+        reason: format!("invalid $EDITOR syntax: {editor:?}"),
+    })?;
     if parts.is_empty() {
         return Err(CliError::ConfigError {
             reason: "$EDITOR is empty".into(),
@@ -254,12 +258,6 @@ fn run_edit(ctx: &Ctx) -> Result<(), CliError> {
     }
 }
 
-/// Minimal shell-ish split of `$EDITOR`.  Avoids pulling shlex
-/// into the cli crate just for this.
-fn shlex_split(s: &str) -> Vec<String> {
-    s.split_whitespace().map(str::to_string).collect()
-}
-
 /// `ark config get <KEY>` — print leaf value for a dotted path.
 fn run_get(ctx: &Ctx, key: &str) -> Result<(), CliError> {
     let cfg = load_effective(ctx)?;
@@ -278,6 +276,13 @@ fn run_get(ctx: &Ctx, key: &str) -> Result<(), CliError> {
 
 /// `ark config set <KEY> <VAL>` — write to user config file.
 /// Comments in the file are NOT preserved (see module doc).
+///
+/// Validates the edited table against the [`Config`] schema BEFORE
+/// touching the real file (F-508). Validation is done by serializing
+/// the updated table to a sibling temp file, running the full layered
+/// `ConfigLoader::load::<Config>()` against it, and only renaming the
+/// temp over the real file if deserialization succeeds. On schema
+/// failure the original file is left untouched.
 fn run_set(ctx: &Ctx, key: &str, val: &str) -> Result<(), CliError> {
     let path = user_config_path(ctx);
     ensure_parent(&path)?;
@@ -288,8 +293,35 @@ fn run_set(ctx: &Ctx, key: &str, val: &str) -> Result<(), CliError> {
         toml::to_string_pretty(&toml::Value::Table(table)).map_err(|e| CliError::ConfigError {
             reason: format!("serialize user table: {e}"),
         })?;
-    std::fs::write(&path, rendered).map_err(|e| CliError::ConfigError {
-        reason: format!("write {}: {e}", path.display()),
+
+    // Write to a sibling temp file so a validation failure leaves the
+    // real config.toml on disk exactly as it was.
+    let parent = path.parent().ok_or_else(|| CliError::ConfigError {
+        reason: format!("{} has no parent directory", path.display()),
+    })?;
+    let tmp_path = parent.join(format!(".config.toml.tmp.{}", std::process::id()));
+    std::fs::write(&tmp_path, &rendered).map_err(|e| CliError::ConfigError {
+        reason: format!("write temp {}: {e}", tmp_path.display()),
+    })?;
+
+    // Validate: load the edited TOML through the same layered loader
+    // used by `show`/`get`, but with the temp file standing in for the
+    // user layer. Project and env layers are intentionally skipped so
+    // a valid write isn't rejected by an unrelated env override.
+    let validate = ConfigLoader::new()
+        .with_user_path(Some(tmp_path.clone()))
+        .load::<Config>();
+    if let Err(e) = validate {
+        // Remove the temp file; ignore errors (best-effort cleanup).
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(CliError::ConfigError {
+            reason: format!("invalid value for {key:?}: {e}"),
+        });
+    }
+
+    // Atomic rename over the real file.
+    std::fs::rename(&tmp_path, &path).map_err(|e| CliError::ConfigError {
+        reason: format!("rename {} -> {}: {e}", tmp_path.display(), path.display()),
     })?;
     Ok(())
 }
@@ -307,11 +339,8 @@ pub fn run(args: ConfigArgs, ctx: &Ctx) -> Result<(), CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_lock::ENV_LOCK;
     use clap::Parser;
-    use std::sync::Mutex;
-
-    /// Process-env mutations must be serialized across tests.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[derive(Debug, Parser)]
     struct Host {
@@ -590,5 +619,126 @@ mod tests {
         let ctx = ctx_for(tmp.path());
         let args = Host::try_parse_from(["config", "show"]).unwrap().args;
         run(args, &ctx).expect("show runs");
+    }
+
+    // ------------------------------------------------------------------
+    // F-508: `set` must validate before persisting.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn set_rejects_schema_invalid_value_and_preserves_original_file() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_for(tmp.path());
+        let path = user_config_path(&ctx);
+
+        // Seed a known-good original file.
+        ensure_parent(&path).unwrap();
+        let original = "[diff]\ndebounce_ms = 250\n";
+        std::fs::write(&path, original).unwrap();
+
+        // Attempt to set `diff.debounce_ms` to a non-integer — the
+        // schema wants a u64, so figment must reject on load.
+        let err = run_set(&ctx, "diff.debounce_ms", "\"nope\"")
+            .expect_err("schema-invalid value must be rejected");
+        assert!(
+            matches!(err, CliError::ConfigError { .. }),
+            "expected ConfigError, got {err:?}"
+        );
+
+        // Original file must be untouched on disk.
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            after, original,
+            "config.toml must NOT be overwritten when validation fails"
+        );
+
+        // No temp file should be left behind.
+        let leftovers: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(".config.toml.tmp.")
+            })
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp file must be cleaned up on validation failure, found {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn set_accepts_schema_valid_value_via_validation_path() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_for(tmp.path());
+        // Valid integer for diff.debounce_ms must succeed and load
+        // back through the effective loader.
+        run_set(&ctx, "diff.debounce_ms", "750").expect("valid set");
+        let cfg = load_effective(&ctx).expect("reload");
+        assert_eq!(cfg.diff.debounce_ms, 750);
+    }
+
+    // ------------------------------------------------------------------
+    // F-510: `$EDITOR` parsing must handle quoted args / sh-c wrappers.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn editor_parses_quoted_path_with_spaces() {
+        // A quoted editor path with spaces plus a trailing flag must
+        // yield two argv entries: the full path, and `--wait`.
+        let editor = "\"/Applications/Sublime Text.app/Contents/SharedSupport/bin/subl\" --wait";
+        let parts = shlex::split(editor).expect("parse ok");
+        assert_eq!(
+            parts,
+            vec![
+                "/Applications/Sublime Text.app/Contents/SharedSupport/bin/subl".to_string(),
+                "--wait".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn editor_parses_sh_c_wrapper_with_nested_quotes() {
+        // `sh -c "vim $1"` is a common wrapper; shlex must produce
+        // three tokens without mangling the inner quoted command.
+        let editor = "sh -c \"vim $1\"";
+        let parts = shlex::split(editor).expect("parse ok");
+        assert_eq!(
+            parts,
+            vec!["sh".to_string(), "-c".to_string(), "vim $1".to_string()]
+        );
+    }
+
+    #[test]
+    fn editor_invalid_syntax_returns_config_error() {
+        // Unclosed quote must surface as a ConfigError, not a panic
+        // and not silently fall back to something weird.
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_for(tmp.path());
+        let prior = std::env::var("EDITOR").ok();
+        // Safety: guarded by ENV_LOCK.
+        unsafe {
+            std::env::set_var("EDITOR", "\"unterminated");
+        }
+        let got = run_edit(&ctx);
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("EDITOR", v),
+                None => std::env::remove_var("EDITOR"),
+            }
+        }
+        match got {
+            Err(CliError::ConfigError { reason }) => {
+                assert!(
+                    reason.contains("invalid $EDITOR syntax"),
+                    "expected syntax error, got {reason:?}"
+                );
+            }
+            other => panic!("expected ConfigError, got {other:?}"),
+        }
     }
 }
