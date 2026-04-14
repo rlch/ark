@@ -135,13 +135,18 @@ dependencies = [
 name = "ark-engines-claude-code"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "ark-types",
  "nix",
+ "notify",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
