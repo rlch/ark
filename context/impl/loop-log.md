@@ -21,3 +21,17 @@ last_edited: "2026-04-14"
 
 ### Iteration 6 — 2026-04-14
 - T-010 + T-015 + T-016 — DONE in single general-purpose packet. Files: status_writer.rs (atomic tmp+sync_all+rename), config.rs (placeholder until T-018), multiplexer.rs (Multiplexer trait), orchestrator.rs (World replaces stub with full fields). Commit 19f75f1. Tests ark-core 18/18 (was 9). **TIER 0 COMPLETE: 17/17 tasks done, 102 tests passing across ark-types + ark-core.** Next: Tier 1 (28 tasks, frontier of 7 ready).
+
+### Iteration 7 — 2026-04-14 (Tier 0 codex review + fixes)
+- Codex adversarial review vs c25b545. Findings: F-036 (P2 AgentId parse accepts extra hyphens) FIXED; F-037 (P2 EventSink drop+warn) DEFERRED to consumer tasks T-059/60/61; F-038 (P3 EngineHandle pub fields) FIXED; F-035 (P1 zmij dep) DISMISSED as false positive (zmij is legit dtolnay upstream in serde_json 1.0.149). Commit e0bc149. Gate: PROCEED.
+
+### Iteration 8 — 2026-04-14 (Tier 1 W1)
+- 4 parallel general-purpose packets: T-018 (ark-config figment), T-024+T-029 (mux executor + layout resolver), T-039 (pane chrome), T-043+T-045 (control-socket + agents-dir). All COMPLETE. Commits 3b798da, 75270d0 (+scope issues from parallel `git add -A` despite scoped instructions — sandbox blocks git reset). Tests: 226 workspace.
+
+### Iteration 9 — 2026-04-14 (Tier 1 W2)
+- 3 parallel packets: T-019-T-023 (ark-config tail), T-025-T-028+T-032 (ZellijMux impl + preflight), T-041+T-042 (pane git + log). All COMPLETE. Commits 771e7e4/5971925, af429f4, 78ba8f2 (more commit interleaving). Plus T-044 inline (stale-socket GC + ENOTSOCK portability handling) → commit 1fb2747. Tests: 229 workspace.
+
+### Iteration 10 — 2026-04-14 (Tier 1 W3 — closeout)
+- 2 parallel packets: T-030+T-031+T-033+T-034+T-035+T-036+T-037+T-038 (layout templating + KDL writer + 6 shipped layouts + precedence + list + validation + docs) and T-040 (ark pane diff with delta + ansi-to-tui). All COMPLETE. Commits ecda420, 8020b64. **TIER 1 COMPLETE: 28/28 tasks done. 265 tests passing across 6 crates.**
+
+Overall: 45/134 (34%). Next: Tier 2 (engine-claude-code + event-bus consumers, 16 tasks).
