@@ -6,13 +6,34 @@ use serde::{Deserialize, Serialize};
 use crate::id::AgentId;
 use crate::spec::AgentSpec;
 
-/// Placeholder for the zellij tab handle. Refined by T-007; defined here so
-/// `AgentEvent` compiles. Do not depend on its field shape yet.
+/// Handle to a zellij tab hosting an agent pane.
+///
+/// Refined by T-007: adds a constructor and `Display` impl. Serialization shape
+/// is stable (session/tab_index/name) so persisted events from earlier builds
+/// stay compatible. See cavekit-types-state-events.md R3 and
+/// cavekit-architecture.md R3–R4.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct TabHandle {
     pub session: String,
     pub tab_index: u32,
     pub name: String,
+}
+
+impl TabHandle {
+    /// Construct a new `TabHandle`.
+    pub fn new(session: impl Into<String>, tab_index: u32, name: impl Into<String>) -> Self {
+        Self {
+            session: session.into(),
+            tab_index,
+            name: name.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for TabHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.session, self.tab_index)
+    }
 }
 
 /// Every observable event during an agent run. Serde-serializable for
@@ -474,6 +495,35 @@ mod tests {
             let back: LogLevel = serde_json::from_str(&json).expect("de");
             assert_eq!(back, l);
         }
+    }
+
+    #[test]
+    fn tab_handle_new_and_display() {
+        let h = TabHandle::new("ark-cavekit-auth", 3, "builder");
+        assert_eq!(h.session, "ark-cavekit-auth");
+        assert_eq!(h.tab_index, 3);
+        assert_eq!(h.name, "builder");
+        assert_eq!(format!("{h}"), "ark-cavekit-auth:3");
+    }
+
+    #[test]
+    fn tab_handle_hash_via_btreeset() {
+        use std::collections::BTreeSet;
+        let a = TabHandle::new("s", 1, "a");
+        let b = TabHandle::new("s", 2, "b");
+        let mut set: BTreeSet<String> = BTreeSet::new();
+        set.insert(a.to_string());
+        set.insert(b.to_string());
+        set.insert(a.to_string());
+        assert_eq!(set.len(), 2);
+
+        // Also ensure the Hash derive is usable via HashSet
+        use std::collections::HashSet;
+        let mut hs: HashSet<TabHandle> = HashSet::new();
+        hs.insert(a.clone());
+        hs.insert(b.clone());
+        hs.insert(a.clone());
+        assert_eq!(hs.len(), 2);
     }
 
     /// Instantiate every variant once — proves field shapes compile.
