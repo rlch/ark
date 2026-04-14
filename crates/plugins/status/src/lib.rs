@@ -35,6 +35,13 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+pub mod chip;
+
+pub use chip::{
+    CHIP_SEPARATOR_WIDTH, Chip, Phase, Severity, build_chip, char_display_width, fit_chips,
+    phase_from_str, phase_icon, phase_severity,
+};
+
 /// Registered plugin name used by supervisors when targeting `zellij pipe --name`.
 ///
 /// Supervisors publish agent status updates to this pipe target; see
@@ -132,6 +139,27 @@ pub struct Status {
     /// show a warning chip instead of silently failing.
     #[allow(dead_code)]
     pub(crate) permission_denied: bool,
+    /// Name of the session currently focused by the client, learned from the
+    /// zellij `Event::SessionUpdate` stream (the `is_current_session` flag
+    /// on `SessionInfo`). Used by [`chip::fit_chips`] to pin the focused
+    /// session's chip to row 1 per R3. `None` until the first update
+    /// arrives; render handles that by not pinning anything.
+    #[allow(dead_code)]
+    pub(crate) focused_session: Option<String>,
+}
+
+/// Public, host-testable accessor for the cached focused session name.
+///
+/// R3 requires the currently-focused session's chip to always be visible.
+/// Zellij-tile 0.44 does not expose a synchronous `get_focused_session_name()`
+/// shim, so we shadow that behaviour by subscribing to `Event::SessionUpdate`
+/// and caching the `SessionInfo` whose `is_current_session == true`. Host
+/// tests build a `Status` with an explicit cache and exercise this directly.
+impl Status {
+    /// Return the currently focused session name, if known.
+    pub fn get_focused_session_name(&self) -> Option<&str> {
+        self.focused_session.as_deref()
+    }
 }
 
 /// Parse a pipe payload and upsert it into `cache`.
@@ -180,8 +208,18 @@ pub(crate) fn evict_stale(
 
 #[cfg(target_arch = "wasm32")]
 mod wasm_plugin {
+    use super::chip::{CHIP_SEPARATOR_WIDTH, Chip, Severity, build_chip, fit_chips};
     use super::{EVICTION_TTL_MS, Status, evict_stale, ingest_pipe_payload};
     use zellij_tile::prelude::*;
+
+    /// Text `color_range` level indices used by `Text::serialize`. Zellij's
+    /// plugin protocol maps these to semantic colours chosen by the user's
+    /// theme — `0`=info/cyan, `1`=warn/yellow, `2`=error/red, `3`=success/
+    /// green in the current default theme. We use the dedicated helpers
+    /// (`success_color_range`, `error_color_range`) where available and fall
+    /// back to numeric levels for info/warn.
+    const INFO_LEVEL: usize = 0;
+    const WARN_LEVEL: usize = 1;
 
     /// Cadence for freshness ticks — R2's "1s timer if stale".
     const TIMER_INTERVAL_SECS: f64 = 1.0;
@@ -209,8 +247,14 @@ mod wasm_plugin {
 
             // R1: subscribe to the 1 Hz timer (freshness ticks — R2 uses it
             // to redraw / evict when no pipe message arrived) and permission
-            // results so we can react if the user denies the request.
-            subscribe(&[EventType::Timer, EventType::PermissionRequestResult]);
+            // results so we can react if the user denies the request. R3
+            // adds `SessionUpdate` so we can track which session the client
+            // is focused on (used to pin that chip to row 1 on render).
+            subscribe(&[
+                EventType::Timer,
+                EventType::PermissionRequestResult,
+                EventType::SessionUpdate,
+            ]);
 
             // Arm the first freshness tick. Subsequent ticks re-arm from
             // inside `update` so we keep a steady 1 Hz cadence without
@@ -238,6 +282,20 @@ mod wasm_plugin {
                     self.permission_denied = !matches!(status, PermissionStatus::Granted);
                     true
                 }
+                Event::SessionUpdate(session_infos, _resurrectable) => {
+                    // R3 "focused-session always visible" pin source. Zellij
+                    // emits the full session list; the one with
+                    // `is_current_session` is the one the user is focused
+                    // on. We cache just the name — chip pinning is string
+                    // based so we don't need the rest.
+                    let new_focus = session_infos
+                        .into_iter()
+                        .find(|s| s.is_current_session)
+                        .map(|s| s.name);
+                    let changed = self.focused_session != new_focus;
+                    self.focused_session = new_focus;
+                    changed
+                }
                 _ => false,
             }
         }
@@ -257,9 +315,89 @@ mod wasm_plugin {
             }
         }
 
-        fn render(&mut self, _rows: usize, _cols: usize) {
-            // R3 render stub — filled in by T-096.
+        fn render(&mut self, _rows: usize, cols: usize) {
+            // Permission-denied fast path (T-095 carry-over): render a single
+            // warning row pointing users at `ark doctor` rather than a blank
+            // bar. We keep this above the chip path so even a stale cache
+            // doesn't mask the permission state.
+            if self.permission_denied {
+                let msg = format!(
+                    "⚠ {}: ReadCliPipes denied. Run `ark doctor`.",
+                    super::PLUGIN_NAME
+                );
+                let text = Text::new(&msg).color_range(WARN_LEVEL, ..);
+                print_text_with_coordinates(text, 0, 0, Some(cols), Some(1));
+                return;
+            }
+
+            // Build one chip per cached summary in BTreeMap order (stable /
+            // deterministic per R2). `build_chip` is pure — we reuse the
+            // same helper host tests exercise.
+            let focused = self.focused_session.clone();
+            let is_focused_for =
+                |name: &str| -> bool { focused.as_deref().map(|s| s == name).unwrap_or(false) };
+            let chips: Vec<Chip> = self
+                .cache
+                .values()
+                .map(|s| build_chip(s, is_focused_for(&s.name)))
+                .collect();
+
+            let (row1, row2) = fit_chips(chips, cols, focused.as_deref());
+
+            // Row 1
+            let (row1_text, row1_ranges) = compose_row(&row1);
+            emit_row(row1_text, &row1_ranges, 0, cols);
+            // Row 2 (may be empty — still emit to clear prior frame)
+            let (row2_text, row2_ranges) = compose_row(&row2);
+            emit_row(row2_text, &row2_ranges, 1, cols);
         }
+    }
+
+    /// Single coloured range inside a composed row.
+    ///
+    /// `start`/`end` are character-index bounds in the final row string (not
+    /// byte offsets — `Text::color_range` operates on `chars().count()`).
+    struct ColorRange {
+        start: usize,
+        end: usize,
+        severity: Severity,
+    }
+
+    /// Concatenate chip texts separated by [`CHIP_SEPARATOR_WIDTH`] spaces
+    /// and compute per-chip colour ranges.
+    fn compose_row(chips: &[Chip]) -> (String, Vec<ColorRange>) {
+        let mut out = String::new();
+        let mut ranges = Vec::with_capacity(chips.len());
+        for (idx, chip) in chips.iter().enumerate() {
+            if idx > 0 {
+                for _ in 0..CHIP_SEPARATOR_WIDTH {
+                    out.push(' ');
+                }
+            }
+            let start = out.chars().count();
+            out.push_str(&chip.text);
+            let end = out.chars().count();
+            ranges.push(ColorRange {
+                start,
+                end,
+                severity: chip.severity,
+            });
+        }
+        (out, ranges)
+    }
+
+    /// Apply each [`ColorRange`] via the matching `Text` helper, then emit.
+    fn emit_row(row_text: String, ranges: &[ColorRange], y: usize, cols: usize) {
+        let mut text = Text::new(&row_text);
+        for r in ranges {
+            text = match r.severity {
+                Severity::Ok => text.success_color_range(r.start..r.end),
+                Severity::Danger => text.error_color_range(r.start..r.end),
+                Severity::Info => text.color_range(INFO_LEVEL, r.start..r.end),
+                Severity::Warn => text.color_range(WARN_LEVEL, r.start..r.end),
+            };
+        }
+        print_text_with_coordinates(text, 0, y, Some(cols), Some(1));
     }
 
     register_plugin!(Status);
