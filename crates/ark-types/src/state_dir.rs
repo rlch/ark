@@ -30,32 +30,20 @@ pub enum StateLayoutError {
 }
 
 impl StateLayout {
-    /// Resolve from environment using XDG conventions.
+    /// Resolve from environment using XDG conventions and ARK_* overrides.
     ///
-    /// - `base`   = `$XDG_STATE_HOME/ark/`  or `$HOME/.local/state/ark/`
-    /// - `config` = `$XDG_CONFIG_HOME/ark/` or `$HOME/.config/ark/`
-    /// - `runtime` = `$XDG_RUNTIME_DIR/ark-{uid}/` when set (Linux) or
-    ///   `/tmp/ark-{uid}/` otherwise (macOS default — `XDG_RUNTIME_DIR` is
-    ///   typically unset there; see cavekit-hook-ipc.md R4).
+    /// Thin wrapper around [`crate::env_paths::EnvPaths::resolve`] — that is
+    /// the single source of truth for ark path resolution. See its docs for
+    /// the full precedence order.
     pub fn from_env() -> Result<Self, StateLayoutError> {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or_else(|| StateLayoutError::XdgUnresolvable("HOME not set".to_string()))?;
-
-        let base = xdg_dir("XDG_STATE_HOME", &home, ".local/state").join("ark");
-        let config = xdg_dir("XDG_CONFIG_HOME", &home, ".config").join("ark");
-
-        let uid = nix::unistd::Uid::current().as_raw();
-        let runtime_leaf = format!("ark-{uid}");
-        let runtime = match std::env::var_os("XDG_RUNTIME_DIR") {
-            Some(v) if !v.is_empty() => PathBuf::from(v).join(&runtime_leaf),
-            _ => PathBuf::from("/tmp").join(&runtime_leaf),
-        };
-
-        Ok(Self {
-            base,
-            runtime,
-            config,
+        crate::env_paths::EnvPaths::resolve().map_err(|e| match e {
+            crate::env_paths::EnvPathsError::HomeUnset => {
+                StateLayoutError::XdgUnresolvable("HOME not set".to_string())
+            }
+            crate::env_paths::EnvPathsError::InvalidUtf8 => {
+                StateLayoutError::XdgUnresolvable("env var not valid utf-8".to_string())
+            }
+            crate::env_paths::EnvPathsError::Io(e) => StateLayoutError::Io(e),
         })
     }
 
@@ -151,13 +139,6 @@ impl StateLayout {
         create_dir_all_0700(path)?;
         set_mode_0700(path)?;
         Ok(())
-    }
-}
-
-fn xdg_dir(var: &str, home: &Path, fallback: &str) -> PathBuf {
-    match std::env::var_os(var) {
-        Some(v) if !v.is_empty() => PathBuf::from(v),
-        _ => home.join(fallback),
     }
 }
 
