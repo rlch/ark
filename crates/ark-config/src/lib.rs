@@ -55,6 +55,16 @@ use figment::{
 };
 use serde::{Serialize, de::DeserializeOwned};
 
+pub mod hooks;
+pub mod schema;
+
+pub use hooks::{HookContext, HookEntry};
+pub use schema::{
+    Config, DefaultsSection, DiffSection, EngineClaudeCodeSection, EngineSection, MuxSection,
+    MuxZellijSection, OrchestratorCavekitSection, OrchestratorClaudeCodeSection,
+    OrchestratorSection,
+};
+
 /// Default env-var prefix for ark config overrides.
 pub const DEFAULT_ENV_PREFIX: &str = "ARK_";
 
@@ -62,6 +72,52 @@ pub const DEFAULT_ENV_PREFIX: &str = "ARK_";
 ///
 /// Example: `ARK_DIFF__DEBOUNCE_MS` → `diff.debounce_ms`.
 pub const ENV_NESTED_SPLIT: &str = "__";
+
+/// User-facing shipped template config.  Embedded at compile time via
+/// [`include_str!`]; `ark doctor --fix` uses this when writing the initial
+/// `$XDG_CONFIG_HOME/ark/config.toml`.  See cavekit-config.md R3/R4/R5.
+pub const TEMPLATE_CONFIG_TOML: &str = include_str!("../templates/config.toml");
+
+/// Documentation blob for `ARK_*` env-var shortcuts — rendered by
+/// `ark config show --help` / README / `ark doctor` output.
+///
+/// Covers cavekit-config.md R5:
+/// - `ARK_*__*` double-underscore flattening for arbitrary nested keys
+/// - convenience shortcuts for the common toggles
+/// - the v1 limitation that arrays are unsupported via env.
+pub const ENV_SHORTCUTS_DOC: &str = "\
+ARK_* environment variables override config.toml keys.
+
+Nested keys flatten with double underscore:
+  ARK_DEFAULTS__ENGINE=claude-code         -> defaults.engine
+  ARK_DIFF__DEBOUNCE_MS=500                -> diff.debounce_ms
+  ARK_ENGINE__CLAUDE_CODE__TRANSCRIPT_TAIL=false
+
+Convenience shortcuts (expanded to their canonical key by the loader):
+  ARK_ORCHESTRATOR   -> defaults.orchestrator
+  ARK_ENGINE         -> defaults.engine
+  ARK_LOG            -> tracing log filter (consumed by logging subsystem)
+  ARK_CONFIG_PATH    -> override for user config file
+  ARK_STATE_DIR      -> override for state directory
+  ARK_CONFIG_DIR     -> override for config directory
+  ARK_RUNTIME_DIR    -> override for runtime directory
+
+Limitations:
+  * Arrays cannot be set via env vars (figment Env is scalar-only). Use
+    config.toml for list-valued fields like `engine.claude_code.inject_hooks`
+    or `[[hooks]]`.
+";
+
+/// Env var names consumed by the path resolver / logging subsystem rather
+/// than the TOML layer — documented so the env layer can skip them when
+/// figment asks "which keys are mine?".
+pub const RESERVED_ENV_VARS: &[&str] = &[
+    "ARK_LOG",
+    "ARK_CONFIG_PATH",
+    "ARK_STATE_DIR",
+    "ARK_CONFIG_DIR",
+    "ARK_RUNTIME_DIR",
+];
 
 /// Convenience entry point — loads `T` using env-derived user / project paths
 /// and the `ARK_` env prefix.
@@ -191,7 +247,33 @@ impl ConfigLoader {
         }
 
         if let Some(prefix) = self.env_prefix.as_ref() {
-            fig = fig.merge(Env::prefixed(prefix).split(ENV_NESTED_SPLIT));
+            // Shortcut promotion (cavekit-config.md R5) is scoped to the
+            // canonical `ARK_` prefix so legacy callers / tests using a
+            // different prefix (e.g. `ARKTEST_`) keep pure double-underscore
+            // semantics.
+            let apply_shortcuts = prefix == DEFAULT_ENV_PREFIX;
+
+            // Env layer A: the general double-underscore-nested keys.
+            // When shortcuts are active we filter their bare suffixes out so
+            // they don't collide as top-level config keys (and so reserved
+            // names like ARK_LOG don't surface as unknown fields).
+            fig = fig.merge(
+                Env::prefixed(prefix)
+                    .filter(move |key| {
+                        if !apply_shortcuts {
+                            return true;
+                        }
+                        let upper = key.as_str().to_uppercase();
+                        !is_reserved_env_suffix(&upper) && !is_shortcut_env_suffix(&upper)
+                    })
+                    .split(ENV_NESTED_SPLIT),
+            );
+
+            // Env layer B: the explicit shortcuts (`ARK_ORCHESTRATOR`,
+            // `ARK_ENGINE`) mapped into their canonical nested keys.
+            if apply_shortcuts && let Some(overrides) = collect_shortcut_overrides(prefix) {
+                fig = fig.merge(Serialized::defaults(overrides));
+            }
         }
 
         if let Some(overrides) = self.overrides.as_ref() {
@@ -200,6 +282,46 @@ impl ConfigLoader {
 
         fig.extract::<T>()
     }
+}
+
+/// Suffixes (prefix already stripped + uppercased) that are consumed by the
+/// path resolver / logging subsystem, not the TOML layer.
+fn is_reserved_env_suffix(suffix_upper: &str) -> bool {
+    matches!(
+        suffix_upper,
+        "LOG" | "CONFIG_PATH" | "STATE_DIR" | "CONFIG_DIR" | "RUNTIME_DIR"
+    )
+}
+
+/// Suffixes that are promoted to nested config keys via
+/// [`collect_shortcut_overrides`].
+fn is_shortcut_env_suffix(suffix_upper: &str) -> bool {
+    matches!(suffix_upper, "ORCHESTRATOR" | "ENGINE")
+}
+
+/// Read the shortcut env vars and serialize them into the canonical nested
+/// structure.  Returns `None` when no shortcut is set so the layer is simply
+/// skipped.
+///
+/// Currently handled:
+/// - `{prefix}ORCHESTRATOR` -> `defaults.orchestrator`
+/// - `{prefix}ENGINE`       -> `defaults.engine`
+fn collect_shortcut_overrides(prefix: &str) -> Option<serde_json::Value> {
+    let orch = std::env::var(format!("{prefix}ORCHESTRATOR")).ok();
+    let eng = std::env::var(format!("{prefix}ENGINE")).ok();
+    if orch.is_none() && eng.is_none() {
+        return None;
+    }
+    let mut defaults = serde_json::Map::new();
+    if let Some(v) = orch {
+        defaults.insert("orchestrator".into(), serde_json::Value::String(v));
+    }
+    if let Some(v) = eng {
+        defaults.insert("engine".into(), serde_json::Value::String(v));
+    }
+    let mut root = serde_json::Map::new();
+    root.insert("defaults".into(), serde_json::Value::Object(defaults));
+    Some(serde_json::Value::Object(root))
 }
 
 #[cfg(test)]
@@ -438,5 +560,144 @@ mod tests {
         let a: TestConfig = ConfigLoader::new().load().unwrap();
         let b: TestConfig = ConfigLoader::default().load().unwrap();
         assert_eq!(a, b);
+    }
+
+    // -----------------------------------------------------------------
+    // Full `Config` integration — schema + env shortcuts + template.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn canonical_config_loads_defaults_from_empty_loader() {
+        let cfg: Config = ConfigLoader::new().load().expect("defaults load");
+        assert_eq!(cfg, Config::defaults());
+    }
+
+    #[test]
+    fn ark_defaults_engine_via_double_underscore() {
+        Jail::expect_with(|jail| {
+            jail.set_env("ARK_DEFAULTS__ENGINE", "claude-code");
+            let cfg: Config = ConfigLoader::new()
+                .with_env_prefix("ARK_")
+                .load()
+                .expect("env load");
+            assert_eq!(cfg.defaults.engine, "claude-code");
+            // sibling untouched
+            assert_eq!(cfg.defaults.orchestrator, "auto");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn ark_orchestrator_shortcut_maps_to_defaults_orchestrator() {
+        Jail::expect_with(|jail| {
+            jail.set_env("ARK_ORCHESTRATOR", "cavekit");
+            let cfg: Config = ConfigLoader::new()
+                .with_env_prefix("ARK_")
+                .load()
+                .expect("env shortcut load");
+            assert_eq!(cfg.defaults.orchestrator, "cavekit");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn ark_engine_shortcut_maps_to_defaults_engine() {
+        Jail::expect_with(|jail| {
+            jail.set_env("ARK_ENGINE", "some-future-engine");
+            let cfg: Config = ConfigLoader::new()
+                .with_env_prefix("ARK_")
+                .load()
+                .expect("engine shortcut");
+            assert_eq!(cfg.defaults.engine, "some-future-engine");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn ark_log_reserved_does_not_become_config_key() {
+        Jail::expect_with(|jail| {
+            jail.set_env("ARK_LOG", "debug");
+            // Must not error even though `log` is not a field on Config.
+            let cfg: Config = ConfigLoader::new()
+                .with_env_prefix("ARK_")
+                .load()
+                .expect("ARK_LOG must be ignored by config layer");
+            assert_eq!(cfg, Config::defaults());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn ark_nested_engine_claude_code_transcript_tail() {
+        Jail::expect_with(|jail| {
+            jail.set_env("ARK_ENGINE__CLAUDE_CODE__TRANSCRIPT_TAIL", "false");
+            let cfg: Config = ConfigLoader::new()
+                .with_env_prefix("ARK_")
+                .load()
+                .expect("nested env");
+            assert!(!cfg.engine.claude_code.transcript_tail);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn shipped_template_parses_as_default_config() {
+        // All keys are commented out so the template parses as defaults.
+        Jail::expect_with(|jail| {
+            jail.create_file("ark.toml", TEMPLATE_CONFIG_TOML)?;
+            let cfg: Config = Figment::new()
+                .merge(Toml::file(jail.directory().join("ark.toml")))
+                .extract()
+                .expect("template config must parse");
+            assert_eq!(cfg, Config::defaults());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn template_documents_every_section_and_env_shortcuts() {
+        for section in [
+            "[defaults]",
+            "[diff]",
+            "[engine.claude_code]",
+            "[orchestrator.cavekit]",
+            "[orchestrator.claude_code]",
+            "[mux.zellij]",
+            "[[hooks]]",
+        ] {
+            assert!(
+                TEMPLATE_CONFIG_TOML.contains(section),
+                "template missing section header {section}"
+            );
+        }
+        // R5 documentation
+        assert!(TEMPLATE_CONFIG_TOML.contains("ARK_ORCHESTRATOR"));
+        assert!(TEMPLATE_CONFIG_TOML.contains("ARK_ENGINE"));
+        assert!(TEMPLATE_CONFIG_TOML.contains("ARK_LOG"));
+        assert!(TEMPLATE_CONFIG_TOML.contains("double underscore"));
+    }
+
+    #[test]
+    fn env_shortcuts_doc_covers_kit_r5() {
+        for piece in [
+            "ARK_ORCHESTRATOR",
+            "ARK_ENGINE",
+            "ARK_LOG",
+            "ARK_STATE_DIR",
+            "double underscore",
+            "Arrays",
+        ] {
+            assert!(
+                ENV_SHORTCUTS_DOC.contains(piece),
+                "ENV_SHORTCUTS_DOC missing {piece}"
+            );
+        }
+    }
+
+    #[test]
+    fn reserved_env_vars_listed_for_discovery() {
+        for name in ["ARK_LOG", "ARK_CONFIG_PATH", "ARK_STATE_DIR"] {
+            assert!(RESERVED_ENV_VARS.contains(&name), "missing {name}");
+        }
     }
 }
