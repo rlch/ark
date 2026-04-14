@@ -244,10 +244,13 @@ dependencies = [
  "ark-core",
  "ark-types",
  "fd-lock",
+ "interprocess",
  "nix",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]
