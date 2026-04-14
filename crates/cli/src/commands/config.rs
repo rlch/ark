@@ -1,8 +1,21 @@
-//! `ark config` — scaffold only.
+//! `ark config` — show/edit/get/set (cavekit-cli R6, T-090).
 //!
-//! Real implementation: T-090 (cavekit-cli R6). Nested subcommands
-//! `show`, `edit`, `get`, `set`.
+//! # Layering
+//! `show` and `get` resolve the *effective* config by layering:
+//!   defaults -> user TOML -> project TOML -> `ARK_*` env.
+//! `set` writes only to the user file at
+//! `{ctx.config_dir}/config.toml`, consistent with `ark config edit`.
+//!
+//! # Comment preservation caveat
+//! `set` round-trips through `toml::Value`, which drops comments
+//! and whitespace. Users who want commented templates should edit
+//! the file directly via `ark config edit`. Structural keys and
+//! values ARE preserved; only trailing / inline comments are lost.
 
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use ark_config::{ConfigLoader, DEFAULT_ENV_PREFIX, TEMPLATE_CONFIG_TOML, schema::Config};
 use clap::{Args, Subcommand};
 
 use crate::ctx::Ctx;
@@ -37,7 +50,7 @@ pub enum ConfigCommand {
     ///   ark config show
     Show,
 
-    /// Open $EDITOR on the user config file; create from template if missing.
+    /// Open $EDITOR on the user config file.
     ///
     /// Example:
     ///   ark config edit
@@ -67,15 +80,223 @@ pub enum ConfigCommand {
     },
 }
 
-/// Stub handler — replaced by T-090.
-pub fn run(_args: ConfigArgs, _ctx: &Ctx) -> Result<(), CliError> {
-    Err(CliError::not_yet_wired("config", "T-090"))
+/// Path of the user config file for a given ctx.
+fn user_config_path(ctx: &Ctx) -> PathBuf {
+    ctx.config_dir.join("config.toml")
+}
+
+/// Path of the project config file: `./.ark/config.toml`.
+fn project_config_path() -> Option<PathBuf> {
+    std::env::current_dir()
+        .ok()
+        .map(|d| d.join(".ark").join("config.toml"))
+}
+
+/// Build a loader that mirrors `show`/`get` resolution semantics.
+fn effective_loader(ctx: &Ctx) -> ConfigLoader {
+    ConfigLoader::new()
+        .with_user_path(Some(user_config_path(ctx)))
+        .with_project_path(project_config_path())
+        .with_env_prefix(DEFAULT_ENV_PREFIX)
+}
+
+/// Load the effective `Config`, translating any figment error to
+/// [`CliError::ConfigError`].
+fn load_effective(ctx: &Ctx) -> Result<Config, CliError> {
+    effective_loader(ctx)
+        .load::<Config>()
+        .map_err(|e| CliError::ConfigError {
+            reason: e.to_string(),
+        })
+}
+
+/// Traverse a `toml::Value` with a dotted path.
+fn walk_dotted<'a>(root: &'a toml::Value, key: &str) -> Option<&'a toml::Value> {
+    let mut cur = root;
+    for segment in key.split('.') {
+        let table = cur.as_table()?;
+        cur = table.get(segment)?;
+    }
+    Some(cur)
+}
+
+/// Parse a user-supplied string as a TOML value.  Falls back to
+/// a bare string when the input isn't valid TOML syntax, so that
+/// `ark config set foo.bar hello` Just Works.
+fn parse_value(raw: &str) -> toml::Value {
+    // Wrap in a key=value line so scalars parse cleanly.
+    let wrapped = format!("__v = {raw}");
+    if let Ok(parsed) = wrapped.parse::<toml::Value>()
+        && let Some(v) = parsed.get("__v")
+    {
+        return v.clone();
+    }
+    toml::Value::String(raw.to_string())
+}
+
+/// Insert `value` at `key` (dotted path) inside `root`, creating
+/// intermediate tables as needed.
+fn insert_dotted(
+    root: &mut toml::value::Table,
+    key: &str,
+    value: toml::Value,
+) -> Result<(), CliError> {
+    let parts: Vec<&str> = key.split('.').collect();
+    if parts.is_empty() || parts.iter().any(|p| p.is_empty()) {
+        return Err(CliError::ConfigError {
+            reason: format!("invalid dotted key: {key:?}"),
+        });
+    }
+    let mut cur = root;
+    for seg in &parts[..parts.len() - 1] {
+        let entry = cur
+            .entry((*seg).to_string())
+            .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+        match entry {
+            toml::Value::Table(t) => cur = t,
+            _ => {
+                return Err(CliError::ConfigError {
+                    reason: format!("segment {seg:?} is not a table in key {key:?}"),
+                });
+            }
+        }
+    }
+    cur.insert(parts[parts.len() - 1].to_string(), value);
+    Ok(())
+}
+
+/// Ensure the parent directory of `path` exists.
+fn ensure_parent(path: &Path) -> Result<(), CliError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| CliError::ConfigError {
+            reason: format!("create {}: {e}", parent.display()),
+        })?;
+    }
+    Ok(())
+}
+
+/// Read the user config file as a TOML table (empty if missing).
+fn read_user_table(path: &Path) -> Result<toml::value::Table, CliError> {
+    if !path.exists() {
+        return Ok(toml::value::Table::new());
+    }
+    let s = std::fs::read_to_string(path).map_err(|e| CliError::ConfigError {
+        reason: format!("read {}: {e}", path.display()),
+    })?;
+    s.parse::<toml::Value>()
+        .map_err(|e| CliError::ConfigError {
+            reason: format!("parse {}: {e}", path.display()),
+        })?
+        .as_table()
+        .cloned()
+        .ok_or_else(|| CliError::ConfigError {
+            reason: format!("{} is not a TOML table", path.display()),
+        })
+}
+
+/// `ark config show` — print the effective config as pretty TOML.
+fn run_show(ctx: &Ctx) -> Result<(), CliError> {
+    let cfg = load_effective(ctx)?;
+    let out = toml::to_string_pretty(&cfg).map_err(|e| CliError::ConfigError {
+        reason: format!("serialize effective config: {e}"),
+    })?;
+    println!("{out}");
+    Ok(())
+}
+
+/// `ark config edit` — spawn `$EDITOR` on the user config file.
+/// Creates the file (with the shipped template) if absent.
+fn run_edit(ctx: &Ctx) -> Result<(), CliError> {
+    let path = user_config_path(ctx);
+    if !path.exists() {
+        ensure_parent(&path)?;
+        std::fs::write(&path, TEMPLATE_CONFIG_TOML).map_err(|e| CliError::ConfigError {
+            reason: format!("write template to {}: {e}", path.display()),
+        })?;
+    }
+    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+    // Split the editor string so `EDITOR="code --wait"` works.
+    let parts = shlex_split(&editor);
+    if parts.is_empty() {
+        return Err(CliError::ConfigError {
+            reason: "$EDITOR is empty".into(),
+        });
+    }
+    let status = Command::new(&parts[0])
+        .args(&parts[1..])
+        .arg(&path)
+        .status()
+        .map_err(|e| CliError::Generic {
+            reason: format!("spawn editor {editor:?}: {e}"),
+        })?;
+    if status.success() {
+        Ok(())
+    } else {
+        let code = status.code().unwrap_or(1);
+        Err(CliError::Generic {
+            reason: format!("editor exited with code {code}"),
+        })
+    }
+}
+
+/// Minimal shell-ish split of `$EDITOR`.  Avoids pulling shlex
+/// into the cli crate just for this.
+fn shlex_split(s: &str) -> Vec<String> {
+    s.split_whitespace().map(str::to_string).collect()
+}
+
+/// `ark config get <KEY>` — print leaf value for a dotted path.
+fn run_get(ctx: &Ctx, key: &str) -> Result<(), CliError> {
+    let cfg = load_effective(ctx)?;
+    let as_toml = toml::Value::try_from(&cfg).map_err(|e| CliError::ConfigError {
+        reason: format!("serialize for lookup: {e}"),
+    })?;
+    let leaf = walk_dotted(&as_toml, key).ok_or_else(|| CliError::NotFound {
+        what: format!("config key {key:?}"),
+    })?;
+    match leaf {
+        toml::Value::String(s) => println!("{s}"),
+        other => println!("{other}"),
+    }
+    Ok(())
+}
+
+/// `ark config set <KEY> <VAL>` — write to user config file.
+/// Comments in the file are NOT preserved (see module doc).
+fn run_set(ctx: &Ctx, key: &str, val: &str) -> Result<(), CliError> {
+    let path = user_config_path(ctx);
+    ensure_parent(&path)?;
+    let mut table = read_user_table(&path)?;
+    let parsed = parse_value(val);
+    insert_dotted(&mut table, key, parsed)?;
+    let rendered =
+        toml::to_string_pretty(&toml::Value::Table(table)).map_err(|e| CliError::ConfigError {
+            reason: format!("serialize user table: {e}"),
+        })?;
+    std::fs::write(&path, rendered).map_err(|e| CliError::ConfigError {
+        reason: format!("write {}: {e}", path.display()),
+    })?;
+    Ok(())
+}
+
+/// Dispatch entry-point for `ark config ...`.
+pub fn run(args: ConfigArgs, ctx: &Ctx) -> Result<(), CliError> {
+    match args.command {
+        ConfigCommand::Show => run_show(ctx),
+        ConfigCommand::Edit => run_edit(ctx),
+        ConfigCommand::Get { key } => run_get(ctx, &key),
+        ConfigCommand::Set { key, val } => run_set(ctx, &key, &val),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::Parser;
+    use std::sync::Mutex;
+
+    /// Process-env mutations must be serialized across tests.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[derive(Debug, Parser)]
     struct Host {
@@ -138,16 +359,140 @@ mod tests {
         );
     }
 
+    // ------------------------------------------------------------------
+    // Handler tests.  These mutate process env (HOME / ARK_CONFIG_DIR /
+    // EDITOR) so hold ENV_LOCK.
+    // ------------------------------------------------------------------
+
+    fn ctx_for(config_dir: &Path) -> Ctx {
+        Ctx {
+            no_color: true,
+            log_level: "info".into(),
+            state_dir: config_dir.to_path_buf(),
+            config_dir: config_dir.to_path_buf(),
+            runtime_dir: config_dir.to_path_buf(),
+        }
+    }
+
     #[test]
-    fn run_returns_not_yet_wired() {
-        let args = Host::try_parse_from(["config", "show"]).unwrap().args;
-        let err = run(args, &Ctx::default()).expect_err("stub");
-        assert!(matches!(
-            err,
-            CliError::NotYetWired {
-                subcommand: "config",
-                task: "T-090",
+    fn show_renders_user_config_as_toml() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, "[defaults]\norchestrator = \"cavekit\"\n").unwrap();
+        let ctx = ctx_for(tmp.path());
+        // Ensure no cwd .ark overrides and no env wins over file.
+        let cfg = load_effective(&ctx).expect("load");
+        assert_eq!(cfg.defaults.orchestrator, "cavekit");
+
+        // Also exercise the rendering path.
+        let rendered = toml::to_string_pretty(&cfg).unwrap();
+        assert!(rendered.contains("orchestrator = \"cavekit\""));
+    }
+
+    #[test]
+    fn get_returns_leaf_via_dotted_path() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[orchestrator.cavekit]\ndefault_layout = \"triple-stack\"\n",
+        )
+        .unwrap();
+        let ctx = ctx_for(tmp.path());
+        let cfg = load_effective(&ctx).expect("load");
+        let v = toml::Value::try_from(&cfg).unwrap();
+        let leaf = walk_dotted(&v, "orchestrator.cavekit.default_layout").expect("leaf");
+        assert_eq!(leaf.as_str(), Some("triple-stack"));
+    }
+
+    #[test]
+    fn get_missing_key_is_not_found() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_for(tmp.path());
+        let err = run_get(&ctx, "nope.definitely.not.here").expect_err("missing key should error");
+        assert!(matches!(err, CliError::NotFound { .. }));
+    }
+
+    #[test]
+    fn set_round_trips_value_into_user_file() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_for(tmp.path());
+        run_set(&ctx, "defaults.orchestrator", "\"cavekit\"").expect("set");
+
+        let path = user_config_path(&ctx);
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("orchestrator = \"cavekit\""));
+
+        // Re-loading through the effective loader must see the new value.
+        let cfg = load_effective(&ctx).expect("reload");
+        assert_eq!(cfg.defaults.orchestrator, "cavekit");
+    }
+
+    #[test]
+    fn set_creates_nested_tables_and_parses_scalars() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_for(tmp.path());
+        // Raw scalar (no quotes) still parses via the `__v = <raw>`
+        // wrapper.
+        run_set(&ctx, "diff.debounce_ms", "500").expect("set int");
+        let cfg = load_effective(&ctx).expect("reload");
+        assert_eq!(cfg.diff.debounce_ms, 500);
+    }
+
+    #[test]
+    fn edit_creates_template_when_missing() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_for(tmp.path());
+        // No-op editor: `true` exits 0 without touching the file.
+        let prior = std::env::var("EDITOR").ok();
+        // Safety: guarded by ENV_LOCK.
+        unsafe {
+            std::env::set_var("EDITOR", "true");
+        }
+        let result = run_edit(&ctx);
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("EDITOR", v),
+                None => std::env::remove_var("EDITOR"),
             }
-        ));
+        }
+        result.expect("edit ok");
+
+        let path = user_config_path(&ctx);
+        assert!(path.exists(), "template must be created when missing");
+        let contents = std::fs::read_to_string(&path).unwrap();
+        // Sanity: the shipped template has the R5 env-shortcut doc.
+        assert!(contents.contains("ARK_ORCHESTRATOR"));
+    }
+
+    #[test]
+    fn parse_value_handles_string_and_int_and_bool() {
+        assert_eq!(parse_value("42").as_integer(), Some(42));
+        assert_eq!(parse_value("true").as_bool(), Some(true));
+        assert_eq!(parse_value("\"hi\"").as_str(), Some("hi"));
+        // Bare unquoted word -> fallback to string.
+        assert_eq!(parse_value("bareword").as_str(), Some("bareword"));
+    }
+
+    #[test]
+    fn insert_dotted_rejects_empty_segment() {
+        let mut t = toml::value::Table::new();
+        let err = insert_dotted(&mut t, "a..b", toml::Value::Integer(1))
+            .expect_err("empty segment rejected");
+        assert!(matches!(err, CliError::ConfigError { .. }));
+    }
+
+    #[test]
+    fn run_dispatches_show_without_panic() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_for(tmp.path());
+        let args = Host::try_parse_from(["config", "show"]).unwrap().args;
+        run(args, &ctx).expect("show runs");
     }
 }
