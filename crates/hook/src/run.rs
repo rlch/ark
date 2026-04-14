@@ -145,13 +145,21 @@ pub fn run_with_state<R: Read, W: Write>(
             error = %e,
             "stdin read failed; fail-open"
         );
+        // F-060: every PermissionRequest fail-open branch must emit
+        // the Asked+Resolved pair together. `maybe_emit_permission_decision`
+        // returns the Resolved half; the helper pairs it with a
+        // synthetic Asked (tool="unknown") emitted first.
         if let Some(decision) =
             maybe_emit_permission_decision(cli, stdout, state_root.as_deref(), None, true)
         {
-            // F-053: always emit PermissionResolved alongside the
-            // policy decision so the Asked+Resolved pair in the audit
-            // log is complete.
-            emit_permission_resolved_trace(&cli.id, state_root.as_deref(), "unknown", decision);
+            emit_permission_pair_synthetic(
+                &cli.id,
+                state_root.as_deref(),
+                "unknown",
+                "",
+                decision,
+                "stdin-read-error",
+            );
         }
         log_budget(cli, started);
         return Ok(HookOutcome::Allow);
@@ -163,12 +171,19 @@ pub fn run_with_state<R: Read, W: Write>(
             event = %cli.event,
             "stdin empty; fail-open (R3 — never block claude)"
         );
+        // F-060: empty stdin is the second fail-open branch. Same pair
+        // invariant applies — synthesize both halves in order.
         if let Some(decision) =
             maybe_emit_permission_decision(cli, stdout, state_root.as_deref(), None, true)
         {
-            // F-053: always emit PermissionResolved alongside the
-            // policy decision.
-            emit_permission_resolved_trace(&cli.id, state_root.as_deref(), "unknown", decision);
+            emit_permission_pair_synthetic(
+                &cli.id,
+                state_root.as_deref(),
+                "unknown",
+                "",
+                decision,
+                "empty-stdin",
+            );
         }
         log_budget(cli, started);
         return Ok(HookOutcome::Allow);
@@ -322,6 +337,39 @@ fn emit_permission_asked_trace(id: &AgentId, state_root: Option<&Path>, tool: &s
     let payload_str = serde_json::to_string(&serialized).unwrap_or_else(|_| String::from("{}"));
     let _ = pipe_to_zellij(TARGET_ARK_STATUS, &payload_str);
     let _ = pipe_to_zellij(TARGET_ARK_PICKER, &payload_str);
+}
+
+/// F-060 fix: synthesize BOTH `PermissionAsked` and `PermissionResolved`
+/// events for a fail-open branch that never went through
+/// `payload_to_events` (so no Asked was emitted by the main-loop path).
+///
+/// Invariant: `PermissionAsked` MUST precede `PermissionResolved` in
+/// the JSONL file, and both MUST carry the same `tool` string so
+/// downstream consumers can correlate the pair.
+///
+/// The `reason` field is for logging only — it records which fail-open
+/// branch synthesized the pair (stdin-read-error / empty-stdin /
+/// malformed-JSON) so operators investigating a hook trace can tell
+/// why the tool was `unknown`.
+///
+/// Per cavekit-engine-claude-code R3 + cavekit-hook-ipc R2.
+fn emit_permission_pair_synthetic(
+    id: &AgentId,
+    state_root: Option<&Path>,
+    tool: &str,
+    summary: &str,
+    decision: PermissionDecision,
+    reason: &str,
+) {
+    info!(
+        agent = %id,
+        event = "PermissionRequest",
+        reason = reason,
+        tool = tool,
+        "synthesizing Asked+Resolved pair for fail-open branch"
+    );
+    emit_permission_asked_trace(id, state_root, tool, summary);
+    emit_permission_resolved_trace(id, state_root, tool, decision);
 }
 
 /// F-053 fix: emit the matching `PermissionResolved` trace after
@@ -1364,6 +1412,222 @@ mod tests {
         assert_eq!(
             resolved.get("decision").and_then(|d| d.as_str()),
             Some("deferred")
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // F-060: Asked+Resolved pair invariant in fail-open branches.
+    //
+    // The F-053 fix added the Resolved half of the pair to every
+    // fail-open branch, but forgot to also synthesize the Asked half
+    // in the stdin-read-error and empty-stdin paths — so those two
+    // branches ended up emitting Resolved alone, breaking the pair
+    // invariant that F-053 itself introduced.
+    //
+    // After F-060: every PermissionRequest fail-open branch emits the
+    // synthetic Asked + Resolved pair in JSONL order, both with
+    // tool="unknown". The malformed-JSON branch already had Asked from
+    // before (locked with a regression test here), and the valid-JSON
+    // path already pairs Asked via payload_to_events + Resolved via
+    // the main-loop post-pass.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn f060_stdin_read_error_emits_asked_then_resolved_pair() {
+        // F-060 regression: both halves of the pair must be present,
+        // in order (Asked before Resolved), both with tool="unknown".
+        struct ErroringReader;
+        impl Read for ErroringReader {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "simulated"))
+            }
+        }
+        let tmp = TempDir::new().unwrap();
+        let cli = cli_for(HookEvent::PermissionRequest);
+        seed_policy(tmp.path(), &cli, PermissionPolicy::AutoApproveAll);
+        fs::create_dir_all(cli.id.state_dir(tmp.path())).unwrap();
+
+        let mut stdin = ErroringReader;
+        let mut stdout: Vec<u8> = Vec::new();
+        run_with_state(
+            &cli,
+            &mut stdin,
+            &mut stdout,
+            Some(tmp.path().to_path_buf()),
+        )
+        .expect("run ok");
+        assert!(stdout.is_empty());
+
+        let lines = read_permission_jsonl(tmp.path(), &cli);
+        assert_eq!(
+            lines.len(),
+            2,
+            "F-060: stdin-read-error branch must emit Asked + Resolved pair, got {lines:#?}"
+        );
+        assert_eq!(kind_of(&lines[0]), "permission_asked");
+        assert_eq!(kind_of(&lines[1]), "permission_resolved");
+        assert_eq!(
+            lines[0].get("tool").and_then(|t| t.as_str()),
+            Some("unknown"),
+            "Asked must carry tool=\"unknown\" when stdin couldn't be read"
+        );
+        assert_eq!(
+            lines[1].get("tool").and_then(|t| t.as_str()),
+            Some("unknown"),
+            "Resolved must match Asked's tool so consumers can correlate the pair"
+        );
+        assert_eq!(
+            lines[1].get("decision").and_then(|d| d.as_str()),
+            Some("deferred")
+        );
+    }
+
+    #[test]
+    fn f060_empty_stdin_emits_asked_then_resolved_pair() {
+        // F-060: empty stdin is the second fail-open branch. Same pair
+        // invariant, same tool="unknown" contract.
+        let tmp = TempDir::new().unwrap();
+        let cli = cli_for(HookEvent::PermissionRequest);
+        seed_policy(tmp.path(), &cli, PermissionPolicy::AutoApproveAll);
+        fs::create_dir_all(cli.id.state_dir(tmp.path())).unwrap();
+
+        let (_, stdout) = run_sandboxed(&cli, b"", Some(tmp.path().to_path_buf()));
+        assert!(stdout.is_empty());
+
+        let lines = read_permission_jsonl(tmp.path(), &cli);
+        assert_eq!(
+            lines.len(),
+            2,
+            "F-060: empty-stdin branch must emit Asked + Resolved pair, got {lines:#?}"
+        );
+        assert_eq!(kind_of(&lines[0]), "permission_asked");
+        assert_eq!(kind_of(&lines[1]), "permission_resolved");
+        assert_eq!(
+            lines[0].get("tool").and_then(|t| t.as_str()),
+            Some("unknown")
+        );
+        assert_eq!(
+            lines[1].get("tool").and_then(|t| t.as_str()),
+            Some("unknown")
+        );
+        assert_eq!(
+            lines[1].get("decision").and_then(|d| d.as_str()),
+            Some("deferred")
+        );
+    }
+
+    #[test]
+    fn f060_whitespace_only_stdin_emits_asked_then_resolved_pair() {
+        // Whitespace-only stdin trips the same `buf.trim().is_empty()`
+        // branch as truly-empty stdin. The pair invariant must hold.
+        let tmp = TempDir::new().unwrap();
+        let cli = cli_for(HookEvent::PermissionRequest);
+        seed_policy(tmp.path(), &cli, PermissionPolicy::AutoApproveAll);
+        fs::create_dir_all(cli.id.state_dir(tmp.path())).unwrap();
+
+        let (_, stdout) = run_sandboxed(&cli, b"   \n\t  \n", Some(tmp.path().to_path_buf()));
+        assert!(stdout.is_empty());
+
+        let lines = read_permission_jsonl(tmp.path(), &cli);
+        assert_eq!(
+            lines.len(),
+            2,
+            "F-060: whitespace-only stdin must also emit Asked + Resolved pair"
+        );
+        assert_eq!(kind_of(&lines[0]), "permission_asked");
+        assert_eq!(kind_of(&lines[1]), "permission_resolved");
+    }
+
+    #[test]
+    fn f060_malformed_json_still_emits_asked_then_resolved_pair() {
+        // Regression lock: the malformed-JSON branch already had Asked
+        // from before F-060 (emitted inline via
+        // `emit_permission_asked_trace`). This test pins that behavior
+        // so no future refactor can accidentally break it.
+        let tmp = TempDir::new().unwrap();
+        let cli = cli_for(HookEvent::PermissionRequest);
+        seed_policy(tmp.path(), &cli, PermissionPolicy::AutoApproveAll);
+        fs::create_dir_all(cli.id.state_dir(tmp.path())).unwrap();
+
+        let (_, stdout) = run_sandboxed(&cli, b"{not json", Some(tmp.path().to_path_buf()));
+        assert!(stdout.is_empty());
+
+        let lines = read_permission_jsonl(tmp.path(), &cli);
+        assert_eq!(
+            lines.len(),
+            2,
+            "F-060 regression: malformed JSON must emit Asked + Resolved pair, got {lines:#?}"
+        );
+        assert_eq!(kind_of(&lines[0]), "permission_asked");
+        assert_eq!(kind_of(&lines[1]), "permission_resolved");
+        assert_eq!(
+            lines[0].get("tool").and_then(|t| t.as_str()),
+            Some("unknown")
+        );
+        assert_eq!(
+            lines[1].get("tool").and_then(|t| t.as_str()),
+            Some("unknown")
+        );
+    }
+
+    #[test]
+    fn f060_valid_payload_still_emits_asked_then_resolved_pair() {
+        // The non-synthetic path — valid payload, Asked comes from
+        // payload_to_events (carries the real tool name), Resolved
+        // comes from the main-loop post-pass. Both must match tools.
+        let tmp = TempDir::new().unwrap();
+        let cli = cli_for(HookEvent::PermissionRequest);
+        seed_policy(tmp.path(), &cli, PermissionPolicy::Ask);
+        let payload = r#"{"session_id":"s1","cwd":"/tmp","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
+        let (_, _) = run_sandboxed(&cli, payload.as_bytes(), Some(tmp.path().to_path_buf()));
+
+        let lines = read_permission_jsonl(tmp.path(), &cli);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(kind_of(&lines[0]), "permission_asked");
+        assert_eq!(kind_of(&lines[1]), "permission_resolved");
+        // Both MUST carry the real tool name, not "unknown".
+        assert_eq!(lines[0].get("tool").and_then(|t| t.as_str()), Some("Bash"));
+        assert_eq!(lines[1].get("tool").and_then(|t| t.as_str()), Some("Bash"));
+    }
+
+    #[test]
+    fn f060_ordering_in_stdin_read_error_branch() {
+        // Asked file-offset MUST be strictly less than Resolved's —
+        // byte-level ordering, independent of line parsing.
+        struct ErroringReader;
+        impl Read for ErroringReader {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::Other, "boom"))
+            }
+        }
+        let tmp = TempDir::new().unwrap();
+        let cli = cli_for(HookEvent::PermissionRequest);
+        seed_policy(tmp.path(), &cli, PermissionPolicy::AutoApproveAll);
+        fs::create_dir_all(cli.id.state_dir(tmp.path())).unwrap();
+
+        let mut stdin = ErroringReader;
+        let mut stdout: Vec<u8> = Vec::new();
+        run_with_state(
+            &cli,
+            &mut stdin,
+            &mut stdout,
+            Some(tmp.path().to_path_buf()),
+        )
+        .expect("run ok");
+
+        let path = cli
+            .id
+            .state_dir(tmp.path())
+            .join("hooks")
+            .join("PermissionRequest.jsonl");
+        let contents = fs::read_to_string(&path).unwrap();
+        let asked = contents.find("permission_asked").expect("Asked present");
+        let resolved = contents
+            .find("permission_resolved")
+            .expect("Resolved present");
+        assert!(
+            asked < resolved,
+            "F-060: Asked ({asked}) must precede Resolved ({resolved}) in stdin-read-error branch"
         );
     }
 }

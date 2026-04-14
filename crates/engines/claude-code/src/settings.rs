@@ -56,6 +56,7 @@ use ark_types::AgentId;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tracing::warn;
 
 const SETTINGS_FILE: &str = "settings.local.json";
 const BACKUP_FILE: &str = "settings.local.json.ark-backup";
@@ -257,13 +258,26 @@ pub fn inject_hooks(
 
 /// Restore `.claude/settings.local.json` from the `.ark-backup` companion.
 ///
-/// - If the backup exists: copy it back over the live settings file and
-///   delete the backup.
-/// - If the backup does not exist but the live settings file does: this
-///   means the install ran on a fresh cwd (no prior settings to backup) —
-///   remove the live settings file so the cwd returns to its original
-///   pristine state.
-/// - If neither exists: no-op.
+/// Behavior matrix (F-059 data-loss fix):
+///
+/// | Backup exists | Live settings exists | Action                                       |
+/// |---------------|----------------------|----------------------------------------------|
+/// | yes           | yes or no            | Restore from backup + remove backup          |
+/// | no            | yes                  | **LEAVE live file alone** + warn-log         |
+/// | no            | no                   | No-op                                        |
+///
+/// **Why the `no backup + live exists` branch does NOT delete the live
+/// file (F-059):** `restore_settings` can be invoked on a worktree where
+/// the backup was never created (fresh cwd, no prior settings) OR where
+/// the user removed the backup themselves OR where an install aborted
+/// mid-write. In all of those cases we cannot tell the
+/// "user-managed-config-they-want-kept" scenario apart from the
+/// "fresh-install-remnant-to-discard" scenario. Erring on the side of
+/// silently deleting the user's config was a data-loss bug; the fixed
+/// behavior is to leave the live file untouched and log a warning so
+/// the operator can see what happened. The live file may still carry
+/// ark-injected entries, but nothing is lost — `inject_hooks` is
+/// idempotent and any re-install will simply re-merge.
 pub fn restore_settings(cwd: &Path) -> Result<(), RestoreError> {
     let claude_dir = cwd.join(CLAUDE_DIR);
     let settings_path = claude_dir.join(SETTINGS_FILE);
@@ -283,10 +297,15 @@ pub fn restore_settings(cwd: &Path) -> Result<(), RestoreError> {
             source,
         })?;
     } else if settings_path.exists() {
-        fs::remove_file(&settings_path).map_err(|source| RestoreError::RemoveFile {
-            path: settings_path.clone(),
-            source,
-        })?;
+        // F-059: no backup to restore from. The live file may contain
+        // user-managed config (the backup was never made, was removed
+        // by the user, or the install failed mid-write). Log and leave
+        // it alone — never silently delete the user's data.
+        warn!(
+            settings = %settings_path.display(),
+            "restore_settings: no `.ark-backup` found; leaving live \
+             settings.local.json untouched to preserve user data (F-059)"
+        );
     }
 
     Ok(())
@@ -639,22 +658,42 @@ mod tests {
 
     #[test]
     fn restore_round_trip_with_no_pre_existing_settings() {
+        // F-059: on a fresh cwd with no prior settings, ark injects a
+        // fresh file but never creates a backup. When restore runs we
+        // used to DELETE the live file — that was a data-loss bug if
+        // the user had manually removed the backup or added to the live
+        // file between install and teardown. The fixed behavior: leave
+        // the live file alone; the caller is responsible for cleaning
+        // up the worktree wholesale if they want a pristine dir.
         let tmp = TempDir::new().unwrap();
         let cwd = tmp.path();
         let id = fake_agent_id();
 
         inject_hooks(cwd, &id, EVENTS, "0.1.0").expect("inject");
         let claude_dir = cwd.join(".claude");
-        assert!(claude_dir.join(SETTINGS_FILE).exists());
+        let settings_file = claude_dir.join(SETTINGS_FILE);
+        let backup_file = claude_dir.join(BACKUP_FILE);
+        assert!(settings_file.exists());
         assert!(
-            !claude_dir.join(BACKUP_FILE).exists(),
+            !backup_file.exists(),
             "no backup should exist when no original settings existed",
         );
+        // Snapshot pre-restore content so we can prove nothing was
+        // clobbered below.
+        let pre_restore = fs::read(&settings_file).expect("read pre-restore settings");
 
         restore_settings(cwd).expect("restore");
+
+        // F-059 contract: live file MUST still be present post-restore.
         assert!(
-            !claude_dir.join(SETTINGS_FILE).exists(),
-            "fresh-cwd restore should remove the injected settings file",
+            settings_file.exists(),
+            "restore_settings must NOT delete the live file when no backup exists (F-059)"
+        );
+        // And its content is untouched.
+        let post_restore = fs::read(&settings_file).expect("read post-restore settings");
+        assert_eq!(
+            pre_restore, post_restore,
+            "restore_settings must not modify the live file when no backup exists (F-059)"
         );
     }
 
@@ -664,6 +703,131 @@ mod tests {
         let cwd = tmp.path();
         // Don't even create .claude/.
         restore_settings(cwd).expect("noop");
+    }
+
+    // -----------------------------------------------------------------
+    // F-059 (data-loss): restore_settings MUST NOT delete the live file
+    // when no backup exists. The two branches below exercise the two
+    // real-world scenarios the old code silently clobbered.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn f059_restore_preserves_live_file_when_backup_deleted_mid_session() {
+        // Scenario: inject_hooks ran once on a cwd that DID have a
+        // prior settings file (so a backup was created). Later — maybe
+        // the user cleaned up by hand — the backup is removed, but the
+        // live file (now containing ark's injected hooks + the user's
+        // original keys) is still there. restore_settings used to
+        // delete it; it MUST now leave it alone.
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path();
+        let claude_dir = cwd.join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+        let original = json!({
+            "permissions": { "allow": ["Read", "Write"] },
+            "model": "claude-opus",
+        });
+        fs::write(
+            claude_dir.join(SETTINGS_FILE),
+            serde_json::to_vec_pretty(&original).unwrap(),
+        )
+        .unwrap();
+
+        let id = fake_agent_id();
+        inject_hooks(cwd, &id, EVENTS, "0.1.0").expect("inject");
+        assert!(claude_dir.join(BACKUP_FILE).exists());
+
+        // Simulate the user manually deleting the backup.
+        fs::remove_file(claude_dir.join(BACKUP_FILE)).expect("remove backup");
+        assert!(!claude_dir.join(BACKUP_FILE).exists());
+        assert!(claude_dir.join(SETTINGS_FILE).exists());
+
+        // Snapshot live content before restore.
+        let pre_restore = fs::read(claude_dir.join(SETTINGS_FILE)).expect("read live");
+
+        restore_settings(cwd).expect("restore");
+
+        // Live file MUST still exist; its content MUST be untouched.
+        assert!(
+            claude_dir.join(SETTINGS_FILE).exists(),
+            "restore_settings deleted the user's live settings (F-059 regression)"
+        );
+        let post_restore = fs::read(claude_dir.join(SETTINGS_FILE)).expect("read live");
+        assert_eq!(
+            pre_restore, post_restore,
+            "restore_settings modified the user's live settings (F-059)"
+        );
+    }
+
+    #[test]
+    fn f059_restore_preserves_user_only_file_when_no_backup_or_inject() {
+        // Scenario: the user created .claude/settings.local.json
+        // themselves, independently of ark. ark never ran inject_hooks
+        // in this cwd, so there's no backup. If teardown ever calls
+        // restore_settings on this dir (e.g. a misfire), the user's
+        // file MUST survive.
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path();
+        let claude_dir = cwd.join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+        let user_config = json!({
+            "permissions": { "allow": ["Edit"] },
+            "model": "claude-sonnet",
+        });
+        let user_bytes = serde_json::to_vec_pretty(&user_config).unwrap();
+        fs::write(claude_dir.join(SETTINGS_FILE), &user_bytes).unwrap();
+        assert!(!claude_dir.join(BACKUP_FILE).exists());
+
+        restore_settings(cwd).expect("restore");
+
+        assert!(
+            claude_dir.join(SETTINGS_FILE).exists(),
+            "restore_settings deleted a user-owned file it had no business touching (F-059)"
+        );
+        let preserved = fs::read(claude_dir.join(SETTINGS_FILE)).expect("read live");
+        assert_eq!(
+            preserved, user_bytes,
+            "restore_settings rewrote a user-owned file (F-059)"
+        );
+    }
+
+    #[test]
+    fn f059_double_restore_is_noop_on_second_call() {
+        // After a successful restore (backup consumed, live restored),
+        // a second restore_settings call must not blow away the
+        // just-restored live file. This exercises the no-backup +
+        // live-exists branch's new preservation behavior.
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path();
+        let claude_dir = cwd.join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+        let original = json!({ "permissions": { "allow": ["Read"] } });
+        let original_bytes = serde_json::to_vec_pretty(&original).unwrap();
+        fs::write(claude_dir.join(SETTINGS_FILE), &original_bytes).unwrap();
+
+        let id = fake_agent_id();
+        inject_hooks(cwd, &id, EVENTS, "0.1.0").expect("inject");
+
+        // First restore: backup → live, backup deleted.
+        restore_settings(cwd).expect("first restore");
+        assert!(claude_dir.join(SETTINGS_FILE).exists());
+        assert!(!claude_dir.join(BACKUP_FILE).exists());
+        assert_eq!(
+            fs::read(claude_dir.join(SETTINGS_FILE)).unwrap(),
+            original_bytes
+        );
+
+        // Second restore: no backup, live exists. Must NOT delete.
+        restore_settings(cwd).expect("second restore");
+        assert!(
+            claude_dir.join(SETTINGS_FILE).exists(),
+            "second restore deleted the live file (F-059 regression)"
+        );
+        assert_eq!(
+            fs::read(claude_dir.join(SETTINGS_FILE)).unwrap(),
+            original_bytes,
+            "second restore mutated the live file (F-059)"
+        );
     }
 
     #[test]

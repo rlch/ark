@@ -51,6 +51,7 @@ chrono = { version = "0.4", default-features = false, features = ["serde", "cloc
 tempfile = "3"
 sha2 = "0.10"
 fd-lock = "4"
+shlex = "1"
 
 [profile.release]
 opt-level = 3
