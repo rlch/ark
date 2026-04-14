@@ -1,5 +1,5 @@
 [package]
-name = "ark-mux-zellij"
+name = "ark-config"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,10 +9,11 @@ rust-version.workspace = true
 
 [dependencies]
 ark-types = { path = "../ark-types" }
-tokio = { workspace = true }
-async-trait = { workspace = true }
+figment = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
-tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+figment = { workspace = true, features = ["test"] }
