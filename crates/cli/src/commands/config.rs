@@ -219,6 +219,28 @@ fn run_show(ctx: &Ctx) -> Result<(), CliError> {
     Ok(())
 }
 
+/// F-515: decide the trailing argv (after the parsed EDITOR words) for
+/// the editor spawn. For a `sh -c "<script>"` / `bash -c "<script>"`
+/// wrapper the shell consumes subsequent argv entries as `$0, $1, $2,
+/// …`; if we merely append the config path it becomes `$0` (the
+/// wrapper's "script name") instead of `$1`, so the user's `"$1"`
+/// reference in the inner command expands to empty and the editor
+/// opens nothing. When we recognize that pattern (exactly three tokens:
+/// `sh|bash`, `-c`, `<script>`) we prepend a dummy `"ark-edit"` so the
+/// path lands at `$1`. Every other EDITOR shape just appends the path.
+fn build_editor_argv_tail(parts: &[String], path: &std::path::Path) -> Vec<std::ffi::OsString> {
+    let is_sh_c_wrapper =
+        parts.len() == 3 && (parts[0] == "sh" || parts[0] == "bash") && parts[1] == "-c";
+    if is_sh_c_wrapper {
+        vec![
+            std::ffi::OsString::from("ark-edit"),
+            path.as_os_str().to_os_string(),
+        ]
+    } else {
+        vec![path.as_os_str().to_os_string()]
+    }
+}
+
 /// `ark config edit` — spawn `$EDITOR` on the user config file.
 /// Creates the file (with the shipped template) if absent.
 fn run_edit(ctx: &Ctx) -> Result<(), CliError> {
@@ -241,9 +263,16 @@ fn run_edit(ctx: &Ctx) -> Result<(), CliError> {
             reason: "$EDITOR is empty".into(),
         });
     }
+    // F-515: when EDITOR is a `sh -c "…"` / `bash -c "…"` wrapper, the
+    // shell interprets subsequent argv entries as `$0, $1, $2, …` of
+    // the inner script. Simply appending the config path would make
+    // it `$0` (the shell's "script name"), not `$1`, so the wrapper
+    // opens nothing. Insert a dummy `$0` before the path so the path
+    // lands at `$1` where users expect.
+    let argv_tail = build_editor_argv_tail(&parts, &path);
     let status = Command::new(&parts[0])
         .args(&parts[1..])
-        .arg(&path)
+        .args(&argv_tail)
         .status()
         .map_err(|e| CliError::Generic {
             reason: format!("spawn editor {editor:?}: {e}"),
@@ -710,6 +739,51 @@ mod tests {
             parts,
             vec!["sh".to_string(), "-c".to_string(), "vim $1".to_string()]
         );
+    }
+
+    #[test]
+    fn editor_argv_tail_plain_editor_just_appends_path() {
+        // F-515: non-wrapper shapes must behave exactly as before —
+        // append the path as the last argv entry.
+        let parts: Vec<String> = vec!["vim".into(), "--nofork".into()];
+        let tail = build_editor_argv_tail(&parts, std::path::Path::new("/tmp/a.toml"));
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0], std::ffi::OsString::from("/tmp/a.toml"));
+    }
+
+    #[test]
+    fn editor_argv_tail_sh_c_wrapper_inserts_dummy_zero_then_path() {
+        // F-515: `sh -c "vim \"$1\""` needs an extra arg at position
+        // $0 so the real file path lands at $1 where the inner script
+        // expects it. Without this the editor opens nothing.
+        let parts: Vec<String> = vec!["sh".into(), "-c".into(), "vim \"$1\"".into()];
+        let tail = build_editor_argv_tail(&parts, std::path::Path::new("/tmp/a.toml"));
+        assert_eq!(tail.len(), 2);
+        assert_eq!(tail[0], std::ffi::OsString::from("ark-edit"));
+        assert_eq!(tail[1], std::ffi::OsString::from("/tmp/a.toml"));
+    }
+
+    #[test]
+    fn editor_argv_tail_bash_c_wrapper_also_inserts_dummy() {
+        // F-515: `bash -c` behaves identically to `sh -c` w.r.t. $0/$1
+        // positional expansion, so it gets the same treatment.
+        let parts: Vec<String> = vec!["bash".into(), "-c".into(), "nvim \"$1\"".into()];
+        let tail = build_editor_argv_tail(&parts, std::path::Path::new("/tmp/x.toml"));
+        assert_eq!(tail.len(), 2);
+        assert_eq!(tail[0], std::ffi::OsString::from("ark-edit"));
+        assert_eq!(tail[1], std::ffi::OsString::from("/tmp/x.toml"));
+    }
+
+    #[test]
+    fn editor_argv_tail_sh_without_dash_c_is_not_wrapper() {
+        // F-515: guard against false positives — a longer argv that
+        // happens to start with `sh` must NOT get the dummy $0 treatment.
+        let parts: Vec<String> = vec!["sh".into(), "-x".into(), "-c".into(), "vim \"$1\"".into()];
+        let tail = build_editor_argv_tail(&parts, std::path::Path::new("/tmp/a.toml"));
+        // Only three-token `sh -c <script>` qualifies; this 4-token
+        // form falls through to the plain append branch.
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0], std::ffi::OsString::from("/tmp/a.toml"));
     }
 
     #[test]

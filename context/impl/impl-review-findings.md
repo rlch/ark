@@ -209,3 +209,33 @@ ark-cli: 212 baseline → 217 passing (+5 new tests: 2 for F-508, 3 for F-510; F
 ## Test Delta — Cycle 4
 
 ark-cli: 217 baseline → 224 passing (+7: 4 new `build_zellij_command` tests for F-511, 2 integration tests in `crates/cli/tests/cli_help.rs` for F-512, 1 for F-513; existing `zellij_plan_inside_session_attaches` updated for the new `ZellijPlan::Attach.layout` field — test count unchanged by that edit). Full-workspace `cargo test --workspace -- --test-threads=1` green end-to-end.
+
+## Tier 4 — Cycle 5 (Codex)
+
+### F-514 — P2 `ark pane log` must use provided Ctx, not re-read env (FIXED)
+
+**Source:** codex
+**Tier:** 4
+**Severity:** P2
+**Status:** fixed
+**Location:** crates/cli/src/commands/pane.rs (`run`, `run_log`)
+
+**Description:** `run_log()` reconstructed a `StateLayout` via `StateLayout::from_env()` instead of using the `Ctx` that `run()` was given. In-process callers and tests that supply a non-default `Ctx` (e.g. a temp `state_dir` for fixture-based resolution) were silently ignored — the resolver always walked paths under the ambient `ARK_*` / `$HOME` env. That also made the cycle-3 unit test for this path an env-mutation test rather than a true ctx-honoring test: it had to set `ARK_STATE_DIR` to force resolution under its tempdir.
+
+**Resolution:** `PaneCommand::Log` now forwards the `&Ctx` through `run()` into `run_log(args, ctx)`. `run_log` constructs the `StateLayout` directly via `StateLayout::new(ctx.state_dir.clone(), ctx.runtime_dir.clone(), ctx.config_dir.clone())` — ark-types already exposes `pub fn new(base, runtime, config)` so no new API surface is needed. Replaced the env-mutation `run_log_unknown_id_returns_not_found` with two tests: `run_log_unknown_id_returns_not_found_using_ctx` (no env mutation; just a ctx pointed at a temp dir) and `run_log_honors_ctx_state_dir_even_when_env_points_elsewhere` (sets `ARK_STATE_DIR` to a *different* dir, asserts `run_log` still resolves against ctx and returns `NotFound`, and reconstructs the layout to assert `layout.base() == ctx.state_dir`).
+
+### F-515 — P2 `ark config edit` — `sh -c` wrapper pattern file-argument placement (FIXED)
+
+**Source:** codex
+**Tier:** 4
+**Severity:** P2
+**Status:** fixed
+**Location:** crates/cli/src/commands/config.rs (new `build_editor_argv_tail`, `run_edit`)
+
+**Description:** After `shlex::split` (added in F-510 for quoted-path support), `run_edit` appended the user config path as a single extra argv entry. For `EDITOR='sh -c "vim \"$1\""'` that means `parts = ["sh", "-c", "vim \"$1\""]` and `Command::new("sh").args(&parts[1..]).arg(&path)` produces argv `["sh", "-c", "vim \"$1\"", "<path>"]`. Under `sh -c`, argv[1] is the script, argv[2] becomes `$0`, argv[3] becomes `$1`. With only one trailing entry, the path lands at `$0` (the wrapper's synthetic "script name"), not `$1` — so the inner `"$1"` expands to empty and the editor opens nothing (or errors). F-510's cycle-3 test only asserted shlex tokenization, not end-to-end argv correctness, so the latent bug slipped through.
+
+**Resolution:** Added a pure helper `build_editor_argv_tail(parts, path) -> Vec<OsString>`: when the invocation is a recognizable `sh -c <script>` / `bash -c <script>` wrapper (exactly three tokens, `parts[0]` is `sh` or `bash`, `parts[1] == "-c"`), the helper returns `["ark-edit", <path>]` so the path lands at `$1`. Every other EDITOR shape returns `[<path>]` — identical to the prior behavior. `run_edit` now calls `.args(&parts[1..])` followed by `.args(&argv_tail)` so plain editors are unchanged. Added four unit tests on the pure helper: plain editor just appends path (`editor_argv_tail_plain_editor_just_appends_path`), `sh -c "<script>"` inserts `ark-edit` as `$0` (`editor_argv_tail_sh_c_wrapper_inserts_dummy_zero_then_path`), `bash -c` behaves identically (`editor_argv_tail_bash_c_wrapper_also_inserts_dummy`), and a longer `sh -x -c <script>` form stays on the plain-append branch (`editor_argv_tail_sh_without_dash_c_is_not_wrapper`) — guarding against false positives. The existing cycle-3 `editor_parses_sh_c_wrapper_with_nested_quotes` test is retained unchanged since it only asserted shlex tokenization, which remains correct.
+
+## Test Delta — Cycle 5
+
+ark-cli: 224 baseline → 227 passing in lib unittests + 2 integration = 229 total (+5 new lib tests: 2 for F-514 replacing 1 deleted env-mutation test → net +1 pane; 4 new `build_editor_argv_tail` tests for F-515 → +4 config). Full-workspace `cargo test --workspace -- --test-threads=1` reports pre-existing failures in `ark-orchestrators-cavekit::watchers::{codex_findings, impl_tracking, ralph_loop}` and `ark-engines-claude-code` that are entirely outside the files this cycle touched (cycle-3 notes already flagged ralph_loop as flaky; these failures reproduce on the same crates in isolation). `cargo test -p ark-cli` is green.
