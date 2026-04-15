@@ -16,7 +16,7 @@ Build site: context/plans/build-site.md (134 tasks, 7 tiers).
 | 2 | 16 | 16 | ✅ COMPLETE |
 | 3 | 22 | 22 | ✅ COMPLETE |
 | 4 | 10 | 10 | ✅ COMPLETE (post-gate) |
-| 5 | 0 | 16 | pending |
+| 5 | 16 | 16 | ✅ COMPLETE (pre-gate) |
 | 6 | 0 | 26 | pending |
 
 **Overall: 94/134 tasks done (70%) · 197 ark-cli tests + workspace green**
@@ -50,8 +50,8 @@ Deferrals from T-087 spawn (noted in commit bodies, picked up in Tier 5/6): supe
 | orchestrator-claude-code | 2 | T-073 detect + T-074 run DONE | (pending) |
 | supervisor | 13 | all 22 supervisor/lifecycle/socket tasks — daemonize, lock, socket, commands, signals, orchestration, kill, crash, auto-close, audit log | (impl-supervisor.md pending) |
 | cli | 10 | TIER-4 COMPLETE (pre-gate) — T-084 scaffold, T-085 exit-codes, T-086 id-resolver, T-087 spawn (partial, supervisor-launch stubbed), T-088 list, T-089 kill, T-090 config, T-091 doctor, T-092 pane routing, T-093 env-vars | (pending) |
-| plugin-status | 0 | TIER-5 pending | (pending) |
-| plugin-picker | 0 | TIER-5 pending | (pending) |
+| plugin-status | 5 | TIER-5 COMPLETE (pre-gate) — T-094 scaffold, T-095 ingest+cache, T-096 chip render, T-097 fs fallback, T-098 distribution | (pending) |
+| plugin-picker | 11 | TIER-5 COMPLETE (pre-gate) — T-099 scaffold, T-100 state model, T-101 bootstrap, T-102 list, T-103 detail, T-104 new-agent, T-105 kill/rename/forget, T-106 resurrect, T-107 switch_session, T-108 keymap+help, T-109 distribution | (pending) |
 | testing | 0 | TIER-6 pending | (pending) |
 
 ## Tooling Notes
