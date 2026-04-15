@@ -87,11 +87,20 @@ pub enum PickerAction {
     /// User confirmed kill in the W4 modal. `keep_worktree` distinguishes
     /// the lowercase-`y` (keep) vs uppercase-`Y` (wipe) variants the R7
     /// wireframe calls out.
+    ///
+    /// F-607: both variants dispatch `Kill` (the graceful supervisor
+    /// command) — only `keep_worktree` differs between them. The earlier
+    /// implementation silently escalated the `Y` variant to `ForceKill`,
+    /// which diverged from the R7 legend ("Kill + worktree", not "force
+    /// kill"). Force-kill is a separate UX not reachable through this
+    /// modal.
     ExecKill {
         /// Agent id to terminate.
         agent_id: String,
-        /// `true` = `Kill` (preserve worktree); `false` = `ForceKill` +
-        /// remove worktree (the uppercase-`Y` variant).
+        /// `true` = keep worktree on disk after the kill ack;
+        /// `false` = also remove the worktree (`remove_worktree=true`
+        /// in the socket payload). The kill command itself is always
+        /// `Kill` (never `ForceKill`) regardless of this flag.
         keep_worktree: bool,
     },
     /// User cancelled the kill modal (lowercase `n` / Esc).

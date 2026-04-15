@@ -595,13 +595,17 @@ mod wasm_plugin {
                                     keep_worktree,
                                 } => {
                                     let sock = agent_sock(&agent_id);
-                                    // `keep_worktree=false` maps to the
-                                    // uppercase-`Y` variant: ForceKill +
-                                    // remove worktree. The helper takes
-                                    // both bools so the semantics stay
-                                    // symmetric with the R7 wireframe.
-                                    let force = !keep_worktree;
-                                    match kill_cmd(&sock, force, keep_worktree) {
+                                    // F-607: both `y` (Kill, keep worktree)
+                                    // and `Y` (Kill + worktree) confirm
+                                    // modal paths run `Kill` — the
+                                    // graceful variant. Only the worktree
+                                    // toggle differs. Force-kill is a
+                                    // separate UX and is NOT reachable
+                                    // through this modal. Earlier behaviour
+                                    // silently escalated `Y` to `ForceKill`,
+                                    // diverging from the R7 wireframe
+                                    // legend.
+                                    match kill_cmd(&sock, false, keep_worktree) {
                                         Ok(()) => {
                                             self.screen = PickerScreen::default();
                                         }

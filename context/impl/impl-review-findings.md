@@ -550,3 +550,54 @@ Three findings from the next codex pass all clustered around env-var precedence 
 `cargo build --workspace` zero new warnings (the two pre-existing `embedded ark-plugin-*` cargo-warnings are just build-script byte-count notices, not code warnings). `cargo fmt --all` clean.
 
 **Gate status after Tier 5 cycle 2:** OPEN pending next codex pass.
+
+## Tier 5 — Cycle 3
+
+Three findings from the next codex pass: an advertised-but-unwired CLI flag (`ark spawn --no-detach`), a confirm-modal path that silently escalated graceful kills into force-kills, and a build-script blind spot where a freshly-appeared wasm artifact did not trigger re-embedding. Common theme: behavior that diverged from a contract the surface already advertised (flag help text, modal legend, distribution R3 expectation).
+
+### F-606 — P1 honor `--no-detach` in `ark spawn` (FIXED)
+
+**Source:** codex
+**Tier:** 5
+**Severity:** P1
+**Status:** fixed
+**Location:** crates/cli/src/commands/spawn.rs (`run` post-spec-write, zellij launch path)
+
+**Description:** `SpawnArgs::no_detach` parsed and printed an informational note but had no effect on the zellij subprocess path: `apply_detach` (pre_exec setsid) was called unconditionally and stdin/stdout/stderr were always nulled before `zcmd.spawn()`. The flag advertised "Stay in foreground with log stream instead of detaching" in the clap help but produced the exact same observable behavior as the default detach path. Operators could not actually watch zellij output or keep the CLI attached.
+
+**Resolution:** Introduced a pure helper `configure_zellij_stdio_and_detach(cmd, no_detach, detach_fn)` that mutates `cmd` conditionally — when `no_detach = true` the function is a no-op (stdio stays inherited from the parent, no pre_exec hook is added); when `no_detach = false` it invokes `detach_fn(cmd)` (normally `apply_detach`) and nullifies all three stdio handles. `run()` branches on `args.no_detach`: the default (detach) path is unchanged (spawn + `zellij_startup_failure` grace poll); the `--no-detach` path uses `zcmd.status()` so the CLI blocks on zellij, inheriting stdio, and cleans up agent state if zellij exits non-zero. The earlier "log-tail deferred" `eprintln!` was dropped — the flag now does real work (foreground attach) rather than advertising vaporware. Injecting `detach_fn` as a closure is what makes the fix testable: the pre_exec closure inside `apply_detach` is opaque to `std::process::Command`, so the host-side test passes a flag-recording mock closure and asserts it is NOT invoked when `no_detach = true`, and IS invoked when `no_detach = false`. One new test `configure_detach_skips_hook_when_no_detach` covers both arms of the branch.
+
+### F-607 — P1 picker `Y` → Kill + remove-worktree (not ForceKill) (FIXED)
+
+**Source:** codex
+**Tier:** 5
+**Severity:** P1
+**Status:** fixed
+**Location:** crates/plugins/picker/src/lib.rs (confirm-kill dispatch), crates/plugins/picker/src/render_list.rs, crates/plugins/picker/src/render_confirm.rs
+
+**Description:** The `PickerAction::ExecKill { keep_worktree: false }` arm (uppercase `Y` in the confirm modal) computed `let force = !keep_worktree;` and called `kill_cmd(&sock, true, false)` — i.e. `ForceKill` with `remove_worktree=true`. The modal legend says "[Y] Kill + worktree", not "force kill". The `Y` variant should escalate the worktree disposition (also remove the directory), not the kill semantics (SIGTERM → SIGKILL bypass of graceful supervisor shutdown). Force-kill is a separate UX (not reachable from this modal).
+
+**Resolution:** Changed the lib.rs dispatch to call `kill_cmd(&sock, false, keep_worktree)` unconditionally — both `y` and `Y` now dispatch the graceful `Kill` command; only `remove_worktree` differs. The `force` local variable was dropped. Doc-comments on `PickerAction::ExecKill` (render_list.rs) and `handle_confirm_kill_key` (render_confirm.rs) were updated to make the new contract explicit: "both variants dispatch `Kill` — only `keep_worktree` differs; force-kill is a separate UX not reachable through this modal." The `ExecKill` enum shape stays the same (no `force` field was ever added; the earlier escalation was a local derivation in lib.rs, so no callers or tests needed signature updates). `handle_confirm_kill_key` already returned the correct payload — the bug was entirely in the dispatch site. The bulk-kill path (`KillAllDoneFailed`, Shift+Del on terminal-phase agents) still uses `kill_cmd(&sock, true, true)` because that is a semantically different UX (bulk reap of already-dead agents); this fix only touches the single-agent confirm modal. Existing `confirm_kill_y_lowercase_keeps_worktree` and `confirm_kill_shift_y_removes_worktree` tests in render_confirm.rs continue to cover the handler output unchanged.
+
+### F-608 — P2 build.rs rerun when wasm artifact appears (FIXED)
+
+**Source:** codex
+**Tier:** 5
+**Severity:** P2
+**Status:** fixed
+**Location:** crates/cli/build.rs (`main`, `cargo:rerun-if-changed` declarations)
+
+**Description:** `build.rs` only emitted `cargo:rerun-if-changed` for plugin sources (`../plugins/{status,picker}/src`) and their `Cargo.toml`. A common workflow produced a stale placeholder: build the CLI first without the wasm target installed → `embed_plugin` falls through to `write_placeholder(b"")` → later `cargo build --target wasm32-wasip1 --release -p ark-plugin-*` produces the real artifact, but because that build did not touch any path cargo was tracking for `ark-cli`'s build.rs, the next `cargo build -p ark-cli` reused the cached placeholder. Operators saw `ark doctor --fix` refuse to install plugins with `<PLUGIN>_WASM_AVAILABLE = false` even though the artifact was already on disk.
+
+**Resolution:** Added three additional `cargo:rerun-if-changed` lines: the wasm release directory itself (`target/wasm32-wasip1/release/`) plus the two specific artifact paths (`ark_plugin_status.wasm`, `ark_plugin_picker.wasm`). Cargo tracks the mtime of a path by name even when the path does not exist yet — when the artifact appears or changes, cargo re-invokes build.rs and `embed_plugin` picks up the real bytes. No new tests (build-script behavior is validated by the existing `cargo:warning=embedded …` line showing the real byte count in CI logs after a wasm build, which this cycle's `cargo build --workspace` output confirms for both plugins).
+
+## Test Delta — Tier 5 Cycle 3
+
+- ark-cli: 264 baseline → 265 (+1: new F-606 `configure_detach_skips_hook_when_no_detach` test covering both `no_detach=true` and `no_detach=false` branches of `configure_zellij_stdio_and_detach` with a flag-recording mock closure).
+- ark-plugin-picker: 203 baseline → 203 (no count change; F-607 changed dispatch-site behavior in lib.rs while the render_confirm.rs key-handler tests continue to exercise the unchanged `ExecKill { keep_worktree }` payload shape).
+- ark-cli build.rs: no test count (build-script behavior validated by `cargo:warning=embedded …` lines showing real byte counts).
+- Workspace totals: 265 + 203 and every other crate unchanged; `cargo test --workspace -- --test-threads=1` fully green.
+
+`cargo build --workspace` zero new warnings (the two pre-existing `embedded ark-plugin-*` cargo-warnings are just build-script byte-count notices, not code warnings). `cargo fmt --all` clean.
+
+**Gate status after Tier 5 cycle 3:** OPEN pending next codex pass.

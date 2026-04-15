@@ -372,6 +372,37 @@ pub fn apply_detach(cmd: &mut Command) {
     }
 }
 
+/// F-606: Configure stdio + TTY-detach on `cmd` according to `no_detach`.
+///
+/// When `no_detach == false` (the default detach path) we nullify
+/// stdin/stdout/stderr and invoke `detach_fn(cmd)` — normally
+/// [`apply_detach`], which wires `pre_exec(setsid)` so the child becomes
+/// a new session leader divorced from the caller's TTY. When
+/// `no_detach == true` we leave stdio INHERITED from the parent and
+/// skip the detach hook entirely so the operator can watch zellij
+/// output live in the foreground (`--no-detach`).
+///
+/// `detach_fn` is injected for testability: host tests pass a flag-
+/// recording stub instead of the real `apply_detach`, which is
+/// otherwise opaque (pre_exec closures can't be introspected via
+/// `std::process::Command`). Real callers pass `apply_detach`.
+pub fn configure_zellij_stdio_and_detach<F>(cmd: &mut Command, no_detach: bool, detach_fn: F)
+where
+    F: FnOnce(&mut Command),
+{
+    if no_detach {
+        // `--no-detach`: stay attached to the caller's TTY so zellij
+        // output is visible. No session leadership change — the child
+        // shares the parent's process group and controlling terminal,
+        // which is exactly what the flag advertises.
+        return;
+    }
+    detach_fn(cmd);
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+}
+
 /// F-522: Derive a collision-free zellij session name for `id`.
 ///
 /// `AgentId::session_name()` intentionally drops the ULID suffix for
@@ -641,12 +672,45 @@ pub fn run(args: SpawnArgs, ctx: &Ctx) -> Result<(), CliError> {
         Some(layout_str.as_str()),
     );
     let mut zcmd = build_zellij_command(&plan);
-    // F-526: detach via pre_exec(setsid) instead of shelling out to
-    // the external `setsid(1)` (which macOS doesn't ship).
-    apply_detach(&mut zcmd);
-    zcmd.stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+    // F-606: honor `--no-detach`. The detach path (default) nullifies
+    // stdio + wires `pre_exec(setsid)` via `apply_detach` so the child
+    // becomes a new session leader. The `--no-detach` path skips BOTH
+    // — stdio is inherited and no session split happens, so the
+    // operator sees zellij output live and we block on the child until
+    // zellij exits.
+    configure_zellij_stdio_and_detach(&mut zcmd, args.no_detach, apply_detach);
+
+    if args.no_detach {
+        // Foreground path: `Command::status()` inherits stdio and blocks
+        // on the child. A non-zero exit is a spawn / runtime failure —
+        // we still run `cleanup_agent_state` so a foreground launch that
+        // fails before the session is listenable doesn't leave an
+        // orphan spec.json / layout.kdl behind.
+        let status = match zcmd.status() {
+            Ok(s) => s,
+            Err(e) => {
+                cleanup_agent_state(&ctx.state_dir, &spec.id);
+                return Err(CliError::Internal {
+                    reason: format!("launch zellij: {e}"),
+                });
+            }
+        };
+        if !status.success() {
+            let code = status.code().unwrap_or(-1);
+            cleanup_agent_state(&ctx.state_dir, &spec.id);
+            return Err(CliError::Internal {
+                reason: format!("zellij exited with code {code} before session came up"),
+            });
+        }
+        eprintln!(
+            "warning: supervisor launch is stubbed in this build; \
+             spec.json written at {}",
+            spec_path.display()
+        );
+        println!("spawned {} -> Ctrl+o w to switch", spec.id);
+        return Ok(());
+    }
+
     // F-528: `zcmd.spawn()` itself can fail (ENOENT after racy PATH
     // change, EACCES on a non-executable binary, EAGAIN / ENOMEM under
     // fork pressure). The prior code returned the error directly and
@@ -689,11 +753,6 @@ pub fn run(args: SpawnArgs, ctx: &Ctx) -> Result<(), CliError> {
     );
 
     println!("spawned {} -> Ctrl+o w to switch", spec.id);
-    if args.no_detach {
-        // `--no-detach` would tail logs — real log-tail is still
-        // deferred until the supervisor exists.
-        eprintln!("note: --no-detach log-tail deferred until supervisor lands");
-    }
     Ok(())
 }
 
@@ -1100,6 +1159,39 @@ mod tests {
         assert!(
             !argv.iter().any(|a| a == "setsid"),
             "argv must not reference external setsid: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn configure_detach_skips_hook_when_no_detach() {
+        // F-606: `--no-detach` must NOT apply the detach hook. We pass a
+        // flag-recording mock as the detach function and assert it stays
+        // un-called when `no_detach = true`, and IS called when
+        // `no_detach = false` (the default path). This is the only way
+        // to observe the pre_exec side of `apply_detach` indirectly —
+        // `std::process::Command` doesn't expose its closures.
+        use std::cell::Cell;
+
+        let called = Cell::new(false);
+        let mut cmd = build_zellij_command(&ZellijSpawn {
+            session: "ark-cavekit-auth".into(),
+            layout: Some("/tmp/b.kdl".into()),
+        });
+        configure_zellij_stdio_and_detach(&mut cmd, true, |_c| called.set(true));
+        assert!(
+            !called.get(),
+            "detach hook must NOT fire when no_detach = true"
+        );
+
+        let called = Cell::new(false);
+        let mut cmd = build_zellij_command(&ZellijSpawn {
+            session: "ark-cavekit-auth".into(),
+            layout: Some("/tmp/b.kdl".into()),
+        });
+        configure_zellij_stdio_and_detach(&mut cmd, false, |_c| called.set(true));
+        assert!(
+            called.get(),
+            "detach hook MUST fire when no_detach = false (default)"
         );
     }
 

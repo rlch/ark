@@ -61,10 +61,15 @@ pub fn render_rename_prompt(state: &RenamePromptState) -> Vec<String> {
 /// Pure key handler for the confirm-kill modal.
 ///
 /// Bindings (R7 W4):
-/// * lowercase `y` → `ExecKill { keep_worktree: true }` (soft kill)
-/// * uppercase `Y` → `ExecKill { keep_worktree: false }` (kill + worktree)
+/// * lowercase `y` → `ExecKill { keep_worktree: true }` (Kill, preserve worktree)
+/// * uppercase `Y` → `ExecKill { keep_worktree: false }` (Kill + remove worktree)
 /// * `n` or `Esc` → `CancelKill`
 /// * anything else → `None`
+///
+/// F-607: both `y` and `Y` dispatch the graceful `Kill` command through
+/// the socket — only the worktree disposition differs. Earlier code
+/// escalated `Y` to `ForceKill`; the modal legend says "Kill + worktree",
+/// not "force kill".
 ///
 /// The handler is immutable — the modal has no in-flight state beyond the
 /// agent id, which never changes across key presses, so `&ConfirmKillState`

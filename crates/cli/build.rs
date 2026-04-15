@@ -62,6 +62,29 @@ fn main() {
         .and_then(|p| p.parent())
         .expect("workspace root");
 
+    // F-608: also watch the wasm release directory so a freshly-appeared
+    // artifact re-triggers build.rs even when no plugin source changed.
+    // Without this, a CLI built before the wasm target was compiled would
+    // embed the zero-byte placeholder; a later `cargo build --target
+    // wasm32-wasip1 --release -p <plugin>` wouldn't touch any input
+    // cargo was tracking, so the next `cargo build -p ark-cli` would
+    // keep the stale placeholder. cargo tracks the mtime of the path we
+    // name even if it doesn't exist yet — when the file appears cargo
+    // will re-invoke us and `embed_plugin` picks up the real bytes.
+    let wasm_release_dir = workspace_root
+        .join("target")
+        .join("wasm32-wasip1")
+        .join("release");
+    println!("cargo:rerun-if-changed={}", wasm_release_dir.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        wasm_release_dir.join("ark_plugin_status.wasm").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        wasm_release_dir.join("ark_plugin_picker.wasm").display()
+    );
+
     embed_plugin(
         workspace_root,
         &wasm_out_dir,
