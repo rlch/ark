@@ -73,3 +73,19 @@ fmt:
 # Format check (CI).
 fmt-check:
     cargo fmt --all -- --check
+
+# Install ark + ark-hook to ~/.cargo/bin from this checkout.
+# Builds wasm plugins first so they get embedded in the binary
+# (status bar + picker won't work without this step).
+install: wasm
+    cargo install --path crates/cli --bin ark --force --locked
+    cargo install --path crates/hook --bin ark-hook --force --locked
+    @echo ""
+    @echo "ark + ark-hook installed to ~/.cargo/bin"
+    @echo "Next: run 'ark doctor --fix' to write embedded plugins"
+    @echo "      and print the zellij KDL keybind snippet."
+
+# Remove ark + ark-hook from ~/.cargo/bin.
+uninstall:
+    cargo uninstall ark-cli
+    cargo uninstall ark-hook
