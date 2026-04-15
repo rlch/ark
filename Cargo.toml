@@ -64,6 +64,13 @@ facet-kdl = "0.42"
 kdl = "6.5"
 miette = { version = "7", features = ["fancy"] }
 cel-interpreter = "0"
+# T-2.3 (scene): RE2-safe glob matcher used by the CEL `glob(str, pattern)`
+# custom function. globset patterns are shell-style (`*`, `**`, `?`,
+# `[abc]`) and compile to a non-backtracking regex engine, so hostile
+# user patterns can't DoS the evaluator. The `matches()` function from
+# CEL stdlib already uses RE2-backed `regex`, so no extra ReDoS surface
+# is introduced by this crate.
+globset = "0.4"
 # T-0.5 (scene): blake3 hashes scene file content to produce `SceneId`
 # for hot-reload delta detection, `ark scene graph` attribution, and
 # compile-cache keying. Used exclusively under `crates/scene/`.
