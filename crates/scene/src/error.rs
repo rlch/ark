@@ -82,6 +82,17 @@ pub enum ErrorCode {
     OpUnresolvedRef,
     /// Op dispatched at runtime returned an error (R7 / R12 / T-4.5).
     OpFailed,
+    /// Scene `emit` op targets a non-UserEvent kind (R4 / T-5.5).
+    /// Scene authors can only emit `UserEvent:<name>` events — core
+    /// kinds come from supervisor/agent/plugin surfaces.
+    EmitNonUserEvent,
+    /// Scene reactions form a cycle through user-event emits
+    /// (R4 / T-5.5). `emit A → on A emits B → on B emits A`.
+    EmitCycle,
+    /// Scene `emit` uses a `source` field outside the R4 canonical set
+    /// (T-5.5). Canonical values: `scene`, `ext:<n>`, `plugin:<n>`,
+    /// `hook:<n>`, `core`, `agent`.
+    EmitInvalidSource,
 }
 
 impl ErrorCode {
@@ -107,6 +118,9 @@ impl ErrorCode {
             ErrorCode::TemplateRender => "scene/template-render",
             ErrorCode::OpUnresolvedRef => "op/unresolved-ref",
             ErrorCode::OpFailed => "op/failed",
+            ErrorCode::EmitNonUserEvent => "scene/emit-non-user-event",
+            ErrorCode::EmitCycle => "scene/emit-cycle",
+            ErrorCode::EmitInvalidSource => "scene/emit-invalid-source",
         }
     }
 }
@@ -543,6 +557,51 @@ pub enum SceneError {
         /// Human-readable failure summary.
         message: String,
     },
+
+    /// Scene `emit "<target>"` op whose target is not a `UserEvent:<name>`
+    /// (R4 / T-5.5). Scene authors are restricted to emitting user
+    /// events; core events come from the supervisor / agent / plugin
+    /// layers, so allowing scenes to emit core kinds would blur the
+    /// attribution model and open static cycle detection.
+    #[error("scene `emit` target `{target}` is not a UserEvent")]
+    #[diagnostic(
+        code = "scene/emit-non-user-event",
+        help("Scene reactions may only emit namespaced user events. Rewrite as `emit \"UserEvent:<namespaced-name>\"` (or simply `emit \"user.foo\"`), or if this is a core event it should come from the supervisor / agent / plugin layer, not a scene reaction.")
+    )]
+    EmitNonUserEvent {
+        /// The target string the scene tried to emit.
+        target: String,
+    },
+
+    /// Scene reactions form a cycle through user-event emits (R4 /
+    /// T-5.5). Compile-time detection builds a DAG from every
+    /// `emit "<user-event>"` op to every `on "UserEvent:<name>"`
+    /// reaction; a back-edge is a cycle.
+    #[error("emit cycle detected: {trail}")]
+    #[diagnostic(
+        code = "scene/emit-cycle",
+        help("Break the cycle by removing one of the `emit` ops in the chain, or guard one of the reactions with an `if=` predicate that terminates the loop. Runtime cascade-depth bounding (R4) still catches unbounded chains but a statically visible cycle is almost always a bug.")
+    )]
+    EmitCycle {
+        /// Dotted chain describing the cycle (e.g. `"user.a → user.b → user.a"`).
+        trail: String,
+    },
+
+    /// Scene `emit` declares a `source="<value>"` outside the R4
+    /// canonical set (T-5.5). Per R4: `core`, `scene`, `ext:<name>`,
+    /// `plugin:<name>`, `hook:<name>`, `agent`. Scene `emit` ops
+    /// typically leave `source` implicit (defaults to `"scene"` — see
+    /// `EmitOp`); this variant surfaces only when a scene author
+    /// explicitly sets an invalid source.
+    #[error("scene `emit` source `{value}` is not a canonical attribution tag")]
+    #[diagnostic(
+        code = "scene/emit-invalid-source",
+        help("Valid `source` values per R4: `core`, `scene`, `ext:<name>`, `plugin:<name>`, `hook:<name>`, `agent`. Scenes usually leave `source` implicit — the `emit` op fills it in as `\"scene\"`.")
+    )]
+    EmitInvalidSource {
+        /// The offending source string.
+        value: String,
+    },
 }
 
 /// Canonical static help text for `scene/unknown-node` — the list
@@ -639,6 +698,9 @@ impl SceneError {
             SceneError::TemplateRender { .. } => ErrorCode::TemplateRender,
             SceneError::OpUnresolvedRef { .. } => ErrorCode::OpUnresolvedRef,
             SceneError::OpFailed { .. } => ErrorCode::OpFailed,
+            SceneError::EmitNonUserEvent { .. } => ErrorCode::EmitNonUserEvent,
+            SceneError::EmitCycle { .. } => ErrorCode::EmitCycle,
+            SceneError::EmitInvalidSource { .. } => ErrorCode::EmitInvalidSource,
         }
     }
 }
