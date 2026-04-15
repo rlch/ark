@@ -470,6 +470,10 @@ pub struct KeybindNode {
 /// `engine { name "…"; command "…"; args "…"; env { … } }` — direct
 /// ACP launch spec per R17. At most one per scene. Mutual-exclusion with
 /// `use "engine-*"` enforced in the compile pipeline (`scene/engine-conflict`).
+///
+/// The compile pipeline lowers this into [`crate::ops::EngineLaunch`]
+/// (see also [`crate::path`] for scene resolution); this AST shape
+/// preserves source fidelity for span-rich diagnostics.
 #[derive(Facet, Debug)]
 pub struct EngineNode {
     /// Human-friendly engine identifier (e.g. `"claude"`). Surfaces in
@@ -481,14 +485,28 @@ pub struct EngineNode {
     #[facet(kdl::child, default)]
     pub command: Option<EngineStringNode>,
 
-    /// Additional argv entries, one per `args` child or multi-arg child
-    /// (zellij-style). Untyped at AST layer.
-    #[facet(kdl::child, default)]
-    pub args: Option<OpaqueBlock>,
+    /// Additional argv entries. Each `args "<v1>" "<v2>" …` line in
+    /// the source contributes one [`EngineArgsNode`] whose `values`
+    /// vector holds the positional strings on that line. Multiple
+    /// `args` lines are allowed and concatenated in source order; the
+    /// lowering step (T-ACP.3 / [`crate::engine::lower_engine`])
+    /// flattens them into a single argv slice.
+    ///
+    /// Renamed to `"args"` (matching the field name verbatim, which
+    /// is also the spec form per R17) so the generated KDL schema
+    /// announces the correct node name. Without the rename the
+    /// schema-emitter would singularize `args` → `arg`; facet-kdl's
+    /// runtime accepts `args` regardless, but the schema would lie
+    /// to editor tooling.
+    #[facet(kdl::children, rename = "args", default)]
+    pub args: Vec<EngineArgsNode>,
 
-    /// Environment variables injected at spawn. Untyped at AST layer.
+    /// `env { KEY "VAL" }` block (R17). Each child is a single
+    /// environment variable: child node name = env-var key, first
+    /// positional argument = value. Allows arbitrary key names by
+    /// routing through `kdl::node_name`.
     #[facet(kdl::child, default)]
-    pub env: Option<OpaqueBlock>,
+    pub env: Option<EngineEnvNode>,
 }
 
 /// Shared shape for single-argument string children inside `engine { }`
@@ -496,6 +514,49 @@ pub struct EngineNode {
 #[derive(Facet, Debug)]
 pub struct EngineStringNode {
     /// The string value (first positional argument).
+    #[facet(kdl::argument)]
+    pub value: String,
+}
+
+/// `args "<v1>" "<v2>" …` child of `engine { }` — positional argv
+/// entries appended after `command`. Multiple `args` lines are
+/// permitted and flattened in source order during lowering.
+#[derive(Facet, Debug, Default)]
+#[facet(traits(Default))]
+pub struct EngineArgsNode {
+    /// The argv strings on this line, in source order.
+    #[facet(kdl::arguments, default)]
+    pub values: Vec<String>,
+}
+
+/// `env { KEY "VAL"; … }` child of `engine { }` — environment-variable
+/// bag. Each [`EngineEnvVarNode`] is a single variable (node name =
+/// key, first argument = value).
+#[derive(Facet, Debug, Default)]
+#[facet(traits(Default))]
+pub struct EngineEnvNode {
+    /// Ordered list of env-var entries (preserves source order so
+    /// duplicate-key diagnostics can point at the second occurrence).
+    /// Children carry arbitrary node names (the env-var keys); the
+    /// `kdl::children` routing accepts every node, with each one
+    /// captured as an [`EngineEnvVarNode`] via `kdl::node_name`.
+    #[facet(kdl::children, default)]
+    pub vars: Vec<EngineEnvVarNode>,
+}
+
+/// One `KEY "VAL"` line inside `engine { env { … } }`.
+///
+/// `kdl::node_name` captures the env-var name (allowing arbitrary
+/// identifier shapes — UPPER_SNAKE, mixedCase, kebab-case, quoted
+/// strings with spaces, etc.). The first positional argument carries
+/// the value.
+#[derive(Facet, Debug)]
+pub struct EngineEnvVarNode {
+    /// The env-var key (captured from the KDL node name).
+    #[facet(kdl::node_name)]
+    pub key: String,
+
+    /// The env-var value (first positional argument).
     #[facet(kdl::argument)]
     pub value: String,
 }

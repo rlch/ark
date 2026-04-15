@@ -113,8 +113,34 @@ document {
                 min 1; max 1
             }
         }
+        node id="EngineArgsNode" {
+            description "`args \"<v1>\" \"<v2>\" …` child of `engine { }` — positional argv entries appended after `command`. Multiple `args` lines are permitted and flattened in source order during lowering."
+            value "values" {
+                description "The argv strings on this line, in source order."
+                type "string"
+                min 0
+            }
+        }
+        node id="EngineEnvNode" {
+            description "`env { KEY \"VAL\"; … }` child of `engine { }` — environment-variable bag. Each [`EngineEnvVarNode`] is a single variable (node name = key, first argument = value)."
+            children {
+                node "var" {
+                    description "Ordered list of env-var entries (preserves source order so duplicate-key diagnostics can point at the second occurrence). Children carry arbitrary node names (the env-var keys); the `kdl::children` routing accepts every node, with each one captured as an [`EngineEnvVarNode`] via `kdl::node_name`."
+                    min 0
+                    ref "EngineEnvVarNode"
+                }
+            }
+        }
+        node id="EngineEnvVarNode" {
+            description "One `KEY \"VAL\"` line inside `engine { env { … } }`.  `kdl::node_name` captures the env-var name (allowing arbitrary identifier shapes — UPPER_SNAKE, mixedCase, kebab-case, quoted strings with spaces, etc.). The first positional argument carries the value."
+            value "value" {
+                description "The env-var value (first positional argument)."
+                type "string"
+                min 1; max 1
+            }
+        }
         node id="EngineNode" {
-            description "`engine { name \"…\"; command \"…\"; args \"…\"; env { … } }` — direct ACP launch spec per R17. At most one per scene. Mutual-exclusion with `use \"engine-*\"` enforced in the compile pipeline (`scene/engine-conflict`)."
+            description "`engine { name \"…\"; command \"…\"; args \"…\"; env { … } }` — direct ACP launch spec per R17. At most one per scene. Mutual-exclusion with `use \"engine-*\"` enforced in the compile pipeline (`scene/engine-conflict`).  The compile pipeline lowers this into [`crate::ops::EngineLaunch`] (see also [`crate::path`] for scene resolution); this AST shape preserves source fidelity for span-rich diagnostics."
             children {
                 node "name" {
                     description "Human-friendly engine identifier (e.g. `\"claude\"`). Surfaces in `ark scene graph` attribution."
@@ -127,14 +153,14 @@ document {
                     ref "EngineStringNode"
                 }
                 node "args" {
-                    description "Additional argv entries, one per `args` child or multi-arg child (zellij-style). Untyped at AST layer."
-                    min 0; max 1
-                    ref "OpaqueBlock"
+                    description "Additional argv entries. Each `args \"<v1>\" \"<v2>\" …` line in the source contributes one [`EngineArgsNode`] whose `values` vector holds the positional strings on that line. Multiple `args` lines are allowed and concatenated in source order; the lowering step (T-ACP.3 / [`crate::engine::lower_engine`]) flattens them into a single argv slice.  Renamed to `\"args\"` (matching the field name verbatim, which is also the spec form per R17) so the generated KDL schema announces the correct node name. Without the rename the schema-emitter would singularize `args` → `arg`; facet-kdl's runtime accepts `args` regardless, but the schema would lie to editor tooling."
+                    min 0
+                    ref "EngineArgsNode"
                 }
                 node "env" {
-                    description "Environment variables injected at spawn. Untyped at AST layer."
+                    description "`env { KEY \"VAL\" }` block (R17). Each child is a single environment variable: child node name = env-var key, first positional argument = value. Allows arbitrary key names by routing through `kdl::node_name`."
                     min 0; max 1
-                    ref "OpaqueBlock"
+                    ref "EngineEnvNode"
                 }
             }
         }
