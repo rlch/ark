@@ -450,6 +450,87 @@ mod tests {
         });
     }
 
+    // -----------------------------------------------------------------
+    // T-119 (cavekit-testing R3): deny_unknown_fields coverage for the
+    // remaining nested sections — kit R2 demands typos surface across
+    // EVERY section, not just the top level + [defaults].
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn unknown_key_in_engine_claude_code_rejected() {
+        Jail::expect_with(|jail| {
+            jail.create_file(
+                "c.toml",
+                r#"
+                [engine.claude_code]
+                transcrpt_tail = true    # typo: missing 'i'
+                "#,
+            )?;
+            let res: Result<Config, _> = Figment::new()
+                .merge(Toml::file(jail.directory().join("c.toml")))
+                .extract();
+            assert!(
+                res.is_err(),
+                "typo in [engine.claude_code] must error; got {res:?}"
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn unknown_key_in_orchestrator_cavekit_rejected() {
+        Jail::expect_with(|jail| {
+            jail.create_file(
+                "c.toml",
+                r#"
+                [orchestrator.cavekit]
+                watch_ralf_loop = true   # typo
+                "#,
+            )?;
+            let res: Result<Config, _> = Figment::new()
+                .merge(Toml::file(jail.directory().join("c.toml")))
+                .extract();
+            assert!(res.is_err(), "typo in [orchestrator.cavekit] must error");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn unknown_key_in_mux_zellij_rejected() {
+        Jail::expect_with(|jail| {
+            jail.create_file(
+                "c.toml",
+                r#"
+                [mux.zellij]
+                statuss_plugin_path = "x"   # typo
+                "#,
+            )?;
+            let res: Result<Config, _> = Figment::new()
+                .merge(Toml::file(jail.directory().join("c.toml")))
+                .extract();
+            assert!(res.is_err(), "typo in [mux.zellij] must error");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn unknown_key_in_diff_rejected() {
+        Jail::expect_with(|jail| {
+            jail.create_file(
+                "c.toml",
+                r#"
+                [diff]
+                debouce_ms = 500   # typo
+                "#,
+            )?;
+            let res: Result<Config, _> = Figment::new()
+                .merge(Toml::file(jail.directory().join("c.toml")))
+                .extract();
+            assert!(res.is_err(), "typo in [diff] must error");
+            Ok(())
+        });
+    }
+
     #[test]
     fn engine_claude_code_inject_hooks_overridable() {
         Jail::expect_with(|jail| {

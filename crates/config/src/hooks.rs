@@ -679,6 +679,94 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------
+    // T-119 (cavekit-testing R3): hook_matches edge cases that fill
+    // gaps in the R4 semantics matrix — orchestrator-only filters,
+    // tri-filter AND, and severity=None semantics when no filter is set.
+    // -----------------------------------------------------------------
+
+    /// Orchestrator-only filter: event/severity unconstrained, must
+    /// match on any event kind for the listed orchestrator and reject
+    /// others.
+    #[test]
+    fn orchestrator_only_filter_matches_any_event_in_orchestrator() {
+        let h = HookEntry {
+            cmd: "true".into(),
+            on_orchestrator: vec!["cavekit".into()],
+            ..Default::default()
+        };
+        assert!(h.matches(&ctx("done", "cavekit", None)));
+        assert!(h.matches(&ctx("stall", "cavekit", Some("P0"))));
+        assert!(!h.matches(&ctx("done", "claude-code", None)));
+    }
+
+    /// All three filters set simultaneously — must satisfy event AND
+    /// orchestrator AND severity.  Missing any one fails the match.
+    #[test]
+    fn tri_filter_and_semantics_require_all_three() {
+        let h = HookEntry {
+            cmd: "true".into(),
+            on_event: vec!["finding".into()],
+            on_orchestrator: vec!["cavekit".into()],
+            on_severity: vec!["P0".into()],
+            ..Default::default()
+        };
+        // full match
+        assert!(h.matches(&ctx("finding", "cavekit", Some("P0"))));
+        // event mismatch
+        assert!(!h.matches(&ctx("done", "cavekit", Some("P0"))));
+        // orchestrator mismatch
+        assert!(!h.matches(&ctx("finding", "claude-code", Some("P0"))));
+        // severity mismatch
+        assert!(!h.matches(&ctx("finding", "cavekit", Some("P1"))));
+        // severity missing when filter requires it
+        assert!(!h.matches(&ctx("finding", "cavekit", None)));
+    }
+
+    /// When `on_severity` is empty, the hook should match both
+    /// severity-bearing AND None-severity events.  Regression guard:
+    /// previous logic might incorrectly reject None when filter empty.
+    #[test]
+    fn empty_severity_filter_matches_regardless_of_context_severity() {
+        let h = HookEntry {
+            cmd: "true".into(),
+            on_event: vec!["done".into()],
+            ..Default::default()
+        };
+        assert!(h.matches(&ctx("done", "cavekit", None)));
+        assert!(h.matches(&ctx("done", "cavekit", Some("P0"))));
+        assert!(h.matches(&ctx("done", "cavekit", Some("P3"))));
+    }
+
+    /// Multi-entry severity filter: OR within the list.
+    #[test]
+    fn severity_filter_or_semantics() {
+        let h = HookEntry {
+            cmd: "true".into(),
+            on_severity: vec!["P0".into(), "P1".into()],
+            ..Default::default()
+        };
+        assert!(h.matches(&ctx("finding", "cavekit", Some("P0"))));
+        assert!(h.matches(&ctx("finding", "cavekit", Some("P1"))));
+        assert!(!h.matches(&ctx("finding", "cavekit", Some("P2"))));
+    }
+
+    /// Hook match is case-sensitive on event kind — "Done" and "done"
+    /// must not cross-match.  Kit R4 says event slugs are lowercase
+    /// tokens; a typo in either the config or the emitter should
+    /// surface as "no match" rather than silently firing.
+    #[test]
+    fn event_filter_case_sensitive() {
+        let h = HookEntry {
+            cmd: "true".into(),
+            on_event: vec!["done".into()],
+            ..Default::default()
+        };
+        assert!(h.matches(&ctx("done", "cavekit", None)));
+        assert!(!h.matches(&ctx("Done", "cavekit", None)));
+        assert!(!h.matches(&ctx("DONE", "cavekit", None)));
+    }
+
     #[test]
     fn f058_render_escapes_nul_byte_fallback() {
         // NUL can't be represented in shell syntax. Our helper falls

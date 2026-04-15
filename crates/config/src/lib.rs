@@ -700,4 +700,187 @@ mod tests {
             assert!(RESERVED_ENV_VARS.contains(&name), "missing {name}");
         }
     }
+
+    // -----------------------------------------------------------------
+    // T-119 (cavekit-testing R3): coverage for kit R1 layering +
+    // R5 env precedence that existing tests don't exercise end-to-end.
+    // -----------------------------------------------------------------
+
+    /// Full 4-layer precedence chain on a single scalar field, so a
+    /// regression in any single layer boundary is caught here.
+    /// Order (lowest → highest): defaults < user < project < env < overrides.
+    #[test]
+    fn full_layer_chain_highest_wins_per_field() {
+        Jail::expect_with(|jail| {
+            // user sets field to "from-user"
+            jail.create_file("user.toml", r#"orchestrator = "from-user""#)?;
+            // project overrides with "from-project"
+            jail.create_file("project.toml", r#"orchestrator = "from-project""#)?;
+            // env overrides with "from-env"
+            jail.set_env("ARKTEST_ORCHESTRATOR", "from-env");
+
+            // Without overrides → env wins
+            let cfg: TestConfig = loader_for(jail, Some("user.toml"), Some("project.toml"))
+                .with_env_prefix("ARKTEST_")
+                .load()
+                .expect("load env-wins");
+            assert_eq!(cfg.orchestrator, "from-env");
+
+            // With overrides → overrides win
+            let cfg: TestConfig = loader_for(jail, Some("user.toml"), Some("project.toml"))
+                .with_env_prefix("ARKTEST_")
+                .with_overrides(serde_json::json!({
+                    "orchestrator": "from-flags",
+                }))
+                .load()
+                .expect("load overrides-wins");
+            assert_eq!(cfg.orchestrator, "from-flags");
+            Ok(())
+        });
+    }
+
+    /// Reserved path-resolver env vars (ARK_STATE_DIR, ARK_CONFIG_PATH,
+    /// ARK_RUNTIME_DIR, ARK_CONFIG_DIR) must not surface as config
+    /// fields when the ARK_ prefix + `deny_unknown_fields` Config type is
+    /// used — otherwise figment rejects them as unknown top-level keys.
+    #[test]
+    fn reserved_path_env_vars_do_not_leak_into_config() {
+        Jail::expect_with(|jail| {
+            jail.set_env("ARK_STATE_DIR", "/tmp/ark-state");
+            jail.set_env("ARK_CONFIG_PATH", "/tmp/ark.toml");
+            jail.set_env("ARK_RUNTIME_DIR", "/tmp/ark-run");
+            jail.set_env("ARK_CONFIG_DIR", "/tmp/ark-cfg");
+            let cfg: Config = ConfigLoader::new()
+                .with_env_prefix("ARK_")
+                .load()
+                .expect("reserved env vars must be filtered out of config layer");
+            assert_eq!(cfg, Config::defaults());
+            Ok(())
+        });
+    }
+
+    /// `ARK_ORCHESTRATOR` shortcut must beat a project-level TOML value —
+    /// env layer sits above the file layers in the precedence stack.
+    #[test]
+    fn ark_orchestrator_shortcut_beats_file_values() {
+        Jail::expect_with(|jail| {
+            jail.create_file(
+                "project.toml",
+                r#"
+                [defaults]
+                orchestrator = "from-file"
+                "#,
+            )?;
+            jail.set_env("ARK_ORCHESTRATOR", "from-env");
+            let cfg: Config = ConfigLoader::new()
+                .with_project_path(Some(jail.directory().join("project.toml")))
+                .with_env_prefix("ARK_")
+                .load()
+                .expect("shortcut precedence");
+            assert_eq!(cfg.defaults.orchestrator, "from-env");
+            Ok(())
+        });
+    }
+
+    /// `default_user_path()` should resolve to a concrete path whose
+    /// filename is `config.toml` when HOME is set.  Sanity check that
+    /// the public helper doesn't silently return None in normal envs.
+    #[test]
+    fn default_user_path_ends_with_config_toml_when_home_is_set() {
+        Jail::expect_with(|jail| {
+            // Jail wipes the process env on construction; set only the
+            // minimum we need so we go through the canonical HOME/XDG
+            // fallback branch in EnvPaths.
+            jail.set_env("HOME", jail.directory().to_string_lossy().to_string());
+            let path = default_user_path().expect("should resolve via HOME");
+            assert!(
+                path.file_name().and_then(|s| s.to_str()) == Some("config.toml"),
+                "default_user_path leaf must be config.toml, got {path:?}"
+            );
+            Ok(())
+        });
+    }
+
+    /// An unknown top-level TOML key must produce an error whose Display
+    /// message names the offending key — otherwise `ark doctor` users
+    /// can't locate the typo in their config file.
+    #[test]
+    fn unknown_key_error_mentions_key_name() {
+        Jail::expect_with(|jail| {
+            jail.create_file(
+                "bad.toml",
+                r#"
+                mystery_flag = "oops"
+                "#,
+            )?;
+            let err = ConfigLoader::new()
+                .with_project_path(Some(jail.directory().join("bad.toml")))
+                .load::<Config>()
+                .expect_err("unknown top-level key must error");
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("mystery_flag"),
+                "error must mention offending key; got: {msg}"
+            );
+            Ok(())
+        });
+    }
+
+    /// Unknown key inside a `[[hooks]]` entry should be rejected by the
+    /// HookEntry deny_unknown_fields attribute when loaded through the
+    /// full Config type.
+    #[test]
+    fn unknown_key_inside_hooks_entry_rejected_via_config() {
+        Jail::expect_with(|jail| {
+            jail.create_file(
+                "c.toml",
+                r#"
+                [[hooks]]
+                cmd = "true"
+                bogus_hook_field = "nope"
+                "#,
+            )?;
+            let res: Result<Config, _> = ConfigLoader::new()
+                .with_project_path(Some(jail.directory().join("c.toml")))
+                .load();
+            assert!(
+                res.is_err(),
+                "unknown field inside [[hooks]] must error; got {res:?}"
+            );
+            Ok(())
+        });
+    }
+
+    /// Hooks array parses end-to-end via the Config loader and fields
+    /// round-trip (exercises the HookEntry integration with Config).
+    #[test]
+    fn hooks_array_parses_end_to_end_via_config() {
+        Jail::expect_with(|jail| {
+            jail.create_file(
+                "c.toml",
+                r#"
+                [[hooks]]
+                cmd = "notify-send 'ark: {{name}} done'"
+                on_event = ["done"]
+
+                [[hooks]]
+                cmd_argv = ["say", "agent stalled"]
+                on_event = ["stall"]
+                on_orchestrator = ["cavekit"]
+                "#,
+            )?;
+            let cfg: Config = ConfigLoader::new()
+                .with_project_path(Some(jail.directory().join("c.toml")))
+                .load()
+                .expect("hooks parse");
+            assert_eq!(cfg.hooks.len(), 2);
+            assert_eq!(cfg.hooks[0].on_event, vec!["done".to_string()]);
+            assert_eq!(
+                cfg.hooks[1].cmd_argv,
+                vec!["say".to_string(), "agent stalled".to_string()]
+            );
+            assert_eq!(cfg.hooks[1].on_orchestrator, vec!["cavekit".to_string()]);
+            Ok(())
+        });
+    }
 }
