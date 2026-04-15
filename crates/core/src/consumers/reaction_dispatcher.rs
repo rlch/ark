@@ -18,9 +18,14 @@
 //!    (T-4.5). Op failures are absorbed here so the event loop keeps
 //!    running.
 //!
-//! Coexists with the legacy `hook_dispatcher` until T-5.7 migrates hook
-//! config into a synthetic scene fragment. Both consumers are attached
-//! to the same broadcast bus; neither interferes with the other.
+//! T-5.7 deleted the standalone `hook_dispatcher`: legacy `[[hooks]]`
+//! TOML config is compiled into a synthetic scene fragment via
+//! `ark_scene::hook_compat::build_hook_registry`, and the resulting
+//! `ReactionRegistry` is merged into the user-scene registry the
+//! supervisor passes here. Hook-derived reactions are tagged
+//! `ReactionOrigin::HookConfig` so the T-5.6 telemetry surface
+//! distinguishes them from user-scene reactions in the
+//! `scene::reactions` tracing target.
 //!
 //! Resilient to `RecvError::Lagged(n)` (warn-log + continue), exits on
 //! `RecvError::Closed`, honors a `tokio_util::sync::CancellationToken`

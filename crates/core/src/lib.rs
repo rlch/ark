@@ -2,9 +2,12 @@
 //!
 //! - `config` — placeholder `Config` (T-018 fills the schema).
 //! - `consumers` — supervisor broadcast-bus consumer tasks
-//!   (`state_writer`, `hook_dispatcher`) per cavekit-supervisor.md R2. The
-//!   mux-coupled `status_pipe` consumer lives in `ark-supervisor` so
-//!   `ark-core` stays mux-free.
+//!   (`state_writer`, `reaction_dispatcher`) per cavekit-supervisor.md R2.
+//!   The mux-coupled `status_pipe` consumer lives in `ark-supervisor` so
+//!   `ark-core` stays mux-free. T-5.7 deleted the legacy `hook_dispatcher`
+//!   consumer; legacy `[[hooks]]` config is now compiled into a synthetic
+//!   `ReactionRegistry` (`ark_scene::hook_compat`) and dispatched through
+//!   the unified `reaction_dispatcher`.
 //! - `control_socket` — per-supervisor unix control socket primitive
 //!   (cavekit-hook-ipc.md R4, cavekit-supervisor.md R7).
 //! - `engine` — `Engine` trait + `EngineHandle` + `ApprovalPolicy`
@@ -31,7 +34,7 @@ pub mod socket_paths;
 pub mod status_writer;
 
 pub use config::Config;
-pub use consumers::{hook_dispatcher, state_writer};
+pub use consumers::{ReactionDispatcherCtx, reaction_dispatcher, state_writer};
 pub use control_socket::{
     ControlListener, Response, gc_stale_socket, handle_single_request, unlink_if_exists,
 };

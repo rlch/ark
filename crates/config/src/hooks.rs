@@ -21,9 +21,12 @@
 //!   hardening). The template literal syntax is preserved verbatim; only
 //!   the untrusted interpolated values are quoted.
 //!
-//! If both fields are set, `cmd_argv` wins. The dispatcher in
-//! `crates/core/src/consumers/hook_dispatcher.rs` reads the `render_form`
-//! helper on [`HookEntry`] to decide which branch to take.
+//! If both fields are set, `cmd_argv` wins. T-5.7 migrated the
+//! dispatch path: legacy `[[hooks]]` entries are now compiled by
+//! `ark_scene::hook_compat::build_hook_registry` into synthetic scene
+//! reactions tagged `ReactionOrigin::HookConfig`; the unified
+//! `reaction_dispatcher` runs them via the `ark.core.exec` op rather
+//! than the deleted standalone `hook_dispatcher` consumer.
 //!
 //! ```rust
 //! use ark_config::hooks::{HookContext, HookEntry};

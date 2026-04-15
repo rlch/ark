@@ -10,6 +10,7 @@ pub mod compile;
 pub mod cycle;
 pub mod context;
 pub mod error;
+pub mod hook_compat;
 pub mod id;
 pub mod intent;
 pub mod ops;

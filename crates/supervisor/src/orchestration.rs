@@ -16,7 +16,10 @@
 //! 6. Factory: Engine / Orchestrator / Mux
 //! 7. mux.ensure_session(spec.session)
 //! 8. engine.preflight (free fn from ark-engines-claude-code)
-//! 9. Spawn consumer tasks (state_writer, status_pipe, hook_dispatcher)
+//! 9. Spawn consumer tasks (state_writer, status_pipe, reaction_dispatcher)
+//!    — T-5.7 swapped hook_dispatcher for reaction_dispatcher; the legacy
+//!    `[[hooks]]` config is compiled into a synthetic ReactionRegistry
+//!    via `ark_scene::hook_compat::build_hook_registry`.
 //! 10. engine.install_observability → EngineHandle
 //! 11. Emit Started { spec }
 //! 12. Signal readiness to parent (Daemon: print agent_id to stdout;
@@ -41,8 +44,15 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use ark_core::consumers::{hook_dispatcher, state_writer};
+use ark_core::consumers::{ReactionDispatcherCtx, reaction_dispatcher, state_writer};
 use ark_core::{Config, Engine, Orchestrator, World, write_status_atomic};
+use ark_scene::context::{AgentSnapshot, SessionSnapshot};
+use ark_scene::hook_compat::{
+    HookEntry as SceneHookEntry, build_hook_registry,
+};
+use ark_scene::id::SceneId;
+use ark_scene::intent::{IntentContext, IntentRegistry};
+use ark_scene::ops::register_core_ops;
 use ark_engines_claude_code::preflight;
 use ark_mux_zellij::ZellijMux;
 use ark_types::{
@@ -304,16 +314,75 @@ pub async fn run_supervisor_with(
     }
 
     {
+        // T-5.7: legacy `[[hooks]]` TOML entries are translated to a
+        // synthetic ReactionRegistry tagged with
+        // `ReactionOrigin::HookConfig`, then merged with the (still
+        // empty at this tier) user-scene registry. The supervisor
+        // spawns the unified `reaction_dispatcher` against that
+        // combined registry; the old `hook_dispatcher` consumer is
+        // removed entirely.
+        //
+        // The placeholder `Config` (T-018 still pending) does not yet
+        // expose `[[hooks]]` to the supervisor — when it does, the
+        // hook list is read from `config.hooks` and threaded here.
+        // Until then we synthesise an empty registry, which keeps the
+        // consumer attached but idle (same operational shape as
+        // pre-T-5.7).
+        let hook_entries: Vec<SceneHookEntry> = Vec::new();
+        let reactions = Arc::new(build_hook_registry(&hook_entries));
+
+        // IntentRegistry holds the core `ark.core.*` op set the
+        // synthesised `exec` reactions dispatch through. The async
+        // registration is deliberately blocking-on-runtime here — we
+        // only build it once at supervisor boot, and the cost is a
+        // few hash inserts.
+        let intents = IntentRegistry::new();
+        register_core_ops(&intents).await;
+
+        // IntentContext placeholder identity: the supervisor doesn't
+        // hold a real scene path yet (the orchestrator owns scene
+        // loading at T-5.x). Synthesise a stable SceneId from the
+        // agent's spec path so cascade telemetry has a consistent
+        // attribution; the placeholder keeps the dispatcher happy
+        // until full scene wiring lands.
+        let scene_id = SceneId::from_bytes(
+            spec.cwd.clone(),
+            format!("hook-compat:{}", spec.id.as_str()).as_bytes(),
+        );
+        let intent_ctx = IntentContext::placeholder(scene_id);
+
+        // CEL context snapshots: populated from the live AgentSpec so
+        // hook predicates that gate on `agent.orchestrator` (the
+        // primary use case for the synthesised CEL) evaluate correctly.
+        let agent_snapshot = Arc::new(AgentSnapshot {
+            id: spec.id.as_str().to_string(),
+            name: spec.name.clone(),
+            orchestrator: spec.orchestrator.clone(),
+            engine: spec.engine.clone(),
+            cwd: spec.cwd.display().to_string(),
+            cmd: spec
+                .cmd
+                .first()
+                .cloned()
+                .unwrap_or_default(),
+            args: spec.cmd.iter().skip(1).cloned().collect(),
+        });
+        let session_snapshot = Arc::new(SessionSnapshot {
+            name: spec.session.clone(),
+        });
+
+        let ctx = ReactionDispatcherCtx {
+            reactions,
+            intents,
+            intent_ctx,
+            agent: agent_snapshot,
+            session: session_snapshot,
+        };
         let rx = events.subscribe();
-        // No hooks configured at the placeholder-config layer yet; pass
-        // an empty Vec so the consumer is attached but idle. T-018+ wires
-        // the figment-loaded hooks through.
-        let hooks: Arc<Vec<ark_config::HookEntry>> = Arc::new(Vec::new());
-        let orch_slug = spec.orchestrator.clone();
         let cancel = cancel.clone();
-        consumers.spawn(async move { hook_dispatcher(rx, hooks, orch_slug, cancel).await });
+        consumers.spawn(async move { reaction_dispatcher(rx, ctx, cancel).await });
     }
-    debug!("R3 step 9: consumer tasks spawned");
+    debug!("R3 step 9: consumer tasks spawned (T-5.7 reaction_dispatcher)");
 
     // ---- Step 10: install observability ----
     //

@@ -259,17 +259,42 @@ pub struct SupervisorHandle;
 /// Provenance tag for a dispatched intent.
 ///
 /// Scene graph (R11) renders each reaction / keybind with its origin
-/// (user scene vs. extension name). `ReactionOrigin` carries that
-/// attribution from the compile pipeline through to ops that want to
-/// log or gate on it.
+/// (user scene vs. extension name vs. legacy hook config). `ReactionOrigin`
+/// carries that attribution from the compile pipeline through to ops that
+/// want to log or gate on it; the dispatcher's telemetry record (T-5.6)
+/// renders the `Debug` form into `reaction_origin="…"` so users filtering
+/// the `scene::reactions` tracing target can attribute every fired
+/// reaction back to its source layer.
 ///
-/// TODO(T-4.5): replace with `ark_core::ReactionOrigin` — a richer
-/// enum with `UserScene { id: SceneId }`, `Extension { name: String }`,
-/// `Keybind { chord: String }` variants. The placeholder is a unit
-/// struct so callers can already thread `origin: ReactionOrigin::default()`
-/// at the call sites that will become real attributions.
-#[derive(Debug, Default, Clone)]
-pub struct ReactionOrigin;
+/// Variants:
+///
+/// * [`ReactionOrigin::UserScene`] — reaction parsed from the user's
+///   scene KDL file. Default for any reaction whose origin isn't
+///   explicitly set by a downstream rewriter.
+/// * [`ReactionOrigin::HookConfig`] — reaction synthesised by the
+///   T-5.7 hook-compat layer from a legacy `[[hooks]]` TOML entry.
+///   See [`crate::hook_compat`] for the shape of the synthesised
+///   fragment.
+///
+/// TODO(post-v1): grow richer variants — `Extension { name: String }`,
+/// `Keybind { chord: String }` — once the extension merge pass and
+/// keybind compile path need to attribute distinctly. The current
+/// two-variant enum keeps the dispatcher-visible Debug rendering
+/// stable while we add the legacy compat path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReactionOrigin {
+    /// Reaction parsed straight from the user's scene KDL.
+    UserScene,
+    /// Reaction synthesised from a legacy `[[hooks]]` TOML entry by the
+    /// T-5.7 hook-compat layer ([`crate::hook_compat`]).
+    HookConfig,
+}
+
+impl Default for ReactionOrigin {
+    fn default() -> Self {
+        ReactionOrigin::UserScene
+    }
+}
 
 // ---------------------------------------------------------------------------
 // IntentContext
@@ -339,7 +364,7 @@ impl IntentContext {
             bus: Arc::new(EventBus::default()),
             supervisor: Arc::new(SupervisorHandle),
             scene_id,
-            origin: ReactionOrigin,
+            origin: ReactionOrigin::default(),
             cascade_depth: 0,
             max_cascade_depth: DEFAULT_MAX_CASCADE_DEPTH,
         }

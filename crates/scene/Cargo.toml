@@ -39,6 +39,10 @@ serde_json = { workspace = true }
 # T-2.5: runtime template renderer emits `tracing::debug!` for every
 # undefined-access trail so users can diagnose via `ark pane log`.
 tracing = { workspace = true }
+# T-5.7 (hook_compat): shell-quotes legacy `[[hooks]] cmd_argv` entries
+# when joining them into the synthesised `exec script="…"` op so
+# metacharacters in argv slots survive the `sh -c` round-trip.
+shlex = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

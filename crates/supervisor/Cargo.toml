@@ -11,6 +11,12 @@ rust-version.workspace = true
 ark-types = { path = "../types" }
 ark-core = { path = "../core" }
 ark-config = { path = "../config" }
+# T-5.7: hook_dispatcher migration. Supervisor now compiles legacy
+# `[[hooks]]` config into a synthetic ReactionRegistry via
+# `ark_scene::hook_compat`, builds the IntentRegistry + IntentContext
+# the reaction_dispatcher consumes, and spawns reaction_dispatcher in
+# place of the old hook_dispatcher.
+ark-scene = { path = "../scene" }
 ark-engines-claude-code = { path = "../engines/claude-code" }
 ark-orchestrators-cavekit = { path = "../orchestrators/cavekit" }
 ark-orchestrators-claude-code = { path = "../orchestrators/claude-code" }

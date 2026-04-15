@@ -3,8 +3,9 @@
 //! The mux-coupled consumers live here (rather than under `ark-core`) so the
 //! core crate can stay free of any dependency on the concrete mux type. The
 //! only consumer in this module today is [`status_pipe`]; the mux-free
-//! consumers (`state_writer`, `hook_dispatcher`) live in
-//! [`ark_core::consumers`].
+//! consumers (`state_writer`, `reaction_dispatcher`) live in
+//! [`ark_core::consumers`]. T-5.7 deleted the standalone `hook_dispatcher`
+//! consumer that used to ship alongside `state_writer`.
 //!
 //! Relocated in the mux tight-coupling revision (Wave B, task M-9). See
 //! `context/impl/impl-mux-tight-coupling.md` for the decision record.
