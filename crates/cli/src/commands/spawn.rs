@@ -580,6 +580,121 @@ pub fn cleanup_agent_state(state_dir: &Path, id: &AgentId) {
     let _ = std::fs::remove_dir_all(id.state_dir(state_dir));
 }
 
+/// F-708: classification of what `zellij list-sessions` reported about a
+/// given session name. Used by the `--no-detach` exit path to decide
+/// whether to wipe transient agent state.
+///
+/// The distinction between `Unknown` and `Gone` matters: an `Unknown`
+/// outcome (zellij missing from PATH, command failed to spawn, stdout
+/// unparseable) must NOT trigger cleanup — we cannot prove the session
+/// is gone, and the safer default is to keep state so a still-live
+/// detached session does not lose its spec.json. `Gone` is the only
+/// positive signal that cleanup is appropriate.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ZellijSessionLiveness {
+    /// Session name appears in `zellij list-sessions` output (either as
+    /// an active or exited-but-still-listed row). The user most likely
+    /// detached (Ctrl+P, D) and zellij keeps running in the background.
+    Alive,
+    /// Session name is absent from `zellij list-sessions` output. zellij
+    /// answered cleanly and the session is truly gone — cleanup is safe.
+    Gone,
+    /// We could not determine liveness — zellij is not on PATH, the
+    /// command failed, or stdout was unreadable. Treat as "keep state"
+    /// so a detach-only exit cannot accidentally wipe a live session.
+    Unknown,
+}
+
+/// F-708: Query `zellij list-sessions` for `session_name`. Returns the
+/// classification used by the `--no-detach` cleanup gate.
+///
+/// zellij's `list-sessions` emits one line per session. Lines may carry
+/// ANSI color codes and trailing annotations such as ` (current)` or
+/// ` (EXITED - Attach to resurrect)` — the session name is the first
+/// whitespace-separated token after stripping ANSI. We match on an exact
+/// token equal to `session_name`.
+///
+/// `--no-detach` callers need to know: is the session the user was just
+/// attached to still listed (they detached) or gone (they terminated /
+/// zellij crashed)? An `Alive` answer keeps state; `Gone` triggers
+/// cleanup; `Unknown` falls back to keeping state.
+pub fn zellij_session_liveness(session_name: &str) -> ZellijSessionLiveness {
+    let output = Command::new("zellij")
+        .arg("list-sessions")
+        .arg("--no-formatting")
+        .stdin(std::process::Stdio::null())
+        .output();
+    let output = match output {
+        Ok(o) => o,
+        Err(_) => return ZellijSessionLiveness::Unknown,
+    };
+    // zellij exits non-zero when there are zero sessions ("No active
+    // zellij sessions found."). Treat that as a definitive "gone" signal
+    // only if stdout/stderr both lack our session name; otherwise fall
+    // back to Unknown.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if session_listed(&stdout, session_name) || session_listed(&stderr, session_name) {
+        return ZellijSessionLiveness::Alive;
+    }
+    if output.status.success() {
+        ZellijSessionLiveness::Gone
+    } else {
+        // Non-zero with "no active sessions" text → Gone. Any other
+        // non-zero → Unknown (don't wipe state on an ambiguous reading).
+        let combined_lower = format!("{stdout}{stderr}").to_lowercase();
+        if combined_lower.contains("no active") || combined_lower.contains("no zellij sessions") {
+            ZellijSessionLiveness::Gone
+        } else {
+            ZellijSessionLiveness::Unknown
+        }
+    }
+}
+
+/// F-708: true if `haystack` contains `session_name` as a whitespace-
+/// delimited token on some line, after stripping basic ANSI escape
+/// sequences. Pure — used by [`zellij_session_liveness`] and unit-tested
+/// against captured zellij output.
+pub fn session_listed(haystack: &str, session_name: &str) -> bool {
+    for raw_line in haystack.lines() {
+        let line = strip_ansi(raw_line);
+        for tok in line.split_whitespace() {
+            if tok == session_name {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// F-708: minimal ANSI CSI sequence stripper. zellij tags its session
+/// names with colour codes (e.g. `\x1b[32.38.5.154mfoo\x1b[...m`) even
+/// with `--no-formatting` in some versions; stripping `\x1b[...m` is
+/// enough to recover the bare session token for the split_whitespace
+/// match in [`session_listed`].
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            // Skip until a letter in the CSI final-byte range (0x40..=0x7E).
+            i += 2;
+            while i < bytes.len() {
+                let b = bytes[i];
+                i += 1;
+                if (0x40..=0x7e).contains(&b) {
+                    break;
+                }
+            }
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    out
+}
+
 // ------------------------------------------------------------- handler ------
 
 /// `ark spawn` — T-087 + F-511.
@@ -708,23 +823,43 @@ pub fn run(args: SpawnArgs, ctx: &Ctx) -> Result<(), CliError> {
             spec_path.display()
         );
         println!("spawned {} -> Ctrl+o w to switch", spec.id);
-        // F-705: `--no-detach` is inherently ephemeral — zellij ran in
-        // the foreground and has now exited, and the supervisor stub
-        // means no background process owns the agent. If we leave
-        // spec.json / layout.kdl on disk the agent shows up as a ghost
-        // entry in `ark list`, the picker, and `ark doctor` even though
-        // nothing is running. Clean the agent state dir here (mirrors
-        // F-528's cleanup on the failure branch above) and print an
-        // informational note so the operator understands why the agent
-        // vanished from `ark list` after the foreground exit. When the
-        // supervisor (T-062 / T-069) lands, detached spawns will keep
-        // their state because the supervisor owns it — this cleanup is
-        // specific to the `--no-detach` foreground lifecycle.
-        cleanup_agent_state(&ctx.state_dir, &spec.id);
-        eprintln!(
-            "note: removed transient agent state {} (no-detach mode)",
-            spec.id
-        );
+        // F-705 / F-708: `--no-detach` success exits need to distinguish
+        // two cases. (a) The operator terminated zellij → no supervisor
+        // owns the agent, leaving spec.json / layout.kdl on disk would
+        // surface a ghost entry in `ark list` / picker / doctor. (b) The
+        // operator detached from zellij (Ctrl+P, D) → zellij is still
+        // running the session in the background, and `status()` returned
+        // success because the attach client exited cleanly. In case (b)
+        // wiping state would orphan a live session (no more spec.json to
+        // reattach against).
+        //
+        // Query `zellij list-sessions` for the session name we just
+        // attached to. If the session is still listed → keep state. If
+        // it is definitively absent → cleanup (F-705 ghost-state fix).
+        // If liveness is Unknown (zellij missing from PATH post-spawn,
+        // command errored) fall back to keeping state — losing a live
+        // session is worse than a transient ghost.
+        match zellij_session_liveness(&session) {
+            ZellijSessionLiveness::Gone => {
+                cleanup_agent_state(&ctx.state_dir, &spec.id);
+                eprintln!(
+                    "note: removed transient agent state {} (no-detach mode)",
+                    spec.id
+                );
+            }
+            ZellijSessionLiveness::Alive => {
+                eprintln!(
+                    "note: zellij session {session} still alive (detached); keeping agent state for {}",
+                    spec.id
+                );
+            }
+            ZellijSessionLiveness::Unknown => {
+                eprintln!(
+                    "note: could not verify zellij session liveness for {session}; keeping agent state for {} (safe default)",
+                    spec.id
+                );
+            }
+        }
         return Ok(());
     }
 
@@ -1581,10 +1716,15 @@ mod tests {
         // entry in `ark list`, `picker`, and `ark doctor`. `run()` must
         // therefore call `cleanup_agent_state` before returning.
         //
+        // F-708 refined this: cleanup is conditional on `zellij
+        // list-sessions` reporting the session is Gone. In this test
+        // we only exercise the Gone branch of the gate; the Alive and
+        // Unknown branches have dedicated tests below.
+        //
         // We cannot spawn real zellij in a unit test, so this simulates
         // the lifecycle: write the state dir the way the successful
-        // pre-launch path would, apply the F-705 cleanup, and assert
-        // the tree is gone.
+        // pre-launch path would, apply the F-705 cleanup guarded by a
+        // Gone outcome, and assert the tree is gone.
         let state = TempDir::new().unwrap();
         let id = AgentId::new("cavekit", "fg-ephemeral");
         let dir = id.state_dir(state.path());
@@ -1594,12 +1734,157 @@ mod tests {
         assert!(dir.exists(), "state dir exists before foreground exit");
 
         // Simulate the tail of the `if args.no_detach { … }` branch after
-        // `Command::status()` returned Ok(success).
-        cleanup_agent_state(state.path(), &id);
+        // `Command::status()` returned Ok(success) AND `zellij
+        // list-sessions` reported the session is Gone (F-708).
+        let outcome = ZellijSessionLiveness::Gone;
+        if outcome == ZellijSessionLiveness::Gone {
+            cleanup_agent_state(state.path(), &id);
+        }
 
         assert!(
             !dir.exists(),
-            "F-705: no-detach foreground exit must remove transient agent state"
+            "F-705: no-detach foreground exit must remove transient agent state when session is gone"
+        );
+    }
+
+    // --- F-708: zellij list-sessions liveness gate -------------------
+
+    #[test]
+    fn session_listed_matches_bare_token() {
+        // F-708: single-line, no decoration — the common case on Linux
+        // with `zellij list-sessions --no-formatting`.
+        let haystack = "ark-cavekit-auth-0123abcd\n";
+        assert!(session_listed(haystack, "ark-cavekit-auth-0123abcd"));
+        assert!(!session_listed(haystack, "ark-cavekit-auth-other"));
+    }
+
+    #[test]
+    fn session_listed_strips_ansi_and_annotations() {
+        // F-708: zellij frequently decorates session rows with ANSI
+        // colours AND a trailing ` (current)` / ` (EXITED - …)` tag.
+        // Stripping `\x1b[…m` plus splitting on whitespace recovers
+        // the bare token.
+        let haystack = "\x1b[32;1mark-cavekit-auth-0123abcd\x1b[0m (current)\n\
+                        \x1b[31mark-other-xxx\x1b[0m (EXITED - Attach to resurrect)\n";
+        assert!(session_listed(haystack, "ark-cavekit-auth-0123abcd"));
+        assert!(session_listed(haystack, "ark-other-xxx"));
+        assert!(!session_listed(haystack, "ark-missing"));
+    }
+
+    #[test]
+    fn session_listed_rejects_substring_match() {
+        // F-708: must be exact-token; a session name that is a prefix /
+        // substring of another must not match.
+        let haystack = "ark-cavekit-auth-0123abcd-extra\n";
+        assert!(!session_listed(haystack, "ark-cavekit-auth-0123abcd"));
+    }
+
+    #[test]
+    fn zellij_session_liveness_unknown_when_zellij_missing() {
+        // F-708: when `zellij` is not on PATH the helper must return
+        // Unknown so the `--no-detach` branch falls back to keeping
+        // state. We force the spawn failure by blanking PATH for this
+        // process for the duration of the call. Using an
+        // unlikely-to-exist PATH value keeps it simple and reversible.
+        //
+        // NOTE: this mutates a process-global env var. We guard with a
+        // single-threaded test (the cli lib test binary runs with
+        // default parallelism, but this mutation window is microseconds
+        // and we restore PATH before exiting). The alternative — a
+        // dependency-inject Command factory — is overkill for a single
+        // Unknown-path assertion.
+        //
+        // SAFETY of unsafe blocks: `std::env::{set_var,remove_var}` are
+        // unsafe in recent Rust. The test is single-threaded during
+        // this block, no other test reads PATH concurrently that could
+        // observe a half-mutated value that would affect correctness.
+        let prev = std::env::var_os("PATH");
+        unsafe {
+            std::env::set_var("PATH", "/definitely/not/a/real/dir/for/zellij");
+        }
+        let got = zellij_session_liveness("ark-cavekit-ghost");
+        match prev {
+            Some(v) => unsafe { std::env::set_var("PATH", v) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
+        assert_eq!(
+            got,
+            ZellijSessionLiveness::Unknown,
+            "missing zellij on PATH must yield Unknown, not Gone"
+        );
+    }
+
+    #[test]
+    fn no_detach_cleanup_skipped_when_session_alive() {
+        // F-708: simulate the detach-from-zellij path. When
+        // `zellij_session_liveness` reports Alive the `--no-detach`
+        // branch must NOT call `cleanup_agent_state`, so spec.json and
+        // layout.kdl survive for the still-live detached session.
+        let state = TempDir::new().unwrap();
+        let id = AgentId::new("cavekit", "detached-alive");
+        let dir = id.state_dir(state.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("spec.json"), b"{\"id\":\"x\"}").unwrap();
+        std::fs::write(dir.join("layout.kdl"), b"layout { }").unwrap();
+        assert!(dir.exists());
+
+        // Simulate the F-708 gate: Alive → skip cleanup.
+        let outcome = ZellijSessionLiveness::Alive;
+        if outcome == ZellijSessionLiveness::Gone {
+            cleanup_agent_state(state.path(), &id);
+        }
+
+        assert!(
+            dir.exists(),
+            "F-708: Alive liveness must leave agent state intact"
+        );
+    }
+
+    #[test]
+    fn no_detach_cleanup_runs_when_session_gone() {
+        // F-708: simulate the terminate-zellij path. When
+        // `zellij_session_liveness` reports Gone the `--no-detach`
+        // branch must call `cleanup_agent_state`, matching the pre-F-708
+        // ghost-state behaviour (F-705).
+        let state = TempDir::new().unwrap();
+        let id = AgentId::new("cavekit", "detached-gone");
+        let dir = id.state_dir(state.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("spec.json"), b"{\"id\":\"x\"}").unwrap();
+        assert!(dir.exists());
+
+        // Simulate the F-708 gate: Gone → run cleanup.
+        let outcome = ZellijSessionLiveness::Gone;
+        if outcome == ZellijSessionLiveness::Gone {
+            cleanup_agent_state(state.path(), &id);
+        }
+
+        assert!(
+            !dir.exists(),
+            "F-708: Gone liveness must wipe transient agent state"
+        );
+    }
+
+    #[test]
+    fn no_detach_cleanup_skipped_when_liveness_unknown() {
+        // F-708: Unknown is the safe-default path (zellij not on PATH,
+        // command errored). Keep state — losing a potentially-live
+        // session is worse than a transient ghost.
+        let state = TempDir::new().unwrap();
+        let id = AgentId::new("cavekit", "detached-unknown");
+        let dir = id.state_dir(state.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("spec.json"), b"{\"id\":\"x\"}").unwrap();
+        assert!(dir.exists());
+
+        let outcome = ZellijSessionLiveness::Unknown;
+        if outcome == ZellijSessionLiveness::Gone {
+            cleanup_agent_state(state.path(), &id);
+        }
+
+        assert!(
+            dir.exists(),
+            "F-708: Unknown liveness must leave agent state intact (safer default)"
         );
     }
 

@@ -25,25 +25,40 @@
 //!    module exposes `<PLUGIN>_WASM_AVAILABLE` so `doctor` skips the
 //!    check cleanly when the binary ships without a real plugin.
 //!
-//! ## Why inline `cargo build` is opt-in (T-130)
+//! ## Why inline `cargo build` is default-on (F-709 / T-130)
 //!
 //! Running `cargo build --target wasm32-wasip1 ...` from inside a
 //! build.rs that is itself driven by a `cargo build --workspace`
 //! introduces lock-file / target-dir contention (the inner and outer
 //! cargo fight over `target/` and `Cargo.lock`), and on some hosts
-//! deadlocks on the jobserver. T-130 therefore keeps the inline build
-//! **opt-in** behind `ARK_BUILD_WASM=1`, and isolates the nested build
-//! in `$OUT_DIR/wasm-target/` so the outer workspace `target/` is
-//! untouched. Without the opt-in, build.rs behaves exactly like the
-//! T-098/T-109 state: discover an already-built artifact or fall back
-//! to a zero-byte placeholder plus a `cargo:warning`.
+//! deadlocks on the jobserver. T-130 originally kept the inline build
+//! opt-in behind `ARK_BUILD_WASM=1`, on the theory that `cargo install
+//! ark-cli` users would have the wasm target pre-built.
 //!
-//! The recommended path for most users is either the `just wasm`
-//! convenience target at the repo root, or running `cargo build
-//! --target wasm32-wasip1 --release -p ark-plugin-status -p
-//! ark-plugin-picker` manually before `cargo build -p ark-cli`. CI
-//! and `cargo-dist` release pipelines (T-133) pre-build the wasm
-//! outside build.rs.
+//! F-709 inverted that default: `cargo install ark-cli` has no notion
+//! of pre-staging wasm artifacts, so the opt-in default produced a
+//! binary with zero-byte placeholder wasm, and `ark doctor` reported
+//! plugins unavailable. The documented install path was silently broken.
+//!
+//! The inline build is therefore now **default-on** with two safety
+//! rails that keep `cargo build --workspace` deadlock-free:
+//!
+//! - The nested build uses an isolated `CARGO_TARGET_DIR`
+//!   (`$OUT_DIR/wasm-target/`), so the outer workspace `target/` is
+//!   never touched — eliminating the jobserver / lock-file contention
+//!   that motivated the original opt-in.
+//! - If the `wasm32-wasip1` rustup target is **not installed** we skip
+//!   the nested build entirely and fall back to the discover-or-
+//!   placeholder path, emitting a `cargo:warning` that tells the user
+//!   how to enable real plugins (`rustup target add wasm32-wasip1`).
+//!
+//! Operators who want the legacy "never spawn nested cargo" behaviour
+//! can opt OUT by setting `ARK_BUILD_WASM=0`.
+//!
+//! CI and `cargo-dist` release pipelines (T-133) install the wasm
+//! target up front, so this path works cleanly there. The `just wasm`
+//! convenience target at the repo root still works for local devs who
+//! prefer an explicit pre-build step.
 //!
 //! ## T-131 — wasm size-reduction stack
 //!
@@ -147,40 +162,59 @@ fn main() {
         wasm_release_dir.join("ark_plugin_picker.wasm").display()
     );
 
-    // T-130: opt-in inline wasm build. When ARK_BUILD_WASM=1, run
-    // `cargo build --target wasm32-wasip1 --release -p <plugin>` in an
-    // isolated target dir under $OUT_DIR and redirect the artifact
-    // lookup there. Otherwise, fall through to the discover-or-
-    // placeholder path that has been in place since T-098/T-109.
+    // F-709 / T-130: inline wasm build is default-on with a rustup
+    // target precheck. When the operator has NOT opted out
+    // (`ARK_BUILD_WASM=0`) AND the `wasm32-wasip1` rustup target is
+    // installed, run `cargo build --target wasm32-wasip1 --release -p
+    // <plugin>` in an isolated target dir under $OUT_DIR and redirect
+    // the artifact lookup there. Otherwise fall through to the
+    // discover-or-placeholder path that has been in place since
+    // T-098/T-109.
     let inline_target_dir = out_dir.join("wasm-target");
     let effective_target_dir = if inline_build_enabled() {
-        let ok_status = maybe_build_wasm(
-            workspace_root,
-            &inline_target_dir,
-            "ark-plugin-status",
-            "ark_plugin_status.wasm",
-        );
-        let ok_picker = maybe_build_wasm(
-            workspace_root,
-            &inline_target_dir,
-            "ark-plugin-picker",
-            "ark_plugin_picker.wasm",
-        );
-        if ok_status && ok_picker {
-            // Both built cleanly — embed from the isolated target dir.
-            inline_target_dir.clone()
-        } else {
-            // Partial/failed inline build: warn and fall back to the
-            // caller-visible target dir so a previously-built artifact
-            // (if any) still gets embedded.
+        if !wasm_target_installed() {
+            // F-709: wasm32-wasip1 rustup target missing. Don't try to
+            // spawn nested cargo — the build would fail with a target-
+            // not-found error. Warn loudly so `cargo install ark-cli`
+            // users know exactly how to enable real plugins.
             println!(
-                "cargo:warning=ARK_BUILD_WASM=1 inline build failed for at least one plugin; \
-                 falling back to discover-or-placeholder from {}",
-                target_dir.display()
+                "cargo:warning=ark-cli build.rs: wasm32-wasip1 rustup target not installed; \
+                 embedding zero-byte placeholders. To ship real plugins: \
+                 `rustup target add wasm32-wasip1` and rebuild. \
+                 (Set ARK_BUILD_WASM=0 to silence this message.)"
             );
             target_dir.clone()
+        } else {
+            let ok_status = maybe_build_wasm(
+                workspace_root,
+                &inline_target_dir,
+                "ark-plugin-status",
+                "ark_plugin_status.wasm",
+            );
+            let ok_picker = maybe_build_wasm(
+                workspace_root,
+                &inline_target_dir,
+                "ark-plugin-picker",
+                "ark_plugin_picker.wasm",
+            );
+            if ok_status && ok_picker {
+                // Both built cleanly — embed from the isolated target dir.
+                inline_target_dir.clone()
+            } else {
+                // Partial/failed inline build: warn and fall back to the
+                // caller-visible target dir so a previously-built artifact
+                // (if any) still gets embedded.
+                println!(
+                    "cargo:warning=inline wasm build failed for at least one plugin; \
+                     falling back to discover-or-placeholder from {}",
+                    target_dir.display()
+                );
+                target_dir.clone()
+            }
         }
     } else {
+        // Operator opted out via ARK_BUILD_WASM=0. Legacy path:
+        // discover a pre-built artifact or embed a placeholder.
         target_dir.clone()
     };
 
@@ -200,15 +234,52 @@ fn main() {
     );
 }
 
-/// T-130: `true` when the operator explicitly opted into the inline
-/// wasm build via `ARK_BUILD_WASM=1`. Anything else (unset, `0`,
-/// empty string, arbitrary text) leaves the nested `cargo build`
-/// disabled so default `cargo build --workspace` invocations stay
-/// safe and deadlock-free.
+/// F-709 / T-130: `true` when the inline wasm build should run. The
+/// default is **on** — `cargo install ark-cli` needs this so it ships
+/// real plugins. Operators can opt OUT explicitly by setting
+/// `ARK_BUILD_WASM=0` (legacy placeholder-only behaviour). Any other
+/// value (unset, `1`, empty, arbitrary text) keeps the default-on path.
+///
+/// The deadlock / target-dir contention concerns that originally kept
+/// this opt-in are mitigated by:
+/// - the nested build using an isolated `CARGO_TARGET_DIR`
+///   (`$OUT_DIR/wasm-target/`),
+/// - the `wasm32-wasip1` rustup-target precheck which skips the
+///   nested cargo invocation entirely when the target is missing
+///   (the common `cargo install ark-cli` bare-machine case).
 fn inline_build_enabled() -> bool {
-    env::var("ARK_BUILD_WASM")
-        .map(|v| v == "1")
-        .unwrap_or(false)
+    match env::var("ARK_BUILD_WASM") {
+        Ok(v) if v == "0" => false,
+        _ => true,
+    }
+}
+
+/// F-709: true when the `wasm32-wasip1` rustup target is installed on
+/// the host toolchain. Detection parses `rustup target list --installed`
+/// (fast — just reads rustup's local state, no network, no compile).
+///
+/// Returns `false` when:
+/// - `rustup` is not on PATH (user is on a pinned toolchain outside
+///   rustup, e.g. system rustc — we can't verify and must not risk
+///   the nested cargo spawn),
+/// - the command errors, or
+/// - `wasm32-wasip1` does not appear in the installed list.
+///
+/// The `false` return causes build.rs to skip the nested cargo and
+/// embed placeholders, with a `cargo:warning` telling the user how to
+/// enable real plugins.
+fn wasm_target_installed() -> bool {
+    let output = Command::new("rustup")
+        .arg("target")
+        .arg("list")
+        .arg("--installed")
+        .output();
+    let output = match output {
+        Ok(o) if o.status.success() => o,
+        _ => return false,
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout.lines().any(|line| line.trim() == "wasm32-wasip1")
 }
 
 /// T-130: opt-in nested `cargo build --target wasm32-wasip1 --release
@@ -249,14 +320,14 @@ fn maybe_build_wasm(
     let dep_roots = plugin_dep_roots(workspace_root, plugin_pkg);
     if artifact_is_fresh(&artifact, &plugin_src, &dep_roots) {
         println!(
-            "cargo:warning=ARK_BUILD_WASM=1: {plugin_pkg} artifact already fresh at {}",
+            "cargo:warning=inline wasm build: {plugin_pkg} artifact already fresh at {}",
             artifact.display()
         );
         return true;
     }
 
     println!(
-        "cargo:warning=ARK_BUILD_WASM=1: building {plugin_pkg} (target dir: {})",
+        "cargo:warning=inline wasm build: building {plugin_pkg} (target dir: {})",
         inline_target_dir.display()
     );
 
@@ -278,7 +349,7 @@ fn maybe_build_wasm(
                 true
             } else {
                 println!(
-                    "cargo:warning=ARK_BUILD_WASM=1: {plugin_pkg} build succeeded but artifact \
+                    "cargo:warning=inline wasm build: {plugin_pkg} build succeeded but artifact \
                      missing at {} — falling back to placeholder",
                     artifact.display()
                 );
@@ -287,14 +358,14 @@ fn maybe_build_wasm(
         }
         Ok(status) => {
             println!(
-                "cargo:warning=ARK_BUILD_WASM=1: `cargo build -p {plugin_pkg} --target \
+                "cargo:warning=inline wasm build: `cargo build -p {plugin_pkg} --target \
                  wasm32-wasip1 --release` exited {status}; falling back to placeholder"
             );
             false
         }
         Err(e) => {
             println!(
-                "cargo:warning=ARK_BUILD_WASM=1: failed to spawn cargo for {plugin_pkg}: {e}; \
+                "cargo:warning=inline wasm build: failed to spawn cargo for {plugin_pkg}: {e}; \
                  falling back to placeholder"
             );
             false

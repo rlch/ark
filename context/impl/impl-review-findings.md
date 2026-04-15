@@ -903,3 +903,88 @@ Templater syntax-validated with `bash -n` and dry-run on fake args; YAML validat
 - `bash -n scripts/generate-brew-formula.sh` clean; dry-run templater emits well-formed Ruby. `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/release.yml'))"` clean.
 
 **Gate status after Tier 6 cycle 4:** CLOSED. Cycle 4 resolved one P1 + one P2 on the distribution surface and raised zero new findings; the Tier 6 ledger now spans F-500 through F-707.
+
+## Tier 6 Gate — Cycle 5 (2026-04-15)
+
+Cycle 5 reopened the gate after codex flagged two findings at the boundary between spawn lifecycle (F-708 P1) and distribution plumbing (F-709 P2). Both fix regressions introduced by earlier cycles — F-708 tightens F-705's over-aggressive cleanup, and F-709 inverts the F-130 opt-in default so `cargo install ark-cli` actually ships real plugins. Both fixed in a single commit with new unit coverage for the liveness gate.
+
+### F-708 — P1 `--no-detach` cleanup_agent_state too aggressive (FIXED)
+
+**Source:** codex
+**Tier:** 6
+**Severity:** P1
+**Status:** fixed
+**Location:** crates/cli/src/commands/spawn.rs (`--no-detach` success branch, `zellij_session_liveness`, `session_listed`, `strip_ansi`)
+
+**Description:** F-705 patched the ghost-state bug by unconditionally calling `cleanup_agent_state` after `zcmd.status()` returned success in the `--no-detach` branch. That closed one hole but opened another: zellij's `Ctrl+P, D` detach also ends the attach client with exit code 0 while leaving the zellij session alive in the background. F-705's blanket cleanup therefore wiped `spec.json` and `layout.kdl` for a still-running session, breaking any downstream reattach by id (the next `ark list` or picker action can't find the spec the session is supposed to resolve against). The deeper fix — let the real supervisor own lifecycle — waits on T-062 / T-069; for today's stubbed-supervisor state we need a narrower gate.
+
+**Resolution:** Picked **option (a) of the finding — query `zellij list-sessions` after `status()` returns** and gate cleanup on the answer. The options considered:
+
+- **(a) Query `zellij list-sessions` for the session name.** Three-way outcome (`Alive`, `Gone`, `Unknown`) lets us keep state when the session is listed (detach case), wipe state when it is absent (terminate case), and fall back to keeping state on ambiguous readings (zellij missing from PATH, command error). Matches user intent precisely and degrades safely.
+- **(b) Revert F-705's cleanup in the `--no-detach` branch entirely.** Would reopen the original ghost-state bug the moment a user does terminate zellij. Unacceptable regression.
+- **(c) Add a `--ephemeral` flag.** Pushes the decision onto the user who shouldn't have to know about the supervisor-stub state of the world. Rejected as UX regression.
+
+**Chose (a):** precise, reversible, and the `ZellijSessionLiveness::Unknown` fallback keeps a live session safe even when the zellij binary disappears between the attach and the liveness check. The new helper reads:
+
+```rust
+pub enum ZellijSessionLiveness { Alive, Gone, Unknown }
+
+pub fn zellij_session_liveness(session_name: &str) -> ZellijSessionLiveness {
+    // zellij list-sessions --no-formatting, strip ANSI, token-match
+}
+```
+
+The `--no-detach` branch now dispatches on the three outcomes: `Gone` → `cleanup_agent_state` + "removed transient agent state" note (original F-705 behaviour); `Alive` → keep state + "zellij session … still alive (detached); keeping agent state" note; `Unknown` → keep state + "could not verify zellij session liveness … keeping agent state (safe default)" note. The existing F-705 regression test was updated to thread the `Gone` outcome through the gate so it still asserts cleanup fires on the terminate path.
+
+**Key helpers added:**
+- `zellij_session_liveness(session_name)` — runs `zellij list-sessions --no-formatting` and classifies.
+- `session_listed(haystack, session_name)` — pure, exact-token match with ANSI stripping. Unit-tested against captured zellij output shapes (bare, ANSI-coloured + `(current)`, ANSI-coloured + `(EXITED - Attach to resurrect)`).
+- `strip_ansi(s)` — minimal CSI-sequence stripper for `\x1b[...m` colour codes.
+
+### F-709 — P2 cargo install ark-cli embeds empty wasm (FIXED)
+
+**Source:** codex
+**Tier:** 6
+**Severity:** P2
+**Status:** fixed
+**Location:** crates/cli/build.rs (`inline_build_enabled`, new `wasm_target_installed`, module-level `main` dispatch)
+
+**Description:** T-130 introduced the inline wasm build behind `ARK_BUILD_WASM=1` on the (reasonable-at-the-time) theory that release pipelines would pre-stage the wasm artifact, and that local devs running `cargo build --workspace` should not eat a nested `cargo build --target wasm32-wasip1` spawn. That assumption breaks on the documented `cargo install ark-cli` path: `cargo install` runs ark-cli's build.rs in isolation, without any opportunity to set env vars and without any pre-staged artifact. The default-off inline build therefore wrote zero-byte placeholders into the installed binary, `ark doctor` flagged both plugins as "unavailable", and the README-documented install path was silently broken for every user who took it.
+
+**Resolution:** Inverted the default AND added a `rustup` target precheck so default-on stays safe on machines that don't have the wasm toolchain installed.
+
+**Default-on rationale (per the commit body):**
+- `cargo install ark-cli` is a primary install path on the README. Shipping it with placeholder plugins is a silent failure for the very users who can't debug it (`ark doctor` is itself plugin-gated behind real wasm).
+- The original deadlock / target-dir contention concerns that motivated the opt-in are mitigated by the `CARGO_TARGET_DIR=$OUT_DIR/wasm-target/` isolation — the nested cargo never touches the outer workspace `target/`, so there is no lock-file fight.
+- Local devs who want the legacy behaviour can opt OUT with `ARK_BUILD_WASM=0`. Default-on flips which end of the spectrum pays the cost of knowing about the toggle.
+
+**rustup target precheck:** `wasm_target_installed()` parses `rustup target list --installed` before the nested cargo invocation. When `wasm32-wasip1` is absent (or rustup is not on PATH — pinned toolchain case), the inline build is skipped entirely and build.rs emits:
+
+```
+cargo:warning=ark-cli build.rs: wasm32-wasip1 rustup target not installed;
+embedding zero-byte placeholders. To ship real plugins:
+`rustup target add wasm32-wasip1` and rebuild. (Set ARK_BUILD_WASM=0 to silence this message.)
+```
+
+**Behaviour matrix:**
+
+| Scenario | `ARK_BUILD_WASM` | wasm32-wasip1 target | Outcome |
+|----------|------------------|----------------------|---------|
+| CI / cargo-dist (T-129 + T-133) | unset | installed by pipeline | real wasm embedded (nested cargo) |
+| Local dev, target installed | unset | installed | real wasm embedded (nested cargo) |
+| Local dev, target NOT installed | unset | missing | placeholder + clear cargo:warning |
+| `cargo install ark-cli`, target installed | unset | installed | real wasm embedded |
+| `cargo install ark-cli`, target NOT installed | unset | missing | placeholder + clear cargo:warning |
+| Legacy opt-out | `ARK_BUILD_WASM=0` | anything | discover-or-placeholder (original T-098/T-109 path) |
+
+The `inline_build_enabled()` fn now returns `true` unless `ARK_BUILD_WASM` is literally `"0"`. The module-level docstring was rewritten to reflect the new default and cross-reference F-709.
+
+## Test Delta — Tier 6 Cycle 5
+
+- ark-cli: 270 baseline → 277 passing (+7 new tests for F-708: 3 pure `session_listed` shape tests, 1 `zellij_session_liveness` Unknown-path test using a blanked PATH, 3 cleanup-gate tests covering Alive/Gone/Unknown flows. F-709 is build-time only and is exercised by the gate rebuild itself — both default-on and `ARK_BUILD_WASM=0` paths verified manually against the live `cargo build --workspace`).
+- ark-cli cli_help integration: 3 unchanged. ark-cli e2e: 9 unchanged.
+- Other crates: unchanged.
+- Workspace: `cargo test --workspace -- --test-threads=1` fully green (41 ok result lines, 0 FAILED).
+- `cargo fmt --all --check` clean. `cargo build --workspace` clean under both `ARK_BUILD_WASM=0` (legacy path) and default (nested build path) — no new warnings beyond the existing `cargo:warning` telemetry.
+
+**Gate status after Tier 6 cycle 5:** CLOSED. Cycle 5 resolved one P1 + one P2 and raised zero new findings; the Tier 6 ledger now spans F-500 through F-709.
