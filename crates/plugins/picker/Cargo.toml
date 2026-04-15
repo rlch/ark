@@ -9,3 +9,19 @@ rust-version.workspace = true
 
 [lib]
 crate-type = ["cdylib"]
+
+[dependencies]
+# zellij-tile 0.44 matches the zellij 0.44.x runtime targeted by cavekit-mux-zellij.
+# Pinned locally (also mirrored in ark-plugin-status) — no other workspace crate
+# uses it, so it stays out of [workspace.dependencies].
+zellij-tile = "0.44"
+# nucleo-matcher (NOT fuzzy-matcher) is mandated by cavekit-plugin-picker R1:
+# faster, lighter wasm footprint, only transitively pulls in `memchr`. The
+# workspace already pins 0.3 so the picker shares a single version.
+nucleo-matcher = { workspace = true }
+serde = { workspace = true }
+
+# NOTE: serde_json, humantime, and chrono are intentionally NOT listed here.
+# cavekit-plugin-picker R1 and cavekit-distribution.md R3 ban them from the
+# picker plugin to keep the wasm binary inside the T-131/T-132 size budget —
+# hand-rolled formatters and parsers are used instead.
