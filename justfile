@@ -89,3 +89,19 @@ install: wasm
 uninstall:
     cargo uninstall ark-cli
     cargo uninstall ark-hook
+
+# T-1.5: regenerate crates/scene/share/scene.kdl-schema by walking the
+# facet SHAPE of ark-scene's AST. Runs the `gen-scene-schema` binary, then
+# fails loudly if the generated schema drifts from what's committed — CI
+# gates merges on a matching schema. Run locally, commit the updated file,
+# and push.
+scene-schema:
+    cargo run -p ark-scene --bin gen-scene-schema
+    @if ! git diff --exit-code --quiet crates/scene/share/scene.kdl-schema; then \
+        echo ""; \
+        echo "crates/scene/share/scene.kdl-schema drifted from HEAD."; \
+        echo "The AST changed — review + commit the new schema."; \
+        git --no-pager diff --stat crates/scene/share/scene.kdl-schema; \
+        exit 1; \
+    fi
+    @echo "scene.kdl-schema up to date."

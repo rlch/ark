@@ -19,3 +19,10 @@ blake3 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+# T-1.5: `gen-scene-schema` emits `share/scene.kdl-schema` by walking the
+# facet SHAPE of `ast::SceneDoc`. CI regenerates and diffs the output
+# against the committed schema to catch drift. Schema is editor-consumed.
+[[bin]]
+name = "gen-scene-schema"
+path = "src/bin/gen-scene-schema.rs"
