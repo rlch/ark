@@ -95,3 +95,10 @@ pub use plugin_lifecycle::{
 // pass. See cavekit-supervisor.md R3 step 7.
 pub mod scene_runtime;
 pub use scene_runtime::{CompiledScene, SceneSource, compile_scene_for_runtime};
+
+// T-ACP.2c: turn-inflight tracker — per-session wait table the
+// reload-gate (T-11.1) queries before applying scene deltas, so
+// `reload_scene` fires can't land between a `session/prompt`
+// request and its response. See cavekit-scene R14 + R17.
+pub mod turn_inflight;
+pub use turn_inflight::{StopReason, TurnInflightQuery, TurnInflightTracker, TurnKey};
