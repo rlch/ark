@@ -277,6 +277,8 @@ dependencies = [
  "anyhow",
  "ark-config",
  "ark-core",
+ "ark-ext-metadata",
+ "ark-ext-metadata-types",
  "ark-mux-zellij",
  "ark-orchestrators-cavekit",
  "ark-orchestrators-claude-code",
@@ -300,6 +302,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ulid",
+ "wat",
 ]
 
 [[package]]

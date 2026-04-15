@@ -14,6 +14,7 @@
 
 pub mod config;
 pub mod doctor;
+pub mod ext;
 pub mod kill;
 pub mod list;
 pub mod pane;
@@ -37,6 +38,8 @@ pub enum Commands {
     Doctor(doctor::DoctorArgs),
     Config(config::ConfigArgs),
     Pane(pane::PaneArgs),
+    /// Inspect, list, and show info for ark extensions.
+    Ext(ext::ExtArgs),
 }
 
 impl Commands {
@@ -49,6 +52,7 @@ impl Commands {
             Commands::Doctor(args) => doctor::run(args, ctx),
             Commands::Config(args) => config::run(args, ctx),
             Commands::Pane(args) => pane::run(args, ctx),
+            Commands::Ext(args) => ext::run(args, ctx),
         }
     }
 }

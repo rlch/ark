@@ -71,6 +71,12 @@ ark-config = { path = "../config" }
 ark-core = { path = "../core" }
 ark-supervisor = { path = "../supervisor" }
 ark-scene = { path = "../scene" }
+# T-10.8 / T-10.9: `ark ext inspect` + `ark ext list` + `ark ext info`
+# read wasm cartridge metadata (via ark-scene::wasm_meta) and text
+# manifests (via ark-ext-metadata::parse_extension_metadata_kdl), then
+# re-emit them with ark-ext-metadata::extension_metadata_kdl_string.
+ark-ext-metadata = { path = "../ark-ext-metadata" }
+ark-ext-metadata-types = { path = "../ark-ext-metadata-types" }
 ark-orchestrators-cavekit = { path = "../orchestrators/cavekit" }
 ark-orchestrators-claude-code = { path = "../orchestrators/claude-code" }
 ark-mux-zellij = { path = "../mux/zellij" }
@@ -93,6 +99,10 @@ portable-pty = "0.8"
 tempfile = { workspace = true }
 ulid = { workspace = true }
 ark-test-fixtures = { path = "../test-fixtures" }
+# T-10.8 tests: build minimal wasm fixtures with embedded `ark.metadata`
+# custom sections (same pattern as ark-scene::wasm_meta::tests) so the
+# `ark ext inspect` integration can round-trip a valid cartridge.
+wat = { workspace = true }
 # T-8.4: scene_e2e's pre-flight unit asserts the ark-bus
 # auto-injection pass against a parsed `SceneDoc`; both are reached
 # via the public `ark_scene` surface, but the test calls
