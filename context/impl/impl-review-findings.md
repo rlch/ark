@@ -840,3 +840,66 @@ Added one host test `no_detach_foreground_exit_cleans_up_transient_state` that s
 - `cargo fmt --all` clean. `cargo build --workspace` clean (no new warnings).
 
 **Gate status after Tier 6 cycle 3:** CLOSED. Cycle 3 resolved one P1 + two P2s and raised zero new findings; the Tier 6 ledger now spans F-500 through F-705.
+
+## Tier 6 Gate — Cycle 4 (2026-04-15)
+
+Cycle 4 reopened the gate after codex flagged two distribution-surface findings: the cargo-binstall metadata on `ark-cli` only shipped the `ark` binary (leaving `ark-hook` behind on every binstall install — P1), and the release workflow never pushed an updated formula to the Homebrew tap that README's `brew install rlch/ark/ark` path depends on (P2). Both are invisible to the test suite because they live in release plumbing that only fires on tag push; both are on the critical install path for new users. Fixed in one commit alongside a new shell-script templater for the formula.
+
+### F-706 — P1 cargo-binstall metadata must deliver ark-hook too (FIXED)
+
+**Source:** codex
+**Tier:** 6
+**Severity:** P1
+**Status:** fixed
+**Location:** crates/cli/Cargo.toml (`[package.metadata.binstall]` + `[[bin]]` stanzas)
+
+**Description:** `ark-cli` declared a single `[[bin]]` (`ark`) alongside the binstall metadata `bin-dir = "ark-{ version }-{ target }/{ bin }"`. cargo-binstall expands `{ bin }` per `[[bin]]` entry in the package being installed — so `cargo binstall ark-cli` only extracted `ark` from the release tarball and silently dropped `ark-hook`. Every hook-driven workflow (ClaudeCodeEngine's PreToolUse / PostToolUse pipeline, T-046 onward) is dead on any machine installed via `cargo binstall ark-cli` because the hook binary never lands in `$PATH`. The `Stage artifacts` step of release.yml already copies both binaries into the tarball, so the bits exist on disk on the runner; the bug was purely metadata-side telling binstall to ignore half of them.
+
+**Resolution:** Picked **option (b) of the finding — a binstall-metadata-only fix — via a "binstall shim" `[[bin]]` stanza.** The options considered:
+
+- **(a) Move ark-hook's binary into ark-cli as a second `[[bin]]`.** Would work but requires a cross-workspace refactor of `crates/hook` (removing its `[[bin]]`, moving `src/main.rs` into `crates/cli/src/bin/`, re-pointing release.yml's `cargo build -p ark-hook` at `ark-cli`, and patching every spec-exec site that spawns the hook by package). Heavy, touches Rust source, and conflicts with the gate's forbidden-files list.
+- **(b) Keep the hook as a separate crate; declare `ark-hook` as a shim `[[bin]]` in ark-cli purely for binstall's metadata reader.** Cargo still validates the `path =` points at an existing file, but a `required-features = ["_binstall_shim"]` gate keeps it OUT of the default build graph — `cargo build -p ark-cli` never tries to compile it (ark-cli lacks ark-hook's deps), while cargo-binstall's metadata walk still sees the `[[bin]]` name and looks for `ark-hook` inside the tarball. Zero Rust source changes, zero changes to `crates/hook`, zero changes to the workspace build graph.
+- **(c) Drop the binstall block entirely.** Functional but regresses README's documented `cargo binstall ark-cli` install path, which is the fast-install story for users without brew.
+
+**Chose (b)**: cleanest surgery, reversible, and the `required-features` gate makes the intent explicit for future readers. The stanza now reads:
+
+```toml
+[[bin]]
+name = "ark-hook"
+path = "../hook/src/main.rs"
+required-features = ["_binstall_shim"]
+
+[features]
+_binstall_shim = []
+```
+
+With this in place, `cargo binstall ark-cli` enumerates both `ark` and `ark-hook`, resolves each via the shared `bin-dir = "ark-{ version }-{ target }/{ bin }"` template, and extracts both binaries out of `ark-<version>-<target>.tar.xz`. `cargo build --workspace` remains clean (the shim bin is skipped — verified: `cargo check -p ark-cli` and full-workspace build both succeed with no new warnings). A documentation comment on the stanza flags it as a binstall-only shim and warns against enabling the feature.
+
+### F-707 — P2 release.yml must publish homebrew formula on tag (FIXED)
+
+**Source:** codex
+**Tier:** 6
+**Severity:** P2
+**Status:** fixed
+**Location:** .github/workflows/release.yml (new `homebrew-publish` job) + scripts/generate-brew-formula.sh (new templater)
+
+**Description:** README documented `brew install rlch/ark/ark` as a first-class install path and claimed the tap repo at `rlch/homebrew-ark` was "auto-updated by cargo-dist on release". Neither claim held: release.yml stopped at uploading tarballs + wasm + sha256 sums to the GH release. Nothing in the workflow cloned, updated, or pushed to `rlch/homebrew-ark`, so the tap repo's `Formula/ark.rb` stayed frozen against whatever SHA was last committed by hand — brew installs would either 404 on a stale URL or install an older version than the tagged one. Users following the README's top-listed install path got a silently-broken experience on every release.
+
+**Resolution:** Added a hand-rolled `homebrew-publish` job downstream of `release` (so the tarballs exist on the GH release first) plus a new shell-script templater `scripts/generate-brew-formula.sh`. The templater accepts `<version> <owner> <sha_arm_darwin> <sha_x86_darwin> <sha_arm_linux> <sha_x86_linux>` and emits a complete Ruby formula to stdout — `on_macos`/`on_linux` blocks with `on_arm`/`on_intel` nested inside (Homebrew's preferred multi-arch idiom), a `def install` that copies BOTH `ark` and `ark-hook` into `bin`, and a test block exercising `--version` on each binary. The job wiring:
+
+1. **Guard on `HOMEBREW_TAP_TOKEN` secret.** Reads the secret into an env var and gates every subsequent step on `steps.guard.outputs.skip != 'true'`. If the secret is missing (first-time setup, forks without the tap), the guard prints a `HOMEBREW_TAP_TOKEN not configured — skipping tap publish.` notice to stderr and the job completes successfully without touching the tap. Picked the step-level output approach (rather than a job-level `if: secrets.X != ''`) because `secrets.*` references in job-level `if:` expressions do not evaluate reliably on all runner paths; reading the secret via `env:` and branching on its emptiness is the GitHub-recommended workaround.
+2. **Download + collect SHAs.** Reuses the `actions/download-artifact@v4` pattern from the `release` job, then walks `dist/` for the four `ark-<version>-<target>.tar.xz.sha256` files, awks out the hex field, and emits them as `steps.sums.outputs.{arm_darwin,x86_darwin,arm_linux,x86_linux}`.
+3. **Render formula.** Invokes the templater with those four SHAs + version + `github.repository_owner` (so the URL pattern works on forks too), writing `out/Formula/ark.rb` and echoing it to the log for auditability.
+4. **Clone + push tap.** `git clone` uses `x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/<owner>/homebrew-ark.git`, copies the rendered formula into `Formula/ark.rb`, short-circuits with a `nothing to push` message if the file is byte-identical (re-running a release on the same SHAs shouldn't churn the tap history), otherwise commits as `github-actions[bot]` with message `ark <version>` and pushes HEAD.
+
+Templater syntax-validated with `bash -n` and dry-run on fake args; YAML validated with `python3 -c "import yaml; yaml.safe_load(...)"`. Contract notes in both files cross-reference the `Stage artifacts` step so future renames of the tarball layout show up in a grep for `dist/ark-${version}-${target}`. The job is forbidden from running outside tag-push / workflow_dispatch, so PRs that add new workflow steps cannot accidentally touch the tap.
+
+## Test Delta — Tier 6 Cycle 4
+
+- ark-cli: 270 unchanged (no Rust source changes — F-706 is metadata-only, F-707 is CI-only).
+- ark-cli cli_help integration: 3 unchanged. ark-plugin-status: 57 unchanged. ark-plugin-picker: 215 unchanged.
+- Workspace: `cargo test --workspace -- --test-threads=1` fully green (41 ok result lines, 0 FAILED).
+- `cargo fmt --all --check` clean. `cargo build --workspace` clean (no new warnings; the shim `[[bin]]` is skipped as designed).
+- `bash -n scripts/generate-brew-formula.sh` clean; dry-run templater emits well-formed Ruby. `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/release.yml'))"` clean.
+
+**Gate status after Tier 6 cycle 4:** CLOSED. Cycle 4 resolved one P1 + one P2 on the distribution surface and raised zero new findings; the Tier 6 ledger now spans F-500 through F-707.

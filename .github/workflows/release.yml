@@ -288,3 +288,132 @@ jobs:
             release/*.tar.xz
             release/*.wasm
             release/*.sha256
+
+  # ---------------------------------------------------------------------------
+  # homebrew-publish: regenerate Formula/ark.rb in the rlch/homebrew-ark tap
+  # so `brew install rlch/ark/ark` resolves against the new release (F-707).
+  #
+  # Guarded on the HOMEBREW_TAP_TOKEN secret: if the tap PAT is not
+  # configured (e.g. on a first-time release from a fork), the job no-ops
+  # with a notice instead of failing the workflow. The secret must grant
+  # `contents: write` on github.com/rlch/homebrew-ark.
+  #
+  # Layout contract: the formula's `def install` block expects the tarball
+  # root dir (`ark-<version>-<target>/`) to contain `ark` + `ark-hook`,
+  # matching the `Stage artifacts` step of the build job above.
+  # ---------------------------------------------------------------------------
+  homebrew-publish:
+    name: publish homebrew formula
+    needs:
+      - release
+    runs-on: ubuntu-latest
+    # Guard: skip entirely when the tap deploy token is missing so
+    # first-time tag pushes from a fresh repo do not fail. Evaluated
+    # against the environment variable (secret context is not allowed
+    # directly in `if:` expressions on job level in all runners, but
+    # reading via env works universally).
+    env:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Check tap token
+        id: guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${HOMEBREW_TAP_TOKEN:-}" ]]; then
+            echo "HOMEBREW_TAP_TOKEN not configured — skipping tap publish." >&2
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Determine version
+        id: ver
+        if: steps.guard.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref="${GITHUB_REF:-}"
+          if [[ "$ref" == refs/tags/v* ]]; then
+            version="${ref#refs/tags/v}"
+          else
+            version="${{ github.event.inputs.tag }}"
+            version="${version#v}"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Download release artifacts
+        if: steps.guard.outputs.skip != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Collect SHA256 sums
+        id: sums
+        if: steps.guard.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          V="${{ steps.ver.outputs.version }}"
+          # Each .sha256 file is of the form `<hex>  <filename>` — pick the
+          # hex field only. File layout matches release.yml Stage step.
+          sum_for() {
+            local target="$1"
+            local f
+            f=$(find dist -type f -name "ark-${V}-${target}.tar.xz.sha256" | head -n1)
+            if [[ -z "$f" ]]; then
+              echo "missing sha256 for target ${target}" >&2
+              exit 1
+            fi
+            awk '{print $1}' "$f"
+          }
+          {
+            echo "arm_darwin=$(sum_for aarch64-apple-darwin)"
+            echo "x86_darwin=$(sum_for x86_64-apple-darwin)"
+            echo "arm_linux=$(sum_for aarch64-unknown-linux-gnu)"
+            echo "x86_linux=$(sum_for x86_64-unknown-linux-gnu)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Render formula
+        if: steps.guard.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out/Formula
+          scripts/generate-brew-formula.sh \
+            "${{ steps.ver.outputs.version }}" \
+            "${{ github.repository_owner }}" \
+            "${{ steps.sums.outputs.arm_darwin }}" \
+            "${{ steps.sums.outputs.x86_darwin }}" \
+            "${{ steps.sums.outputs.arm_linux }}" \
+            "${{ steps.sums.outputs.x86_linux }}" \
+            > out/Formula/ark.rb
+          echo "--- rendered Formula/ark.rb ---"
+          cat out/Formula/ark.rb
+
+      - name: Clone tap and push formula
+        if: steps.guard.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          V="${{ steps.ver.outputs.version }}"
+          OWNER="${{ github.repository_owner }}"
+          tap_dir="$(mktemp -d)"
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${OWNER}/homebrew-ark.git" "${tap_dir}"
+          mkdir -p "${tap_dir}/Formula"
+          cp out/Formula/ark.rb "${tap_dir}/Formula/ark.rb"
+          cd "${tap_dir}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- Formula/ark.rb; then
+            echo "Formula/ark.rb unchanged for v${V}; nothing to push."
+            exit 0
+          fi
+          git add Formula/ark.rb
+          git commit -m "ark ${V}"
+          git push origin HEAD

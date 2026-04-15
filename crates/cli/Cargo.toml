@@ -18,10 +18,13 @@ categories = ["command-line-utilities", "development-tools"]
 # `.github/workflows/release.yml` (T-133). Contract:
 #   - url:    `<repo>/releases/download/v<version>/ark-<version>-<target>.tar.xz`
 #   - format: .tar.xz (`txz`)
-#   - bin path inside the tarball: `ark-<version>-<target>/ark`
+#   - bin path inside the tarball: `ark-<version>-<target>/{bin}`
 # Keep these in sync with the `Stage artifacts` step of release.yml
 # (tarball name + staging dir layout). The {bin} template expands to
-# each `[[bin]]` declared below (currently `ark`).
+# each `[[bin]]` declared below — `ark` and `ark-hook` — so binstall
+# extracts BOTH binaries from the tarball. Without the second `[[bin]]`
+# stanza (see F-706), binstall would only install `ark` and leave
+# hooks dead on every binstall install.
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/ark-{ version }-{ target }.tar.xz"
 pkg-fmt = "txz"
@@ -34,6 +37,26 @@ path = "src/lib.rs"
 [[bin]]
 name = "ark"
 path = "src/main.rs"
+
+# F-706 shim: declare `ark-hook` as a second binary of ark-cli purely so
+# cargo-binstall's `{ bin }` template iterator expands to both names and
+# copies `ark-hook` out of the release tarball alongside `ark`. The
+# binary is NOT built from ark-cli — it is produced by `-p ark-hook` in
+# release.yml — the `required-features = ["_binstall_shim"]` gate keeps
+# `cargo build -p ark-cli` from attempting to compile this path. The
+# `_binstall_shim` feature is never enabled in production; it exists
+# solely to make this `[[bin]]` entry inert for cargo while still
+# visible to binstall's metadata reader.
+[[bin]]
+name = "ark-hook"
+path = "../hook/src/main.rs"
+required-features = ["_binstall_shim"]
+
+[features]
+# Private feature used only to neutralise the `ark-hook` binstall-shim
+# `[[bin]]` above. Do NOT enable — ark-cli lacks ark-hook's runtime
+# dependencies and the build would fail. See F-706 for context.
+_binstall_shim = []
 
 [dependencies]
 ark-types = { path = "../types" }
