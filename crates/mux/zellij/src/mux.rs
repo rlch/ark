@@ -1,4 +1,4 @@
-//! `ZellijMux` — `Multiplexer` impl backed by the zellij CLI.
+//! `ZellijMux` — ark's concrete integration with the zellij CLI.
 //!
 //! Implements cavekit-mux-zellij.md R1/R2/R3/R4/R6 (tasks T-025/26/27/28/32).
 //!
@@ -16,36 +16,35 @@
 //!
 //! # Session-collision policy (R1)
 //!
-//! The `Multiplexer` trait signature of `ensure_session(&self, name: &str) ->
-//! Result<()>` has no room to return a mutated name. For v1 we therefore:
+//! `ensure_session(&self, name: &str) -> Result<()>` has no return channel
+//! for a mutated name. For v1 we therefore:
 //!
 //! 1. Run `zellij list-sessions`.
 //! 2. If `name` is present in the output, emit a `warn!` log and proceed.
 //! 3. Rely on zellij's own rejection for truly hard collisions at
 //!    `create_tab` time.
 //!
-//! A proper short-ULID rename would require extending the trait; that is
+//! A proper short-ULID rename would require a signature change; that is
 //! tracked as a TODO.
 //!
-//! # `setsid` prefix
+//! # Test seam — `ZellijMux::for_test`
 //!
-//! When outside zellij, the first spawn uses `setsid zellij -s … --layout …`
-//! so zellij detaches from the supervisor's controlling terminal. `setsid` is
-//! a POSIX binary present on Linux and available via `brew install
-//! util-linux` on macOS; when missing, the real executor will surface an
-//! `io::Error` at spawn time and the caller decides whether to retry
-//! without the prefix. Tests assert the command shape, not platform
-//! availability.
+//! Downstream crates that test code calling `ZellijMux` methods should enable
+//! the `test-support` cargo feature in their `[dev-dependencies]` entry for
+//! `ark-mux-zellij` and construct the mux via
+//! [`ZellijMux::for_test`](Self::for_test). The returned mux is backed by a
+//! [`StubExecutor`] that replays a scripted sequence of canned
+//! [`CommandOutput`](crate::executor::CommandOutput) responses and records
+//! every call for later argv assertion. See the constructor docs for an
+//! example.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::anyhow;
-use async_trait::async_trait;
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
-use ark_core::Multiplexer;
 use ark_types::TabHandle;
 
 use crate::executor::{CommandExecutor, RealExecutor};
@@ -175,9 +174,11 @@ pub(crate) fn parse_zellij_version(line: &str) -> anyhow::Result<(u32, u32, u32)
     ))
 }
 
-#[async_trait]
-impl Multiplexer for ZellijMux {
-    fn kind(&self) -> &'static str {
+/// Inherent method surface mirroring the former `Multiplexer` trait (deleted
+/// alongside the `ark-core::multiplexer` module). See cavekit-mux-zellij.md
+/// for the contract each method fulfils.
+impl ZellijMux {
+    pub fn kind(&self) -> &'static str {
         "zellij"
     }
 
@@ -191,9 +192,9 @@ impl Multiplexer for ZellijMux {
     ///   session.
     /// - When outside zellij this is a best-effort collision check via
     ///   `zellij list-sessions`. The actual spawn happens in `create_tab`
-    ///   with `--layout` (R2) because `ensure_session` has no layout
-    ///   argument in the trait signature.
-    async fn ensure_session(&self, name: &str) -> anyhow::Result<()> {
+    ///   with `--layout` (R2) because `ensure_session` takes no layout
+    ///   argument.
+    pub async fn ensure_session(&self, name: &str) -> anyhow::Result<()> {
         if self.in_zellij {
             // Forbid nesting: switch-session replaces the current client,
             // which is the supported way to enter a new session from inside
@@ -242,7 +243,7 @@ impl Multiplexer for ZellijMux {
     /// First call per session: spawn the session itself with `--layout`.
     /// Subsequent calls: `zellij --session {s} action new-tab --layout {p}
     /// --name {n}`.
-    async fn create_tab(
+    pub async fn create_tab(
         &self,
         session: &str,
         name: &str,
@@ -274,19 +275,47 @@ impl Multiplexer for ZellijMux {
                     ));
                 }
             } else {
-                // Outside zellij: detach via setsid so the supervisor isn't
-                // tied to the zellij TTY.
-                let out = self
-                    .executor
-                    .run("setsid", &["zellij", "-s", session, "--layout", layout_str])
-                    .await
-                    .map_err(|e| anyhow!("failed to spawn `setsid zellij`: {e}"))?;
-                if !out.status.success() {
-                    return Err(anyhow!(
-                        "`setsid zellij -s {session} --layout {layout_str}` failed: {}",
-                        String::from_utf8_lossy(&out.stderr).trim()
-                    ));
+                // F-731: outside-zellij first-tab spawn. The earlier
+                // `setsid zellij ...` invocation was double-broken:
+                // (1) macOS doesn't ship `setsid(1)` so the call failed
+                // with "no such file or directory" before zellij even
+                // exec'd, and (2) even on Linux, `setsid + null stdio`
+                // strips the controlling TTY that zellij's TUI client
+                // requires to boot — same pattern F-730 fixed in
+                // `crates/cli/src/commands/spawn.rs`.
+                //
+                // The fix is the shared pty helper from
+                // [`crate::pty::spawn_zellij_with_pty`]: allocate a
+                // pty pair, spawn zellij with the slave as its
+                // controlling TTY, run the 500 ms startup grace poll,
+                // then drop the pair so the master closes and the
+                // server daemon (already forked) lives on
+                // independently.
+                //
+                // Note: we deliberately do NOT route this through
+                // `self.executor`. The executor trait is
+                // `Output`-style (captures stdout/stderr); pty spawn
+                // is structurally different. The call site here is
+                // the only outside-zellij first-tab spawn in the
+                // codebase, so a one-off direct call is simpler than
+                // growing the trait.
+                //
+                // Cwd is the layout's parent dir as a placeholder —
+                // the real per-agent cwd is baked into the rendered
+                // layout. v1 layouts ignore the client's cwd.
+                let cwd = layout_path.parent().unwrap_or(layout_path);
+                let mut handle = crate::pty::spawn_zellij_with_pty(session, layout_path, cwd)
+                    .map_err(|e| anyhow!("failed to spawn zellij in pty: {e}"))?;
+                if let Err(e) = crate::pty::pty_child_startup_failure(handle.child.as_mut()) {
+                    return Err(anyhow!("zellij failed to start for session {session}: {e}",));
                 }
+                // Drop the handle here — the pty pair's lifetime ends
+                // and the master fd closes, sending SIGHUP to the
+                // zellij client. The server daemon has already
+                // forked at this point (the 500 ms grace covered
+                // that), so the SIGHUP only kills the now-redundant
+                // client; the session keeps running.
+                drop(handle);
             }
             state.sessions_spawned.insert(session.to_string());
             state.session_tabs.insert(session.to_string(), 1);
@@ -326,7 +355,7 @@ impl Multiplexer for ZellijMux {
 
     /// R3 — close is idempotent: an error from zellij (typically because the
     /// tab has already been closed) downgrades to a `debug!` and `Ok(())`.
-    async fn close_tab(&self, handle: &TabHandle) -> anyhow::Result<()> {
+    pub async fn close_tab(&self, handle: &TabHandle) -> anyhow::Result<()> {
         let index = handle.tab_index.to_string();
         let out = self
             .executor
@@ -366,7 +395,7 @@ impl Multiplexer for ZellijMux {
 
     /// R3 — rename the tab, used as the progress fallback when the
     /// status-bar plugin isn't available.
-    async fn rename_tab(&self, handle: &TabHandle, name: &str) -> anyhow::Result<()> {
+    pub async fn rename_tab(&self, handle: &TabHandle, name: &str) -> anyhow::Result<()> {
         let index = handle.tab_index.to_string();
         let out = self
             .executor
@@ -400,7 +429,7 @@ impl Multiplexer for ZellijMux {
     /// failure: a missing plugin or a transport error is logged at `warn`
     /// and we still return `Ok(())` so the supervisor can fall back to
     /// tab-rename progress.
-    async fn pipe(&self, target_name: &str, payload: &str) -> anyhow::Result<()> {
+    pub async fn pipe(&self, target_name: &str, payload: &str) -> anyhow::Result<()> {
         let out = self
             .executor
             .run("zellij", &["pipe", "--name", target_name, "--", payload])
@@ -424,6 +453,88 @@ impl Multiplexer for ZellijMux {
                 Ok(())
             }
         }
+    }
+}
+
+// --------------------------------------------------------------------------
+// Test-support surface (`test-support` cargo feature or `cfg(test)`).
+//
+// This is the canonical downstream test seam: consumers add
+// `ark-mux-zellij = { path = "...", features = ["test-support"] }` to their
+// `[dev-dependencies]` and call `ZellijMux::for_test(scripted)` to build a
+// mux backed by a [`StubExecutor`] seeded with a scripted response queue.
+// Tests then call the mux's public methods and, if needed, introspect the
+// captured argv via the returned `Arc<StubExecutor>` handle.
+// --------------------------------------------------------------------------
+
+#[cfg(any(test, feature = "test-support"))]
+mod test_support {
+    use crate::executor::{CommandExecutor, CommandOutput, StubExecutor};
+    use std::sync::Arc;
+
+    /// Adapter that lets the mux delegate to a shared `Arc<StubExecutor>`
+    /// so callers can both drive the mux and read back recorded calls.
+    pub(super) struct ArcStubExecutor(pub Arc<StubExecutor>);
+
+    #[async_trait::async_trait]
+    impl CommandExecutor for ArcStubExecutor {
+        async fn run(&self, program: &str, args: &[&str]) -> std::io::Result<CommandOutput> {
+            self.0.run(program, args).await
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl ZellijMux {
+    /// Build a `ZellijMux` backed by a [`StubExecutor`] seeded with
+    /// `scripted` command outputs. Returned alongside the `Arc<StubExecutor>`
+    /// so callers can inspect `recorded_calls()` after driving the mux.
+    ///
+    /// Responses are served in FIFO order; any additional call once the
+    /// queue is drained will return an `io::Error` (exactly the existing
+    /// `StubExecutor` contract). This is intentional — it surfaces "test
+    /// made more calls than it scripted" as a loud failure instead of a
+    /// silent fallthrough.
+    ///
+    /// Pass an empty `Vec` when the scenario is expected to not route
+    /// through the executor at all (e.g. the outside-zellij first-tab pty
+    /// path) — the returned recorder will stay empty and the test can
+    /// assert that.
+    ///
+    /// ```no_run
+    /// # use ark_mux_zellij::{ZellijMux, executor::{CommandOutput, StubExecutor}};
+    /// # use std::sync::Arc;
+    /// # async fn demo() {
+    /// let (mux, stub): (ZellijMux, Arc<StubExecutor>) = ZellijMux::for_test(Vec::new());
+    /// // ... drive mux, then inspect stub.recorded_calls() ...
+    /// # let _ = (mux, stub);
+    /// # }
+    /// ```
+    pub fn for_test(
+        scripted: Vec<crate::executor::CommandOutput>,
+    ) -> (Self, std::sync::Arc<crate::executor::StubExecutor>) {
+        let stub = std::sync::Arc::new(crate::executor::StubExecutor::new());
+        for output in scripted {
+            stub.queue_response(output);
+        }
+        let mux = Self::with_executor(Box::new(test_support::ArcStubExecutor(stub.clone())))
+            .with_in_zellij(false);
+        (mux, stub)
+    }
+
+    /// Variant of [`Self::for_test`] that forces the `in_zellij` flag. Use
+    /// when the scenario under test depends on the inside-zellij branch
+    /// (e.g. `ensure_session` issuing `switch-session`).
+    pub fn for_test_in_zellij(
+        scripted: Vec<crate::executor::CommandOutput>,
+    ) -> (Self, std::sync::Arc<crate::executor::StubExecutor>) {
+        let stub = std::sync::Arc::new(crate::executor::StubExecutor::new());
+        for output in scripted {
+            stub.queue_response(output);
+        }
+        let mux = Self::with_executor(Box::new(test_support::ArcStubExecutor(stub.clone())))
+            .with_in_zellij(true);
+        (mux, stub)
     }
 }
 
@@ -628,31 +739,39 @@ mod tests {
         mux.ensure_session("ark-build-demo").await.unwrap();
     }
 
+    // F-731: the outside-zellij first-tab path used to shell out to
+    // the external `setsid(1)` binary. macOS doesn't ship it, and even
+    // on Linux the null-stdio + setsid combination strips zellij's
+    // controlling TTY (the TUI client refuses to boot). The path now
+    // calls `crate::pty::spawn_zellij_with_pty` directly — bypassing
+    // the `executor` trait — so the prior argv-shape test is no longer
+    // observable through the stub. The pty helper itself is covered
+    // by `crate::pty::tests::*`. We keep this test name and assert the
+    // OBSERVABLE consequence at the mux level: the executor records
+    // ZERO calls on the outside-zellij first-tab path (because the
+    // pty spawn does not route through `self.executor`), and the
+    // returned `TabHandle` has the expected shape.
+    //
+    // The actual zellij spawn is gated on a real zellij binary being
+    // present, so we cannot exercise it from a unit test without a
+    // big infrastructure dependency. The W-8 e2e scenario provides
+    // the integration coverage.
     #[tokio::test]
-    async fn create_tab_first_outside_uses_setsid_and_layout() {
+    async fn create_tab_first_outside_does_not_route_through_executor() {
         let (mux, stub) = mux_with_stub(false);
-        stub.queue_response(output(ok_status().await, b"", b""));
-
-        let handle = mux
+        // No queued executor response. The pty path may succeed (real
+        // zellij on PATH) or fail (CI without zellij) — either is OK
+        // for this test. The assertion is on the ROUTING: the
+        // outside-zellij first-tab spawn must not call
+        // `self.executor.run` because that path was the F-731 bug.
+        // The pty helper bypasses the executor entirely.
+        let _ = mux
             .create_tab("ark-build-demo", "builder", Path::new("/tmp/x.kdl"))
-            .await
-            .unwrap();
-        assert_eq!(handle.tab_index, 0);
-        assert_eq!(handle.session, "ark-build-demo");
-        assert_eq!(handle.name, "builder");
-
+            .await;
         let calls = stub.recorded_calls();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, "setsid");
-        assert_eq!(
-            calls[0].1,
-            vec![
-                "zellij".to_string(),
-                "-s".to_string(),
-                "ark-build-demo".to_string(),
-                "--layout".to_string(),
-                "/tmp/x.kdl".to_string()
-            ]
+        assert!(
+            calls.is_empty(),
+            "outside-zellij first-tab spawn must not route through self.executor: got calls {calls:?}"
         );
     }
 
@@ -684,11 +803,10 @@ mod tests {
     #[tokio::test]
     async fn create_tab_additional_increments_index_and_uses_new_tab() {
         let (mux, stub) = mux_with_stub(false);
-        // First tab: session spawn.
+        // F-731: first tab uses the pty path and does NOT consume a
+        // queued executor response. Subsequent tabs use `action
+        // new-tab` and DO consume responses.
         stub.queue_response(output(ok_status().await, b"", b""));
-        // Second tab: action new-tab.
-        stub.queue_response(output(ok_status().await, b"", b""));
-        // Third tab: action new-tab.
         stub.queue_response(output(ok_status().await, b"", b""));
 
         let layout = PathBuf::from("/tmp/x.kdl");
@@ -701,11 +819,15 @@ mod tests {
         assert_eq!(t2.tab_index, 2);
 
         let calls = stub.recorded_calls();
-        assert_eq!(calls.len(), 3);
-        // Second call is the first `action new-tab`.
-        assert_eq!(calls[1].0, "zellij");
         assert_eq!(
-            calls[1].1,
+            calls.len(),
+            2,
+            "first tab is pty (no executor); only the two `action new-tab` calls go through executor"
+        );
+        // First executor call is the first `action new-tab` (for `t1`).
+        assert_eq!(calls[0].0, "zellij");
+        assert_eq!(
+            calls[0].1,
             vec![
                 "--session".to_string(),
                 "s".to_string(),
@@ -720,15 +842,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_tab_reports_zellij_failure() {
+    async fn create_tab_additional_reports_zellij_failure() {
+        // F-731: this test was originally `create_tab_reports_zellij_failure`
+        // and exercised first-tab spawn failure via the executor stub.
+        // First-tab spawn now uses the pty path which doesn't go
+        // through the executor. We test the SECOND tab (action new-tab)
+        // failure-propagation instead — same code path, different
+        // surface. First-tab pty failure is covered by W-8 e2e.
         let (mux, stub) = mux_with_stub(false);
-        stub.queue_response(output(fail_status().await, b"", b"layout not found\n"));
+        // First tab: uses pty (no queued response needed).
+        let layout = PathBuf::from("/tmp/x.kdl");
+        let _ = mux.create_tab("s", "builder", &layout).await;
+        // Second tab: queue a failing response so `action new-tab`
+        // bubbles the stderr text up.
+        stub.queue_response(output(fail_status().await, b"", b"new-tab failed\n"));
         let err = mux
-            .create_tab("s", "builder", Path::new("/tmp/x.kdl"))
+            .create_tab("s", "review", &layout)
             .await
             .unwrap_err()
             .to_string();
-        assert!(err.contains("layout not found"), "got: {err}");
+        assert!(err.contains("new-tab failed"), "got: {err}");
     }
 
     #[tokio::test]
@@ -887,34 +1020,32 @@ mod tests {
         );
     }
 
-    /// Guard on the full new-session argv shape from the outside-zellij
-    /// path: `setsid zellij -s <name> --layout <path>`. Pins
-    /// cavekit-mux-zellij R2 token-by-token, catching drops or reorders
-    /// of `-s` or `--layout`.
+    /// F-731: the outside-zellij first-tab argv shape (`zellij -s <s>
+    /// --layout <p>`) is now built by `crate::pty::spawn_zellij_with_pty`
+    /// inside `portable_pty::CommandBuilder`. The argv is no longer
+    /// observable through `self.executor`. The shape is implicitly
+    /// guarded by the W-8 e2e test scenario which requires zellij to
+    /// start a real session against a real pty; if the argv drifts,
+    /// zellij refuses to boot and the e2e fails.
+    ///
+    /// We retain a guard for the inverse: the outside-zellij first-tab
+    /// path MUST NOT route through `self.executor`. Routing through it
+    /// would re-introduce the F-731 null-stdio failure mode.
     #[tokio::test]
-    async fn create_tab_new_session_includes_session_name_and_layout_flags() {
+    async fn create_tab_new_session_does_not_route_through_executor_outside_zellij() {
         let (mux, stub) = mux_with_stub(false);
-        stub.queue_response(output(ok_status().await, b"", b""));
-        mux.create_tab("my-sess", "builder", Path::new("/tmp/layout.kdl"))
-            .await
-            .unwrap();
-
+        // No queued response — accidental executor.run() would panic
+        // for lack of a canned reply, OR the call would Err from the
+        // pty path (no zellij in test env). Either way: zero stub
+        // calls.
+        let _ = mux
+            .create_tab("my-sess", "builder", Path::new("/tmp/layout.kdl"))
+            .await;
         let calls = stub.recorded_calls();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, "setsid");
-        let a = &calls[0].1;
-        assert_eq!(a.first().map(String::as_str), Some("zellij"));
-        let s_pos = a.iter().position(|t| t == "-s").expect("missing -s flag");
-        assert_eq!(a.get(s_pos + 1).map(String::as_str), Some("my-sess"));
-        let l_pos = a
-            .iter()
-            .position(|t| t == "--layout")
-            .expect("missing --layout flag");
-        assert_eq!(
-            a.get(l_pos + 1).map(String::as_str),
-            Some("/tmp/layout.kdl")
+        assert!(
+            calls.is_empty(),
+            "outside-zellij first-tab spawn must not route through self.executor: got calls {calls:?}"
         );
-        assert!(!a.iter().any(|t| t == "--create"));
     }
 
     /// Guard on the `action new-tab` argv shape: must match the exact
@@ -923,15 +1054,17 @@ mod tests {
     #[tokio::test]
     async fn create_tab_additional_uses_action_new_tab_verb() {
         let (mux, stub) = mux_with_stub(false);
-        stub.queue_response(output(ok_status().await, b"", b""));
+        // F-731: first tab uses pty (no executor). Second tab uses
+        // executor for `action new-tab`. Queue ONE response for the
+        // second tab.
         stub.queue_response(output(ok_status().await, b"", b""));
         let layout = PathBuf::from("/tmp/layout.kdl");
-        mux.create_tab("ss", "one", &layout).await.unwrap();
+        let _ = mux.create_tab("ss", "one", &layout).await;
         mux.create_tab("ss", "two", &layout).await.unwrap();
 
         let calls = stub.recorded_calls();
-        assert_eq!(calls.len(), 2);
-        let a = &calls[1].1;
+        assert_eq!(calls.len(), 1);
+        let a = &calls[0].1;
         let act_pos = a
             .iter()
             .position(|t| t == "action")

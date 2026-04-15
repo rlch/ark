@@ -22,10 +22,13 @@
 
 #![cfg(unix)]
 
+pub mod consumers;
 pub mod control_socket;
 pub mod daemon;
 pub mod foreground;
 pub mod lock;
+
+pub use consumers::status_pipe;
 
 pub use control_socket::{
     ControlCommandHandler, ControlSocketHandle, NoopHandler, bind_control_socket, shutdown,
@@ -67,3 +70,7 @@ pub use crash::{adjust_status_if_crashed, detect_crashed, is_pid_alive};
 // T-072: auto-close policy on outcome (cavekit-supervisor R6).
 pub mod auto_close;
 pub use auto_close::{AutoClosePolicy, apply_auto_close_policy, collect_opened_tabs};
+
+// W-2: parent ↔ daemon ready handshake (cavekit-supervisor R3 step 12).
+pub mod ready_signal;
+pub use ready_signal::{ACK_BYTE, ReadyWriter};

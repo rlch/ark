@@ -8,7 +8,6 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-ark-core = { path = "../../core" }
 ark-types = { path = "../../types" }
 tokio = { workspace = true }
 async-trait = { workspace = true }
@@ -17,8 +16,15 @@ tracing = { workspace = true }
 ulid = { workspace = true }
 anyhow = { workspace = true }
 minijinja = { workspace = true }
+portable-pty = "0.8"
 
 [dev-dependencies]
 async-trait = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }
+
+[features]
+# Exposes `ZellijMux::for_test(...)` to downstream crates' dev-dependencies so
+# tests can script a stub executor without redeclaring their own mock mux.
+# Default-off so the test-only surface never leaks into production builds.
+test-support = []

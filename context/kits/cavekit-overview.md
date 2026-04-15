@@ -1,6 +1,6 @@
 ---
 created: "2026-04-14T00:00:00Z"
-last_edited: "2026-04-14"
+last_edited: "2026-04-16"
 ---
 
 # Cavekit Overview — ark
@@ -23,6 +23,7 @@ One engine can be used by many orchestrators. Third-party extension via a subpro
 6. **Compile-in default, subprocess escape hatch later** — blessed engines + orchestrators in-binary; third-party comes in v2.
 7. **XDG compliant** — state in `$XDG_STATE_HOME`, sockets in `$XDG_RUNTIME_DIR`, config in `$XDG_CONFIG_HOME`.
 8. **Textual aesthetic** — `delta` for diff rendering, syntect-backed. No ratatui for wasm plugins (zellij-tile instead). Ratatui reserved for native pane commands.
+9. **Concrete over trait-with-one-impl** — when ark wraps a single external tool (e.g. zellij), the wrapper is a concrete type, not a trait. Test seams come from (a) pure functions returning data (`Vec<MuxOp>`-style command-bus), (b) stubbed command executors at the subprocess boundary, or (c) relocating consumers to a crate where the concrete type is already reachable. Traits-for-mocking with a single production impl are explicitly rejected — see `cavekit-testing.md` R1 for rationale (matklad "Concrete Abstraction," sans-IO).
 
 ## Domain Index
 
@@ -44,6 +45,7 @@ One engine can be used by many orchestrators. Third-party extension via a subpro
 | Hook sidecar + IPC | cavekit-hook-ipc.md | 5 | APPROVED | `ark-hook` binary, control socket protocol for picker→host |
 | Testing strategy | cavekit-testing.md | 5 | APPROVED | Contract tests, fixtures, e2e, CI matrix |
 | Distribution | cavekit-distribution.md | 4 | APPROVED | cargo-dist, homebrew, install flow, wasm embedding |
+| Scene (reactive KDL + extensions) | cavekit-scene.md | 15 | DRAFT | KDL 2.0 superset of zellij layout; reactions, keybinds, plugin lifecycle, extensions via `use` + wasm custom section. CEL for predicates. Nvim-class extensibility. |
 
 ## Cross-Reference Map
 
@@ -87,7 +89,7 @@ Ordered by what must be defined before what can be built:
 v1 ships:
 - 1 engine: `ClaudeCodeEngine`
 - 2 orchestrators: `CavekitOrchestrator`, `ClaudeCodeOrchestrator`
-- 1 mux: `ZellijMux`
+- Zellij integration: `ZellijMux` (concrete type, no mux trait)
 - 2 plugins: status bar, picker
 - 3 pane commands: `ark pane diff`, `ark pane git`, `ark pane log`
 - 6 CLI subcommands: `spawn`, `list`, `kill`, `doctor`, `config`, `pane`
@@ -96,7 +98,6 @@ Explicitly deferred to v2+:
 - AiderEngine, CodexEngine (as first-class), CursorEngine
 - RalphOrchestrator, AiderOrchestrator, ShellOrchestrator
 - SubprocessOrchestrator NDJSON protocol for third-party plugins
-- TmuxMux
 - Agent SDK (headless, no pane) mode
 - Remote agents (ssh)
 - Multi-user / team features

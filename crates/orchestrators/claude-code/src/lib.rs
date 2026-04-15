@@ -237,10 +237,11 @@ impl ClaudeCodeOrchestrator {
 mod tests {
     use super::*;
     use ark_core::Config;
-    use ark_core::Multiplexer;
-    use ark_types::{AgentId, CancellationToken, EventSink, StateLayout, TabHandle};
+    use ark_mux_zellij::ZellijMux;
+    use ark_mux_zellij::executor::{CommandOutput, StubExecutor};
+    use ark_types::{AgentId, CancellationToken, EventSink, StateLayout};
     use std::ffi::OsString;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     // --- detect -----------------------------------------------------------
@@ -356,53 +357,44 @@ mod tests {
         assert_eq!(o.default_layout(), "classic");
     }
 
-    // --- run() integration with stub mux ---------------------------------
+    // --- run() integration with ZellijMux(StubExecutor) ------------------
 
-    struct StubMux {
-        created: Mutex<Vec<(String, String, PathBuf)>>,
-        closed: Mutex<Vec<TabHandle>>,
+    /// Construct a test ZellijMux (inside-zellij variant so `create_tab`
+    /// routes through the executor rather than the outside-zellij pty
+    /// path that would try to spawn a real zellij binary).
+    async fn test_mux(n: usize) -> (Arc<ZellijMux>, Arc<StubExecutor>) {
+        let ok_status = tokio::process::Command::new("true")
+            .status()
+            .await
+            .unwrap();
+        let responses: Vec<CommandOutput> = (0..n)
+            .map(|_| CommandOutput {
+                status: ok_status,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+            .collect();
+        let (mux, stub) = ZellijMux::for_test_in_zellij(responses);
+        (Arc::new(mux), stub)
     }
 
-    impl StubMux {
-        fn new() -> Self {
-            Self {
-                created: Mutex::new(Vec::new()),
-                closed: Mutex::new(Vec::new()),
-            }
-        }
+    fn count_create_tab_calls(stub: &StubExecutor) -> usize {
+        stub.recorded_calls()
+            .iter()
+            .filter(|(_, args)| {
+                let has_switch = args.iter().any(|a| a == "switch-session");
+                let has_new_tab = args.iter().any(|a| a == "new-tab");
+                has_switch || has_new_tab
+            })
+            .count()
     }
 
-    #[async_trait]
-    impl Multiplexer for StubMux {
-        fn kind(&self) -> &'static str {
-            "stub"
-        }
-        async fn ensure_session(&self, _name: &str) -> Result<()> {
-            Ok(())
-        }
-        async fn create_tab(
-            &self,
-            session: &str,
-            name: &str,
-            layout_path: &Path,
-        ) -> Result<TabHandle> {
-            self.created.lock().unwrap().push((
-                session.to_string(),
-                name.to_string(),
-                layout_path.to_path_buf(),
-            ));
-            Ok(TabHandle::new(session, 1, name))
-        }
-        async fn close_tab(&self, handle: &TabHandle) -> Result<()> {
-            self.closed.lock().unwrap().push(handle.clone());
-            Ok(())
-        }
-        async fn rename_tab(&self, _handle: &TabHandle, _name: &str) -> Result<()> {
-            Ok(())
-        }
-        async fn pipe(&self, _target: &str, _payload: &str) -> Result<()> {
-            Ok(())
-        }
+    fn close_argvs(stub: &StubExecutor) -> Vec<Vec<String>> {
+        stub.recorded_calls()
+            .into_iter()
+            .filter(|(_, args)| args.iter().any(|a| a == "close-tab-at-index"))
+            .map(|(_, args)| args)
+            .collect()
     }
 
     fn make_spec(cwd: PathBuf) -> AgentSpec {
@@ -416,7 +408,10 @@ mod tests {
         )
     }
 
-    fn make_world(spec: AgentSpec, mux: Arc<StubMux>) -> (World, EventSink, CancellationToken) {
+    fn make_world(
+        spec: AgentSpec,
+        mux: Arc<ZellijMux>,
+    ) -> (World, EventSink, CancellationToken) {
         let (events, _rx) = ark_types::channel(16);
         let cancel = CancellationToken::new();
         let hooks_dir = PathBuf::from("/tmp/hooks");
@@ -428,7 +423,7 @@ mod tests {
         let config = Arc::new(Config::placeholder());
         let world = World::new(
             spec,
-            mux as Arc<dyn Multiplexer>,
+            mux,
             events.clone(),
             cancel.clone(),
             hooks_dir,
@@ -442,7 +437,7 @@ mod tests {
     async fn run_returns_success_on_engine_done() {
         let cwd = TempDir::new().unwrap();
         let spec = make_spec(cwd.path().to_path_buf());
-        let mux = Arc::new(StubMux::new());
+        let (mux, stub) = test_mux(4).await;
         let (world, events, _cancel) = make_world(spec.clone(), mux.clone());
 
         // Spawn a task that sends Done after a tiny delay.
@@ -474,19 +469,23 @@ mod tests {
             other => panic!("expected Success, got {other:?}"),
         }
 
-        // Builder tab was created with classic layout.
-        let created = mux.created.lock().unwrap().clone();
-        assert_eq!(created.len(), 1);
-        assert_eq!(created[0].0, spec.session);
-        assert_eq!(created[0].1, "builder");
-        assert_eq!(created[0].2, PathBuf::from("classic"));
+        // Builder tab was created with classic layout. Argv inspection.
+        assert_eq!(count_create_tab_calls(&stub), 1);
+        let calls = stub.recorded_calls();
+        let (_, argv) = calls
+            .iter()
+            .find(|(_, args)| args.iter().any(|a| a == "switch-session"))
+            .expect("expected switch-session call");
+        assert!(argv.iter().any(|a| a == spec.session.as_str()));
+        let layout_pos = argv.iter().position(|a| a == "--layout").unwrap();
+        assert_eq!(argv[layout_pos + 1], "classic");
     }
 
     #[tokio::test]
     async fn run_emits_tab_opened() {
         let cwd = TempDir::new().unwrap();
         let spec = make_spec(cwd.path().to_path_buf());
-        let mux = Arc::new(StubMux::new());
+        let (mux, _stub) = test_mux(4).await;
         let (world, events, _cancel) = make_world(spec.clone(), mux.clone());
         let mut rx = events.subscribe();
 
@@ -530,7 +529,7 @@ mod tests {
     async fn run_returns_killed_on_cancel() {
         let cwd = TempDir::new().unwrap();
         let spec = make_spec(cwd.path().to_path_buf());
-        let mux = Arc::new(StubMux::new());
+        let (mux, stub) = test_mux(4).await;
         let (world, _events, cancel) = make_world(spec.clone(), mux.clone());
 
         let handle = tokio::spawn(async move {
@@ -546,21 +545,24 @@ mod tests {
         let outcome = handle.await.expect("join");
         assert_eq!(outcome, Outcome::Killed);
 
-        // builder tab was closed on cancel
-        let closed = mux.closed.lock().unwrap().clone();
+        // Builder tab lives at index 0 (inside-zellij first tab). Assert
+        // the close argv carries that index.
+        let closes = close_argvs(&stub);
         assert_eq!(
-            closed.len(),
+            closes.len(),
             1,
-            "expected one close_tab call, got {closed:?}"
+            "expected one close_tab call, got {closes:?}"
         );
-        assert_eq!(closed[0].name, "builder");
+        let argv = &closes[0];
+        let pos = argv.iter().position(|a| a == "close-tab-at-index").unwrap();
+        assert_eq!(argv[pos + 1], "0");
     }
 
     #[tokio::test]
     async fn run_forwards_engine_outcome_non_success_untouched() {
         let cwd = TempDir::new().unwrap();
         let spec = make_spec(cwd.path().to_path_buf());
-        let mux = Arc::new(StubMux::new());
+        let (mux, _stub) = test_mux(4).await;
         let (world, events, _cancel) = make_world(spec.clone(), mux.clone());
 
         let id = spec.id.clone();
@@ -605,7 +607,7 @@ mod tests {
         std::fs::write(&file, b"hello\nworld\n").unwrap();
 
         let spec = make_spec(cwd.path().to_path_buf());
-        let mux = Arc::new(StubMux::new());
+        let (mux, _stub) = test_mux(4).await;
         let (world, events, _cancel) = make_world(spec.clone(), mux.clone());
 
         let id = spec.id.clone();

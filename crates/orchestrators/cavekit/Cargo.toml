@@ -10,6 +10,7 @@ rust-version.workspace = true
 [dependencies]
 ark-types = { path = "../../types" }
 ark-core = { path = "../../core" }
+ark-mux-zellij = { path = "../../mux/zellij" }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -18,5 +19,6 @@ notify = { workspace = true }
 
 [dev-dependencies]
 ark-test-fixtures = { path = "../../test-fixtures" }
+ark-mux-zellij = { path = "../../mux/zellij", features = ["test-support"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

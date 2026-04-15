@@ -573,9 +573,11 @@ async fn drain_watchers(watchers: &mut JoinSet<Result<()>>, grace: Duration) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_core::{Config, Multiplexer};
-    use ark_types::{AgentId, CancellationToken, EventSink, StateLayout, TabHandle};
-    use std::sync::{Arc, Mutex};
+    use ark_core::Config;
+    use ark_mux_zellij::ZellijMux;
+    use ark_mux_zellij::executor::{CommandOutput, StubExecutor};
+    use ark_types::{AgentId, CancellationToken, EventSink, StateLayout};
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     // ------- detect() tests (preserved from T-075) ------------------------
@@ -765,54 +767,55 @@ mod tests {
         assert!(trim_artifacts(Vec::new()).is_empty());
     }
 
-    // ------- run() integration via StubMux --------------------------------
+    // ------- run() integration via ZellijMux(StubExecutor) ----------------
 
-    struct StubMux {
-        created: Mutex<Vec<(String, String, PathBuf)>>,
-        closed: Mutex<Vec<TabHandle>>,
+    /// Build a `ZellijMux` backed by a `StubExecutor` pre-seeded with `n`
+    /// ok-status responses. We use the inside-zellij path so
+    /// `create_tab`'s first-tab spawn routes through `zellij action
+    /// switch-session --layout <p>` (observable via the executor) rather
+    /// than the outside-zellij pty path (which tries to spawn a real
+    /// zellij binary, unavailable in this test env).
+    async fn test_mux(n: usize) -> (Arc<ZellijMux>, Arc<StubExecutor>) {
+        let ok_status = tokio::process::Command::new("true")
+            .status()
+            .await
+            .unwrap();
+        let responses: Vec<CommandOutput> = (0..n)
+            .map(|_| CommandOutput {
+                status: ok_status,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+            .collect();
+        let (mux, stub) = ZellijMux::for_test_in_zellij(responses);
+        (Arc::new(mux), stub)
     }
 
-    impl StubMux {
-        fn new() -> Self {
-            Self {
-                created: Mutex::new(Vec::new()),
-                closed: Mutex::new(Vec::new()),
-            }
-        }
+    /// Count zellij argv sequences that correspond to `create_tab`.
+    /// Inside zellij the first tab uses `switch-session --layout`; any
+    /// additional tab uses `action new-tab --layout`.
+    fn count_create_tab_calls(stub: &StubExecutor) -> usize {
+        stub.recorded_calls()
+            .iter()
+            .filter(|(_, args)| {
+                let has_switch = args.iter().any(|a| a == "switch-session");
+                let has_new_tab = args.iter().any(|a| a == "new-tab");
+                has_switch || has_new_tab
+            })
+            .count()
     }
 
-    #[async_trait]
-    impl Multiplexer for StubMux {
-        fn kind(&self) -> &'static str {
-            "stub"
-        }
-        async fn ensure_session(&self, _name: &str) -> Result<()> {
-            Ok(())
-        }
-        async fn create_tab(
-            &self,
-            session: &str,
-            name: &str,
-            layout_path: &Path,
-        ) -> Result<TabHandle> {
-            let index = self.created.lock().unwrap().len() as u32 + 1;
-            self.created.lock().unwrap().push((
-                session.to_string(),
-                name.to_string(),
-                layout_path.to_path_buf(),
-            ));
-            Ok(TabHandle::new(session, index, name))
-        }
-        async fn close_tab(&self, handle: &TabHandle) -> Result<()> {
-            self.closed.lock().unwrap().push(handle.clone());
-            Ok(())
-        }
-        async fn rename_tab(&self, _handle: &TabHandle, _name: &str) -> Result<()> {
-            Ok(())
-        }
-        async fn pipe(&self, _target: &str, _payload: &str) -> Result<()> {
-            Ok(())
-        }
+    /// Argv sequences recorded as `close-tab-at-index` calls.
+    fn close_argvs(stub: &StubExecutor) -> Vec<Vec<String>> {
+        stub.recorded_calls()
+            .into_iter()
+            .filter(|(_, args)| args.iter().any(|a| a == "close-tab-at-index"))
+            .map(|(_, args)| args)
+            .collect()
+    }
+
+    fn count_close_tab_calls(stub: &StubExecutor) -> usize {
+        close_argvs(stub).len()
     }
 
     fn make_spec(cwd: PathBuf) -> AgentSpec {
@@ -826,7 +829,10 @@ mod tests {
         )
     }
 
-    fn make_world(spec: AgentSpec, mux: Arc<StubMux>) -> (World, EventSink, CancellationToken) {
+    fn make_world(
+        spec: AgentSpec,
+        mux: Arc<ZellijMux>,
+    ) -> (World, EventSink, CancellationToken) {
         let (events, _rx) = ark_types::channel(256);
         let cancel = CancellationToken::new();
         let hooks_dir = PathBuf::from("/tmp/hooks");
@@ -838,7 +844,7 @@ mod tests {
         let config = Arc::new(Config::placeholder());
         let world = World::new(
             spec,
-            mux as Arc<dyn Multiplexer>,
+            mux,
             events.clone(),
             cancel.clone(),
             hooks_dir,
@@ -866,7 +872,8 @@ mod tests {
     async fn run_creates_builder_tab_with_default_layout() {
         let cwd = TempDir::new().unwrap();
         let spec = make_spec(cwd.path().to_path_buf());
-        let mux = Arc::new(StubMux::new());
+        // One scripted ok for the builder create_tab; plus cushion.
+        let (mux, stub) = test_mux(4).await;
         let (world, events, _cancel) = make_world(spec.clone(), mux.clone());
 
         let id = spec.id.clone();
@@ -888,11 +895,21 @@ mod tests {
             other => panic!("expected Success, got {other:?}"),
         }
 
-        let created = mux.created.lock().unwrap().clone();
-        assert_eq!(created.len(), 1, "create_tab should be called exactly once");
-        assert_eq!(created[0].0, spec.session);
-        assert_eq!(created[0].1, "builder");
-        assert_eq!(created[0].2, PathBuf::from("builder"));
+        assert_eq!(
+            count_create_tab_calls(&stub),
+            1,
+            "create_tab should be called exactly once; got: {:?}",
+            stub.recorded_calls()
+        );
+        // Argv should mention the session and the default "builder" layout.
+        let calls = stub.recorded_calls();
+        let (_, argv) = calls
+            .iter()
+            .find(|(_, args)| args.iter().any(|a| a == "switch-session"))
+            .expect("expected switch-session call");
+        assert!(argv.iter().any(|a| a == spec.session.as_str()));
+        let layout_pos = argv.iter().position(|a| a == "--layout").unwrap();
+        assert_eq!(argv[layout_pos + 1], "builder");
     }
 
     #[tokio::test]
@@ -900,7 +917,7 @@ mod tests {
         let cwd = TempDir::new().unwrap();
         let mut spec = make_spec(cwd.path().to_path_buf());
         spec.layout = Some("focused".to_string());
-        let mux = Arc::new(StubMux::new());
+        let (mux, stub) = test_mux(4).await;
         let (world, events, _cancel) = make_world(spec.clone(), mux.clone());
 
         let id = spec.id.clone();
@@ -917,17 +934,25 @@ mod tests {
 
         let _ = all_gates_off().run(spec.clone(), world).await.expect("run");
 
-        let created = mux.created.lock().unwrap().clone();
-        assert_eq!(created.len(), 1);
-        assert_eq!(created[0].1, "builder");
-        assert_eq!(created[0].2, PathBuf::from("focused"));
+        assert_eq!(count_create_tab_calls(&stub), 1);
+        let calls = stub.recorded_calls();
+        let (_, argv) = calls
+            .iter()
+            .find(|(_, args)| args.iter().any(|a| a == "switch-session"))
+            .expect("expected switch-session call");
+        let layout_pos = argv.iter().position(|a| a == "--layout").unwrap();
+        assert_eq!(
+            argv[layout_pos + 1],
+            "focused",
+            "layout override must propagate to zellij argv"
+        );
     }
 
     #[tokio::test]
     async fn run_emits_tab_opened_builder_role() {
         let cwd = TempDir::new().unwrap();
         let spec = make_spec(cwd.path().to_path_buf());
-        let mux = Arc::new(StubMux::new());
+        let (mux, _stub) = test_mux(4).await;
         let (world, events, _cancel) = make_world(spec.clone(), mux.clone());
         let mut rx = events.subscribe();
 
@@ -970,7 +995,7 @@ mod tests {
         // is re-evaluated.
         let cwd = TempDir::new().unwrap();
         let spec = make_spec(cwd.path().to_path_buf());
-        let mux = Arc::new(StubMux::new());
+        let (mux, _stub) = test_mux(4).await;
         let (world, events, _cancel) = make_world(spec.clone(), mux.clone());
 
         let id = spec.id.clone();
@@ -996,7 +1021,8 @@ mod tests {
     async fn run_returns_killed_on_cancel_and_closes_tab() {
         let cwd = TempDir::new().unwrap();
         let spec = make_spec(cwd.path().to_path_buf());
-        let mux = Arc::new(StubMux::new());
+        // create + close
+        let (mux, stub) = test_mux(4).await;
         let (world, _events, cancel) = make_world(spec.clone(), mux.clone());
 
         let handle =
@@ -1008,11 +1034,24 @@ mod tests {
         let outcome = handle.await.expect("join");
         assert_eq!(outcome, Outcome::Killed);
 
-        let closed = mux.closed.lock().unwrap().clone();
-        assert!(!closed.is_empty(), "expected at least the builder to close");
+        // The builder tab's index is 0 inside zellij (first tab). Assert
+        // the close argv mentions index 0.
         assert!(
-            closed.iter().any(|h| h.name == "builder"),
-            "builder tab must be closed on cancel"
+            count_close_tab_calls(&stub) >= 1,
+            "expected at least the builder to close; calls: {:?}",
+            stub.recorded_calls()
+        );
+        let closes = close_argvs(&stub);
+        let indices: Vec<&str> = closes
+            .iter()
+            .map(|a| {
+                let pos = a.iter().position(|x| x == "close-tab-at-index").unwrap();
+                a[pos + 1].as_str()
+            })
+            .collect();
+        assert!(
+            indices.contains(&"0"),
+            "builder tab (index 0) must be closed; got indices: {indices:?}"
         );
     }
 
@@ -1080,7 +1119,7 @@ mod tests {
         );
 
         let spec = make_spec(cwd.path().to_path_buf());
-        let mux = Arc::new(StubMux::new());
+        let (mux, _stub) = test_mux(8).await;
         let (world, events, _cancel) = make_world(spec.clone(), mux.clone());
         let mut probe = events.subscribe();
 
@@ -1123,7 +1162,7 @@ mod tests {
         // R9 case d: no build-site, total=0 → Success with empty artifacts.
         let cwd = TempDir::new().unwrap();
         let spec = make_spec(cwd.path().to_path_buf());
-        let mux = Arc::new(StubMux::new());
+        let (mux, _stub) = test_mux(8).await;
         let (world, events, _cancel) = make_world(spec.clone(), mux.clone());
 
         let orch = CavekitOrchestrator::with_gates(CavekitGates {
@@ -1173,7 +1212,7 @@ mod tests {
         );
 
         let spec = make_spec(cwd.path().to_path_buf());
-        let mux = Arc::new(StubMux::new());
+        let (mux, _stub) = test_mux(8).await;
         let (world, events, _cancel) = make_world(spec.clone(), mux.clone());
         let mut probe = events.subscribe();
 
@@ -1245,7 +1284,7 @@ mod tests {
         );
 
         let spec = make_spec(cwd.path().to_path_buf());
-        let mux = Arc::new(StubMux::new());
+        let (mux, _stub) = test_mux(8).await;
         let (world, events, _cancel) = make_world(spec.clone(), mux.clone());
 
         let orch = CavekitOrchestrator::with_gates(CavekitGates {
@@ -1313,7 +1352,7 @@ mod tests {
         // verify the builder AND the child are closed.
         let cwd = TempDir::new().unwrap();
         let spec = make_spec(cwd.path().to_path_buf());
-        let mux = Arc::new(StubMux::new());
+        let (mux, stub) = test_mux(8).await;
         let (world, events, cancel) = make_world(spec.clone(), mux.clone());
 
         let orch = all_gates_off();
@@ -1342,14 +1381,24 @@ mod tests {
             .expect("run ok");
         assert_eq!(outcome, Outcome::Killed);
 
-        let closed = mux.closed.lock().unwrap().clone();
+        // Builder tab lives at index 0 (first inside-zellij tab). Child
+        // TabHandle was constructed with index 99 above. Assert both
+        // appear among close-tab-at-index argvs.
+        let closes = close_argvs(&stub);
+        let indices: Vec<String> = closes
+            .iter()
+            .map(|a| {
+                let pos = a.iter().position(|x| x == "close-tab-at-index").unwrap();
+                a[pos + 1].clone()
+            })
+            .collect();
         assert!(
-            closed.iter().any(|h| h.name == "builder"),
-            "builder not closed: {closed:?}"
+            indices.contains(&"0".to_string()),
+            "builder (index 0) not closed; got indices: {indices:?}"
         );
         assert!(
-            closed.iter().any(|h| h.name == "review"),
-            "review child not closed: {closed:?}"
+            indices.contains(&"99".to_string()),
+            "review child (index 99) not closed; got indices: {indices:?}"
         );
     }
 }

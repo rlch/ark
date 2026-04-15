@@ -1,6 +1,6 @@
 ---
 created: "2026-04-14T00:00:00Z"
-last_edited: "2026-04-14T00:00:00Z"
+last_edited: "2026-04-15T00:00:00Z"
 ---
 
 # Spec: Core Architecture
@@ -45,7 +45,7 @@ An orchestrator may use one engine and spawn additional sibling panes (e.g., Cav
 ### R3: World handle
 **Description:** Capabilities handed to an orchestrator's `run` method.
 **Acceptance Criteria:**
-- [ ] `World` struct with fields: `mux: Arc<dyn Multiplexer>`, `events: EventSink`, `cancel: CancellationToken`, `hooks_dir: PathBuf`, `state: Arc<StateDir>`, `config: Arc<Config>`
+- [ ] `World` struct with fields: `mux: Arc<ZellijMux>`, `events: EventSink`, `cancel: CancellationToken`, `hooks_dir: PathBuf`, `state: Arc<StateDir>`, `config: Arc<Config>`
 - [ ] `mux` is shared; orchestrator calls `.create_tab()`, `.close_tab()`, `.pipe()` freely
 - [ ] `events` is a cloneable `tokio::sync::broadcast::Sender<AgentEvent>`
 - [ ] `cancel` fires when supervisor receives SIGTERM or `ark kill`
@@ -53,14 +53,14 @@ An orchestrator may use one engine and spawn additional sibling panes (e.g., Cav
 - [ ] Orchestrator must honor `cancel` within 5s or risk SIGKILL escalation
 **Dependencies:** R1, R2
 
-### R4: Multiplexer trait
-**Description:** Abstract interface for a terminal multiplexer capable of hosting agent panes.
+### R4: Zellij host integration
+**Description:** `ZellijMux` — ark's concrete integration with zellij as the terminal multiplexer. No trait abstraction; the type is the API. Ark ships zellij-only; a second mux is not a planned capability.
 **Acceptance Criteria:**
-- [ ] `Multiplexer` trait is `Send + Sync`
-- [ ] Methods: `kind() -> &'static str`, `ensure_session(name) -> Result<()>`, `create_tab(session, name, layout_path) -> Result<TabHandle>`, `close_tab(handle) -> Result<()>`, `rename_tab(handle, name) -> Result<()>`, `pipe(target_name, payload) -> Result<()>`
-- [ ] v1 ship one impl: `ZellijMux`
-- [ ] Trait is tmux-compatible in principle (TmuxMux can implement later without trait changes)
-- [ ] Tests: contract suite uses a stub executor to verify command sequences emitted per operation
+- [ ] `ZellijMux` is a concrete `Send + Sync` struct in `ark-mux-zellij`; no `Multiplexer` trait, no dyn dispatch
+- [ ] Inherent methods: `kind() -> &'static str` (returns `"zellij"`), `ensure_session(name) -> Result<()>`, `create_tab(session, name, layout_path) -> Result<TabHandle>`, `close_tab(handle) -> Result<()>`, `rename_tab(handle, name) -> Result<()>`, `pipe(target_name, payload) -> Result<()>`
+- [ ] Zellij-native capability expansion (floating panes, swap layouts, typed pipe source, pane titles, plugin-permission declarations) is deferred — add inherent methods when a consumer kit motivates them; do not pre-add
+- [ ] Tests: `StubExecutor` records command sequences and is asserted in `ark-mux-zellij` unit tests (see `cavekit-testing` R3); no cross-impl contract suite
+- [ ] No narrow injection traits for test mockability (no `TabOps`, `PluginPipe`, `StatusChannel`, etc.). Downstream tests use pure-function factoring (return `MuxOp` data) or `ZellijMux` backed by `StubExecutor`. See `cavekit-overview.md` principle 9 and `cavekit-testing.md` R1 for the reasoning.
 **Dependencies:** cavekit-types-state-events
 
 ### R5: Ownership rules
@@ -79,7 +79,7 @@ An orchestrator may use one engine and spawn additional sibling panes (e.g., Cav
 **Acceptance Criteria:**
 - [ ] Engines: `ClaudeCodeEngine` only
 - [ ] Orchestrators: `CavekitOrchestrator`, `ClaudeCodeOrchestrator`
-- [ ] Multiplexers: `ZellijMux` only
+- [ ] Zellij integration: `ZellijMux` (concrete type, no mux trait)
 - [ ] v1 compiles with one binary (`ark`), two wasm plugins (`ark-status.wasm`, `ark-picker.wasm`), one hook sidecar (`ark-hook`)
 - [ ] Third-party extension (subprocess NDJSON protocol) explicitly deferred to v2
 - [ ] `--engine` CLI flag accepted but only `claude-code` valid in v1
@@ -129,7 +129,7 @@ async fn supervisor(
     spec: OrchestratorSpec,
     engine: Arc<dyn Engine>,
     orchestrator: Arc<dyn Orchestrator>,
-    mux: Arc<dyn Multiplexer>,
+    mux: Arc<ZellijMux>,
     config: Arc<Config>,
 ) {
     let state = StateDir::create(&spec.id)?;

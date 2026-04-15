@@ -39,7 +39,7 @@
 use std::time::Instant;
 
 use anyhow::Result;
-use ark_core::Multiplexer;
+use ark_mux_zellij::ZellijMux;
 use ark_types::{AgentEvent, AgentId, EventReceiver, EventSink, Outcome, TabHandle};
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use tracing::{debug, warn};
@@ -115,7 +115,7 @@ impl AutoClosePolicy {
 pub async fn apply_auto_close_policy(
     outcome: &Outcome,
     config: &AutoClosePolicy,
-    mux: &dyn Multiplexer,
+    mux: &ZellijMux,
     session: &str,
     tabs: &[TabHandle],
     event_bus: &EventSink,
@@ -262,78 +262,55 @@ fn merge_tab_event(open: &mut Vec<TabHandle>, ev: &AgentEvent, agent_id: &AgentI
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ark_mux_zellij::executor::{CommandOutput, StubExecutor};
     use ark_types::{TabRole, channel};
-    use async_trait::async_trait;
-    use std::path::{Path, PathBuf};
-    use std::sync::Mutex;
+    use std::path::PathBuf;
+    use std::sync::Arc;
     use std::time::Duration;
 
-    /// Mux that records every `close_tab` call, optionally failing on a
-    /// named tab to exercise the warn-and-continue branch.
-    struct StubMux {
-        closed: Mutex<Vec<TabHandle>>,
-        fail_on: Option<String>,
+    /// Mux that never fails. Useful for tests that care about the call
+    /// count only. ZellijMux's `close_tab` is intentionally idempotent
+    /// (it swallows non-zero exit), so even queued failures would still
+    /// "succeed" at the mux API level — hence we use queued successes here
+    /// and assert on the recorded argv.
+    async fn mux_with_n_ok_closes(n: usize) -> (ZellijMux, Arc<StubExecutor>) {
+        let ok_status = tokio::process::Command::new("true")
+            .status()
+            .await
+            .unwrap();
+        let responses: Vec<CommandOutput> = (0..n)
+            .map(|_| CommandOutput {
+                status: ok_status,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
+            .collect();
+        ZellijMux::for_test(responses)
     }
 
-    impl StubMux {
-        fn new() -> Self {
-            Self {
-                closed: Mutex::new(Vec::new()),
-                fail_on: None,
-            }
-        }
-
-        fn failing_on(name: impl Into<String>) -> Self {
-            Self {
-                closed: Mutex::new(Vec::new()),
-                fail_on: Some(name.into()),
-            }
-        }
-
-        fn closed(&self) -> Vec<TabHandle> {
-            self.closed.lock().unwrap().clone()
-        }
+    /// Count `close-tab-at-index` calls.
+    fn count_closes(stub: &StubExecutor) -> usize {
+        stub.recorded_calls()
+            .iter()
+            .filter(|(_, args)| args.iter().any(|a| a == "close-tab-at-index"))
+            .count()
     }
 
-    #[async_trait]
-    impl Multiplexer for StubMux {
-        fn kind(&self) -> &'static str {
-            "stub-auto-close"
-        }
-
-        async fn ensure_session(&self, _name: &str) -> Result<()> {
-            Ok(())
-        }
-
-        async fn create_tab(
-            &self,
-            session: &str,
-            name: &str,
-            _layout_path: &Path,
-        ) -> Result<TabHandle> {
-            Ok(TabHandle::new(session, 1, name))
-        }
-
-        async fn close_tab(&self, handle: &TabHandle) -> Result<()> {
-            if let Some(bad) = &self.fail_on
-                && handle.name == *bad
-            {
-                return Err(anyhow::anyhow!(
-                    "synthetic close failure on {}",
-                    handle.name
-                ));
-            }
-            self.closed.lock().unwrap().push(handle.clone());
-            Ok(())
-        }
-
-        async fn rename_tab(&self, _handle: &TabHandle, _name: &str) -> Result<()> {
-            Ok(())
-        }
-
-        async fn pipe(&self, _target: &str, _payload: &str) -> Result<()> {
-            Ok(())
-        }
+    /// Extract the index from each `close-tab-at-index` call, paired with
+    /// its session. Lets us check "which tab was closed?" without relying
+    /// on the now-removed name propagation inside the stub.
+    fn close_argv_indices(stub: &StubExecutor) -> Vec<u32> {
+        stub.recorded_calls()
+            .into_iter()
+            .filter(|(_, args)| args.iter().any(|a| a == "close-tab-at-index"))
+            .map(|(_, args)| {
+                let pos = args
+                    .iter()
+                    .position(|a| a == "close-tab-at-index")
+                    .unwrap();
+                args[pos + 1].parse::<u32>().unwrap_or(0)
+            })
+            .collect()
     }
 
     fn agent() -> AgentId {
@@ -404,7 +381,7 @@ mod tests {
 
     #[tokio::test]
     async fn success_default_policy_closes_all_and_emits_tabclosed() {
-        let mux = StubMux::new();
+        let (mux, stub) = mux_with_n_ok_closes(2).await;
         let (tx, mut rx) = channel(16);
         let id = agent();
         let tabs = vec![tab("builder", 1), tab("log", 2)];
@@ -421,10 +398,10 @@ mod tests {
         .await
         .expect("ok");
 
-        let closed = mux.closed();
-        assert_eq!(closed.len(), 2);
-        assert!(closed.iter().any(|t| t.name == "builder"));
-        assert!(closed.iter().any(|t| t.name == "log"));
+        assert_eq!(count_closes(&stub), 2);
+        let mut indices = close_argv_indices(&stub);
+        indices.sort();
+        assert_eq!(indices, vec![1, 2]);
 
         // Drain bus and look for a TabClosed for each.
         let mut closed_names: Vec<String> = Vec::new();
@@ -439,7 +416,7 @@ mod tests {
 
     #[tokio::test]
     async fn success_on_done_false_skips_all() {
-        let mux = StubMux::new();
+        let (mux, stub) = mux_with_n_ok_closes(0).await;
         let (tx, _rx) = channel(8);
         let id = agent();
         let tabs = vec![tab("builder", 1)];
@@ -452,12 +429,12 @@ mod tests {
             .await
             .expect("ok");
 
-        assert!(mux.closed().is_empty());
+        assert_eq!(count_closes(&stub), 0);
     }
 
     #[tokio::test]
     async fn failed_default_policy_skips_all() {
-        let mux = StubMux::new();
+        let (mux, stub) = mux_with_n_ok_closes(0).await;
         let (tx, _rx) = channel(8);
         let id = agent();
         let tabs = vec![tab("builder", 1), tab("log", 2)];
@@ -474,12 +451,16 @@ mod tests {
         .await
         .expect("ok");
 
-        assert!(mux.closed().is_empty(), "default on_fail=false → no close");
+        assert_eq!(
+            count_closes(&stub),
+            0,
+            "default on_fail=false → no close"
+        );
     }
 
     #[tokio::test]
     async fn failed_on_fail_true_closes_tabs() {
-        let mux = StubMux::new();
+        let (mux, stub) = mux_with_n_ok_closes(2).await;
         let (tx, _rx) = channel(8);
         let id = agent();
         let tabs = vec![tab("builder", 1), tab("log", 2)];
@@ -492,12 +473,12 @@ mod tests {
             .await
             .expect("ok");
 
-        assert_eq!(mux.closed().len(), 2);
+        assert_eq!(count_closes(&stub), 2);
     }
 
     #[tokio::test]
     async fn killed_default_policy_closes_tabs() {
-        let mux = StubMux::new();
+        let (mux, stub) = mux_with_n_ok_closes(1).await;
         let (tx, _rx) = channel(8);
         let id = agent();
         let tabs = vec![tab("builder", 1)];
@@ -514,12 +495,12 @@ mod tests {
         .await
         .expect("ok");
 
-        assert_eq!(mux.closed().len(), 1);
+        assert_eq!(count_closes(&stub), 1);
     }
 
     #[tokio::test]
     async fn crashed_default_policy_skips() {
-        let mux = StubMux::new();
+        let (mux, stub) = mux_with_n_ok_closes(0).await;
         let (tx, _rx) = channel(8);
         let id = agent();
         let tabs = vec![tab("builder", 1)];
@@ -536,17 +517,17 @@ mod tests {
         .await
         .expect("ok");
 
-        assert!(mux.closed().is_empty());
+        assert_eq!(count_closes(&stub), 0);
     }
 
     #[tokio::test]
     async fn timeout_follows_fail_branch() {
-        let mux_default = StubMux::new();
+        // Default on_fail=false → Timeout should NOT close.
+        let (mux_default, stub_default) = mux_with_n_ok_closes(0).await;
         let (tx, _rx) = channel(8);
         let id = agent();
         let tabs = vec![tab("builder", 1)];
 
-        // Default on_fail=false → Timeout should NOT close.
         apply_auto_close_policy(
             &Outcome::Timeout,
             &AutoClosePolicy::default(),
@@ -558,10 +539,10 @@ mod tests {
         )
         .await
         .expect("ok");
-        assert!(mux_default.closed().is_empty());
+        assert_eq!(count_closes(&stub_default), 0);
 
         // on_fail=true → Timeout SHOULD close.
-        let mux_on = StubMux::new();
+        let (mux_on, stub_on) = mux_with_n_ok_closes(1).await;
         let p = AutoClosePolicy {
             on_fail: true,
             ..Default::default()
@@ -577,12 +558,12 @@ mod tests {
         )
         .await
         .expect("ok");
-        assert_eq!(mux_on.closed().len(), 1);
+        assert_eq!(count_closes(&stub_on), 1);
     }
 
     #[tokio::test]
     async fn empty_tabs_is_noop_no_panic() {
-        let mux = StubMux::new();
+        let (mux, stub) = mux_with_n_ok_closes(0).await;
         let (tx, mut rx) = channel(8);
         let id = agent();
 
@@ -598,7 +579,7 @@ mod tests {
         .await
         .expect("ok");
 
-        assert!(mux.closed().is_empty());
+        assert_eq!(count_closes(&stub), 0);
         // No events emitted.
         match rx.try_recv() {
             Err(_) => {}
@@ -607,14 +588,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn close_failure_on_one_tab_continues_with_others() {
-        // Mux fails on the "builder" tab; "log" and "review" still closed.
-        let mux = StubMux::failing_on("builder");
+    async fn every_tab_receives_a_close_attempt() {
+        // Three closes scripted; mux idempotency means even queued non-zero
+        // exit still looks like success at the API level.
+        let (mux, stub) = mux_with_n_ok_closes(3).await;
         let (tx, mut rx) = channel(16);
         let id = agent();
         let tabs = vec![tab("builder", 1), tab("log", 2), tab("review", 3)];
 
-        // Returns Ok(()) despite one close failing.
         apply_auto_close_policy(
             &success(),
             &AutoClosePolicy::default(),
@@ -625,16 +606,13 @@ mod tests {
             &id,
         )
         .await
-        .expect("returns Ok even if one close fails");
+        .expect("returns Ok");
 
-        // Only the successful closes were recorded.
-        let closed = mux.closed();
-        assert_eq!(closed.len(), 2);
-        assert!(!closed.iter().any(|t| t.name == "builder"));
-        assert!(closed.iter().any(|t| t.name == "log"));
-        assert!(closed.iter().any(|t| t.name == "review"));
+        assert_eq!(count_closes(&stub), 3);
+        let mut indices = close_argv_indices(&stub);
+        indices.sort();
+        assert_eq!(indices, vec![1, 2, 3]);
 
-        // TabClosed events only emitted for the successful closes.
         let mut closed_names: Vec<String> = Vec::new();
         while let Ok(ev) = rx.try_recv() {
             if let AgentEvent::TabClosed { tab_handle, .. } = ev {
@@ -642,7 +620,7 @@ mod tests {
             }
         }
         closed_names.sort();
-        assert_eq!(closed_names, vec!["log", "review"]);
+        assert_eq!(closed_names, vec!["builder", "log", "review"]);
     }
 
     // ---------- collect_opened_tabs ----------

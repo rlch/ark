@@ -1,12 +1,12 @@
 ---
 created: "2026-04-14T00:00:00Z"
-last_edited: "2026-04-14T00:00:00Z"
+last_edited: "2026-04-15T00:00:00Z"
 ---
 
-# Spec: Multiplexer — Zellij
+# Spec: Zellij Integration
 
 ## Scope
-The `ZellijMux` implementation of the `Multiplexer` trait. Creates zellij sessions, manages tabs from KDL layouts, pipes events to plugins, detects `$ZELLIJ` for in-vs-out-of-zellij spawn paths. Session-per-run model.
+`ZellijMux` — ark's concrete integration with zellij. Creates zellij sessions, manages tabs from KDL layouts, pipes events to plugins, detects `$ZELLIJ` for in-vs-out-of-zellij spawn paths. Session-per-run model. No mux trait abstraction: `ZellijMux` is the type consumers hold directly.
 
 ## Requirements
 
@@ -16,8 +16,8 @@ The `ZellijMux` implementation of the `Multiplexer` trait. Creates zellij sessio
 - [ ] Session name derived from `AgentSpec.session` (set at spawn time per cavekit-types-state-events R1)
 - [ ] If session name collides with existing session, append `-{short-ulid}`
 - [ ] Detect existing zellij context via `$ZELLIJ` env var:
-  - **outside zellij** (`$ZELLIJ` unset): spawn new session via `zellij -s {session} --layout {path.kdl}` wrapped in `setsid` (POSIX) or double-fork to detach. Layout file MUST end in `.kdl` (zellij issue #4994: non-`.kdl` extensions silently fail with `--layout`)
-  - **inside zellij** (`$ZELLIJ` set): ask current client to switch via `zellij action switch-session {session} [--layout {path.kdl}]` (zellij ≥ 0.44.1). Note: `switch-session` create-if-missing is the DEFAULT behavior; there is no `--create` flag (that flag exists on `attach`, not `switch-session`)
+  - **outside zellij** (`$ZELLIJ` unset): allocate a pty pair (e.g. `portable-pty`), spawn `zellij -s {session} --layout {path.kdl}` with the slave fd wired as stdin/stdout/stderr and `TIOCSCTTY` issued so the slave is the child's controlling terminal. The spawn helper calls `setsid(2)` in a `pre_exec` so zellij becomes the session leader of the pty. Drop the master fd on the parent side AFTER a startup-grace poll confirms zellij did not exit non-zero (zellij's server daemon forks and detaches within that window; dropping master then SIGHUPs only the client, which is already redundant). Layout file MUST end in `.kdl` (zellij issue #4994: non-`.kdl` extensions silently fail with `--layout`). Null-stdio + setsid is explicitly FORBIDDEN — zellij has no `--daemonize` mode and its TUI client exits with code 2 when started without a real TTY (F-730).
+  - **inside zellij** (`$ZELLIJ` set): ask the current client to switch via `zellij action switch-session [--layout {path.kdl}] {session}` (zellij ≥ 0.44.1). Dispatch is IPC-only over the caller's live zellij socket — no pty, no setsid, no stdio nullification. Note: `switch-session` create-if-missing is the DEFAULT behavior; there is no `--create` flag (that flag exists on `attach`, not `switch-session`).
 - [ ] Under no circumstance nest zellij clients (no `zellij attach` inside a running zellij)
 - [ ] Switching sessions returns control to the caller; supervisor continues independently in its own process
 **Dependencies:** cavekit-types-state-events R1
@@ -80,10 +80,10 @@ The `ZellijMux` implementation of the `Multiplexer` trait. Creates zellij sessio
 
 ## Interaction with supervisor
 
-Supervisor obtains `Arc<dyn Multiplexer>` from a factory based on config. For v1 the factory always returns `ZellijMux`. Inside supervisor loop:
+Supervisor constructs `Arc<ZellijMux>` directly from config. No factory indirection; the type is concrete. Inside supervisor loop:
 
 ```rust
-let mux: Arc<dyn Multiplexer> = Arc::new(ZellijMux::new(config.mux.zellij.clone()));
+let mux: Arc<ZellijMux> = Arc::new(ZellijMux::new(config.mux.zellij.clone()));
 mux.ensure_session(&spec.session).await?;
 let tab = mux.create_tab(&spec.session, "builder", &layout_path).await?;
 ```
@@ -96,7 +96,7 @@ The orchestrator can call `mux.create_tab` further at any time (e.g., review tab
 - Headless / no-UI zellij — v1 assumes a TTY; CI tests mock the executor
 
 ## Cross-References
-- cavekit-architecture.md — Multiplexer trait definition (R4)
+- cavekit-architecture.md — ZellijMux ownership in World (R3) and type spec (R4)
 - cavekit-layouts.md — KDL templates and shipped layouts
 - cavekit-plugin-status.md — consumes `ark-status` pipes
 - cavekit-plugin-picker.md — consumes `ark-picker` pipes

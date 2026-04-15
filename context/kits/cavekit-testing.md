@@ -1,26 +1,27 @@
 ---
 created: "2026-04-14T00:00:00Z"
-last_edited: "2026-04-14T00:00:00Z"
+last_edited: "2026-04-15T00:00:00Z"
 ---
 
 # Spec: Testing Strategy
 
 ## Scope
-Test layers for ark. Covers: trait contract tests (every Engine / Orchestrator / Multiplexer impl shares a common suite), per-crate unit tests, integration tests for state dir + hooks, e2e tests against real zellij + delta, wasm plugin tests.
+Test layers for ark. Covers: trait contract tests (every Engine / Orchestrator impl shares a common suite), per-crate unit tests (including `ark-mux-zellij` stub-executor assertions), integration tests for state dir + hooks, e2e tests against real zellij + delta, wasm plugin tests.
 
 ## Requirements
 
-### R1: Contract tests per trait
-**Description:** Every trait impl (Engine, Orchestrator, Multiplexer) passes the same behavioral suite.
+### R1: Contract tests per trait — and when NOT to introduce a trait
+**Description:** Every trait with multiple real impls (Engine, Orchestrator) passes a common behavioral suite. `ZellijMux` is a concrete type (no mux trait) and is covered by unit tests in R3 rather than a cross-impl contract suite.
+
+**Rule of trait introduction** (applies to all ark crates): a trait exists because either (a) a second production impl exists or is concretely planned in a kit, or (b) a downstream caller outside ark's control needs to swap the impl. Tests are not a justification — test-only traits with a single production impl are explicitly rejected. This matches matklad's "Concrete Abstraction" guidance and the sans-IO pattern practiced by `quinn`, `gitoxide`, `cargo-nextest`, and `zero2prod`. When the current consumer seems to "want a trait for tests," prefer in order: (1) factor a pure function returning data (e.g. a `MuxOp` enum the caller applies), (2) use a stubbed command executor at the subprocess boundary, (3) relocate the consumer to a crate where the concrete type is reachable.
+
 **Acceptance Criteria:**
-- [ ] Contract suites live in the respective trait's crate under `tests/contract.rs`
-- [ ] Each suite takes a factory closure `impl Fn() -> Box<dyn Trait>` and runs a fixed scenario set
-- [ ] Engine contract fires fake hook payloads, asserts events emitted match expected timeline
-- [ ] Orchestrator contract runs with a mock Mux + fixture cwd, asserts orchestrator-level events + tab-graph calls
-- [ ] Multiplexer contract uses a stub executor that records command sequences, asserts create/close/pipe/rename patterns
-- [ ] Every new trait impl must pass the suite before being merged
-- [ ] Suite runs in CI as part of `cargo test`
-**Dependencies:** cavekit-architecture
+- [ ] Engine contract suite lives in `ark-core/engine_contract.rs` with a factory closure `impl Fn() -> Box<dyn Engine>`; fires fake hook payloads; asserts emitted event timelines
+- [ ] Orchestrator contract suite lives in `ark-core/orchestrator_contract.rs` with a factory closure; runs against a fixture cwd + `StubExecutor`-backed `ZellijMux`; asserts orchestrator-level events + recorded zellij CLI argv
+- [ ] No `Multiplexer`, `TabOps`, `PluginPipe`, or other single-impl mux-facing trait exists in the workspace. Grep rule: `rg 'trait (Mux|TabOps|TabGraph|PluginPipe|StatusChannel|PipeSender)'` returns no matches
+- [ ] Every new trait impl of Engine or Orchestrator passes the relevant suite before merge
+- [ ] Suites run in CI as part of `cargo test --workspace`
+**Dependencies:** cavekit-architecture, cavekit-overview (principle 9)
 
 ### R2: Fixtures
 **Description:** Reproducible test data.

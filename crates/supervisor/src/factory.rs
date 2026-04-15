@@ -1,5 +1,5 @@
-//! Factory helpers that mint Engine / Orchestrator / Multiplexer trait
-//! objects from v1 scope slugs.
+//! Factory helpers that mint Engine / Orchestrator trait objects and the
+//! concrete `ZellijMux` from v1 scope slugs.
 //!
 //! Implements the "step 6" hand-off in cavekit-supervisor.md R3:
 //!
@@ -23,7 +23,7 @@
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
-use ark_core::{Config, Engine, Multiplexer, Orchestrator};
+use ark_core::{Config, Engine, Orchestrator};
 use ark_engines_claude_code::engine::ClaudeCodeEngine;
 use ark_mux_zellij::ZellijMux;
 use ark_orchestrators_cavekit::CavekitOrchestrator;
@@ -69,8 +69,15 @@ pub fn build_orchestrator(slug: &str, _config: &Config) -> Result<Box<dyn Orches
 
 // --------------------------------------------------------------- mux --------
 
-/// Mint a concrete `Multiplexer` trait object for `slug`.
-pub fn build_multiplexer(slug: &str, _config: &Config) -> Result<Arc<dyn Multiplexer>> {
+/// Mint a concrete `ZellijMux` for `slug`.
+///
+/// The slug is still validated against [`ark_types::MUX_V1`] so a typo
+/// (`"zllij"`) fails with the same actionable error as the engine /
+/// orchestrator factories. v1 only ships the `zellij` branch; adding a
+/// second concrete multiplexer would require a refactor here (and the
+/// deferred `MUX_V1` downscope noted in the tracking doc for this
+/// revision).
+pub fn build_multiplexer(slug: &str, _config: &Config) -> Result<Arc<ZellijMux>> {
     if !is_v1_mux(slug) {
         return Err(anyhow!(
             "unknown multiplexer slug `{slug}` — v1 ships: {:?}. check config.mux and ark config.",

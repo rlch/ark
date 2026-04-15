@@ -11,6 +11,11 @@ rust-version.workspace = true
 ark-types = { path = "../types" }
 ark-config = { path = "../config" }
 ark-test-fixtures = { path = "../test-fixtures" }
+# `test-support` is enabled unconditionally so the publicly-exported
+# `orchestrator_contract_suite` can construct a scripted `ZellijMux`. The
+# surface this exposes is a pair of constructor fns; cost is a few hundred
+# bytes of code in release builds.
+ark-mux-zellij = { path = "../mux/zellij", features = ["test-support"] }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

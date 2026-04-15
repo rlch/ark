@@ -10,19 +10,22 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use ark_mux_zellij::ZellijMux;
 use ark_types::{AgentSpec, CancellationToken, EventSink, Outcome, StateLayout};
 use async_trait::async_trait;
 
 use crate::config::Config;
-use crate::multiplexer::Multiplexer;
 
 /// Capabilities passed to `Orchestrator::run`.
 ///
-/// See cavekit-architecture.md R3.
+/// See cavekit-architecture.md R3. `mux` is `Arc<ZellijMux>` concrete: the
+/// prior `Multiplexer` trait was deleted in the mux tight-coupling revision
+/// (Wave B). Consumers call inherent methods on `ZellijMux` directly; tests
+/// use `ZellijMux::for_test(...)` to inject a scripted `StubExecutor`.
 #[non_exhaustive]
 pub struct World {
     pub spec: AgentSpec,
-    pub mux: Arc<dyn Multiplexer>,
+    pub mux: Arc<ZellijMux>,
     pub events: EventSink,
     pub cancel: CancellationToken,
     pub hooks_dir: PathBuf,
@@ -37,7 +40,7 @@ impl World {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         spec: AgentSpec,
-        mux: Arc<dyn Multiplexer>,
+        mux: Arc<ZellijMux>,
         events: EventSink,
         cancel: CancellationToken,
         hooks_dir: PathBuf,
@@ -76,9 +79,8 @@ pub trait Orchestrator: Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_types::{AgentEvent, AgentId, TabHandle};
+    use ark_types::{AgentEvent, AgentId};
     use std::path::PathBuf;
-    use std::sync::Mutex;
 
     fn sample_spec() -> AgentSpec {
         AgentSpec::new(
@@ -91,42 +93,11 @@ mod tests {
         )
     }
 
-    struct NoopMux {
-        calls: Mutex<u32>,
-    }
-
-    #[async_trait]
-    impl Multiplexer for NoopMux {
-        fn kind(&self) -> &'static str {
-            "noop"
-        }
-        async fn ensure_session(&self, _name: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-        async fn create_tab(
-            &self,
-            session: &str,
-            name: &str,
-            _layout_path: &Path,
-        ) -> anyhow::Result<TabHandle> {
-            *self.calls.lock().unwrap() += 1;
-            Ok(TabHandle::new(session, 1, name))
-        }
-        async fn close_tab(&self, _handle: &TabHandle) -> anyhow::Result<()> {
-            Ok(())
-        }
-        async fn rename_tab(&self, _handle: &TabHandle, _name: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-        async fn pipe(&self, _target_name: &str, _payload: &str) -> anyhow::Result<()> {
-            Ok(())
-        }
-    }
-
     fn make_world(spec: AgentSpec) -> World {
-        let mux: Arc<dyn Multiplexer> = Arc::new(NoopMux {
-            calls: Mutex::new(0),
-        });
+        // Empty scripted queue — these assertions only check World wiring,
+        // never invoke a mux method.
+        let (mux, _stub) = ZellijMux::for_test(Vec::new());
+        let mux = Arc::new(mux);
         let (events, _rx) = tokio::sync::broadcast::channel::<AgentEvent>(8);
         let cancel = CancellationToken::new();
         let hooks_dir = PathBuf::from("/tmp/hooks");
@@ -181,7 +152,7 @@ mod tests {
         let spec = sample_spec();
         let world = make_world(spec.clone());
         assert_eq!(world.spec.id, spec.id);
-        assert_eq!(world.mux.kind(), "noop");
+        assert_eq!(world.mux.kind(), "zellij");
         assert_eq!(world.hooks_dir, PathBuf::from("/tmp/hooks"));
         assert_eq!(world.state.base(), Path::new("/tmp/state"));
         assert!(!world.cancel.is_cancelled());

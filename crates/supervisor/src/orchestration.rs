@@ -38,13 +38,13 @@
 //! [`outcome_exit_code`]; the foreground path may propagate it up to the
 //! parent CLI directly.
 
-use std::io::Write as _;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use ark_core::consumers::{hook_dispatcher, state_writer, status_pipe};
-use ark_core::{Config, Engine, Multiplexer, Orchestrator, World, write_status_atomic};
+use ark_core::consumers::{hook_dispatcher, state_writer};
+use ark_core::{Config, Engine, Orchestrator, World, write_status_atomic};
 use ark_engines_claude_code::preflight;
+use ark_mux_zellij::ZellijMux;
 use ark_types::{
     AgentEvent, AgentId, AgentSpec, AgentStatus, CancellationToken, Outcome, Phase, StateLayout,
     channel,
@@ -53,9 +53,11 @@ use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 
 use crate::commands::{SupervisorCommandCtx, SupervisorCommandHandler};
+use crate::consumers::status_pipe;
 use crate::control_socket::{ControlCommandHandler, bind_control_socket, shutdown};
 use crate::kill::{TabRegistry, apply_tab_event, new_tab_registry};
 use crate::lock::{LockGuard, acquire_lock};
+use crate::ready_signal::ReadyWriter;
 use crate::signals::install_signal_handlers;
 
 /// Which boot path reached [`run_supervisor`].
@@ -105,6 +107,8 @@ pub async fn run_supervisor(
     spec: AgentSpec,
     mode: SupervisorMode,
     config: Config,
+    ready_writer: Option<ReadyWriter>,
+    external_cancel: Option<CancellationToken>,
 ) -> Result<Outcome> {
     let state_layout = StateLayout::from_env().context("resolve state layout")?;
     let engine = crate::factory::build_engine(&spec.engine, &config).context("build engine")?;
@@ -120,6 +124,8 @@ pub async fn run_supervisor(
         orchestrator,
         mux,
         /* run_preflight */ true,
+        ready_writer,
+        external_cancel,
     )
     .await
 }
@@ -127,7 +133,7 @@ pub async fn run_supervisor(
 /// Variant of [`run_supervisor`] that accepts injected layout + factories.
 ///
 /// Preferred entry point for tests: lets them swap the Engine, Orchestrator,
-/// and Multiplexer to stubs without relying on the v1-locked factory
+/// and mux to stubs without relying on the v1-locked factory
 /// slugs. `run_preflight = false` skips the claude-code preflight check
 /// for tests that don't have the real `claude` binary on PATH.
 #[allow(clippy::too_many_arguments)]
@@ -138,8 +144,10 @@ pub async fn run_supervisor_with(
     state_layout: StateLayout,
     engine: Box<dyn Engine>,
     orchestrator: Box<dyn Orchestrator>,
-    mux: Arc<dyn Multiplexer>,
+    mux: Arc<ZellijMux>,
     run_preflight: bool,
+    ready_writer: Option<ReadyWriter>,
+    external_cancel: Option<CancellationToken>,
 ) -> Result<Outcome> {
     // ---- Step 1: StateDir + spec.json + initial status.json ----
     let agent_dir = state_layout.agent_dir(&spec.id);
@@ -163,8 +171,12 @@ pub async fn run_supervisor_with(
 
     // Cancel token threaded into every async component + the control-socket
     // command handler so `Kill` / SIGTERM both unwind through the same
-    // path.
-    let cancel = CancellationToken::new();
+    // path. W-4: callers that drive the supervisor from a background
+    // thread (e.g. `--no-detach`) pass an `external_cancel` they hold a
+    // clone of so they can trigger shutdown after their foreground
+    // subprocess (zellij) exits. Daemon callers pass `None` and rely
+    // on the signal handler to fire cancel.
+    let cancel = external_cancel.unwrap_or_else(CancellationToken::new);
 
     // Event bus — created BEFORE the socket handler because the handler's
     // ctx wants an `EventSink` for future audit-log routing.
@@ -324,12 +336,30 @@ pub async fn run_supervisor_with(
     debug!("R3 step 11: Started event emitted");
 
     // ---- Step 12: signal readiness to parent ----
-    if matches!(mode, SupervisorMode::Daemon) {
-        // The parent CLI is blocked reading one line of stdout. Print the
-        // id and flush immediately.
-        let mut out = std::io::stdout().lock();
-        let _ = writeln!(out, "{}", spec.id.as_str());
-        let _ = out.flush();
+    //
+    // W-2: pipe-inheritance ack. The CLI parent created a pipe before
+    // calling `daemonize()` and passed the write fd through to us via
+    // `ReadyWriter`. We write the ACK byte + drop, which closes our
+    // copy of the fd and unblocks the parent's `read()`.
+    //
+    // Failure to write the ack is logged but NOT fatal: if the pipe
+    // broke (parent died, fd was somehow closed), the supervisor can
+    // still run the agent — it just means no client is waiting on the
+    // ready signal. The parent's 5 s timeout in `wait_for_ready`
+    // catches the dead-pipe case and surfaces a clean error to its
+    // caller.
+    //
+    // The previous step-12 implementation wrote `agent_id\n` to stdout,
+    // which was always a no-op in `Daemon` mode because
+    // `setup_supervisor_log` had already redirected stdout to
+    // `supervisor.log` before this code ran. The `mode` parameter is
+    // now informational only — the writer's presence/absence is the
+    // real switch.
+    let _ = mode;
+    if let Some(writer) = ready_writer {
+        if let Err(err) = writer.write_ack() {
+            warn!(error = %err, "failed to write ready ack to parent CLI");
+        }
     }
     info!(agent = %spec.id.as_str(), "supervisor ready");
 
@@ -519,40 +549,18 @@ pub fn finalize_state(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_core::Multiplexer;
-    use ark_types::{AgentEvent, AgentId, AgentSpec, Outcome, TabHandle};
+    use ark_mux_zellij::ZellijMux;
+    use ark_types::{AgentEvent, AgentId, AgentSpec, Outcome};
     use async_trait::async_trait;
 
-    // --- stub mux / engine / orchestrator for the smoke test ---------------
-
-    struct StubMux;
-
-    #[async_trait]
-    impl Multiplexer for StubMux {
-        fn kind(&self) -> &'static str {
-            "stub"
-        }
-        async fn ensure_session(&self, _name: &str) -> Result<()> {
-            Ok(())
-        }
-        async fn create_tab(
-            &self,
-            session: &str,
-            name: &str,
-            _layout_path: &std::path::Path,
-        ) -> Result<TabHandle> {
-            Ok(TabHandle::new(session, 1, name))
-        }
-        async fn close_tab(&self, _handle: &TabHandle) -> Result<()> {
-            Ok(())
-        }
-        async fn rename_tab(&self, _handle: &TabHandle, _name: &str) -> Result<()> {
-            Ok(())
-        }
-        async fn pipe(&self, _target: &str, _payload: &str) -> Result<()> {
-            Ok(())
-        }
-    }
+    // --- stub engine / orchestrator for the smoke test ---------------
+    //
+    // Mux is a concrete `ZellijMux(StubExecutor)` built via
+    // `ZellijMux::for_test(Vec::new())`. The orchestrator under test here
+    // is `InstantSuccessOrchestrator` which never touches the mux beyond
+    // the required `ensure_session` call, so no scripted responses are
+    // needed — the empty queue would only surface if the flow regressed
+    // and started calling something unexpected.
 
     struct StubEngine;
 
@@ -628,6 +636,20 @@ mod tests {
         // We don't have direct access to the bus from outside; instead, read
         // events.jsonl after drain to confirm Started landed.
 
+        // Mux is a concrete `ZellijMux` backed by a StubExecutor. The R3
+        // boot sequence calls `mux.ensure_session` (step 7); that routes to
+        // `zellij list-sessions` outside zellij. We queue an ok response
+        // with empty stdout so the "no collision" branch fires.
+        let ok_status = tokio::process::Command::new("true")
+            .status()
+            .await
+            .unwrap();
+        let (mux, _stub) = ZellijMux::for_test(vec![ark_mux_zellij::executor::CommandOutput {
+            status: ok_status,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        }]);
+
         let result = run_supervisor_with(
             spec.clone(),
             SupervisorMode::Foreground,
@@ -635,8 +657,10 @@ mod tests {
             layout.clone(),
             Box::new(StubEngine),
             Box::new(InstantSuccessOrchestrator),
-            Arc::new(StubMux),
+            Arc::new(mux),
             false,
+            None,
+            None,
         )
         .await
         .expect("run_supervisor_with ok");
@@ -748,6 +772,17 @@ mod tests {
         let layout = layout_at(tmp.path());
         let spec = sample_spec();
 
+        // One scripted `list-sessions` ok (see smoke test for why).
+        let ok_status = tokio::process::Command::new("true")
+            .status()
+            .await
+            .unwrap();
+        let (mux, _stub) = ZellijMux::for_test(vec![ark_mux_zellij::executor::CommandOutput {
+            status: ok_status,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        }]);
+
         let result = run_supervisor_with(
             spec.clone(),
             SupervisorMode::Foreground,
@@ -755,8 +790,10 @@ mod tests {
             layout.clone(),
             Box::new(StubEngine),
             Box::new(InstantSuccessOrchestrator),
-            Arc::new(StubMux),
+            Arc::new(mux),
             false,
+            None,
+            None,
         )
         .await
         .expect("run_supervisor_with ok (signal handler install path must not error)");

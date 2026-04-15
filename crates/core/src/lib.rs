@@ -2,20 +2,18 @@
 //!
 //! - `config` — placeholder `Config` (T-018 fills the schema).
 //! - `consumers` — supervisor broadcast-bus consumer tasks
-//!   (`state_writer`, `status_pipe`, `hook_dispatcher`) per
-//!   cavekit-supervisor.md R2.
+//!   (`state_writer`, `hook_dispatcher`) per cavekit-supervisor.md R2. The
+//!   mux-coupled `status_pipe` consumer lives in `ark-supervisor` so
+//!   `ark-core` stays mux-free.
 //! - `control_socket` — per-supervisor unix control socket primitive
 //!   (cavekit-hook-ipc.md R4, cavekit-supervisor.md R7).
 //! - `engine` — `Engine` trait + `EngineHandle` + `ApprovalPolicy`
 //!   (cavekit-architecture.md R1).
 //! - `events_log` — `events.jsonl` append writer + corruption-tolerant reader
 //!   (cavekit-types-state-events.md R7).
-//! - `multiplexer` — `Multiplexer` trait
-//!   (cavekit-architecture.md R4).
-//! - `mux_contract` — portable Multiplexer contract suite
-//!   (cavekit-architecture.md R1/R4, T-116).
 //! - `orchestrator` — `Orchestrator` trait + `World` capability bag
-//!   (cavekit-architecture.md R2 + R3).
+//!   (cavekit-architecture.md R2 + R3). `World.mux` is
+//!   `Arc<ark_mux_zellij::ZellijMux>` (concrete — there is no mux trait).
 //! - `socket_paths` — agents-socket-dir + per-agent path helpers
 //!   (cavekit-hook-ipc.md R4).
 //! - `status_writer` — atomic `status.json` writer/reader
@@ -27,24 +25,20 @@ pub mod control_socket;
 pub mod engine;
 pub mod engine_contract;
 pub mod events_log;
-pub mod multiplexer;
-pub mod mux_contract;
 pub mod orchestrator;
 pub mod orchestrator_contract;
 pub mod socket_paths;
 pub mod status_writer;
 
 pub use config::Config;
-pub use consumers::{hook_dispatcher, state_writer, status_pipe};
+pub use consumers::{hook_dispatcher, state_writer};
 pub use control_socket::{
     ControlListener, Response, gc_stale_socket, handle_single_request, unlink_if_exists,
 };
 pub use engine::{ApprovalPolicy, Engine, EngineHandle};
 pub use engine_contract::engine_contract_suite;
 pub use events_log::{EventLogHandle, EventLogReader, EventLogWriter, EventRecord};
-pub use multiplexer::Multiplexer;
-pub use mux_contract::{MuxHarness, RecordedCall, mux_contract_suite};
 pub use orchestrator::{Orchestrator, World};
-pub use orchestrator_contract::{MockMux, OrchestratorFixtures, orchestrator_contract_suite};
+pub use orchestrator_contract::{OrchestratorFixtures, orchestrator_contract_suite};
 pub use socket_paths::{agent_socket_path, ensure_agents_dir, runtime_root};
 pub use status_writer::{read_status, write_status_atomic};

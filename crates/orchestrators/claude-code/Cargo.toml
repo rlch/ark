@@ -17,5 +17,6 @@ tracing = { workspace = true }
 anyhow = { workspace = true }
 
 [dev-dependencies]
+ark-mux-zellij = { path = "../../mux/zellij", features = ["test-support"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

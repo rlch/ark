@@ -39,7 +39,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
-use ark_core::Multiplexer;
+use ark_mux_zellij::ZellijMux;
 use ark_types::{AgentEvent, AgentId, EventSink, LogLevel, Outcome, TabHandle};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -120,7 +120,7 @@ pub async fn kill_handler(
     cancel: CancellationToken,
     orchestrator_done: CancellationToken,
     event_bus: EventSink,
-    mux: Arc<dyn Multiplexer>,
+    mux: Arc<ZellijMux>,
     tab_registry: TabRegistry,
     agent_id: AgentId,
     grace: Duration,
@@ -202,53 +202,48 @@ pub async fn kill_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ark_mux_zellij::executor::{CommandOutput, StubExecutor};
     use ark_types::{TabRole, channel};
-    use async_trait::async_trait;
-    use std::sync::Mutex;
     use std::time::Duration;
 
-    /// Mux that records every `close_tab` call.
-    struct StubMux {
-        closed: Mutex<Vec<TabHandle>>,
-    }
-
-    impl StubMux {
-        fn new() -> Arc<Self> {
-            Arc::new(Self {
-                closed: Mutex::new(Vec::new()),
+    /// Build a `ZellijMux` whose `close_tab` calls succeed `n` times in a
+    /// row, and return the shared `StubExecutor` so the test can inspect
+    /// `recorded_calls()` afterwards. Each `close_tab` invocation consumes
+    /// one `ok` response from the queue.
+    async fn mux_with_n_ok_closes(n: usize) -> (Arc<ZellijMux>, Arc<StubExecutor>) {
+        let ok_status = tokio::process::Command::new("true")
+            .status()
+            .await
+            .unwrap();
+        let responses: Vec<CommandOutput> = (0..n)
+            .map(|_| CommandOutput {
+                status: ok_status,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
             })
-        }
-        fn closed(&self) -> Vec<TabHandle> {
-            self.closed.lock().unwrap().clone()
-        }
+            .collect();
+        let (mux, stub) = ZellijMux::for_test(responses);
+        (Arc::new(mux), stub)
     }
 
-    #[async_trait]
-    impl Multiplexer for StubMux {
-        fn kind(&self) -> &'static str {
-            "stub"
-        }
-        async fn ensure_session(&self, _name: &str) -> Result<()> {
-            Ok(())
-        }
-        async fn create_tab(
-            &self,
-            session: &str,
-            name: &str,
-            _layout_path: &std::path::Path,
-        ) -> Result<TabHandle> {
-            Ok(TabHandle::new(session, 1, name))
-        }
-        async fn close_tab(&self, handle: &TabHandle) -> Result<()> {
-            self.closed.lock().unwrap().push(handle.clone());
-            Ok(())
-        }
-        async fn rename_tab(&self, _handle: &TabHandle, _name: &str) -> Result<()> {
-            Ok(())
-        }
-        async fn pipe(&self, _target: &str, _payload: &str) -> Result<()> {
-            Ok(())
-        }
+    /// Count `zellij action close-tab-at-index ...` calls in the executor
+    /// recording.
+    fn count_close_tab_calls(stub: &StubExecutor) -> usize {
+        stub.recorded_calls()
+            .iter()
+            .filter(|(_, args)| args.iter().any(|a| a == "close-tab-at-index"))
+            .count()
+    }
+
+    /// Names of tabs closed (derived from the `--session <s>` + index in the
+    /// recorded argv).
+    fn closed_tab_names_contains(stub: &StubExecutor, _name: &str) -> bool {
+        // We cannot recover the tab *name* from the argv (zellij close uses
+        // index, not name). Callers that need name-level assertions should
+        // map open-tab index → name themselves.
+        stub.recorded_calls()
+            .iter()
+            .any(|(_, args)| args.iter().any(|a| a == "close-tab-at-index"))
     }
 
     fn agent() -> AgentId {
@@ -260,7 +255,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let done = CancellationToken::new();
         let (tx, _rx) = channel(16);
-        let mux = StubMux::new();
+        let (mux, stub) = mux_with_n_ok_closes(0).await;
         let registry = new_tab_registry();
 
         // Trip orchestrator_done immediately — kill_handler should
@@ -281,8 +276,9 @@ mod tests {
 
         assert!(matches!(outcome, Outcome::Killed));
         assert!(cancel.is_cancelled(), "cancel must fire on entry");
-        assert!(
-            mux.closed().is_empty(),
+        assert_eq!(
+            count_close_tab_calls(&stub),
+            0,
             "no tabs to close on fast-path Killed"
         );
     }
@@ -294,7 +290,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let done = CancellationToken::new();
         let (tx, _rx) = channel(8);
-        let mux = StubMux::new();
+        let (mux, stub) = mux_with_n_ok_closes(0).await;
         let registry = new_tab_registry();
 
         let outcome = kill_handler(
@@ -311,10 +307,10 @@ mod tests {
 
         assert!(matches!(outcome, Outcome::Killed));
         assert!(cancel.is_cancelled());
-        assert!(
-            mux.closed().is_empty(),
-            "empty registry → no close calls, got {:?}",
-            mux.closed()
+        assert_eq!(
+            count_close_tab_calls(&stub),
+            0,
+            "empty registry → no close calls"
         );
     }
 
@@ -326,7 +322,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let done = CancellationToken::new();
         let (tx, mut rx) = channel(32);
-        let mux = StubMux::new();
+        let (mux, stub) = mux_with_n_ok_closes(2).await;
 
         let tab_a = TabHandle::new("ark-cavekit-kill", 1, "builder");
         let tab_b = TabHandle::new("ark-cavekit-kill", 2, "log");
@@ -372,10 +368,30 @@ mod tests {
 
         assert!(matches!(outcome, Outcome::Killed));
 
-        let closed = mux.closed();
-        assert_eq!(closed.len(), 2, "both tabs closed, got {closed:?}");
-        assert!(closed.iter().any(|t| t.name == "builder"));
-        assert!(closed.iter().any(|t| t.name == "log"));
+        assert_eq!(
+            count_close_tab_calls(&stub),
+            2,
+            "both tabs closed; recorded calls: {:?}",
+            stub.recorded_calls()
+        );
+        // The argv for each close carries the tab index; verify both
+        // indices (1 and 2) appeared.
+        let indices: Vec<String> = stub
+            .recorded_calls()
+            .into_iter()
+            .filter(|(_, args)| args.iter().any(|a| a == "close-tab-at-index"))
+            .map(|(_, args)| {
+                // close-tab-at-index <N> — pull the N.
+                let pos = args
+                    .iter()
+                    .position(|a| a == "close-tab-at-index")
+                    .unwrap();
+                args[pos + 1].clone()
+            })
+            .collect();
+        let mut sorted = indices;
+        sorted.sort();
+        assert_eq!(sorted, vec!["1".to_string(), "2".to_string()]);
 
         // Drain the bus and look for Log(Warn, "grace expired") + Done/Killed.
         let mut saw_warn = false;
@@ -406,7 +422,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let done = CancellationToken::new();
         let (tx, _rx) = channel(16);
-        let mux = StubMux::new();
+        let (mux, stub) = mux_with_n_ok_closes(0).await;
         let registry = new_tab_registry();
         let id = agent();
         let tab = TabHandle::new("ark-cavekit-kill", 1, "builder");
@@ -443,10 +459,10 @@ mod tests {
         .await
         .expect("ok");
         assert!(matches!(outcome, Outcome::Killed));
-        assert!(
-            mux.closed().is_empty(),
-            "already-closed tab must NOT be re-closed, got {:?}",
-            mux.closed()
+        assert_eq!(
+            count_close_tab_calls(&stub),
+            0,
+            "already-closed tab must NOT be re-closed"
         );
     }
 
@@ -458,7 +474,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let done = CancellationToken::new();
         let (tx, _rx) = channel(16);
-        let mux = StubMux::new();
+        let (mux, stub) = mux_with_n_ok_closes(1).await;
         let registry = new_tab_registry();
         let id = agent();
 
@@ -488,7 +504,12 @@ mod tests {
         .await
         .expect("ok");
         assert!(matches!(outcome, Outcome::Killed));
-        assert_eq!(mux.closed().len(), 1, "pre-kill TabOpened must be closed");
+        assert_eq!(
+            count_close_tab_calls(&stub),
+            1,
+            "pre-kill TabOpened must be closed"
+        );
+        assert!(closed_tab_names_contains(&stub, "builder"));
     }
 
     #[tokio::test]
@@ -499,7 +520,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let done = CancellationToken::new();
         let (tx, _rx) = channel(16);
-        let mux = StubMux::new();
+        let (mux, _stub) = mux_with_n_ok_closes(0).await;
         let registry = new_tab_registry();
 
         let slow_orchestrator = {

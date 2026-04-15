@@ -1,34 +1,33 @@
 //! Supervisor consumer tasks attached to the broadcast event bus.
 //!
-//! Implements cavekit-supervisor.md R2 — three consumer tasks that subscribe
-//! to the supervisor's `tokio::sync::broadcast::Sender<AgentEvent>`:
+//! Implements cavekit-supervisor.md R2 — mux-free consumer tasks that
+//! subscribe to the supervisor's `tokio::sync::broadcast::Sender<AgentEvent>`:
 //!
 //! - [`state_writer`] — appends every event to `events.jsonl` and rolls up
 //!   `status.json`; emits `PhaseTransition` on actual phase change.
-//! - [`status_pipe`] — forwards progress-relevant events to mux pipes
-//!   (`ark-status` + `ark-picker`); falls back to `rename_tab` when the
-//!   plugin is absent.
 //! - [`hook_dispatcher`] — fires user-configured `[[hooks]]` commands on
 //!   matching events, detached, with a 30s timeout each.
 //!
-//! All three are resilient to `RecvError::Lagged(n)` (warn-log + continue),
-//! exit cleanly on `RecvError::Closed`, and honor a
+//! The third consumer, `status_pipe`, lives in `ark-supervisor` so `ark-core`
+//! has no dependency on the concrete mux type. See
+//! `ark_supervisor::consumers::status_pipe`.
+//!
+//! Both consumers are resilient to `RecvError::Lagged(n)` (warn-log +
+//! continue), exit cleanly on `RecvError::Closed`, and honor a
 //! `tokio_util::sync::CancellationToken` for supervisor-driven shutdown.
 
 pub mod hook_dispatcher;
 pub mod state_writer;
-pub mod status_pipe;
 
 pub use hook_dispatcher::hook_dispatcher;
 pub use state_writer::state_writer;
-pub use status_pipe::status_pipe;
 
 /// Shared helper: classify an `AgentEvent` to its serde tag slug used by
-/// hooks (`on_event = ["done", "stall", ...]`) and by `status_pipe`'s
-/// progress-relevant whitelist.
+/// hooks (`on_event = ["done", "stall", ...]`).
 ///
 /// Mirrors `#[serde(tag = "kind", rename_all = "snake_case")]` on
-/// [`ark_types::AgentEvent`].
+/// [`ark_types::AgentEvent`]. `ark-supervisor`'s `status_pipe` mirrors the
+/// equivalent in its own consumers module.
 pub(crate) fn event_kind_slug(event: &ark_types::AgentEvent) -> &'static str {
     use ark_types::AgentEvent::*;
     match event {
