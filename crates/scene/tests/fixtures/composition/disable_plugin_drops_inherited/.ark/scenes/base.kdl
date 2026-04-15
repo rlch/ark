@@ -1,0 +1,10 @@
+scene "base" {
+    plugin "picker" {
+        source "shipped:picker"
+        mount "floating"
+    }
+    plugin "status" {
+        source "shipped:status"
+        mount "status-bar"
+    }
+}

@@ -1,0 +1,10 @@
+---
+source: crates/scene/tests/composition.rs
+expression: rendered
+---
+scene/include-cycle
+
+  × include cycle detected through `<staging>/child.kdl`
+   ╭─[<staging>/frag.kdl:1:1]
+   ╰────
+  help: Break the cycle: remove one `include` along the chain, or refactor shared content into an `extends` base scene.

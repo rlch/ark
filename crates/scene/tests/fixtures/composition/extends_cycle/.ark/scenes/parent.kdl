@@ -1,0 +1,3 @@
+scene "parent" {
+    extends "grand"
+}

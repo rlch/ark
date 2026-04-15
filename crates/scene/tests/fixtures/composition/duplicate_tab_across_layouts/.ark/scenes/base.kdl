@@ -1,0 +1,5 @@
+scene "base" {
+    layout {
+        tab "work"
+    }
+}

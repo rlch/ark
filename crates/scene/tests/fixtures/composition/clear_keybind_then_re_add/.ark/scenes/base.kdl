@@ -1,0 +1,3 @@
+scene "base" {
+    keybind "Alt p" intent="base.picker"
+}

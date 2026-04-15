@@ -1,0 +1,6 @@
+scene "child" {
+    extends "base"
+    layout {
+        tab "work"
+    }
+}

@@ -1,0 +1,4 @@
+scene "base" {
+    keybind "Alt p" intent="base.picker"
+    keybind "Ctrl s" intent="base.save"
+}

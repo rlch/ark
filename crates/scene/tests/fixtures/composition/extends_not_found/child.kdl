@@ -1,0 +1,3 @@
+scene "child" {
+    extends "ghost"
+}

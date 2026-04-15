@@ -1,0 +1,8 @@
+---
+source: crates/scene/tests/composition.rs
+expression: rendered
+---
+scene/extends-cycle
+
+  × extends cycle detected through scene `grand`
+  help: Break the cycle: one of the parents along the chain already extends a scene on the way here. Remove an `extends` clause or refactor a shared base fragment into an `include`.

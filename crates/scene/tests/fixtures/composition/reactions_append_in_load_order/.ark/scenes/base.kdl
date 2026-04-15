@@ -1,0 +1,8 @@
+scene "base" {
+    on "AgentReady" {
+        exec
+    }
+    on "Stall" {
+        emit
+    }
+}

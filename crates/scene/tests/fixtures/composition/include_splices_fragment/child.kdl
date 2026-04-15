@@ -1,0 +1,6 @@
+scene "child" {
+    include "fragment.kdl"
+    on "AgentReady" {
+        exec
+    }
+}

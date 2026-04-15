@@ -1,0 +1,7 @@
+scene "child" {
+    extends "base"
+    plugin "status" override=#true {
+        source "shipped:status"
+        mount "floating"
+    }
+}

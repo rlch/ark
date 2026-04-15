@@ -1,0 +1,14 @@
+---
+source: crates/scene/tests/composition.rs
+expression: rendered
+---
+name: child
+
+reactions:
+
+keybinds:
+
+plugins:
+  - name: status  mount: status-bar  source: shipped:status  override: false
+
+layout tabs:

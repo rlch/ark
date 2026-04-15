@@ -1,0 +1,14 @@
+---
+source: crates/scene/tests/composition.rs
+expression: rendered
+---
+name: child
+
+reactions:
+  - selector: UserEvent:child.only  if: -
+
+keybinds:
+
+plugins:
+
+layout tabs:

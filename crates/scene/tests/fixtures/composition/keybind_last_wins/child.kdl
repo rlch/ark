@@ -1,0 +1,4 @@
+scene "child" {
+    extends "base"
+    keybind "Alt p" intent="child.picker"
+}

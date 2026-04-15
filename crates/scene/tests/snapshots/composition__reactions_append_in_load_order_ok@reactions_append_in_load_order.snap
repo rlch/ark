@@ -1,0 +1,16 @@
+---
+source: crates/scene/tests/composition.rs
+expression: rendered
+---
+name: child
+
+reactions:
+  - selector: AgentReady  if: -
+  - selector: Stall  if: -
+  - selector: UserEvent:child.ready  if: -
+
+keybinds:
+
+plugins:
+
+layout tabs:
