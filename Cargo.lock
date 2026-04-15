@@ -501,6 +501,7 @@ dependencies = [
 name = "ark-scene"
 version = "0.1.0"
 dependencies = [
+ "acp-client",
  "ark-ext-metadata",
  "ark-ext-metadata-types",
  "ark-types",

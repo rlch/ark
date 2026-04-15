@@ -13,6 +13,11 @@ rust-version.workspace = true
 # payloads. Path dep (no workspace entry) matches the convention used by
 # crates/supervisor/ and crates/core/.
 ark-types = { path = "../types" }
+# T-ACP.2b: ACP-interaction ops (prompt / acp_cancel / acp_permit /
+# set_mode) dispatch through the acp-client crate. Path dep so scene
+# can build its IntentRegistry with a first-class `AcpClientHandle`
+# field on `IntentContext`.
+acp-client = { path = "../acp-client" }
 facet = { workspace = true }
 # T-2.2: serde::Serialize for AgentSnapshot/SessionSnapshot placeholders,
 # serialized through cel-interpreter's TryIntoValue blanket impl.
@@ -61,7 +66,6 @@ ark-ext-metadata = { path = "../ark-ext-metadata" }
 # `ExtensionMetadata::ark_range` / `zellij_range` against the host's
 # version. Cargo-style range syntax via `semver::VersionReq`.
 semver = { workspace = true }
-
 [dev-dependencies]
 tempfile = { workspace = true }
 insta = { workspace = true }

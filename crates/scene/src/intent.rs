@@ -256,6 +256,58 @@ impl EventBus {
 #[derive(Debug, Default)]
 pub struct SupervisorHandle;
 
+/// Handle used by the ACP-interaction core ops (T-ACP.2b) to drive
+/// `session/prompt`, `session/cancel`, `session/set_mode`, and
+/// `session/request_permission` responses against the engine agent.
+///
+/// Wraps an optional [`acp_client::AcpClient`]: the supervisor (T-ACP.4a)
+/// will replace the `None` with a live client after it spawns the
+/// engine subprocess + drives the ACP handshake. Until then the
+/// ops return `op/failed` with a clear "ACP client not wired" error —
+/// this is deliberately a runtime error rather than a panic so scenes
+/// authored against the R7 surface still parse + compile cleanly.
+///
+/// Wrapped in [`std::sync::Mutex`] so a cross-thread supervisor path
+/// can swap the inner handle at runtime (reload, reconnect) without
+/// tearing down the whole `IntentContext`. Taking the lock is
+/// contention-free in steady state — only the install / swap paths
+/// need the write side.
+///
+/// TODO(T-ACP.4a): replace with a lock-free shared handle once the
+/// supervisor wiring is in place.
+#[derive(Debug, Default)]
+pub struct AcpClientHandle {
+    /// Live ACP client, installed by the supervisor once the engine is
+    /// up and through `initialize` + `new_session`. `None` before that
+    /// point (and in unit tests that don't wire a real engine).
+    inner: std::sync::Mutex<Option<Arc<acp_client::AcpClient>>>,
+}
+
+impl AcpClientHandle {
+    /// Construct an empty handle (no live client yet).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Swap in a freshly-spawned ACP client. Called by the supervisor
+    /// at session boot. Returns the previous client, if any — callers
+    /// that take ownership are responsible for draining + dropping it.
+    pub fn install(
+        &self,
+        client: Arc<acp_client::AcpClient>,
+    ) -> Option<Arc<acp_client::AcpClient>> {
+        let mut guard = self.inner.lock().expect("acp handle mutex poisoned");
+        guard.replace(client)
+    }
+
+    /// Current ACP client, cloned out by ref-count. `None` until the
+    /// supervisor has installed one.
+    pub fn get(&self) -> Option<Arc<acp_client::AcpClient>> {
+        let guard = self.inner.lock().expect("acp handle mutex poisoned");
+        guard.clone()
+    }
+}
+
 /// Provenance tag for a dispatched intent.
 ///
 /// Scene graph (R11) renders each reaction / keybind with its origin
@@ -329,6 +381,12 @@ pub struct IntentContext {
     /// migration.
     pub supervisor: Arc<SupervisorHandle>,
 
+    /// ACP client handle (T-ACP.2b). Used by the ACP-interaction ops
+    /// (`prompt`, `acp/cancel`, `acp/permit`, `set_mode`). `None`-
+    /// wrapped until the supervisor installs a live client at
+    /// T-ACP.4a; see [`AcpClientHandle`].
+    pub acp: Arc<AcpClientHandle>,
+
     /// Identity of the scene whose reaction / keybind fired this op
     /// (R11 attribution, R14 hot-reload delta detection). Real type;
     /// not a placeholder.
@@ -368,6 +426,7 @@ impl IntentContext {
             mux: Arc::new(MuxPlaceholder),
             bus: Arc::new(EventBus::default()),
             supervisor: Arc::new(SupervisorHandle),
+            acp: Arc::new(AcpClientHandle::new()),
             scene_id,
             origin: ReactionOrigin::default(),
             cascade_depth: 0,

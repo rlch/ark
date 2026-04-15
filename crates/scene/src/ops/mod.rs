@@ -64,6 +64,7 @@
 //! [`AgentEvent::UserEvent`]: ark_types::event::AgentEvent::UserEvent
 //! [`Intent`]: crate::intent::Intent
 
+pub mod acp;
 pub mod control;
 pub mod dispatch;
 pub mod messaging;
@@ -122,6 +123,15 @@ pub async fn register_core_ops(registry: &IntentRegistry) {
     // Control
     registry.register(control::ExecOp).await;
     registry.register(control::ReloadSceneOp).await;
+
+    // ACP-interaction (R7 #14–17). See [`acp`] for the per-op
+    // docs. These ops return `op/failed` with a clear "ACP client
+    // not wired" message until T-ACP.4a installs a live client on
+    // `IntentContext::acp`.
+    registry.register(acp::PromptOp).await;
+    registry.register(acp::CancelOp).await;
+    registry.register(acp::PermitOp).await;
+    registry.register(acp::SetModeOp).await;
 }
 
 /// Canonical ordered list of every core op NAME registered by
@@ -143,6 +153,12 @@ pub const CORE_OP_NAMES: &[&str] = &[
     messaging::SetStatusOp::NAME,
     control::ExecOp::NAME,
     control::ReloadSceneOp::NAME,
+    // ACP-interaction (R7 #14–17). Consumed by `ark scene check`
+    // cross-reference validation same as the non-ACP ops above.
+    acp::PromptOp::NAME,
+    acp::CancelOp::NAME,
+    acp::PermitOp::NAME,
+    acp::SetModeOp::NAME,
 ];
 
 // Pull op NAME constants into scope for `CORE_OP_NAMES`.
@@ -153,13 +169,14 @@ mod tests {
     use super::*;
     use crate::intent::IntentRegistry;
 
-    /// `register_core_ops` populates every R7 op slot — 13 in total.
+    /// `register_core_ops` populates every R7 op slot — 17 in total
+    /// (ops 1–13 plus ACP-interaction ops 14–17; T-ACP.2b).
     #[tokio::test]
-    async fn register_core_ops_registers_thirteen() {
+    async fn register_core_ops_registers_seventeen() {
         let reg = IntentRegistry::new();
         register_core_ops(&reg).await;
         assert_eq!(reg.len().await, CORE_OP_NAMES.len());
-        assert_eq!(CORE_OP_NAMES.len(), 13, "R7 ops 1-13 accounted for");
+        assert_eq!(CORE_OP_NAMES.len(), 17, "R7 ops 1-17 accounted for");
     }
 
     /// Every entry in `CORE_OP_NAMES` is `ark.core.*`-prefixed.
