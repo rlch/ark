@@ -208,37 +208,56 @@ fn build_unmount_reaction(
     })
 }
 
-/// Build a synthetic `pipe plugin="<plugin>" payload="<static>"`
-/// reaction for `selector`.
+/// Build a synthetic `pipe` reaction for the `subscribes` selector that
+/// forwards the matching event's JSON serialisation to `<plugin>`.
 ///
-/// TODO(T-7.5 follow-up): the payload should be the matching event's
-/// canonical `events.jsonl` JSON serialisation, produced by the
-/// T-2.5 template renderer. For v0.1 the payload carries the plugin
-/// name + selector as a JSON object so the wiring exists end-to-end.
+/// The op shape matches the real [`crate::ops::messaging::PipeArgs`]
+/// schema:
+///
+/// ```kdl
+/// pipe plugin="<name>" name="ark-event" {
+///     json "<rendered-event-json>"
+/// }
+/// ```
+///
+/// The `name="ark-event"` property routes the message to the plugin's
+/// `pipe_handler` under the ark-event channel — the convention every
+/// shipped plugin subscribes on.
+///
+/// The `json` child's body is a template string `"{{event_json}}"` which
+/// the T-2.5 template renderer resolves at dispatch time to the matching
+/// event's canonical `events.jsonl` JSON form. For dispatches where the
+/// renderer has not yet wired in, the literal template string is forwarded
+/// verbatim — the plugin treats malformed JSON as a no-op.
+///
+/// TODO(post-v0.1): thread the real `AgentEvent` through the context so
+/// the `{{event_json}}` template resolves to the authoritative
+/// `serde_json::to_string(&AgentEvent)` form. The template pass already
+/// substitutes `{{…}}` tokens; this op's payload inherits the work when
+/// the renderer lands in the reaction dispatcher (T-2.5 integration).
 fn build_pipe_reaction(
     decl: &PluginDecl<'_>,
     selector: &str,
 ) -> Result<ReactionEntry, crate::error::SceneError> {
+    // Root `pipe` node with property slots matching `PipeArgs`.
     let mut node = KdlNode::new("pipe");
     node.push(KdlEntry::new_prop(
         "plugin",
         KdlValue::String(decl.name.to_string()),
     ));
-    // Channel name matches the "ark-event" convention from T-7.5 spec.
     node.push(KdlEntry::new_prop(
         "name",
         KdlValue::String("ark-event".to_string()),
     ));
-    // v0.1 payload placeholder — see function docs for the real plan.
-    let placeholder_payload = serde_json::json!({
-        "plugin": decl.name,
-        "selector": selector,
-    })
-    .to_string();
-    node.push(KdlEntry::new_prop(
-        "payload",
-        KdlValue::String(placeholder_payload),
-    ));
+
+    // `json "<template>"` child — the template renderer substitutes
+    // `{{event_json}}` at dispatch time.
+    let mut json_child = KdlNode::new("json");
+    json_child.push(KdlEntry::new(KdlValue::String("{{event_json}}".to_string())));
+    let mut body = ::kdl::KdlDocument::new();
+    body.nodes_mut().push(json_child);
+    node.set_children(body);
+
     let ops = vec![CompiledOp::new(
         "ark.core.pipe",
         Idempotency::AlwaysSideEffect,
@@ -460,10 +479,25 @@ mod tests {
         let op = &tick[0].ops[0];
         assert_eq!(op.name, "ark.core.pipe");
         assert_eq!(op.idempotency, Idempotency::AlwaysSideEffect);
-        // The synthetic node carries plugin=<name> + name="ark-event".
-        let rendered = op.node.to_string();
-        assert!(rendered.contains("ark-event"));
-        assert!(rendered.contains("status"));
+        // The synthetic node carries plugin=<name> + name="ark-event" +
+        // a `json "{{event_json}}"` child for template rendering.
+        let plugin_entry = op
+            .node
+            .entries()
+            .iter()
+            .find(|e| e.name().map(|n| n.value()) == Some("plugin"))
+            .expect("plugin prop");
+        assert_eq!(plugin_entry.value().as_string(), Some("status"));
+        let name_entry = op
+            .node
+            .entries()
+            .iter()
+            .find(|e| e.name().map(|n| n.value()) == Some("name"))
+            .expect("name prop");
+        assert_eq!(name_entry.value().as_string(), Some("ark-event"));
+        let body = op.node.children().expect("pipe has body");
+        let json_child = body.nodes().iter().find(|n| n.name().value() == "json");
+        assert!(json_child.is_some(), "pipe body has `json` child");
 
         // PhaseTransition selector → primary index.
         let phase_entries = registry.by_kind(&EventKind::PhaseTransition);
@@ -531,6 +565,50 @@ mod tests {
             e,
             crate::error::SceneError::Grammar { .. }
         )));
+    }
+
+    // ---- T-7.5 integration: subscribes pipe op dispatches --------------
+
+    /// The synthesised `subscribes -> pipe` reaction dispatches
+    /// end-to-end through the intent registry without panicking. The
+    /// pipe op is a stub at this tier (logs + returns Ok) so the
+    /// assertion is simply "the dispatcher accepts the synthesised
+    /// node shape" — which requires the `pipe plugin=<n> name="ark-event"
+    /// { json "..." }` shape to match `PipeArgs`'s facet schema.
+    #[tokio::test]
+    async fn subscribes_synthesised_pipe_reaction_dispatches_end_to_end() {
+        use crate::id::SceneId;
+        use crate::intent::{IntentContext, IntentRegistry};
+        use crate::ops::dispatch::dispatch_sequence;
+        use crate::ops::register_core_ops;
+
+        let doc = parse(
+            r#"scene "s" {
+    plugin "status" {
+        source "shipped:status"
+        mount "status-bar"
+        subscribes "UserEvent:agent.tick"
+    }
+}
+"#,
+        );
+        let mut registry = ReactionRegistry::new();
+        synthesise_plugin_reactions(&doc.scene.plugins, &mut registry).unwrap();
+
+        let entries = registry.by_user_event_name("agent.tick");
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+
+        let intents = IntentRegistry::new();
+        register_core_ops(&intents).await;
+        let ctx = IntentContext::placeholder(SceneId::from_bytes(
+            std::path::PathBuf::from("/tmp/s.kdl"),
+            b"scene",
+        ));
+
+        dispatch_sequence(&entry.ops, &intents, &ctx)
+            .await
+            .expect("pipe op dispatches cleanly");
     }
 
     // ---- T-7.4 integration: dispatch via intent registry --------------
