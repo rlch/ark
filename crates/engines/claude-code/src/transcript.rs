@@ -552,6 +552,141 @@ mod tests {
             .expect("returns Ok on missing file");
     }
 
+    // -----------------------------------------------------------------
+    // T-120: partial-line / chunk-split coverage.
+    //
+    // The tailer handles the case where a writer flushes half a JSONL
+    // record (no trailing newline) by seeking back and waiting for the
+    // rest. Pin that behavior so a future rewrite of `run_tail`'s read
+    // loop can't silently reintroduce dropped-partial-line bugs.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn partial_line_is_buffered_until_newline_arrives() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("session.jsonl");
+        tokio::fs::write(&path, b"").await.unwrap();
+
+        let (tx, mut rx) = channel(64);
+        let id = sample_id();
+        let cancel = CancellationToken::new();
+        let cancel2 = cancel.clone();
+        let path_clone = path.clone();
+        let handle =
+            tokio::spawn(async move { tail_transcript_path(path_clone, tx, id, cancel2).await });
+
+        // Write the first half of a JSON line WITHOUT a terminating
+        // newline. The tailer must NOT parse-and-dispatch this yet.
+        let mut f = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .await
+            .unwrap();
+        let head = r#"{"type":"user","message":{"role":"user","content":"spl"#;
+        f.write_all(head.as_bytes()).await.unwrap();
+        f.flush().await.unwrap();
+
+        // Give the watcher a chance to wake and try to read.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // No event should have been emitted from the partial line.
+        let maybe = tokio::time::timeout(Duration::from_millis(300), rx.recv()).await;
+        assert!(
+            maybe.is_err() || (maybe.is_ok() && maybe.unwrap().is_err()),
+            "partial line must not emit events before newline arrives"
+        );
+
+        // Finish the line and add a newline — the watcher should now
+        // parse the complete record and emit one Message event.
+        let tail = "it-across-chunks\"}}\n";
+        f.write_all(tail.as_bytes()).await.unwrap();
+        f.flush().await.unwrap();
+        drop(f);
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut got: Option<AgentEvent> = None;
+        while tokio::time::Instant::now() < deadline {
+            if let Ok(Ok(ev)) = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+                got = Some(ev);
+                break;
+            }
+        }
+        let ev = got.expect("expected Message event after line completes");
+        match ev {
+            AgentEvent::Message { role, summary, .. } => {
+                assert_eq!(role, MessageRole::User);
+                assert_eq!(summary, "split-across-chunks");
+            }
+            other => panic!("expected Message, got {other:?}"),
+        }
+
+        cancel.cancel();
+        let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn line_split_across_three_writes_parses_once() {
+        // Emulate a slow writer that flushes a single record in three
+        // separate chunks, the first two without a newline. Exactly one
+        // event must result.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("session.jsonl");
+        tokio::fs::write(&path, b"").await.unwrap();
+
+        let (tx, mut rx) = channel(64);
+        let id = sample_id();
+        let cancel = CancellationToken::new();
+        let cancel2 = cancel.clone();
+        let path_clone = path.clone();
+        let handle =
+            tokio::spawn(async move { tail_transcript_path(path_clone, tx, id, cancel2).await });
+
+        let mut f = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .await
+            .unwrap();
+
+        let chunks: [&[u8]; 3] = [
+            br#"{"type":"tool_use","name":"#,
+            br#""Read","input":{"file_path":"#,
+            b"\"/tmp/foo.rs\"}}\n",
+        ];
+        for c in chunks {
+            f.write_all(c).await.unwrap();
+            f.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+        drop(f);
+
+        // Collect events for up to 5s; expect exactly one ToolUse once
+        // all chunks land.
+        let mut evs = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(250), rx.recv()).await {
+                Ok(Ok(ev)) => evs.push(ev),
+                _ => {
+                    if !evs.is_empty() {
+                        break;
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            evs.len(),
+            1,
+            "expected exactly one ToolUse once all chunks land, got {evs:?}"
+        );
+        match &evs[0] {
+            AgentEvent::ToolUse { tool, .. } => assert_eq!(tool, "Read"),
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
+
+        cancel.cancel();
+        let _ = handle.await;
+    }
+
     #[tokio::test]
     async fn append_path_emits_initial_then_appended() {
         let tmp = TempDir::new().unwrap();

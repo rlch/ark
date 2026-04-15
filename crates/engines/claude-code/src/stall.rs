@@ -390,4 +390,198 @@ mod tests {
         cancel.cancel();
         handle.await.unwrap().unwrap();
     }
+
+    // -----------------------------------------------------------------
+    // T-120: explicit negative coverage that non-activity AgentEvent
+    // variants for the target agent do NOT reset the stall timer. The
+    // module docs claim only `ToolUse` and `Message` count; pin that
+    // contract so any future drift in `is_activity_for` is caught.
+    // -----------------------------------------------------------------
+
+    #[tokio::test(start_paused = true)]
+    async fn log_events_for_target_do_not_count_as_activity() {
+        let (tx, mut rx) = channel(32);
+        let worker_rx = tx.subscribe();
+        let id = sample_id();
+        let cancel = CancellationToken::new();
+        let cancel2 = cancel.clone();
+
+        let handle = tokio::spawn(stall_watcher(
+            worker_rx,
+            tx.clone(),
+            id.clone(),
+            Duration::from_secs(30),
+            cancel2,
+        ));
+
+        // Spam Log events for the SAME agent every 5s. If the watcher
+        // (incorrectly) treated Log as activity, the stall below would
+        // never fire.
+        for _ in 0..5 {
+            tokio::time::advance(Duration::from_secs(5)).await;
+            tx.send(AgentEvent::Log {
+                id: id.clone(),
+                level: LogLevel::Info,
+                line: "keepalive".into(),
+            })
+            .unwrap();
+        }
+        // Let the poll interval cross the threshold.
+        tokio::time::advance(Duration::from_secs(20)).await;
+        settle().await;
+
+        let stall = drain_until(&mut rx, Duration::from_secs(1), |ev| {
+            matches!(ev, AgentEvent::Stall { .. })
+        })
+        .await;
+        assert!(
+            stall.is_some(),
+            "Log events must NOT count as activity — stall should fire"
+        );
+
+        cancel.cancel();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn progress_events_for_target_do_not_count_as_activity() {
+        let (tx, mut rx) = channel(32);
+        let worker_rx = tx.subscribe();
+        let id = sample_id();
+        let cancel = CancellationToken::new();
+        let cancel2 = cancel.clone();
+
+        let handle = tokio::spawn(stall_watcher(
+            worker_rx,
+            tx.clone(),
+            id.clone(),
+            Duration::from_secs(30),
+            cancel2,
+        ));
+
+        // Spam Progress events for the same agent — should not reset timer.
+        for i in 0..5 {
+            tokio::time::advance(Duration::from_secs(5)).await;
+            tx.send(AgentEvent::Progress {
+                id: id.clone(),
+                done: i,
+                total: 10,
+                label: None,
+            })
+            .unwrap();
+        }
+        tokio::time::advance(Duration::from_secs(20)).await;
+        settle().await;
+
+        let stall = drain_until(&mut rx, Duration::from_secs(1), |ev| {
+            matches!(ev, AgentEvent::Stall { .. })
+        })
+        .await;
+        assert!(
+            stall.is_some(),
+            "Progress events must NOT count as activity — stall should fire"
+        );
+
+        cancel.cancel();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repeated_silence_past_threshold_emits_only_one_stall() {
+        // Extra-explicit dedupe: even if many poll ticks elapse while
+        // the agent stays silent, exactly one Stall event crosses the
+        // bus. Guards against regressions where `stall_emitted` might
+        // be reset by an unrelated code path.
+        let (tx, mut rx) = channel(32);
+        let worker_rx = tx.subscribe();
+        let id = sample_id();
+        let cancel = CancellationToken::new();
+        let cancel2 = cancel.clone();
+
+        let handle = tokio::spawn(stall_watcher(
+            worker_rx,
+            tx.clone(),
+            id.clone(),
+            Duration::from_secs(30),
+            cancel2,
+        ));
+
+        // Run the watcher for 5 minutes of wall-clock silence; we expect
+        // exactly ONE Stall event across the entire window.
+        tokio::time::sleep(Duration::from_secs(300)).await;
+        settle().await;
+
+        let mut stall_count = 0usize;
+        while let Some(AgentEvent::Stall { .. }) =
+            drain_until(&mut rx, Duration::from_millis(50), |ev| {
+                matches!(ev, AgentEvent::Stall { .. })
+            })
+            .await
+        {
+            stall_count += 1;
+            if stall_count > 5 {
+                break; // defensive cap
+            }
+        }
+        assert_eq!(
+            stall_count, 1,
+            "consecutive silence must emit exactly one Stall, got {stall_count}"
+        );
+
+        cancel.cancel();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stall_activity_stall_sequence_emits_two_stalls_total() {
+        // Pinned sequence: stall → activity → stall again. The resume
+        // Log and two distinct Stalls must all land on the bus. This
+        // is adjacent to `activity_after_stall_logs_resumed_and_rearms`
+        // but asserts the *cumulative* Stall count precisely.
+        let (tx, mut rx) = channel(64);
+        let worker_rx = tx.subscribe();
+        let id = sample_id();
+        let cancel = CancellationToken::new();
+        let cancel2 = cancel.clone();
+
+        let handle = tokio::spawn(stall_watcher(
+            worker_rx,
+            tx.clone(),
+            id.clone(),
+            Duration::from_secs(30),
+            cancel2,
+        ));
+
+        // First stall window.
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        settle().await;
+
+        // Activity resets.
+        tx.send(tool_use(&id)).unwrap();
+        settle().await;
+
+        // Second stall window.
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        settle().await;
+
+        let mut stall_count = 0usize;
+        while let Some(AgentEvent::Stall { .. }) =
+            drain_until(&mut rx, Duration::from_millis(50), |ev| {
+                matches!(ev, AgentEvent::Stall { .. })
+            })
+            .await
+        {
+            stall_count += 1;
+            if stall_count > 5 {
+                break;
+            }
+        }
+        assert_eq!(
+            stall_count, 2,
+            "stall → activity → stall must emit exactly two Stalls, got {stall_count}"
+        );
+
+        cancel.cancel();
+        handle.await.unwrap().unwrap();
+    }
 }

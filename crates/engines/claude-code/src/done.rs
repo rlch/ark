@@ -196,4 +196,99 @@ mod tests {
             .unwrap();
         assert!(res.is_ok());
     }
+
+    // -----------------------------------------------------------------
+    // T-120: stronger dedupe coverage. Existing
+    // `stop_then_session_end_dedupes` only exercises two signals; the
+    // spec requires "multiple markers in sequence — only first triggers".
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn three_stop_signals_emit_only_one_done() {
+        let (sig_tx, sig_rx) = mpsc::channel(8);
+        let (tx, mut rx) = channel(16);
+        let id = sample_id();
+        let cancel = CancellationToken::new();
+        let cancel2 = cancel.clone();
+        let handle = tokio::spawn(done_watcher(sig_rx, tx, id, cancel2));
+
+        // Fire the same Stop signal three times in quick succession.
+        sig_tx.send(DoneSignal::Stop).await.unwrap();
+        sig_tx.send(DoneSignal::Stop).await.unwrap();
+        sig_tx.send(DoneSignal::Stop).await.unwrap();
+
+        // First Done lands on the bus.
+        let first = next_event(&mut rx).await.expect("first done");
+        assert!(matches!(first, AgentEvent::Done { .. }));
+
+        // Drain for a generous window and assert no further Done landed.
+        let mut extras = 0usize;
+        while let Some(ev) = next_event(&mut rx).await {
+            if matches!(ev, AgentEvent::Done { .. }) {
+                extras += 1;
+                if extras > 3 {
+                    break;
+                }
+            }
+        }
+        assert_eq!(extras, 0, "repeated Stop signals must dedupe to one Done");
+
+        cancel.cancel();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_end_then_stop_dedupes() {
+        // Mirror of `stop_then_session_end_dedupes` but with the ordering
+        // flipped — guards against any accidental dependence on which
+        // signal arrives first.
+        let (sig_tx, sig_rx) = mpsc::channel(4);
+        let (tx, mut rx) = channel(8);
+        let id = sample_id();
+        let cancel = CancellationToken::new();
+        let cancel2 = cancel.clone();
+        let handle = tokio::spawn(done_watcher(sig_rx, tx, id, cancel2));
+
+        sig_tx.send(DoneSignal::SessionEnd).await.unwrap();
+        sig_tx.send(DoneSignal::Stop).await.unwrap();
+
+        let first = next_event(&mut rx).await.expect("first done");
+        assert!(matches!(first, AgentEvent::Done { .. }));
+        let second = next_event(&mut rx).await;
+        assert!(
+            second.is_none(),
+            "expected dedupe with SessionEnd-first ordering, got {second:?}"
+        );
+
+        cancel.cancel();
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn signal_after_emit_is_silently_dropped() {
+        // After the watcher has emitted, additional signals arriving
+        // later (not immediately back-to-back) must still be dropped.
+        let (sig_tx, sig_rx) = mpsc::channel(4);
+        let (tx, mut rx) = channel(8);
+        let id = sample_id();
+        let cancel = CancellationToken::new();
+        let cancel2 = cancel.clone();
+        let handle = tokio::spawn(done_watcher(sig_rx, tx, id, cancel2));
+
+        sig_tx.send(DoneSignal::Stop).await.unwrap();
+        let first = next_event(&mut rx).await.expect("first done");
+        assert!(matches!(first, AgentEvent::Done { .. }));
+
+        // Introduce a gap, then send another signal. Must NOT re-emit.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        sig_tx.send(DoneSignal::SessionEnd).await.unwrap();
+        let second = next_event(&mut rx).await;
+        assert!(
+            second.is_none(),
+            "post-emit signal must be dropped, got {second:?}"
+        );
+
+        cancel.cancel();
+        handle.await.unwrap().unwrap();
+    }
 }
