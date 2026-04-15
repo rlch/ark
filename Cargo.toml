@@ -12,6 +12,12 @@ members = [
     "crates/types",
     # T-9.5.1: extension-protocol trait + request/response types (R16).
     "crates/ark-ext-proto",
+    # T-10.1: shared `ExtensionMetadata` type defs (R10). Imported by
+    # both plugin-side helper and ark core; lives on its own so changes
+    # ripple to every consumer without a cycle.
+    "crates/ark-ext-metadata-types",
+    # T-10.1 + T-10.3: plugin-side helper + search-path resolver (R10).
+    "crates/ark-ext-metadata",
     "crates/engines/*",
     "crates/orchestrators/*",
     "crates/mux/*",

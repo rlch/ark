@@ -1,0 +1,21 @@
+[package]
+name = "ark-ext-metadata"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# T-10.1 + T-10.3 (cavekit-scene R10): plugin-side helper crate.
+# Re-exports the `ExtensionMetadata` family from `ark-ext-metadata-types`,
+# adds the KDL serialization helper (`extension_metadata_kdl_bytes`),
+# the declarative `register_extension!` macro, and the
+# extension-search-path resolver (`search_path::resolve_extension_path`).
+[dependencies]
+ark-ext-metadata-types = { path = "../ark-ext-metadata-types" }
+facet = { workspace = true }
+facet-kdl = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
