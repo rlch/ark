@@ -577,7 +577,7 @@ pub fn run(args: SpawnArgs, ctx: &Ctx) -> Result<(), CliError> {
     // spec.json / agent dir to clean up by hand.
     require_zellij_on_path()?;
 
-    let spec = build_spec(
+    let mut spec = build_spec(
         orchestrator,
         args.engine.as_str(),
         &name,
@@ -587,6 +587,17 @@ pub fn run(args: SpawnArgs, ctx: &Ctx) -> Result<(), CliError> {
         args.layout.clone(),
         hooks,
     );
+
+    // F-600: `AgentSpec::new` initialises `spec.session` to
+    // `AgentId::session_name()` — the bare `ark-{orch}-{name}` form that
+    // F-522 deliberately does NOT use as the real zellij session. If we
+    // persist the spec unchanged, `spec.session` disagrees with the actual
+    // session zellij was launched under (`{base}-{ulid8}`), which breaks
+    // any downstream reader that tries to reattach via `spec.session`
+    // (supervisor, picker, status chip focus). Overwrite it here, BEFORE
+    // `write_spec_json`, so the on-disk spec is authoritative.
+    let session = unique_session_name(&spec.id);
+    spec.session = session.clone();
 
     let spec_path = write_spec_json(&ctx.state_dir, &spec)?;
     tracing::debug!(path = %spec_path.display(), "wrote spec.json");
@@ -620,7 +631,9 @@ pub fn run(args: SpawnArgs, ctx: &Ctx) -> Result<(), CliError> {
     //
     // F-525: the plan's layout is the RENDERED KDL path, not the raw
     // stem that came in on the CLI.
-    let session = unique_session_name(&spec.id);
+    //
+    // F-600: `session` was computed above (before `write_spec_json`) so
+    // `spec.session` on disk matches the real zellij session name.
     let layout_str = layout_path.to_string_lossy().into_owned();
     let plan = zellij_plan(
         |k| std::env::var(k).ok(),
@@ -1231,6 +1244,41 @@ mod tests {
         assert_eq!(suffix.len(), 8, "ULID fragment should be 8 chars");
         // And the 8-char suffix must be the tail of the lowercase ULID.
         assert!(a.ulid().ends_with(suffix));
+    }
+
+    // --- F-600: spec.json on disk carries the suffixed session ---------
+
+    #[test]
+    fn write_spec_json_uses_suffixed_session_when_overridden() {
+        // F-600 regression: `AgentSpec::new()` defaults spec.session to
+        // `AgentId::session_name()` — the bare `ark-{orch}-{name}` form.
+        // The real zellij session is `{base}-{ulid8}` (F-522), so the
+        // CLI-layer spawn path must overwrite spec.session BEFORE
+        // persisting spec.json; otherwise downstream readers (supervisor
+        // re-attach, picker OpenSession, status chip focus) target a
+        // session that does not exist.
+        let dir = TempDir::new().unwrap();
+        let mut spec = build_spec(
+            "cavekit",
+            "claude-code",
+            "auth",
+            PathBuf::from("/tmp/w"),
+            vec!["claude".into()],
+            BTreeMap::new(),
+            None,
+            Vec::new(),
+        );
+        // Mirror the override performed by `run()`.
+        let expected = unique_session_name(&spec.id);
+        spec.session = expected.clone();
+
+        let path = write_spec_json(dir.path(), &spec).expect("write");
+        let body = std::fs::read_to_string(&path).unwrap();
+        let back: AgentSpec = serde_json::from_str(&body).unwrap();
+        assert_eq!(back.session, expected);
+        assert!(back.session.starts_with("ark-cavekit-auth-"));
+        let suffix = back.session.strip_prefix("ark-cavekit-auth-").unwrap();
+        assert_eq!(suffix.len(), 8, "persisted session carries ULID suffix");
     }
 
     // --- F-523: zellij_startup_failure cleans up on fast-exit --------

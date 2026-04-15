@@ -550,8 +550,11 @@ pub fn handle_list_key(state: &mut ListState, cache: &PickerCache, key: KeyInput
         KeyInput::ShiftDel => PickerAction::KillAllDoneFailed,
         KeyInput::Enter => match selected_agent(cache, state) {
             // R8 / T-107: Enter on an active (alive) agent switches
-            // directly to its zellij session. The wasm dispatcher passes
-            // the session name (== summary.name) to `switch_session`.
+            // directly to its zellij session. F-601: the wasm dispatcher
+            // passes `summary.session` — the real zellij session id,
+            // `ark-{orch}-{name}-{ulid8}` after F-522/F-600. Previously
+            // this carried `summary.name` (the bare human label), which
+            // named a session that does not exist.
             Some((id, false)) => match cache.active.get(id) {
                 Some(summary) if is_terminal_phase(&summary.phase) => {
                     // Phase reported Done / Failed / Killed / Timeout —
@@ -560,7 +563,17 @@ pub fn handle_list_key(state: &mut ListState, cache: &PickerCache, key: KeyInput
                     // the operator has a chance to back out.
                     PickerAction::OpenResurrectPrompt(id.to_string())
                 }
-                Some(summary) => PickerAction::OpenSession(summary.name.clone()),
+                Some(summary) => {
+                    // F-601: fall back to name ONLY when session is empty,
+                    // e.g. an older supervisor that pre-dates F-600 never
+                    // stamped the suffixed session onto spec.json.
+                    let target = if summary.session.is_empty() {
+                        summary.name.clone()
+                    } else {
+                        summary.session.clone()
+                    };
+                    PickerAction::OpenSession(target)
+                }
                 // Cache lookup races are defensive — selected_agent just
                 // confirmed the id exists; fall back to OpenSession on the
                 // id so we don't silently drop the keystroke.
@@ -725,6 +738,11 @@ mod tests {
         AgentSummary {
             id: id.into(),
             name: name.into(),
+            // F-601: default test session mirrors the real-spawn shape
+            // `ark-{orch}-{name}-{ulid8}` so Enter-handler assertions
+            // exercise the suffixed-session path, not the bare-name
+            // fallback.
+            session: format!("ark-cavekit-{name}-ABCDEFGH"),
             orchestrator: "cavekit".into(),
             engine: "claude-code".into(),
             phase: "running".into(),
@@ -923,11 +941,30 @@ mod tests {
 
     #[test]
     fn key_enter_on_active_opens_session() {
-        // T-107 / R8: Enter on an active agent now jumps directly to
-        // the agent's zellij session (OpenSession carrying summary.name
-        // so the wasm `switch_session` call gets the right argument).
+        // T-107 / R8: Enter on an active agent jumps directly to the
+        // agent's zellij session. F-601: the action now carries
+        // `summary.session` (the real suffixed zellij session id) rather
+        // than the bare human name — otherwise `switch_session` targets
+        // a session that does not exist.
         let mut st = ListState::default();
         let c = cache_of(&[("a", "x")], &[]);
+        let action = handle_list_key(&mut st, &c, KeyInput::Enter);
+        assert_eq!(
+            action,
+            PickerAction::OpenSession("ark-cavekit-x-ABCDEFGH".to_string())
+        );
+    }
+
+    #[test]
+    fn key_enter_on_active_falls_back_to_name_when_session_empty() {
+        // F-601: older supervisors (pre-F-600) do not stamp the suffixed
+        // session onto spec.json — `summary.session` is empty. In that
+        // case we fall back to `summary.name` so the handler keeps
+        // working against legacy state dirs rather than silently passing
+        // an empty session id to `switch_session`.
+        let mut st = ListState::default();
+        let mut c = cache_of(&[("a", "x")], &[]);
+        c.active.get_mut("a").unwrap().session.clear();
         let action = handle_list_key(&mut st, &c, KeyInput::Enter);
         assert_eq!(action, PickerAction::OpenSession("x".to_string()));
     }

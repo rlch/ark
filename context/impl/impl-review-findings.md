@@ -450,3 +450,53 @@ Codex reported **zero P1 findings** this cycle — only 3 P2 findings, all fixed
 ark-cli: 250 baseline → 252 lib + 2 integration = 254 total (+4 net: +2 F-527 clap-parse tests, +2 F-528 cleanup-helper tests, +0 F-529 since the fix is pure serialization). Within the +2-4 target. Workspace-wide `cargo test --workspace -- --test-threads=1` fully green — all test binaries pass. The "parallel twice in a row" validation for F-529 was run as `cargo test -p ark-cli` followed immediately by a second `cargo test -p ark-cli`; both completed at 252 passed / 0 failed. A mid-cycle one-off failure on `zellij_startup_failure_success_when_still_alive` (a pre-existing F-523 sleep-2 test, not touched this cycle) appeared once under heavy system load, then 7+ subsequent parallel runs were clean — it is a fork/reap timing sensitivity in F-523's test, unrelated to the ENV_LOCK fix this cycle targets. `cargo build --workspace` zero warnings (zero NEW, one pre-existing `layout_with_base` dead-code warning in pane.rs tests that predates cycle 10). `cargo fmt --all` clean.
 
 **Gate status after cycle 10:** CLOSED. No P1s found by codex this cycle.
+
+## Tier 5 — Cycle 1
+
+Three findings flagged by codex trace back to F-522's change that gave each zellij session an 8-char ULID suffix (`ark-{orch}-{name}-{ulid8}`). The unique-session scheme did not propagate through every consumer, leaving `spec.session`, the picker's `OpenSession` payload, and the status plugin's focused-chip matcher all working against the bare `ark-{orch}-{name}` form that no longer names any real session.
+
+### F-600 — P1 persist actual zellij session name in spec.json (FIXED)
+
+**Source:** codex
+**Tier:** 5
+**Severity:** P1
+**Status:** fixed
+**Location:** crates/cli/src/commands/spawn.rs (`run`)
+
+**Description:** `write_spec_json` ran BEFORE `unique_session_name()`, so the on-disk `spec.session` was `AgentId::session_name()` — the bare `ark-{orch}-{name}` form F-522 deliberately does NOT use as the real zellij session. Any downstream reader that tries to reattach via `spec.session` (supervisor re-attach path, picker Enter, status chip focus pin) hits a non-existent session.
+
+**Resolution:** Approach (c) from the triage notes — `AgentSpec.session` is a public mutable field in ark-types, so we compute `unique_session_name(&spec.id)` BEFORE `write_spec_json`, overwrite `spec.session` with that value, and then persist. The later spawn-site `let session = …` was a duplicate and was removed; the single `session` binding now drives both the on-disk spec and the zellij spawn plan so the two can never disagree. ark-types was NOT edited. New test `write_spec_json_uses_suffixed_session_when_overridden` round-trips the override through serde_json and asserts the persisted `session` starts with `ark-cavekit-auth-` and has an 8-char suffix.
+
+### F-601 — P1 picker Enter uses real session identifier (FIXED)
+
+**Source:** codex
+**Tier:** 5
+**Severity:** P1
+**Status:** fixed
+**Location:** crates/plugins/picker/src/render_list.rs (`handle_list_key`), crates/plugins/picker/src/state.rs (`AgentSummary`), crates/plugins/picker/src/bootstrap.rs (`parse_agent_status_minimal`)
+
+**Description:** `handle_list_key`'s Enter path emitted `PickerAction::OpenSession(summary.name)` — but `summary.name` is the human label (`auth`), whereas the real zellij session is `ark-{orch}-{name}-{ulid8}`. The wasm dispatcher passed the wrong argument to `switch_session`, leaving the operator staring at the picker with no session change.
+
+**Resolution:** Added a `session: String` field to `AgentSummary` (with `#[serde(default)]` for legacy state-dir compatibility). Extended the bootstrap scanner's hand-rolled JSON extractor to pull `spec.session` out of `status.json` — only one new line via the existing `find_string_field`, no serde_json dependency reintroduced. Updated the Enter handler to emit `OpenSession(summary.session.clone())`, falling back to `summary.name` when `summary.session` is empty (protects against older supervisors that pre-date F-600 and never stamped the suffixed session onto `spec.json`). Two new tests: `key_enter_on_active_opens_session` updated to expect the suffixed form, `key_enter_on_active_falls_back_to_name_when_session_empty` proves the legacy path still works, `parse_session_missing_defaults_empty` exercises the serde default in the bootstrap parser.
+
+### F-602 — P2 status chip_matches_session handles suffixed names (FIXED)
+
+**Source:** codex
+**Tier:** 5
+**Severity:** P2
+**Status:** fixed
+**Location:** crates/plugins/status/src/chip.rs (`chip_matches_session`, new `extract_bare_name_from_session`)
+
+**Description:** `chip_matches_session` only matched against the chip's bare `name` or the `orch:name` token. After F-522 the zellij host reports the focused session as `ark-{orch}-{name}-{ulid8}`, so the focused chip never pinned to row 1 — a cosmetic regression, but visible.
+
+**Resolution:** Kept the existing exact-token branches for legacy/bare sessions and added a parse-side fallback: a new `extract_bare_name_from_session` peels the `ark-` prefix and a validated 8-char uppercase-Crockford-base32 trailing segment, then retries the existing matcher against the recovered bare name. The suffix validator (`is_ascii_uppercase() || is_ascii_digit()` + exact length 8) rejects random dashed session names so unrelated sessions don't accidentally collapse onto a chip. `StatusSummary` was NOT grown a session field — the parse-side approach handled every call site without threading the new field through the pipe ingestion path. Five new tests covering: bare name (`auth`), `orch:name` token, full F-522 session, lowercase-tail rejection, 7-char-suffix rejection. One new wire-through test (`fit_chips_pins_focused_for_suffixed_session`) proves pinning survives end-to-end. One new unit test for `extract_bare_name_from_session` covers the multi-hyphen-name case so the single-ulid-peel is deterministic.
+
+## Test Delta — Tier 5 Cycle 1
+
+- ark-cli: 263 baseline → 264 lib (+1: F-600 round-trip test).
+- ark-plugin-status: 33 baseline → 40 (+7: F-602 matcher + wire-through + extract tests).
+- ark-plugin-picker: 196 baseline → 198 (+2: one new `key_enter_on_active_falls_back_to_name_when_session_empty` in render_list, one new `parse_session_missing_defaults_empty` in bootstrap; the existing happy-path tests were updated in place to assert the new session field rather than being duplicated).
+
+Workspace-wide `cargo test --workspace -- --test-threads=1` fully green. `cargo build --workspace` zero new warnings. `cargo fmt --all` clean.
+
+**Gate status after Tier 5 cycle 1:** OPEN pending next codex pass.

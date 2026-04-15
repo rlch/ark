@@ -323,6 +323,12 @@ pub fn parse_agent_status_minimal(s: &str) -> Option<AgentSummary> {
         .unwrap_or_default();
 
     let name = find_string_field(spec, "name").unwrap_or_default();
+    // F-601: real zellij session identifier; `spec.session` carries the
+    // suffixed `ark-{orch}-{name}-{ulid8}` form after F-600. Older
+    // status.json files written before F-600 may still have the bare
+    // `ark-{orch}-{name}` form — we surface whatever is on disk and let
+    // the Enter handler pass it through verbatim.
+    let session = find_string_field(spec, "session").unwrap_or_default();
     let orchestrator = find_string_field(spec, "orchestrator").unwrap_or_default();
     let engine = find_string_field(spec, "engine").unwrap_or_default();
     let cwd = find_string_field(spec, "cwd").unwrap_or_default();
@@ -344,6 +350,7 @@ pub fn parse_agent_status_minimal(s: &str) -> Option<AgentSummary> {
     Some(AgentSummary {
         id,
         name,
+        session,
         orchestrator,
         engine,
         phase,
@@ -613,16 +620,28 @@ mod tests {
 
     #[test]
     fn parse_happy_path() {
-        let json = r#"{"spec":{"id":"ark-cavekit-auth","name":"auth","orchestrator":"cavekit","engine":"claude-code","cwd":"/tmp/w"},"phase":"running","progress":[3,10],"started_at":1700000000}"#;
+        let json = r#"{"spec":{"id":"ark-cavekit-auth","name":"auth","session":"ark-cavekit-auth-ABCDEFGH","orchestrator":"cavekit","engine":"claude-code","cwd":"/tmp/w"},"phase":"running","progress":[3,10],"started_at":1700000000}"#;
         let s = parse_agent_status_minimal(json).expect("parse");
         assert_eq!(s.id, "ark-cavekit-auth");
         assert_eq!(s.name, "auth");
+        // F-601: session carries the real suffixed zellij identifier.
+        assert_eq!(s.session, "ark-cavekit-auth-ABCDEFGH");
         assert_eq!(s.orchestrator, "cavekit");
         assert_eq!(s.engine, "claude-code");
         assert_eq!(s.phase, "running");
         assert_eq!(s.cwd, "/tmp/w");
         assert_eq!(s.progress, Some((3, 10)));
         assert_eq!(s.started_at, Some(1_700_000_000));
+    }
+
+    #[test]
+    fn parse_session_missing_defaults_empty() {
+        // F-601: legacy status.json written pre-F-600 has no `session`
+        // in `spec{}` — parser must tolerate this and the Enter handler
+        // then falls back to `summary.name`.
+        let json = r#"{"spec":{"id":"x","name":"y","orchestrator":"cavekit","engine":"claude-code","cwd":"/tmp"},"phase":"running"}"#;
+        let s = parse_agent_status_minimal(json).expect("parse");
+        assert!(s.session.is_empty(), "missing session parses as empty");
     }
 
     #[test]

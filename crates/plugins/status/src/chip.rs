@@ -317,21 +317,80 @@ fn partition_focused(
     (focused, rest)
 }
 
-/// True when `chip.text` contains `session_name` surrounded by word-ish
-/// boundaries in its label portion. Cheap heuristic: we split chip.text by
-/// space and look for an exact or `orch:name` equality.
+/// True when `chip.text` matches the focused zellij session.
+///
+/// # F-602
+///
+/// After F-522 the real zellij session name is
+/// `ark-{orchestrator}-{name}-{ulid8}` — the picker and supervisor now both
+/// emit sessions in that shape. `focused_session_name` passed in from the
+/// zellij host therefore is the FULL suffixed identifier, not the bare
+/// `name` the chip renders.
+///
+/// We match in three complementary ways so both the legacy bare-name and
+/// the new suffixed form resolve to the same chip:
+///
+/// 1. Exact-token equality against every space-split token in `chip.text`
+///    (covers `orch:name` tokens and the bare name when the chip label
+///    happens to include it).
+/// 2. `orch:name` token equality, comparing just the `name` half.
+/// 3. If the focused session looks like `ark-{orch}-{name}-{ulid8}`,
+///    strip the `ark-` prefix and the trailing `-{ulid8}` (8-char
+///    Crockford-base32 suffix) and retry step 1/2 against the recovered
+///    bare name.
 fn chip_matches_session(chip: &Chip, session_name: &str) -> bool {
+    if chip_label_contains(chip, session_name) {
+        return true;
+    }
+    if let Some(bare) = extract_bare_name_from_session(session_name)
+        && chip_label_contains(chip, bare)
+    {
+        return true;
+    }
+    false
+}
+
+/// Step (1)+(2) above: exact token match or `orch:name` tail match.
+fn chip_label_contains(chip: &Chip, needle: &str) -> bool {
     for token in chip.text.split_whitespace() {
-        if token == session_name {
+        if token == needle {
             return true;
         }
         if let Some((_orch, name)) = token.split_once(':')
-            && name == session_name
+            && name == needle
         {
             return true;
         }
     }
     false
+}
+
+/// Recover the bare agent name from a full zellij session identifier of
+/// the shape `ark-{orch}-{name}-{ulid8}`. Returns `None` if the input
+/// does not match that shape (e.g. legacy bare-name sessions, or any
+/// non-ark session the zellij host reports).
+///
+/// The 8-char suffix must be Crockford-base32 uppercase — the format
+/// [`ark-cli::commands::spawn::unique_session_name`] emits — so an
+/// unrelated session name that merely contains hyphens does not get
+/// mis-parsed.
+fn extract_bare_name_from_session(session: &str) -> Option<&str> {
+    let body = session.strip_prefix("ark-")?;
+    // Split into `orch-name-suffix`. We need the last hyphen to peel the
+    // ulid8 suffix, and the first hyphen to drop the orchestrator slug.
+    let (head, suffix) = body.rsplit_once('-')?;
+    if suffix.len() != 8
+        || !suffix
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+    {
+        return None;
+    }
+    let (_orch, name) = head.split_once('-')?;
+    if name.is_empty() {
+        return None;
+    }
+    Some(name)
 }
 
 #[cfg(test)]
@@ -480,5 +539,78 @@ mod tests {
         assert_eq!(row1.len(), 1);
         assert_eq!(row1[0].text, small.text);
         assert!(row2.is_empty());
+    }
+
+    // --- F-602: focused session names carry the F-522 ULID suffix -------
+
+    #[test]
+    fn chip_matches_session_bare_name_still_works() {
+        // Legacy shape — pre-F-522 sessions were the bare `name`. The
+        // chip label is `cavekit:auth`, so matching against "auth"
+        // resolves via the `orch:name` tail branch.
+        let chip = build_chip(&summary("auth", "running"), false);
+        assert!(chip_matches_session(&chip, "auth"));
+    }
+
+    #[test]
+    fn chip_matches_session_orchestrator_prefixed() {
+        // `cavekit:auth` token equality — matches when the focused
+        // session string IS the rendered `orch:name` token.
+        let chip = build_chip(&summary("auth", "running"), false);
+        assert!(chip_matches_session(&chip, "cavekit:auth"));
+    }
+
+    #[test]
+    fn chip_matches_session_full_zellij_name_after_f522() {
+        // F-602: the zellij host now reports focused session as the full
+        // `ark-{orch}-{name}-{ulid8}` form. The chip's label still only
+        // contains `cavekit:auth`, so matching must peel the ark- prefix
+        // and the 8-char ULID suffix to recover the bare name.
+        let chip = build_chip(&summary("auth", "running"), false);
+        assert!(chip_matches_session(&chip, "ark-cavekit-auth-01ABCDEF"));
+    }
+
+    #[test]
+    fn chip_matches_session_rejects_short_suffix() {
+        // Defensive: a 7-char trailing segment is NOT a ULID fragment,
+        // so we must not silently peel it and false-match against a
+        // similarly-named chip. The focused session then fails to pin.
+        let chip = build_chip(&summary("auth", "running"), false);
+        assert!(!chip_matches_session(&chip, "ark-cavekit-auth-1234567"));
+    }
+
+    #[test]
+    fn chip_matches_session_rejects_lowercase_suffix() {
+        // ULIDs encode as UPPERCASE Crockford-base32; a lowercase tail
+        // is almost certainly an unrelated session and must not match.
+        let chip = build_chip(&summary("auth", "running"), false);
+        assert!(!chip_matches_session(&chip, "ark-cavekit-auth-deadbeef"));
+    }
+
+    #[test]
+    fn fit_chips_pins_focused_for_suffixed_session() {
+        // Wire-through: `fit_chips` with the full suffixed form still
+        // pins the right chip to row 1, mirroring the bare-name case.
+        let chips: Vec<Chip> = ["a", "b", "c"]
+            .iter()
+            .map(|n| build_chip(&summary(n, "running"), false))
+            .collect();
+        let (row1, _row2) = fit_chips(chips, 200, Some("ark-cavekit-b-01ABCDEF"));
+        assert!(row1[0].text.contains("cavekit:b"));
+    }
+
+    #[test]
+    fn extract_bare_name_shapes() {
+        assert_eq!(
+            extract_bare_name_from_session("ark-cavekit-auth-01ABCDEF"),
+            Some("auth")
+        );
+        // Multi-hyphen name survives — we only peel one trailing ulid8.
+        assert_eq!(
+            extract_bare_name_from_session("ark-cavekit-multi-word-name-01ABCDEF"),
+            Some("multi-word-name")
+        );
+        assert_eq!(extract_bare_name_from_session("not-an-ark-session"), None);
+        assert_eq!(extract_bare_name_from_session("ark-cavekit-auth"), None);
     }
 }

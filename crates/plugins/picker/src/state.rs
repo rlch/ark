@@ -355,6 +355,13 @@ pub struct AgentSummary {
     pub id: String,
     /// Human-readable name from spec.json.
     pub name: String,
+    /// F-601: real zellij session identifier (`ark-{orch}-{name}-{ulid8}`
+    /// per F-522) — NOT the bare human label. Populated by the bootstrap
+    /// scanner from `spec.session` in `status.json`. The picker's Enter
+    /// handler passes THIS verbatim to `switch_session`; using `name`
+    /// targets a session that does not exist.
+    #[serde(default)]
+    pub session: String,
     /// Orchestrator label (`cavekit` / `claude-code`).
     pub orchestrator: String,
     /// Engine label (`claude-code`, etc.).
@@ -612,6 +619,7 @@ mod tests {
         AgentSummary {
             id: "abc123".to_string(),
             name: "MyFeat".to_string(),
+            session: "ark-cavekit-MyFeat-ABCDEFGH".to_string(),
             orchestrator: "Cavekit".to_string(),
             engine: "claude-code".to_string(),
             phase: "running".to_string(),
