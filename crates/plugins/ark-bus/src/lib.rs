@@ -60,8 +60,11 @@ pub const PLUGIN_NAME: &str = "ark-bus";
 /// payload=<json>` to this endpoint.
 pub const PIPE_INTENT: &str = "ark-intent";
 
-/// Pipe endpoint name for the rebind dispatcher (T-6.4 — placeholder
-/// until the handler lands).
+/// Pipe endpoint name for the rebind dispatcher (T-6.4). Used by the
+/// `reload_scene` keybind-diff path: the scene reloader sends a JSON
+/// document of bindings to add and remove, and ark-bus invokes
+/// [`zellij_tile::shim::rebind_keys`] to apply them at runtime
+/// without restarting the zellij session.
 pub const PIPE_REBIND: &str = "ark-rebind";
 
 /// Headless bridge between zellij-internal events and the ark supervisor
@@ -103,6 +106,141 @@ pub fn validate_intent_payload(payload: &str) -> Result<String, IntentPayloadErr
     Ok(value.to_string())
 }
 
+/// Parsed shape of an `ark-rebind` payload (T-6.4).
+///
+/// The wire format is a JSON object with three top-level keys:
+///
+/// ```json
+/// {
+///   "unbind":   [ { "mode": "Normal", "key": "Alt p" }, … ],
+///   "rebind":   [ { "mode": "Normal", "key": "Alt p", "actions": [ … ] }, … ],
+///   "write_to_disk": false
+/// }
+/// ```
+///
+/// `unbind` and `rebind` are both optional; an empty array (or absence)
+/// means "no changes in that direction". `write_to_disk` defaults to
+/// `false` — the `reload_scene` driver should pass `true` only when the
+/// user explicitly opts into mutating their on-disk zellij config.
+///
+/// Action shapes are kept opaque at this layer — see [`RebindActionSpec`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct RebindRequest {
+    /// Bindings to remove. Each entry pairs an `InputMode` name with a
+    /// chord string parsable by `KeyWithModifier::from_str`.
+    #[serde(default)]
+    pub unbind: Vec<RebindKey>,
+    /// Bindings to install. Each entry adds a chord+actions tuple to
+    /// the named mode.
+    #[serde(default)]
+    pub rebind: Vec<RebindBinding>,
+    /// Whether to persist the resulting key map to the user's on-disk
+    /// zellij config. Defaults to `false` (in-memory only).
+    #[serde(default)]
+    pub write_to_disk: bool,
+}
+
+/// Key entry in the `unbind` half of [`RebindRequest`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct RebindKey {
+    /// `InputMode` name, e.g. `"Normal"`, `"Locked"`, `"Tab"`.
+    pub mode: String,
+    /// Chord string, e.g. `"Alt p"`, `"Ctrl Shift t"`. Parsed via
+    /// `KeyWithModifier::from_str` on the wasm side.
+    pub key: String,
+}
+
+/// Binding entry in the `rebind` half of [`RebindRequest`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct RebindBinding {
+    /// `InputMode` name.
+    pub mode: String,
+    /// Chord string.
+    pub key: String,
+    /// Ordered list of actions to fire when the chord is pressed.
+    pub actions: Vec<RebindActionSpec>,
+}
+
+/// Action specification accepted by the rebind endpoint.
+///
+/// v1 supports a single shape: `MessagePlugin` (the zellij action that
+/// becomes `KeybindPipe` internally) — this is what scene-compiled
+/// keybinds emit to dispatch through ark-bus, so the rebind path can
+/// install / replace them without needing a richer action grammar yet.
+/// `kind` MUST be the literal string `"MessagePlugin"`.
+///
+/// Future tiers may grow other action kinds (`SwitchToMode`, `Quit`,
+/// `Run`, …) as the scene grammar surfaces them.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct RebindActionSpec {
+    /// Action discriminator. v1 accepts `"MessagePlugin"`.
+    pub kind: String,
+    /// Plugin url / name to message (e.g. `"ark-bus"`).
+    pub plugin: String,
+    /// Optional message name (e.g. `"ark-intent"`). Defaults to the
+    /// plugin name when absent — matches zellij's own MessagePlugin
+    /// fallback (see `zellij_utils::kdl::mod.rs::MessagePlugin`).
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Optional payload string. Verbatim — typically a JSON document
+    /// the receiving plugin re-parses.
+    #[serde(default)]
+    pub payload: Option<String>,
+}
+
+/// Parse an `ark-rebind` payload, returning the structured request.
+///
+/// Mirrors [`validate_intent_payload`]'s philosophy — keep validation
+/// loose at the plugin layer; the actual chord / action parsing
+/// happens inside the wasm dispatcher where the zellij types are
+/// available. Errors here cover only structural / shape problems.
+pub fn validate_rebind_payload(payload: &str) -> Result<RebindRequest, RebindPayloadError> {
+    let req: RebindRequest = serde_json::from_str(payload)
+        .map_err(|e| RebindPayloadError::BadJson(e.to_string()))?;
+    if req.unbind.is_empty() && req.rebind.is_empty() {
+        return Err(RebindPayloadError::Empty);
+    }
+    for action_list in req.rebind.iter().flat_map(|b| &b.actions) {
+        if action_list.kind != "MessagePlugin" {
+            return Err(RebindPayloadError::UnsupportedActionKind(
+                action_list.kind.clone(),
+            ));
+        }
+    }
+    Ok(req)
+}
+
+/// Errors returned by [`validate_rebind_payload`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RebindPayloadError {
+    /// Top-level JSON failed to parse against [`RebindRequest`].
+    BadJson(String),
+    /// Both `unbind` and `rebind` arrays are empty / absent — nothing
+    /// to do. We refuse rather than silently no-op so misconfigured
+    /// callers see the issue.
+    Empty,
+    /// An action's `kind` is not in the v1 supported set
+    /// (`MessagePlugin`).
+    UnsupportedActionKind(String),
+}
+
+impl std::fmt::Display for RebindPayloadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RebindPayloadError::BadJson(msg) => {
+                write!(f, "ark-rebind payload is not valid JSON: {msg}")
+            }
+            RebindPayloadError::Empty => {
+                write!(f, "ark-rebind payload has empty unbind and rebind arrays")
+            }
+            RebindPayloadError::UnsupportedActionKind(kind) => write!(
+                f,
+                "ark-rebind action kind `{kind}` is not supported in v1 (only `MessagePlugin`)"
+            ),
+        }
+    }
+}
+
 /// Errors returned by [`validate_intent_payload`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IntentPayloadError {
@@ -133,10 +271,19 @@ impl std::fmt::Display for IntentPayloadError {
 
 #[cfg(target_arch = "wasm32")]
 mod wasm_plugin {
-    use super::{ArkBus, IntentPayloadError, PIPE_INTENT, PLUGIN_NAME, validate_intent_payload};
+    use super::{
+        ArkBus, IntentPayloadError, PIPE_INTENT, PIPE_REBIND, PLUGIN_NAME,
+        RebindPayloadError, validate_intent_payload, validate_rebind_payload,
+    };
     use std::collections::BTreeMap;
     use std::path::PathBuf;
+    use std::str::FromStr;
     use zellij_tile::prelude::*;
+    // `Action` lives in `zellij_utils::input::actions` and is re-exported
+    // (as the `actions` module) by zellij_tile's prelude. Pull the bare
+    // type into scope so the `dispatch_rebind` translation reads
+    // cleanly.
+    use zellij_tile::prelude::actions::Action;
 
     impl ZellijPlugin for ArkBus {
         /// Lifecycle entry. ark-bus needs `RunCommands` permission to
@@ -161,14 +308,13 @@ mod wasm_plugin {
             false
         }
 
-        /// Dispatch a pipe message. T-6.2 handles the `ark-intent`
-        /// endpoint by spawning a hidden command pane running
-        /// `ark-hook intent --json '<payload>'`.
+        /// Dispatch a pipe message. T-6.2 handles `ark-intent` by
+        /// spawning a hidden command pane; T-6.4 handles `ark-rebind`
+        /// by calling `zellij_tile::shim::rebind_keys` directly.
         fn pipe(&mut self, msg: PipeMessage) -> bool {
-            // Only handle our endpoints; everything else is silently
-            // ignored (other plugins may share the bus).
             match msg.name.as_str() {
                 PIPE_INTENT => dispatch_intent(&msg),
+                PIPE_REBIND => dispatch_rebind(&msg),
                 _ => {
                     // Foreign endpoint — not for us.
                     false
@@ -212,6 +358,114 @@ mod wasm_plugin {
         // zellij log so failed dispatches are debuggable.
         let _ = open_command_pane_background(cmd, BTreeMap::new());
         false
+    }
+
+    /// Apply a parsed `ark-rebind` payload via
+    /// [`zellij_tile::shim::rebind_keys`]. Returns `false` (no plugin
+    /// re-render needed). Errors are logged to stderr — there is no
+    /// reply channel back to the supervisor for keybind diffs in v1.
+    fn dispatch_rebind(msg: &PipeMessage) -> bool {
+        let payload = match msg.payload.as_deref() {
+            Some(p) => p,
+            None => {
+                eprintln!("{PLUGIN_NAME}: ark-rebind message has no payload; ignoring");
+                return false;
+            }
+        };
+        let req = match validate_rebind_payload(payload) {
+            Ok(r) => r,
+            Err(RebindPayloadError::BadJson(m)) => {
+                eprintln!("{PLUGIN_NAME}: ark-rebind payload not valid JSON: {m}");
+                return false;
+            }
+            Err(e) => {
+                eprintln!("{PLUGIN_NAME}: ark-rebind payload rejected: {e}");
+                return false;
+            }
+        };
+
+        // Translate the wire shapes into zellij types. Failures here
+        // are individual-binding errors — we log and skip the bad
+        // binding rather than abort the whole batch.
+        let mut to_unbind: Vec<(InputMode, KeyWithModifier)> = Vec::new();
+        for u in &req.unbind {
+            match (parse_input_mode(&u.mode), parse_chord(&u.key)) {
+                (Some(mode), Some(key)) => to_unbind.push((mode, key)),
+                _ => eprintln!(
+                    "{PLUGIN_NAME}: ark-rebind unbind entry rejected (mode={:?}, key={:?})",
+                    u.mode, u.key
+                ),
+            }
+        }
+
+        let mut to_rebind: Vec<(InputMode, KeyWithModifier, Vec<Action>)> = Vec::new();
+        for b in &req.rebind {
+            let mode = match parse_input_mode(&b.mode) {
+                Some(m) => m,
+                None => {
+                    eprintln!(
+                        "{PLUGIN_NAME}: ark-rebind unknown InputMode `{}`; skipping",
+                        b.mode
+                    );
+                    continue;
+                }
+            };
+            let key = match parse_chord(&b.key) {
+                Some(k) => k,
+                None => {
+                    eprintln!(
+                        "{PLUGIN_NAME}: ark-rebind chord `{}` rejected; skipping",
+                        b.key
+                    );
+                    continue;
+                }
+            };
+            let actions: Vec<Action> = b
+                .actions
+                .iter()
+                .map(action_spec_to_action)
+                .collect();
+            to_rebind.push((mode, key, actions));
+        }
+
+        rebind_keys(to_unbind, to_rebind, req.write_to_disk);
+        false
+    }
+
+    /// Parse an `InputMode` name. Wraps `InputMode::from_str`.
+    fn parse_input_mode(s: &str) -> Option<InputMode> {
+        InputMode::from_str(s).ok()
+    }
+
+    /// Parse a chord string via `KeyWithModifier::from_str`.
+    fn parse_chord(s: &str) -> Option<KeyWithModifier> {
+        KeyWithModifier::from_str(s).ok()
+    }
+
+    /// Translate an [`super::RebindActionSpec`] to a zellij `Action`.
+    /// Today only `MessagePlugin` is supported (becomes
+    /// `Action::KeybindPipe`); validation upstream guarantees `kind` is
+    /// already `"MessagePlugin"`.
+    fn action_spec_to_action(spec: &super::RebindActionSpec) -> Action {
+        let plugin = spec.plugin.clone();
+        let name = spec
+            .name
+            .clone()
+            .unwrap_or_else(|| plugin.clone());
+        Action::KeybindPipe {
+            name: Some(name),
+            payload: spec.payload.clone(),
+            args: None,
+            plugin: Some(plugin),
+            configuration: None,
+            launch_new: false,
+            skip_cache: false,
+            floating: Some(false),
+            in_place: None,
+            cwd: None,
+            pane_title: None,
+            plugin_id: None,
+        }
     }
 
     register_plugin!(ArkBus);
@@ -270,6 +524,87 @@ mod tests {
     fn validate_intent_payload_rejects_non_string_name() {
         let err = validate_intent_payload(r#"{ "name": 42 }"#).expect_err("must error");
         assert_eq!(err, IntentPayloadError::MissingName);
+    }
+
+    // ---- T-6.4: rebind payload validators ----
+
+    #[test]
+    fn validate_rebind_payload_accepts_unbind_only() {
+        let req = validate_rebind_payload(
+            r#"{"unbind":[{"mode":"Normal","key":"Alt p"}]}"#,
+        )
+        .expect("ok");
+        assert_eq!(req.unbind.len(), 1);
+        assert_eq!(req.rebind.len(), 0);
+        assert!(!req.write_to_disk);
+        assert_eq!(req.unbind[0].mode, "Normal");
+        assert_eq!(req.unbind[0].key, "Alt p");
+    }
+
+    #[test]
+    fn validate_rebind_payload_accepts_rebind_with_message_plugin() {
+        let req = validate_rebind_payload(
+            r#"{
+                "rebind":[{
+                    "mode":"Normal",
+                    "key":"Alt s",
+                    "actions":[{
+                        "kind":"MessagePlugin",
+                        "plugin":"ark-bus",
+                        "name":"ark-intent",
+                        "payload":"{\"name\":\"ark.core.open_tab\",\"args\":{}}"
+                    }]
+                }],
+                "write_to_disk": true
+            }"#,
+        )
+        .expect("ok");
+        assert_eq!(req.rebind.len(), 1);
+        assert!(req.write_to_disk);
+        let b = &req.rebind[0];
+        assert_eq!(b.mode, "Normal");
+        assert_eq!(b.key, "Alt s");
+        assert_eq!(b.actions.len(), 1);
+        assert_eq!(b.actions[0].kind, "MessagePlugin");
+        assert_eq!(b.actions[0].plugin, "ark-bus");
+        assert_eq!(b.actions[0].name.as_deref(), Some("ark-intent"));
+    }
+
+    #[test]
+    fn validate_rebind_payload_rejects_empty() {
+        let err = validate_rebind_payload(r#"{}"#).expect_err("must error");
+        assert_eq!(err, RebindPayloadError::Empty);
+    }
+
+    #[test]
+    fn validate_rebind_payload_rejects_bad_json() {
+        let err = validate_rebind_payload(r#"{not json"#).expect_err("must error");
+        assert!(matches!(err, RebindPayloadError::BadJson(_)));
+    }
+
+    #[test]
+    fn validate_rebind_payload_rejects_unsupported_action_kind() {
+        let err = validate_rebind_payload(
+            r#"{"rebind":[{"mode":"Normal","key":"Alt p","actions":[{"kind":"Quit","plugin":"x"}]}]}"#,
+        )
+        .expect_err("must error");
+        match err {
+            RebindPayloadError::UnsupportedActionKind(k) => assert_eq!(k, "Quit"),
+            other => panic!("expected UnsupportedActionKind, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rebind_payload_error_display_is_useful() {
+        for e in [
+            RebindPayloadError::BadJson("eof".to_string()),
+            RebindPayloadError::Empty,
+            RebindPayloadError::UnsupportedActionKind("Quit".to_string()),
+        ] {
+            let s = e.to_string();
+            assert!(!s.is_empty());
+            assert!(s.contains("ark-rebind"));
+        }
     }
 
     #[test]
