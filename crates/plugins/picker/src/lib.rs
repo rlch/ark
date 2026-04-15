@@ -49,6 +49,7 @@ pub mod render_confirm;
 pub mod render_detail;
 pub mod render_list;
 pub mod render_new_agent;
+pub mod resurrect;
 pub mod socket_cmd;
 pub mod state;
 
@@ -71,6 +72,10 @@ pub use render_list::{
 pub use render_new_agent::{
     Direction, apply_backspace, apply_char, basename_of, build_new_agent_rows, build_spawn_argv,
     cycle_value, handle_new_agent_key, next_field, prev_field,
+};
+pub use resurrect::{
+    AgentSpecFields, ResurrectError, archive_old_state_dir, build_respawn_argv, read_spec,
+    resurrect,
 };
 pub use socket_cmd::{
     SocketError, escape_json_string, forget_cmd, kill_cmd, rename_cmd, send_command,
@@ -165,11 +170,11 @@ impl Picker {
 mod wasm_plugin {
     use super::{
         ConfirmKillState, DetailState, ErrorState, KeyInput, NewAgentState, Picker, PickerAction,
-        PickerScreen, RenamePromptState, bootstrap, build_detail_rows, build_footer, build_header,
-        build_new_agent_rows, build_spawn_argv, forget_cmd, format_row, fuzzy_filter_and_sort,
-        handle_confirm_kill_key, handle_detail_key, handle_list_key, handle_new_agent_key,
-        handle_rename_prompt_key, kill_cmd, rename_cmd, render_confirm_kill, render_rename_prompt,
-        socket_cmd::SocketError,
+        PickerScreen, RenamePromptState, ResurrectError, bootstrap, build_detail_rows,
+        build_footer, build_header, build_new_agent_rows, build_spawn_argv, forget_cmd, format_row,
+        fuzzy_filter_and_sort, handle_confirm_kill_key, handle_detail_key, handle_list_key,
+        handle_new_agent_key, handle_rename_prompt_key, kill_cmd, rename_cmd, render_confirm_kill,
+        render_rename_prompt, resurrect, socket_cmd::SocketError,
     };
     use zellij_tile::prelude::*;
 
@@ -386,6 +391,51 @@ mod wasm_plugin {
                                             self.screen = PickerScreen::Error(ErrorState {
                                                 message: socket_error_message(&e),
                                             });
+                                        }
+                                    }
+                                    true
+                                }
+                                PickerAction::Resurrect(id) => {
+                                    // T-106 / R7 / R8: `r` on a crashed
+                                    // agent re-spawns it with the same
+                                    // parameters. The render_list key
+                                    // handler already filters to the
+                                    // "selected resurrectable" case; we
+                                    // defend once more here so a stale
+                                    // cache can't run resurrect against a
+                                    // live agent.
+                                    if !self.cache.resurrectable.contains_key(&id) {
+                                        return true;
+                                    }
+                                    let (state_dir, _runtime_dir) = wasm_paths();
+                                    match resurrect::resurrect(&state_dir, &id) {
+                                        Ok(argv) => {
+                                            let argv_refs: Vec<&str> =
+                                                argv.iter().map(|s| s.as_str()).collect();
+                                            run_command(
+                                                &argv_refs,
+                                                std::collections::BTreeMap::new(),
+                                            );
+                                            // The 2 s timer tick will pick up
+                                            // the fresh state dir on the next
+                                            // refresh; for now just return to
+                                            // the list.
+                                            self.screen = PickerScreen::default();
+                                        }
+                                        Err(e) => {
+                                            let msg = match e {
+                                                ResurrectError::SpecNotFound => {
+                                                    format!("spec.json missing for {id}")
+                                                }
+                                                ResurrectError::SpecParseError(m) => {
+                                                    format!("spec.json unreadable: {m}")
+                                                }
+                                                ResurrectError::ArchiveFailed(m) => {
+                                                    format!("archive failed: {m}")
+                                                }
+                                            };
+                                            self.screen =
+                                                PickerScreen::Error(ErrorState { message: msg });
                                         }
                                     }
                                     true
