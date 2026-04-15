@@ -115,6 +115,28 @@ fn main() {
         println!("cargo:rerun-if-changed=../../{root}");
     }
     println!("cargo:rerun-if-changed=build.rs");
+    // F-712: watch manifests and the lockfile so transitive dep/profile
+    // changes re-run build.rs and trigger a wasm rebuild.
+    //
+    // Without these, edits that DON'T touch any `src/` file — e.g.
+    //   - bumping `[profile.release]` flags in the workspace Cargo.toml
+    //     (opt-level, lto, strip, panic) which F-704 / T-131 rely on to
+    //     shrink the wasm artifact,
+    //   - bumping a dep version in Cargo.lock (resolver picks a newer
+    //     serde / types crate),
+    //   - editing a transitive `Cargo.toml` like `crates/types/Cargo.toml`
+    //     to pull in a new feature flag —
+    // leave the previously-embedded wasm bytes in `ark-cli`'s OUT_DIR
+    // even though the plugin's compiled output would change on a fresh
+    // build. The stale embed persists until something under the plugin's
+    // own `src/` is touched, producing silent drift between what ships
+    // in the CLI binary and what the plugin crates would actually compile.
+    //
+    // Emitting these extra `cargo:rerun-if-changed` lines costs nothing
+    // (cargo just mtime-watches the paths) and closes the drift window.
+    println!("cargo:rerun-if-changed=../../Cargo.toml");
+    println!("cargo:rerun-if-changed=../../Cargo.lock");
+    println!("cargo:rerun-if-changed=../types/Cargo.toml");
     // F-615: CARGO_TARGET_DIR / `--target-dir` may move the wasm
     // artifact out of `<workspace>/target/`. Re-run when it changes.
     println!("cargo:rerun-if-env-changed=CARGO_TARGET_DIR");

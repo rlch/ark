@@ -817,8 +817,14 @@ fn apply_fix(fix: &FixAction) -> io::Result<String> {
     }
 }
 
-fn run_fixes(rs: &[CheckResult], auto_yes: bool) -> io::Result<()> {
+/// Apply every `FixAction` attached to a CheckResult. Returns the number
+/// of fixes that were successfully applied — the caller uses this to
+/// decide whether to re-run the checks (see F-711: a fresh `run_all`
+/// after a successful repair ensures the final exit code reflects the
+/// POST-fix state, not the pre-fix snapshot).
+fn run_fixes(rs: &[CheckResult], auto_yes: bool) -> io::Result<usize> {
     let mut stderr = io::stderr();
+    let mut applied: usize = 0;
     for r in rs {
         let Some(fix) = &r.fix else { continue };
         let desc = match fix {
@@ -840,6 +846,7 @@ fn run_fixes(rs: &[CheckResult], auto_yes: bool) -> io::Result<()> {
         match apply_fix(fix) {
             Ok(msg) => {
                 writeln!(stderr, "  -> {msg}").ok();
+                applied += 1;
                 // T-098/T-109: after installing a plugin, print the
                 // matching KDL snippet so the user knows how to wire
                 // it into their zellij config.
@@ -864,7 +871,7 @@ fn run_fixes(rs: &[CheckResult], auto_yes: bool) -> io::Result<()> {
             }
         }
     }
-    Ok(())
+    Ok(applied)
 }
 
 // --- entry points -------------------------------------------------
@@ -946,13 +953,15 @@ fn failed_summary(rs: &[CheckResult]) -> String {
 ///   stdout JSON array stays machine-parseable and no state is
 ///   mutated.
 pub fn run(args: DoctorArgs, ctx: &Ctx) -> Result<(), CliError> {
-    let rs = run_all(ctx);
+    let mut rs = run_all(ctx);
 
     if args.json {
         // F-513: JSON mode is read-only. If the caller also passed
         // `--fix`, emit a stderr warning and skip the fix pass so
         // stdout stays pure machine-readable output and disk state
-        // is unchanged.
+        // is unchanged. F-711: because JSON mode cannot apply fixes,
+        // there is nothing to re-check — the pre-fix `rs` is the
+        // final snapshot.
         if args.fix {
             eprintln!("warning: --fix ignored in --json mode");
         }
@@ -967,9 +976,18 @@ pub fn run(args: DoctorArgs, ctx: &Ctx) -> Result<(), CliError> {
         })?;
 
         if args.fix {
-            run_fixes(&rs, args.yes).map_err(|e| CliError::Generic {
+            let applied = run_fixes(&rs, args.yes).map_err(|e| CliError::Generic {
                 reason: format!("fix: {e}"),
             })?;
+            // F-711: recompute check results after a successful repair
+            // pass so the final exit code reflects the POST-fix state.
+            // Without this, `ark doctor --fix --yes` that creates a
+            // missing state_dir still exits 2 (PreflightFail) even
+            // though the repair succeeded — automation sees the pre-fix
+            // `rs` snapshot and assumes the fix failed.
+            if applied > 0 {
+                rs = run_all(ctx);
+            }
         }
     }
 
@@ -1627,6 +1645,62 @@ mod tests {
             sock.exists(),
             "orphan socket must still exist after --json --fix"
         );
+    }
+
+    // ---- F-711: --fix recomputes status after applying fixes ----
+
+    /// Given a missing runtime-dir (Fail + CreateDir fix), verify that:
+    /// 1. the initial `run_all` snapshot contains a Fail,
+    /// 2. `run_fixes(&rs, true)` applies one repair,
+    /// 3. a FRESH `run_all` sees the newly-created dir as Ok.
+    ///
+    /// This models the `run()` control flow introduced by F-711: after a
+    /// successful repair, the final `aggregate_status` must reflect the
+    /// post-fix filesystem, not the pre-fix snapshot. Without the second
+    /// `run_all`, automation running `ark doctor --fix --yes` would see
+    /// exit 2 even though the repair succeeded.
+    #[test]
+    fn fix_recheck_sees_repaired_state_as_ok() {
+        let tmp = tempfile::Builder::new()
+            .prefix("arkd-f711")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let ctx = test_ctx(tmp.path());
+        // Intentionally do NOT create ctx.runtime_dir. check_runtime_dir
+        // will return Fail + FixAction::CreateDir.
+        fs::create_dir_all(&ctx.state_dir).unwrap();
+        fs::create_dir_all(&ctx.config_dir).unwrap();
+
+        assert!(
+            !ctx.runtime_dir.exists(),
+            "precondition: runtime_dir must be missing"
+        );
+
+        // Pre-fix: check_runtime_dir sees Fail + CreateDir fix.
+        let pre = check_runtime_dir(&ctx);
+        assert_eq!(pre.status, Status::Fail, "{pre:?}");
+        assert!(matches!(pre.fix, Some(FixAction::CreateDir(_))), "{pre:?}");
+
+        // Apply the fix.
+        let applied = run_fixes(&[pre], true).expect("fix");
+        assert_eq!(applied, 1, "exactly one repair should have been applied");
+
+        // Post-fix: the dir now exists and the check returns Ok. This is
+        // exactly what run() sees after the F-711 re-run_all pass.
+        assert!(ctx.runtime_dir.exists(), "runtime_dir should now exist");
+        let post = check_runtime_dir(&ctx);
+        assert_eq!(post.status, Status::Ok, "{post:?}");
+        assert!(post.fix.is_none(), "{post:?}");
+    }
+
+    /// Guard the `applied` return contract: when no CheckResult carries
+    /// a FixAction, `run_fixes` must return 0. This is the signal `run()`
+    /// uses to skip the expensive re-check pass.
+    #[test]
+    fn run_fixes_returns_zero_when_nothing_fixable() {
+        let rs = vec![CheckResult::ok("a", "ok"), CheckResult::warn("b", "warn")];
+        let applied = run_fixes(&rs, true).expect("fix");
+        assert_eq!(applied, 0);
     }
 
     // ---- T-098: status plugin distribution ----

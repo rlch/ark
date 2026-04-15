@@ -1022,3 +1022,69 @@ The `inline_build_enabled()` fn now returns `true` unless `ARK_BUILD_WASM` is li
 - `cargo fmt --all` clean. `cargo build --workspace --all-targets` emits zero real warnings (only the six intentional `cargo:warning=` lines from `build.rs`). `RUSTFLAGS="-D warnings" cargo build --workspace --all-targets` succeeds.
 
 **Gate status after Tier 6 cycle 6:** CLOSED. Cycle 6 resolved one P1 (CI gate breakage) plus a bonus manifest ergonomics fix, and raised zero new findings; the Tier 6 ledger now spans F-500 through F-710.
+
+### F-711 — P1 `doctor --fix` exit code reflects pre-fix snapshot (FIXED)
+
+**Source:** codex
+**Tier:** 6
+**Severity:** P1
+**Status:** fixed
+**Location:** `crates/cli/src/commands/doctor.rs` — `run()` final aggregate, `run_fixes()` return type.
+
+**Description:** `ark doctor --fix --yes` computed `aggregate_status(&rs)` against the pre-fix `CheckResults`. When a fix successfully repaired the problem (e.g. `FixAction::CreateDir` creating a missing `runtime_dir`), the on-disk state was clean BUT the binary still exited 2 (`CliError::PreflightFail`) because `rs` was a stale snapshot taken before `run_fixes` ran. Automation driving `ark doctor --fix` in CI or install scripts therefore saw a failed-repair signal even when the repair actually succeeded, which forced brittle workarounds (e.g. a second `ark doctor` invocation + exit-code parsing).
+
+**Resolution:**
+
+1. `run_fixes()` now returns `io::Result<usize>` — the number of successfully-applied fixes. Callers previously relying on `Result<()>` continue to work because the existing call sites all use `.expect("fix")` / `.unwrap()` followed by a `;` that discards the `usize`.
+2. `run()` makes `rs` a `let mut` binding. After a non-zero `applied` count, it re-runs `run_all(ctx)` and reassigns `rs` to the fresh snapshot. `aggregate_status` at the bottom of `run()` now sees post-fix state — exit 0 when every repair succeeded, exit 2 only when at least one check is still `Fail`.
+3. JSON mode is unchanged per F-513 (JSON is read-only, never applies fixes, so there's nothing to re-check — a comment cross-references F-513 so the asymmetry is obvious).
+
+**Tests added:**
+
+- `commands::doctor::tests::fix_recheck_sees_repaired_state_as_ok` seeds a missing `runtime_dir`, asserts `check_runtime_dir` returns `Fail + CreateDir`, calls `run_fixes(&[pre], true)` and asserts it returns `1`, then calls `check_runtime_dir` again and asserts it returns `Ok` with no `fix`. That's the exact control flow `run()` walks through when the user passes `--fix --yes`.
+- `commands::doctor::tests::run_fixes_returns_zero_when_nothing_fixable` guards the `applied == 0` contract: when no `CheckResult` carries a `FixAction`, `run_fixes` returns `0` so `run()` skips the redundant re-check.
+
+**Why not full end-to-end of `run()`:** `run_all()` probes host binaries (`zellij`, `claude`, `delta`, editor), which on the test host may be missing and produce an aggregate `Fail` regardless of the repair pass. The unit-level test above exercises the exact state transition F-711 cares about — pre-fix Fail → fix applied → post-fix Ok — without coupling to host binary availability.
+
+### F-712 — P2 build.rs misses Cargo.toml + Cargo.lock transitive changes (FIXED)
+
+**Source:** codex
+**Tier:** 6
+**Severity:** P2
+**Status:** fixed
+**Location:** `crates/cli/build.rs` — `main()` `cargo:rerun-if-changed` list.
+
+**Description:** `build.rs` watched each plugin's `src/` + `Cargo.toml` and the transitive source roots listed in `STATUS_PLUGIN_DEP_ROOTS` / `PICKER_PLUGIN_DEP_ROOTS` (F-704), but missed three classes of change that also affect the embedded wasm bytes:
+
+1. The workspace root `Cargo.toml` — carries `[profile.release]` (`opt-level = "z"`, `lto = "fat"`, `codegen-units = 1`, `strip`, `panic`) that T-131 relies on to shrink the wasm artifact. Edits here produce different wasm bytes but don't touch any `src/`, so `build.rs` never re-runs.
+2. `Cargo.lock` — when the resolver picks a new `serde` / `serde_json` / transitive dep version, the plugin's compiled output changes without any source file touching.
+3. `crates/types/Cargo.toml` — adding a feature flag or dep bump in a transitive crate's manifest produces different wasm without touching `crates/types/src`.
+
+All three leave the old wasm embedded in ark-cli's OUT_DIR until something under a plugin's own `src/` is edited, producing silent drift between the CLI-shipped wasm and what the plugin crates would actually compile today.
+
+**Resolution:** emit three additional `cargo:rerun-if-changed` lines in `build.rs::main()` (relative to `CARGO_MANIFEST_DIR = crates/cli/`):
+
+- `../../Cargo.toml` — workspace profile + shared `[workspace.dependencies]`.
+- `../../Cargo.lock` — dep version resolution.
+- `../types/Cargo.toml` — transitive dep manifest (the only workspace dep the current plugin graph consumes through its source root).
+
+Extensive comment explains why each is needed. Cost is free — cargo just mtime-watches paths — and the stale-embed window closes.
+
+**Tests added:** none. Build-script re-run behaviour is exercised by the standard gate: after the change, `cargo build -p ark-cli` still links and `cargo test --workspace -- --test-threads=1` still passes. Full regression verification for this class of fix requires touching each watched file in isolation and confirming `build.rs` re-ran, which is a manual/infra-level check rather than a unit test.
+
+**Gate evidence:**
+
+- `cargo fmt --all --check` clean.
+- `cargo build --workspace` emits zero real warnings (only the intentional `cargo:warning=` telemetry from `build.rs` reporting plugin sizes / wasm-opt shrink ratios).
+- `cargo test -p ark-cli` → 279 lib + 0 doc + 3 cli_help + 9 e2e + 0 integration = 291 total (277 → 279 lib via F-711's two new tests; integration sums unchanged).
+- `cargo test --workspace -- --test-threads=1` fully green (41 `ok` result lines, 0 `FAILED`).
+
+## Test Delta — Tier 6 Cycle 7
+
+- ark-cli: 277 lib baseline → 279 passing (+2 for F-711: `fix_recheck_sees_repaired_state_as_ok` exercises the Fail→fix→Ok transition `run()` walks after F-711's re-check pass; `run_fixes_returns_zero_when_nothing_fixable` guards the `applied==0` contract used to skip the redundant re-run).
+- ark-cli cli_help integration: 3 unchanged. ark-cli e2e: 9 unchanged.
+- Other crates: unchanged.
+- Workspace: `cargo test --workspace -- --test-threads=1` fully green (41 `ok` result lines, 0 `FAILED`).
+- `cargo fmt --all --check` clean. `cargo build --workspace` clean (zero real warnings; only the expected `cargo:warning=` telemetry from `build.rs`).
+
+**Gate status after Tier 6 cycle 7:** CLOSED. Cycle 7 resolved one P1 (`doctor --fix` exit code drift) and one P2 (build.rs stale-embed window) and raised zero new findings; the Tier 6 ledger now spans F-500 through F-712.
