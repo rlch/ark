@@ -409,6 +409,54 @@ pub async fn run_supervisor_with(
         "R3 step 10: observability installed"
     );
 
+    // ---- Step 10.5: mount always-on plugins (T-7.2) ----
+    //
+    // Walk the scene's `plugin { }` declarations (when `spec.scene_path`
+    // points at an on-disk scene) and mount every `Lifecycle::Always`
+    // plugin through the intent registry's `mount_plugin` op. Summon /
+    // event-mount plugins are seeded as `Dormant` so downstream
+    // reaction-synthesis paths (T-7.3 / T-7.4) can observe their state
+    // when their selector matches.
+    //
+    // This runs BEFORE `AgentEvent::Started` so any `set_status` op a
+    // freshly-mounted status plugin emits is visible to the event
+    // pipeline the moment the agent comes up. It also means a mount
+    // failure has already been surfaced as `ark.plugin.failed` by the
+    // time the scene's reactions observe `Started` — the scene can
+    // cleanly fall back (e.g. `on "UserEvent:ark.plugin.failed" {
+    // set_status text="<plugin> unavailable" }`).
+    //
+    // On scenes with no `scene_path` (e.g. pre-T-7 callers that build
+    // AgentSpec without scene wiring) this step is a no-op.
+    let plugin_lifecycle = crate::plugin_lifecycle::PluginLifecycleManager::new();
+    if let Some(scene_path) = spec.scene_path.as_ref() {
+        match mount_always_on_plugins(
+            scene_path,
+            &plugin_lifecycle,
+            &events,
+        )
+        .await
+        {
+            Ok(outcomes) => {
+                debug!(
+                    count = outcomes.len(),
+                    "R3 step 10.5: always-on plugin mount pass complete"
+                );
+            }
+            Err(err) => {
+                // Scene parse or IO error — log and continue. The
+                // supervisor must not crash for scene-level errors at
+                // this stage; the scene author gets the diagnostic via
+                // `ark scene check`, and the runtime degrades to a
+                // session with zero plugins mounted rather than no
+                // session at all.
+                warn!(error = %err, scene = %scene_path.display(), "R3 step 10.5: scene plugin mount skipped");
+            }
+        }
+    } else {
+        debug!("R3 step 10.5: no scene_path on spec; plugin mount skipped");
+    }
+
     // ---- Step 11: emit Started ----
     // Best-effort: if nobody is subscribed yet, the Err is benign. The
     // consumers spawned at step 9 always have receivers alive at this
@@ -637,6 +685,66 @@ pub fn finalize_state(
 /// touch those handles (most R7 ops at this tier) work end-to-end. Once
 /// the scene runtime grows real handles (T-7.x / T-8.x), this builder is
 /// the single point to thread them in.
+/// Load the scene at `scene_path`, lower every `plugin { }` declaration to
+/// a typed [`PluginDecl`], and drive the `Lifecycle::Always` set through
+/// [`PluginLifecycleManager::mount_always_on`].
+///
+/// Errors on disk I/O, UTF-8 decode, or facet-kdl parse — the caller
+/// logs and continues. Per-plugin mount failures are NOT surfaced here;
+/// they are recorded on the manager and emitted as `ark.plugin.failed`
+/// UserEvents so scene reactions can observe and act.
+async fn mount_always_on_plugins(
+    scene_path: &std::path::Path,
+    manager: &crate::plugin_lifecycle::PluginLifecycleManager,
+    event_bus: &ark_types::EventSink,
+) -> Result<Vec<crate::plugin_lifecycle::MountOutcome>> {
+    let bytes = std::fs::read(scene_path)
+        .with_context(|| format!("read scene `{}`", scene_path.display()))?;
+    let src = std::str::from_utf8(&bytes)
+        .with_context(|| format!("scene `{}` is not valid utf-8", scene_path.display()))?;
+    let doc = ark_scene::parse::parse_scene(src, scene_path)
+        .map_err(|e| anyhow::anyhow!("scene parse failed: {e}"))?;
+
+    // Lift the typed PluginNode children into PluginDecls, skipping
+    // nodes whose lifecycle lowering errored out (ambiguous / invalid).
+    let mut decls = Vec::new();
+    for plugin in &doc.scene.plugins {
+        match ark_scene::plugin::lower_plugin(plugin) {
+            Ok(decl) => decls.push(decl),
+            Err(err) => {
+                warn!(
+                    plugin = %plugin.name,
+                    error = %err,
+                    "plugin lowering failed; skipping from always-on mount pass"
+                );
+            }
+        }
+    }
+
+    // Build the intent registry used for mount dispatch. This is a
+    // fresh registry rather than sharing with the control-socket /
+    // reaction dispatcher ones; the intent surface is identical (core
+    // ops only) and a separate handle avoids cross-task lock contention.
+    let registry = IntentRegistry::new();
+    register_core_ops(&registry).await;
+
+    // Placeholder IntentContext — the scene crate's own TODO(T-5.x)
+    // covers real handle plumbing for mux / bus / supervisor. The
+    // mount_plugin op at this tier logs + returns Ok(None), so the
+    // lifecycle manager's state tracking is exercised end-to-end even
+    // without a real mux.
+    let scene_id = SceneId::from_bytes(
+        scene_path.to_path_buf(),
+        format!("plugin-lifecycle:{}", scene_path.display()).as_bytes(),
+    );
+    let ctx = IntentContext::placeholder(scene_id);
+
+    let outcomes = manager
+        .mount_always_on(&decls, &registry, &ctx, event_bus)
+        .await;
+    Ok(outcomes)
+}
+
 async fn build_intent_bridge_for_socket(spec: &AgentSpec) -> crate::commands::IntentBridge {
     let registry = IntentRegistry::new();
     register_core_ops(&registry).await;
@@ -988,6 +1096,72 @@ mod tests {
         assert_eq!(s.phase, Phase::Timeout);
         assert_ne!(s.phase, Phase::Done, "must not be misreported as success");
         assert!(s.last_event_summary.contains("timeout"));
+    }
+
+    /// T-7.2 integration: when `spec.scene_path` points at a scene
+    /// declaring an always-on plugin, `mount_always_on_plugins` parses
+    /// the file, lowers the plugin decl, and drives the lifecycle
+    /// manager through the intent registry.
+    #[tokio::test]
+    async fn mount_always_on_plugins_mounts_every_always_plugin_from_scene_file() {
+        let tmp = short_tempdir();
+        let scene_path = tmp.path().join("always.kdl");
+        std::fs::write(
+            &scene_path,
+            r#"scene "always-test" {
+    plugin "status-bar" {
+        source "shipped:status"
+        mount "status-bar"
+    }
+    plugin "on-demand" {
+        source "shipped:picker"
+        mount "floating"
+        summon "UserEvent:picker.show"
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let manager = crate::plugin_lifecycle::PluginLifecycleManager::new();
+        let (tx, _rx) = ark_types::channel(8);
+        let outcomes = mount_always_on_plugins(&scene_path, &manager, &tx)
+            .await
+            .expect("scene parses + mounts");
+
+        // The always plugin got mounted; the summon plugin did not.
+        assert_eq!(outcomes.len(), 1);
+        match &outcomes[0] {
+            crate::plugin_lifecycle::MountOutcome::Mounted { name, .. } => {
+                assert_eq!(name, "status-bar");
+            }
+            other => panic!("expected Mounted, got {other:?}"),
+        }
+
+        // The state map reflects both plugins; only status-bar is mounted.
+        assert!(
+            manager
+                .state("status-bar")
+                .await
+                .unwrap()
+                .is_mounted(),
+        );
+        assert_eq!(
+            manager.state("on-demand").await,
+            Some(crate::plugin_lifecycle::MountState::Dormant),
+        );
+    }
+
+    /// T-7.2 integration: a bogus scene path surfaces as an anyhow error
+    /// rather than panicking. Supervisor boot sequence absorbs this.
+    #[tokio::test]
+    async fn mount_always_on_plugins_returns_err_on_missing_scene() {
+        let tmp = short_tempdir();
+        let missing = tmp.path().join("does-not-exist.kdl");
+        let manager = crate::plugin_lifecycle::PluginLifecycleManager::new();
+        let (tx, _rx) = ark_types::channel(8);
+        let res = mount_always_on_plugins(&missing, &manager, &tx).await;
+        assert!(res.is_err(), "missing scene must error");
     }
 
     #[test]

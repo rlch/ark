@@ -79,3 +79,11 @@ pub use auto_close::{AutoClosePolicy, apply_auto_close_policy, collect_opened_ta
 // W-2: parent ↔ daemon ready handshake (cavekit-supervisor R3 step 12).
 pub mod ready_signal;
 pub use ready_signal::{ACK_BYTE, ReadyWriter};
+
+// T-7.2: plugin lifecycle manager — tracks mount state for every scene-
+// declared plugin, fans out mount failures as `ark.plugin.failed`
+// UserEvents, and drives the always-on mount sequence at session boot.
+pub mod plugin_lifecycle;
+pub use plugin_lifecycle::{
+    MountOutcome, MountState, PluginLifecycleManager, PLUGIN_FAILED_EVENT,
+};
