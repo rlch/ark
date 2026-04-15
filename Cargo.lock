@@ -238,6 +238,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "ark-core",
+ "ark-test-fixtures",
  "ark-types",
  "async-trait",
  "notify 7.0.0",

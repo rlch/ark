@@ -27,6 +27,7 @@ pub mod engine_contract;
 pub mod events_log;
 pub mod multiplexer;
 pub mod orchestrator;
+pub mod orchestrator_contract;
 pub mod socket_paths;
 pub mod status_writer;
 
@@ -40,5 +41,6 @@ pub use engine_contract::engine_contract_suite;
 pub use events_log::{EventLogHandle, EventLogReader, EventLogWriter, EventRecord};
 pub use multiplexer::Multiplexer;
 pub use orchestrator::{Orchestrator, World};
+pub use orchestrator_contract::{MockMux, OrchestratorFixtures, orchestrator_contract_suite};
 pub use socket_paths::{agent_socket_path, ensure_agents_dir, runtime_root};
 pub use status_writer::{read_status, write_status_atomic};

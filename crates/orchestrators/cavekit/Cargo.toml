@@ -17,5 +17,6 @@ anyhow = { workspace = true }
 notify = { workspace = true }
 
 [dev-dependencies]
+ark-test-fixtures = { path = "../../test-fixtures" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
