@@ -5,3 +5,4 @@
 //! `context/kits/cavekit-scene.md` (R1–R17) for the full spec.
 
 pub mod ast;
+pub mod error;
