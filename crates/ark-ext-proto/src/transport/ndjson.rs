@@ -44,7 +44,10 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout_at};
 
-use super::{ExtensionClient, ProgressReceiver, RequestOptions, TaskProgress};
+use super::{
+    ExtensionClient, ProgressReceiver, RequestOptions, ReverseRequestGate, TaskProgress,
+    method_to_capability,
+};
 use crate::*;
 
 /// JSON-RPC 2.0 request envelope.
@@ -112,12 +115,25 @@ pub struct ResponseError {
 
 impl ResponseError {
     /// Convert a wire error into [`ExtensionError`]. The standard
-    /// JSON-RPC codes map onto matching variants; everything else
-    /// funnels into [`ExtensionError::Internal`] with the raw message.
+    /// JSON-RPC codes (`-32601`, `-32602`) map onto matching variants;
+    /// the ark-extended codes (`-32003` capability-denied, `-32004`
+    /// unsupported-version, `-32005` crashed) map onto their typed
+    /// variants. Everything else funnels into
+    /// [`ExtensionError::Internal`] with the raw message.
     pub fn into_extension_error(self) -> ExtensionError {
         match self.code {
             -32601 => ExtensionError::MethodNotFound(self.message),
             -32602 => ExtensionError::InvalidParams(self.message),
+            -32003 => ExtensionError::CapabilityDenied(self.message),
+            -32004 => ExtensionError::UnsupportedVersion(self.message),
+            // -32005 is `ext/crashed` — the wire form carries the
+            // tail in `message`; the structured `Crashed { name, … }`
+            // variant is built host-side by the supervisor crate
+            // (this code path is hit only when an extension echoes a
+            // crash diagnostic over RPC, which is rare). Map to
+            // Internal with the message preserved so callers still
+            // see the diagnostic.
+            -32005 => ExtensionError::Internal(self.message),
             _ => ExtensionError::Internal(self.message),
         }
     }
@@ -824,7 +840,49 @@ impl NdjsonServer {
     /// Drive `ext` to completion on `(reader, writer)` — reads one
     /// NDJSON request per line, dispatches, writes the response back,
     /// loops until EOF. Returns the total number of requests handled.
-    pub async fn serve<R, W, E>(reader: R, mut writer: W, ext: Arc<E>) -> io::Result<u64>
+    pub async fn serve<R, W, E>(reader: R, writer: W, ext: Arc<E>) -> io::Result<u64>
+    where
+        R: AsyncRead + Unpin,
+        W: AsyncWrite + Unpin,
+        E: ArkExtension + 'static,
+    {
+        Self::serve_inner(reader, writer, ext, None).await
+    }
+
+    /// Same as [`NdjsonServer::serve`] but every dispatched request is
+    /// first gated through `gate` per R16: requests for `host/*` /
+    /// `workspace/*` methods MUST present the session token (carried
+    /// in `params._sessionToken`) and the corresponding dotted
+    /// capability identifier MUST be in
+    /// [`crate::Capabilities::granted`]. Failures surface as
+    /// JSON-RPC error responses with code `-32001` (the
+    /// `ext-proto/capability-denied` family); the typed
+    /// [`crate::ExtensionError::CapabilityDenied`] flows through the
+    /// existing `ResponseError::into_extension_error` path.
+    ///
+    /// The token field is stripped from `params` before the request
+    /// is deserialized into the typed request struct, so extension
+    /// code never sees the token leak into its payload.
+    pub async fn serve_gated<R, W, E>(
+        reader: R,
+        writer: W,
+        ext: Arc<E>,
+        gate: ReverseRequestGate,
+    ) -> io::Result<u64>
+    where
+        R: AsyncRead + Unpin,
+        W: AsyncWrite + Unpin,
+        E: ArkExtension + 'static,
+    {
+        Self::serve_inner(reader, writer, ext, Some(gate)).await
+    }
+
+    async fn serve_inner<R, W, E>(
+        reader: R,
+        mut writer: W,
+        ext: Arc<E>,
+        gate: Option<ReverseRequestGate>,
+    ) -> io::Result<u64>
     where
         R: AsyncRead + Unpin,
         W: AsyncWrite + Unpin,
@@ -844,7 +902,7 @@ impl NdjsonServer {
                 WireMessage::Request(r) => r,
                 _ => continue,
             };
-            let resp = Self::dispatch(&ext, req).await;
+            let resp = Self::dispatch(&ext, req, gate.as_ref()).await;
             let body = serde_json::to_string(&resp)
                 .unwrap_or_else(|e| format!("{{\"serialize-error\":\"{e}\"}}"));
             writer.write_all(body.as_bytes()).await?;
@@ -856,9 +914,29 @@ impl NdjsonServer {
     }
 
     /// Dispatch a single parsed [`Request`] against an extension impl
-    /// and produce a wire-ready [`Response`].
-    async fn dispatch<E: ArkExtension>(ext: &Arc<E>, req: Request) -> Response {
+    /// and produce a wire-ready [`Response`]. When `gate` is `Some`,
+    /// any `host/*` / `workspace/*` method is checked first and the
+    /// `params._sessionToken` field is stripped before the typed
+    /// request is built.
+    async fn dispatch<E: ArkExtension>(
+        ext: &Arc<E>,
+        mut req: Request,
+        gate: Option<&ReverseRequestGate>,
+    ) -> Response {
         let id = req.id;
+
+        // Capability + session-token gate per R16. Strip the token
+        // before the typed request is deserialized so extension code
+        // never sees it leak.
+        if let Some(gate) = gate {
+            if let Some(capability) = method_to_capability(&req.method) {
+                let token = pop_session_token(&mut req.params);
+                if let Err(e) = gate.check(&token, &capability) {
+                    return error_response(id, &e);
+                }
+            }
+        }
+
         let method = req.method.as_str();
         let result: Result<Value, ExtensionError> = match method {
             "initialize" => dispatch_typed::<E, InitializeRequest, InitializeResponse, _>(
@@ -891,6 +969,88 @@ impl NdjsonServer {
                 |e, r| async move { e.task_get(r).await },
             )
             .await,
+            "task/cancel" => dispatch_typed::<E, TaskCancelRequest, TaskCancelResponse, _>(
+                ext,
+                req.params,
+                |e, r| async move { e.task_cancel(r).await },
+            )
+            .await,
+            "host/fs/read" => dispatch_typed::<E, HostFsReadRequest, HostFsReadResponse, _>(
+                ext,
+                req.params,
+                |e, r| async move { e.host_fs_read(r).await },
+            )
+            .await,
+            "host/fs/write" => dispatch_typed::<E, HostFsWriteRequest, HostFsWriteResponse, _>(
+                ext,
+                req.params,
+                |e, r| async move { e.host_fs_write(r).await },
+            )
+            .await,
+            "host/proc/spawn" => {
+                dispatch_typed::<E, HostProcSpawnRequest, HostProcSpawnResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.host_proc_spawn(r).await },
+                )
+                .await
+            }
+            "host/net/fetch" => {
+                dispatch_typed::<E, HostNetFetchRequest, HostNetFetchResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.host_net_fetch(r).await },
+                )
+                .await
+            }
+            "workspace/applyEdit" => dispatch_typed::<
+                E,
+                WorkspaceApplyEditRequest,
+                WorkspaceApplyEditResponse,
+                _,
+            >(ext, req.params, |e, r| async move {
+                e.workspace_apply_edit(r).await
+            })
+            .await,
+            "workspace/configuration" => dispatch_typed::<
+                E,
+                WorkspaceConfigurationRequest,
+                WorkspaceConfigurationResponse,
+                _,
+            >(
+                ext, req.params, |e, r| async move { e.workspace_configuration(r).await }
+            )
+            .await,
+            "workspace/showDocument" => dispatch_typed::<
+                E,
+                WorkspaceShowDocumentRequest,
+                WorkspaceShowDocumentResponse,
+                _,
+            >(
+                ext, req.params, |e, r| async move { e.workspace_show_document(r).await }
+            )
+            .await,
+            "workspace/showMessageRequest" => dispatch_typed::<
+                E,
+                WorkspaceShowMessageRequestRequest,
+                WorkspaceShowMessageRequestResponse,
+                _,
+            >(ext, req.params, |e, r| async move {
+                e.workspace_show_message_request(r).await
+            })
+            .await,
+            "scene/getRoot" => dispatch_typed::<E, SceneGetRootRequest, SceneGetRootResponse, _>(
+                ext,
+                req.params,
+                |e, r| async move { e.scene_get_root(r).await },
+            )
+            .await,
+            "log/setLevel" => dispatch_typed::<E, LogSetLevelRequest, LogSetLevelResponse, _>(
+                ext,
+                req.params,
+                |e, r| async move { e.log_set_level(r).await },
+            )
+            .await,
             other => Err(ExtensionError::method_not_found(other)),
         };
         match result {
@@ -900,21 +1060,49 @@ impl NdjsonServer {
                 result: Some(v),
                 error: None,
             },
-            Err(e) => Response {
-                jsonrpc: "2.0".into(),
-                id: Some(id),
-                result: None,
-                error: Some(ResponseError {
-                    code: match &e {
-                        ExtensionError::MethodNotFound(_) => -32601,
-                        ExtensionError::InvalidParams(_) => -32602,
-                        _ => -32000,
-                    },
-                    message: e.to_string(),
-                    data: None,
-                }),
-            },
+            Err(e) => error_response(id, &e),
         }
+    }
+}
+
+/// Strip the `_sessionToken` field from a `params` JSON object, if
+/// present, and return its string value (or empty string when
+/// absent). Used by [`NdjsonServer::dispatch`]'s gate step before the
+/// typed request is built.
+fn pop_session_token(params: &mut Value) -> String {
+    if let Value::Object(map) = params {
+        if let Some(Value::String(s)) = map.remove("_sessionToken") {
+            return s;
+        }
+    }
+    String::new()
+}
+
+/// Build a JSON-RPC error response for any `ExtensionError`. The wire
+/// `code` matches R12: `-32601` for `MethodNotFound`, `-32602` for
+/// `InvalidParams`, `-32003` for `CapabilityDenied`, `-32004` for
+/// `UnsupportedVersion`, `-32000` for everything else (catch-all
+/// internal). The response's `data` field carries the
+/// [`crate::ExtensionError::code`] string so consumers can match
+/// against the `ext-proto/*` family without parsing `message`.
+fn error_response(id: u64, e: &ExtensionError) -> Response {
+    let code = match e {
+        ExtensionError::MethodNotFound(_) => -32601,
+        ExtensionError::InvalidParams(_) => -32602,
+        ExtensionError::CapabilityDenied(_) => -32003,
+        ExtensionError::UnsupportedVersion(_) => -32004,
+        ExtensionError::Crashed { .. } => -32005,
+        ExtensionError::Internal(_) => -32000,
+    };
+    Response {
+        jsonrpc: "2.0".into(),
+        id: Some(id),
+        result: None,
+        error: Some(ResponseError {
+            code,
+            message: e.to_string(),
+            data: Some(Value::String(e.code().to_string())),
+        }),
     }
 }
 
@@ -1229,6 +1417,215 @@ mod tests {
         assert_eq!(subscribers.len(), 1);
         drop(bus);
         client.shutdown_transport().await;
+    }
+
+    /// Stub extension that implements `host_fs_read` so the gate test
+    /// can verify the call lands when the capability matches.
+    struct HostFsExt;
+    #[async_trait]
+    impl ArkExtension for HostFsExt {
+        async fn host_fs_read(
+            &self,
+            req: HostFsReadRequest,
+        ) -> ExtResult<HostFsReadResponse> {
+            Ok(HostFsReadResponse {
+                contents: format!("read:{}", req.path),
+            })
+        }
+    }
+
+    /// T-9.5.8: with the right capability + right session token, a
+    /// `host/fs/read` reverse-request reaches the extension.
+    #[tokio::test]
+    async fn gated_dispatch_admits_authorized_host_call() {
+        use crate::{Capabilities, SessionToken};
+
+        let token = SessionToken::from_string("tok-grant");
+        let caps = Capabilities::from_iter(["host.fs.read"]);
+        let gate = ReverseRequestGate::new(token, caps);
+
+        let (client_io, server_io) = duplex(8192);
+        let (client_r, client_w) = tokio::io::split(client_io);
+        let (server_r, server_w) = tokio::io::split(server_io);
+
+        let client = NdjsonClient::from_halves(client_r, client_w);
+        let server = tokio::spawn(async move {
+            NdjsonServer::serve_gated(server_r, server_w, Arc::new(HostFsExt), gate)
+                .await
+                .ok()
+        });
+
+        // Hand-roll the wire so we can attach `_sessionToken` to
+        // params (the typed client API doesn't expose this — the
+        // supervisor crate is the producer of these wire frames in
+        // real usage).
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 5u64,
+            "method": "host/fs/read",
+            "params": {
+                "path": "/etc/hosts",
+                "_sessionToken": "tok-grant",
+            }
+        })
+        .to_string();
+        let (resp_tx, resp_rx) = oneshot::channel();
+        client.inner.pending.lock().await.insert(5, resp_tx);
+        client.inner.tx.send(body).unwrap();
+
+        let response = tokio::time::timeout(Duration::from_secs(2), resp_rx)
+            .await
+            .expect("recv timed out")
+            .expect("oneshot dropped");
+        assert!(response.error.is_none(), "unexpected: {:?}", response.error);
+        let result = response.result.expect("result missing");
+        assert_eq!(result["contents"], "read:/etc/hosts");
+
+        client.shutdown_transport().await;
+        let _ = server.await;
+    }
+
+    /// T-9.5.8: without the capability, the call is denied even when
+    /// the token is valid.
+    #[tokio::test]
+    async fn gated_dispatch_denies_when_capability_missing() {
+        use crate::{Capabilities, SessionToken};
+
+        let token = SessionToken::from_string("tok-grant");
+        // Extension only has `ui.keybind`, NOT `host.fs.read`.
+        let caps = Capabilities::from_iter(["ui.keybind"]);
+        let gate = ReverseRequestGate::new(token, caps);
+
+        let (client_io, server_io) = duplex(8192);
+        let (client_r, client_w) = tokio::io::split(client_io);
+        let (server_r, server_w) = tokio::io::split(server_io);
+
+        let client = NdjsonClient::from_halves(client_r, client_w);
+        let server = tokio::spawn(async move {
+            NdjsonServer::serve_gated(server_r, server_w, Arc::new(HostFsExt), gate)
+                .await
+                .ok()
+        });
+
+        // Send a wire frame with the right token but unauthorized
+        // method.
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 7u64,
+            "method": "host/fs/read",
+            "params": {
+                "path": "/etc/hosts",
+                "_sessionToken": "tok-grant",
+            }
+        })
+        .to_string();
+        // Register a oneshot for id=7 so we can capture the error
+        // response.
+        let (resp_tx, resp_rx) = oneshot::channel();
+        client.inner.pending.lock().await.insert(7, resp_tx);
+        client.inner.tx.send(body).unwrap();
+
+        let response = tokio::time::timeout(Duration::from_secs(2), resp_rx)
+            .await
+            .expect("recv timed out")
+            .expect("oneshot dropped");
+        let err = response.error.expect("expected error response");
+        assert_eq!(err.code, -32003, "wire code should be capability-denied");
+        assert!(
+            err.message.contains("host.fs.read"),
+            "message should name capability, got {}",
+            err.message
+        );
+        // The structured `data` field carries the ext-proto/* code.
+        assert_eq!(
+            err.data,
+            Some(Value::String("ext-proto/capability-denied".into()))
+        );
+
+        client.shutdown_transport().await;
+        let _ = server.await;
+    }
+
+    /// T-9.5.8: the call is also denied when the token mismatches,
+    /// even if the capability is granted.
+    #[tokio::test]
+    async fn gated_dispatch_denies_when_token_mismatches() {
+        use crate::{Capabilities, SessionToken};
+
+        let token = SessionToken::from_string("tok-correct");
+        let caps = Capabilities::from_iter(["host.fs.read"]);
+        let gate = ReverseRequestGate::new(token, caps);
+
+        let (client_io, server_io) = duplex(8192);
+        let (client_r, client_w) = tokio::io::split(client_io);
+        let (server_r, server_w) = tokio::io::split(server_io);
+
+        let client = NdjsonClient::from_halves(client_r, client_w);
+        let server = tokio::spawn(async move {
+            NdjsonServer::serve_gated(server_r, server_w, Arc::new(HostFsExt), gate)
+                .await
+                .ok()
+        });
+
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 8u64,
+            "method": "host/fs/read",
+            "params": {
+                "path": "/etc/hosts",
+                "_sessionToken": "tok-WRONG",
+            }
+        })
+        .to_string();
+        let (resp_tx, resp_rx) = oneshot::channel();
+        client.inner.pending.lock().await.insert(8, resp_tx);
+        client.inner.tx.send(body).unwrap();
+
+        let response = tokio::time::timeout(Duration::from_secs(2), resp_rx)
+            .await
+            .expect("recv timed out")
+            .expect("oneshot dropped");
+        let err = response.error.expect("expected error response");
+        assert_eq!(err.code, -32003);
+        assert!(
+            err.message.contains("invalid session token"),
+            "message should mention token mismatch, got {}",
+            err.message
+        );
+
+        client.shutdown_transport().await;
+        let _ = server.await;
+    }
+
+    /// Lifecycle methods are not gated — they need to run before the
+    /// session token is even minted.
+    #[tokio::test]
+    async fn gated_dispatch_skips_check_for_lifecycle_methods() {
+        use crate::{Capabilities, SessionToken};
+
+        let token = SessionToken::from_string("tok");
+        let gate = ReverseRequestGate::new(token, Capabilities::empty());
+
+        let (client_io, server_io) = duplex(8192);
+        let (client_r, client_w) = tokio::io::split(client_io);
+        let (server_r, server_w) = tokio::io::split(server_io);
+
+        let client = NdjsonClient::from_halves(client_r, client_w);
+        let server = tokio::spawn(async move {
+            NdjsonServer::serve_gated(server_r, server_w, Arc::new(EchoExt), gate)
+                .await
+                .ok()
+        });
+
+        // No `_sessionToken` on params — `ping` is a lifecycle
+        // method so the gate skips it.
+        let _resp: PingResponse = client
+            .ping(PingRequest::default(), RequestOptions::default())
+            .await
+            .expect("ping should NOT be gated");
+
+        client.shutdown_transport().await;
+        let _ = server.await;
     }
 
     #[tokio::test]
