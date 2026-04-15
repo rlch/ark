@@ -12,6 +12,8 @@
 //!   (cavekit-types-state-events.md R7).
 //! - `multiplexer` — `Multiplexer` trait
 //!   (cavekit-architecture.md R4).
+//! - `mux_contract` — portable Multiplexer contract suite
+//!   (cavekit-architecture.md R1/R4, T-116).
 //! - `orchestrator` — `Orchestrator` trait + `World` capability bag
 //!   (cavekit-architecture.md R2 + R3).
 //! - `socket_paths` — agents-socket-dir + per-agent path helpers
@@ -26,6 +28,7 @@ pub mod engine;
 pub mod engine_contract;
 pub mod events_log;
 pub mod multiplexer;
+pub mod mux_contract;
 pub mod orchestrator;
 pub mod orchestrator_contract;
 pub mod socket_paths;
@@ -40,6 +43,7 @@ pub use engine::{ApprovalPolicy, Engine, EngineHandle};
 pub use engine_contract::engine_contract_suite;
 pub use events_log::{EventLogHandle, EventLogReader, EventLogWriter, EventRecord};
 pub use multiplexer::Multiplexer;
+pub use mux_contract::{MuxHarness, RecordedCall, mux_contract_suite};
 pub use orchestrator::{Orchestrator, World};
 pub use orchestrator_contract::{MockMux, OrchestratorFixtures, orchestrator_contract_suite};
 pub use socket_paths::{agent_socket_path, ensure_agents_dir, runtime_root};
