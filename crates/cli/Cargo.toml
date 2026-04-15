@@ -12,6 +12,12 @@ homepage = "https://github.com/rlch/ark"
 documentation = "https://github.com/rlch/ark"
 keywords = ["zellij", "ai", "agent", "orchestration", "cli"]
 categories = ["command-line-utilities", "development-tools"]
+# F-710: disambiguate `cargo run -p ark-cli` — without this, the second
+# `[[bin]]` (`ark-hook` binstall shim from F-706) makes `cargo run` error
+# on "found multiple binaries". The shim is gated behind `_binstall_shim`
+# so only `ark` is actually buildable, but cargo's binary resolution
+# happens before feature gating.
+default-run = "ark"
 
 # T-134: cargo-binstall metadata (cavekit-distribution R4).
 # Points binstall at the GitHub Release tarballs produced by

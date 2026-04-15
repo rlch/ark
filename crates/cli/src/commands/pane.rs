@@ -263,15 +263,8 @@ mod tests {
 
     use crate::id_resolver::ResolveError;
     use ark_types::{AgentId, StateLayout};
-    use std::path::PathBuf as PB;
     use tempfile::tempdir;
     use ulid::Ulid;
-
-    fn layout_with_base(base: PB) -> StateLayout {
-        let runtime = base.join("runtime");
-        let config = base.join("config");
-        StateLayout::new(base, runtime, config)
-    }
 
     fn fixed_id(name: &str) -> AgentId {
         let ulid = Ulid::from_string("01JX7Z8K6X9Y2ZT4ABCDEF0123").expect("ulid");

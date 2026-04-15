@@ -988,3 +988,37 @@ The `inline_build_enabled()` fn now returns `true` unless `ARK_BUILD_WASM` is li
 - `cargo fmt --all --check` clean. `cargo build --workspace` clean under both `ARK_BUILD_WASM=0` (legacy path) and default (nested build path) — no new warnings beyond the existing `cargo:warning` telemetry.
 
 **Gate status after Tier 6 cycle 5:** CLOSED. Cycle 5 resolved one P1 + one P2 and raised zero new findings; the Tier 6 ledger now spans F-500 through F-709.
+
+### F-710 — P1 CI `-D warnings` breaks on pre-existing `dead_code` warning (FIXED)
+
+**Source:** codex
+**Tier:** 6
+**Severity:** P1
+**Status:** fixed
+**Location:** crates/cli/src/commands/pane.rs (test module, `layout_with_base` helper), crates/cli/Cargo.toml (`[package].default-run`)
+
+**Description:** `.github/workflows/ci.yml` sets `RUSTFLAGS: -D warnings` at the workspace level for both the unit-test and e2e jobs. That gate is meant to keep CI clean, but it silently depended on the tree having zero warnings at the moment the flag was introduced — a brittle invariant. In practice the `ark-cli` test module carried a stale helper `fn layout_with_base(base: PB) -> StateLayout` that had been generating a `dead_code` warning under `cargo build --workspace --all-targets` for several cycles (visible as `warning: function `layout_with_base` is never used`). Under `-D warnings` that became a hard compile error on the `lib test` artifact, taking down CI the moment the flag was enabled. Bonus: `cargo run -p ark-cli` started erroring with "found more than one binary" once the F-706 binstall shim added a second `[[bin]]` entry (`ark-hook`) to the manifest — cargo's binary resolution runs before feature gating, so even though the shim is gated behind the private `_binstall_shim` feature, cargo still refuses to pick a default binary.
+
+**Resolution:**
+
+1. Deleted the dead `layout_with_base` helper and its `use std::path::PathBuf as PB` alias from `crates/cli/src/commands/pane.rs`. Nothing in the test module called it — verified by grepping for `layout_with_base` (1 hit, the definition) and `\bPB\b` (2 hits, both within the dead chunk). All existing tests were untouched: `StateLayout::new` is still exercised directly by `run_log_honors_ctx_state_dir_even_when_env_points_elsewhere` at line 432.
+2. Added `default-run = "ark"` to the `[package]` stanza of `crates/cli/Cargo.toml` with a comment pointing back at F-706/F-710. This tells cargo to pick `ark` as the implicit binary for `cargo run -p ark-cli`, which restores the ergonomic invocation without touching the binstall shim itself.
+
+**Why delete rather than `#[allow(dead_code)]`:** nothing else in the tree referenced `layout_with_base`, and the function was a duplicate of the `StateLayout::new(base, base.join("runtime"), base.join("config"))` pattern that the remaining tests already inline. Suppressing the warning would have preserved the dead code and left the gate tripwire armed for the next stale helper.
+
+**Gate evidence:**
+
+- `cargo fmt --all` clean.
+- `cargo build --workspace --all-targets 2>&1 | grep -E "^warning:|^error" | grep -v "ark-cli@0.1.0:"` returns zero lines (the six remaining `warning: ark-cli@0.1.0: ...` messages are intentional `cargo:warning=` telemetry from `build.rs` reporting wasm embed sizes / wasm-opt savings — see F-709 and T-130).
+- `RUSTFLAGS="-D warnings" cargo build --workspace --all-targets` succeeds, proving the CI gate no longer trips.
+- `cargo test --workspace -- --test-threads=1` fully green (41 `ok` result lines, 0 FAILED).
+- `cargo run -p ark-cli -- --version` resolves to `target/debug/ark` without needing `--bin ark`, confirming the `default-run` fix.
+
+## Test Delta — Tier 6 Cycle 6
+
+- ark-cli: 277 baseline → 277 passing (no new tests; F-710 was a cleanup + manifest fix, not a behaviour change). The deleted `layout_with_base` helper had no callers, so no tests regressed.
+- Other crates: unchanged.
+- Workspace: `cargo test --workspace -- --test-threads=1` fully green (41 ok result lines, 0 FAILED).
+- `cargo fmt --all` clean. `cargo build --workspace --all-targets` emits zero real warnings (only the six intentional `cargo:warning=` lines from `build.rs`). `RUSTFLAGS="-D warnings" cargo build --workspace --all-targets` succeeds.
+
+**Gate status after Tier 6 cycle 6:** CLOSED. Cycle 6 resolved one P1 (CI gate breakage) plus a bonus manifest ergonomics fix, and raised zero new findings; the Tier 6 ledger now spans F-500 through F-710.
