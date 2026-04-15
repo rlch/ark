@@ -216,4 +216,146 @@ mod tests {
         assert_eq!(read, status);
         assert!(!stale_tmp.exists(), "stale tmp must be renamed away");
     }
+
+    /// T-118 (cavekit-testing R3): first-ever write must create the agent
+    /// state dir itself, not just the file. Callers (supervisor on startup)
+    /// rely on this.
+    #[test]
+    fn write_creates_missing_agent_dir() {
+        let tmp = tempdir().unwrap();
+        let layout = layout_with_base(tmp.path().to_path_buf());
+        let (id, status) = sample_status();
+
+        let agent_dir = layout.agent_dir(&id);
+        assert!(
+            !agent_dir.exists(),
+            "agent dir should not exist before first write"
+        );
+
+        write_status_atomic(&layout, &id, &status).expect("write");
+
+        assert!(
+            agent_dir.is_dir(),
+            "agent dir must be created by write_status_atomic"
+        );
+        assert!(
+            layout.status_path(&id).is_file(),
+            "status.json must exist after write"
+        );
+    }
+
+    /// T-118: the freshly-created agent dir is mode 0700 (spec R5 security
+    /// requirement — status bytes can leak secrets via env or argv).
+    #[test]
+    #[cfg(unix)]
+    fn write_creates_agent_dir_with_mode_0700() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempdir().unwrap();
+        let layout = layout_with_base(tmp.path().to_path_buf());
+        let (id, status) = sample_status();
+
+        write_status_atomic(&layout, &id, &status).expect("write");
+
+        let mode = layout
+            .agent_dir(&id)
+            .metadata()
+            .expect("meta")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700, "agent dir must be 0700, got {:o}", mode);
+    }
+
+    /// T-118: after a single atomic write, no `status.json.tmp` sidecar is
+    /// left behind — the rename step must move the tmp away.
+    #[test]
+    fn write_leaves_no_tmp_sidecar() {
+        let tmp = tempdir().unwrap();
+        let layout = layout_with_base(tmp.path().to_path_buf());
+        let (id, status) = sample_status();
+
+        write_status_atomic(&layout, &id, &status).expect("write");
+
+        let tmp_sidecar = {
+            let mut p = layout.status_path(&id);
+            let mut name = p.file_name().unwrap().to_os_string();
+            name.push(".tmp");
+            p.set_file_name(name);
+            p
+        };
+        assert!(
+            !tmp_sidecar.exists(),
+            "no .tmp sidecar must remain after a successful write, found {:?}",
+            tmp_sidecar
+        );
+    }
+
+    /// T-118: bytes on disk are complete, valid JSON — no partial content
+    /// is ever observable by a racing reader. Validates the published file
+    /// directly (bypassing `read_status`) to ensure the publish step only
+    /// exposes complete bytes.
+    #[test]
+    fn published_file_is_complete_json() {
+        let tmp = tempdir().unwrap();
+        let layout = layout_with_base(tmp.path().to_path_buf());
+        let (id, status) = sample_status();
+
+        write_status_atomic(&layout, &id, &status).expect("write");
+
+        let bytes = fs::read(layout.status_path(&id)).expect("read bytes");
+        // Parse as raw JSON — must succeed, which means the renamed file
+        // contains only whole UTF-8 bytes, never a truncation.
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("file must be valid JSON");
+        assert!(parsed.is_object(), "status.json must deserialize to object");
+        assert_eq!(parsed["phase"], "reviewing");
+        assert_eq!(parsed["supervisor_pid"], 12345);
+    }
+
+    /// T-118: during a burst of alternating writes, every snapshot a
+    /// concurrent reader could take is a complete, parseable `AgentStatus`.
+    /// Exercises the atomicity guarantee of `rename(2)`.
+    #[test]
+    fn concurrent_reader_never_sees_partial_write() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let tmp = tempdir().unwrap();
+        let layout = layout_with_base(tmp.path().to_path_buf());
+        let (id, mut status) = sample_status();
+
+        // Seed the file so the reader has something to read from tick 0.
+        write_status_atomic(&layout, &id, &status).expect("seed");
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let reader_stop = stop.clone();
+        let reader_layout = layout.clone();
+        let reader_id = id.clone();
+
+        let reader = std::thread::spawn(move || {
+            let mut reads = 0usize;
+            while !reader_stop.load(Ordering::Relaxed) {
+                match read_status(&reader_layout, &reader_id) {
+                    Ok(Some(_)) => reads += 1,
+                    Ok(None) => panic!("status vanished mid-burst"),
+                    Err(e) => panic!("reader saw partial/invalid bytes: {e}"),
+                }
+            }
+            reads
+        });
+
+        // Alternate writes to force the rename path repeatedly.
+        for i in 0..200 {
+            status.progress = Some((i, 200));
+            write_status_atomic(&layout, &id, &status).expect("write");
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        let reads = reader.join().expect("reader thread");
+        assert!(
+            reads > 0,
+            "reader should have observed at least one complete status"
+        );
+    }
 }

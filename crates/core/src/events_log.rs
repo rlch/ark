@@ -269,4 +269,158 @@ mod tests {
             );
         }
     }
+
+    /// T-118 (cavekit-testing R3): an empty `events.jsonl` must produce an
+    /// empty iterator without panicking. This is the common "agent just
+    /// spawned, no events yet" case for `ark pane log`.
+    #[test]
+    fn empty_file_yields_no_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        // Touch empty file.
+        std::fs::File::create(&path).unwrap();
+
+        let mut reader = EventLogReader::open(&path).unwrap();
+        let records = reader.read_all();
+        assert!(
+            records.is_empty(),
+            "empty file should yield zero records, got {}",
+            records.len()
+        );
+    }
+
+    /// T-118: a record truncated mid-line (no trailing newline, invalid JSON
+    /// suffix) must be skipped without panicking and without poisoning the
+    /// rest of the reader. Simulates a supervisor crash partway through a
+    /// `write_all` call.
+    #[tokio::test]
+    async fn truncated_trailing_record_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+
+        // Write one valid record using the real writer so the JSON shape
+        // matches what a reader would expect.
+        {
+            let handle = EventLogWriter::spawn(path.clone()).unwrap();
+            handle.sender.send(sample_event(0)).unwrap();
+            drop(handle.sender);
+            handle.task.await.unwrap();
+        }
+        // Append a truncated JSON fragment with no newline (simulating a
+        // crash mid-write).
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            // Deliberately missing closing braces + newline.
+            f.write_all(b"{\"ts\":\"2026-04-15T00:00:00Z\",\"event\":{\"Log\":{\"id\"")
+                .unwrap();
+            f.flush().unwrap();
+        }
+
+        let mut reader = EventLogReader::open(&path).unwrap();
+        let records = reader.read_all();
+        assert_eq!(
+            records.len(),
+            1,
+            "truncated trailing record must be skipped (got {} records)",
+            records.len()
+        );
+    }
+
+    /// T-118: every line malformed → reader returns an empty vec without
+    /// panic. Worst-case corruption scenario.
+    #[test]
+    fn all_garbage_file_yields_no_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        std::fs::write(&path, b"not json\n{unclosed\nplain text\n").unwrap();
+
+        let mut reader = EventLogReader::open(&path).unwrap();
+        let records = reader.read_all();
+        assert!(records.is_empty(), "all-garbage file must yield 0 records");
+    }
+
+    /// T-118: blank lines (leading, trailing, interspersed) are silently
+    /// ignored so that operator edits or POSIX tools that append bare
+    /// newlines don't cost us valid records.
+    #[tokio::test]
+    async fn blank_lines_interspersed_are_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+
+        // Valid record.
+        {
+            let handle = EventLogWriter::spawn(path.clone()).unwrap();
+            handle.sender.send(sample_event(0)).unwrap();
+            drop(handle.sender);
+            handle.task.await.unwrap();
+        }
+        // Mixed blank lines + whitespace-only line.
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            writeln!(f).unwrap();
+            writeln!(f, "   ").unwrap();
+            writeln!(f).unwrap();
+            f.flush().unwrap();
+        }
+        // Another valid record.
+        {
+            let handle = EventLogWriter::spawn(path.clone()).unwrap();
+            handle.sender.send(sample_event(1)).unwrap();
+            drop(handle.sender);
+            handle.task.await.unwrap();
+        }
+
+        let mut reader = EventLogReader::open(&path).unwrap();
+        let records = reader.read_all();
+        assert_eq!(
+            records.len(),
+            2,
+            "blank/whitespace lines must not consume records (got {})",
+            records.len()
+        );
+    }
+
+    /// T-118: `read_all` can be called twice on the same reader and yields
+    /// identical results (seeks back to start). Guards the `Seek::seek` call
+    /// in the reader against regression.
+    #[tokio::test]
+    async fn read_all_is_rewindable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let handle = EventLogWriter::spawn(path.clone()).unwrap();
+        for i in 0..3 {
+            handle.sender.send(sample_event(i)).unwrap();
+        }
+        drop(handle.sender);
+        handle.task.await.unwrap();
+
+        let mut reader = EventLogReader::open(&path).unwrap();
+        let first = reader.read_all();
+        let second = reader.read_all();
+        assert_eq!(first.len(), 3);
+        assert_eq!(
+            first.len(),
+            second.len(),
+            "second read must yield the same record count"
+        );
+    }
+
+    /// T-118: opening a non-existent file surfaces `NotFound` — callers
+    /// (e.g. `ark pane log` before the agent writes anything) rely on this
+    /// to distinguish "never logged" from "empty log".
+    #[test]
+    fn open_missing_file_returns_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("does_not_exist.jsonl");
+        match EventLogReader::open(&path) {
+            Ok(_) => panic!("open of missing file must fail"),
+            Err(err) => assert_eq!(err.kind(), std::io::ErrorKind::NotFound),
+        }
+    }
 }
