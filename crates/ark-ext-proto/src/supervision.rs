@@ -224,8 +224,28 @@ impl ExtSupervisor {
     /// Used by the supervisor crate's "is the extension still alive"
     /// loop; on unexpected exit, builds a [`CrashReport`] from the
     /// captured stderr tail and returns it.
+    ///
+    /// The returned [`CrashReport`] is populated whether the exit was
+    /// clean (`exit_code == Some(0)`) or a crash (`exit_code !=
+    /// Some(0)`) — the consumer (the supervisor crate) decides which
+    /// is "expected" based on whether `shutdown` had been called yet.
+    /// When the consumer wants the typed error variant directly, use
+    /// [`ExtSupervisor::wait_for_crash`].
     pub async fn wait_for_exit(mut self) -> std::io::Result<CrashReport> {
         let status = self.child.wait().await?;
+        // Give the stderr pump a brief window to drain any final
+        // lines the child wrote before exit; tokio's read loop sees
+        // EOF and exits, but our pump task is on a separate scheduler
+        // tick. 50ms is plenty for short tails and not enough to
+        // measurably slow the supervisor-crash path.
+        let _ = timeout(Duration::from_millis(50), async {
+            while !self.log_tail.lock().await.is_empty()
+                && self.stderr_task.as_ref().is_some_and(|h| !h.is_finished())
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
         self.cancel_stderr_task();
         let stderr_tail = self.stderr_tail().await;
         Ok(CrashReport {
@@ -233,6 +253,26 @@ impl ExtSupervisor {
             exit_code: status.code(),
             stderr_tail,
         })
+    }
+
+    /// Specialisation of [`ExtSupervisor::wait_for_exit`] that returns
+    /// `Err(ExtensionError::Crashed)` for non-zero exit codes (or
+    /// signal-killed children), and `Ok(())` for clean exits.
+    /// Convenience for call sites that want the typed error directly.
+    pub async fn wait_for_crash(self) -> Result<(), crate::ExtensionError> {
+        let report = self
+            .wait_for_exit()
+            .await
+            .map_err(|e| crate::ExtensionError::Internal(e.to_string()))?;
+        if report.exit_code == Some(0) {
+            Ok(())
+        } else {
+            Err(crate::ExtensionError::Crashed {
+                name: report.name,
+                exit_code: report.exit_code,
+                stderr_tail: report.stderr_tail,
+            })
+        }
     }
 
     fn cancel_stderr_task(&mut self) {
@@ -396,5 +436,64 @@ mod tests {
         assert_eq!(r.name, "x");
         assert_eq!(r.exit_code, Some(42));
         assert_eq!(r.stderr_tail, "boom");
+    }
+
+    #[tokio::test]
+    async fn wait_for_crash_surfaces_typed_error_on_nonzero_exit() {
+        let child = match spawn_bash("echo boom 1>&2; exit 7") {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let sup = ExtSupervisor::new("crash-test", child);
+        // Allow the stderr pump to drain.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let err = sup.wait_for_crash().await.expect_err("non-zero exit");
+        match err {
+            crate::ExtensionError::Crashed {
+                name,
+                exit_code,
+                stderr_tail,
+            } => {
+                assert_eq!(name, "crash-test");
+                assert_eq!(exit_code, Some(7));
+                assert!(stderr_tail.contains("boom"), "tail = {stderr_tail:?}");
+            }
+            other => panic!("expected Crashed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_for_crash_returns_ok_on_clean_exit() {
+        let child = match spawn_bash("exit 0") {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let sup = ExtSupervisor::new("clean", child);
+        sup.wait_for_crash().await.expect("clean exit should be Ok");
+    }
+
+    #[tokio::test]
+    async fn log_tail_caps_at_max_lines() {
+        // Spawn a script that emits 150 stderr lines; the buffer
+        // should retain only the last LOG_TAIL_LINES (100).
+        let script = "for i in $(seq 1 150); do echo line$i 1>&2; done; sleep 0.05";
+        let child = match spawn_bash(script) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let sup = ExtSupervisor::new("cap", child);
+        // Allow the stderr pump to drain all 150 lines.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let report = sup.wait_for_exit().await.unwrap();
+        let lines: Vec<&str> = report.stderr_tail.lines().collect();
+        assert_eq!(
+            lines.len(),
+            LOG_TAIL_LINES,
+            "expected exactly LOG_TAIL_LINES, got {}",
+            lines.len()
+        );
+        // First retained line is line51 (lines 1..50 dropped).
+        assert_eq!(lines[0], "line51");
+        assert_eq!(lines[LOG_TAIL_LINES - 1], "line150");
     }
 }
