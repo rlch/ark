@@ -14,3 +14,4 @@ pub mod parse;
 pub mod scope;
 pub mod suggest;
 pub mod template;
+pub mod validate;
