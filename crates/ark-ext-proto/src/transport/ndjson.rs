@@ -44,7 +44,7 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout_at};
 
-use super::{ExtensionClient, RequestOptions};
+use super::{ExtensionClient, ProgressReceiver, RequestOptions, TaskProgress};
 use crate::*;
 
 /// JSON-RPC 2.0 request envelope.
@@ -153,6 +153,13 @@ enum WireMessage {
 // NdjsonClient
 // ---------------------------------------------------------------------------
 
+/// Per-task progress subscriber registry. The read loop demuxes
+/// `$/progress` notifications by their `token` field and forwards each
+/// entry to every live subscriber. Subscribers are appended via
+/// [`NdjsonClient::subscribe_progress`]; senders are pruned lazily
+/// (next dispatch drops dead receivers).
+type ProgressBus = Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<TaskProgress>>>>>;
+
 /// Shared state behind every [`NdjsonClient`] clone.
 struct Inner {
     /// Monotonic request id generator.
@@ -161,6 +168,8 @@ struct Inner {
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Response>>>>,
     /// Outgoing-message queue. The writer task drains this onto stdin.
     tx: mpsc::UnboundedSender<String>,
+    /// Per-task subscriber registry for `$/progress` notifications.
+    progress: ProgressBus,
     /// Handles for the background read + write tasks. Dropped on
     /// [`NdjsonClient::shutdown_transport`] to release resources.
     read_handle: Mutex<Option<JoinHandle<()>>>,
@@ -203,8 +212,13 @@ impl NdjsonClient {
         let (tx, rx) = mpsc::unbounded_channel::<String>();
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Response>>>> =
             Arc::new(Mutex::new(HashMap::new()));
+        let progress: ProgressBus = Arc::new(Mutex::new(HashMap::new()));
 
-        let read_handle = tokio::spawn(Self::read_loop(reader, pending.clone()));
+        let read_handle = tokio::spawn(Self::read_loop(
+            reader,
+            pending.clone(),
+            progress.clone(),
+        ));
         let write_handle = tokio::spawn(Self::write_loop(writer, rx));
 
         Self {
@@ -212,6 +226,7 @@ impl NdjsonClient {
                 next_id: AtomicU64::new(1),
                 pending,
                 tx,
+                progress,
                 read_handle: Mutex::new(Some(read_handle)),
                 write_handle: Mutex::new(Some(write_handle)),
             }),
@@ -219,13 +234,14 @@ impl NdjsonClient {
     }
 
     /// Background read task — reads one NDJSON object per line and
-    /// routes it to either a pending oneshot (responses) or the floor
-    /// (notifications + server-to-client requests). v1 does not emit
-    /// notifications back up to callers; R16 reverse-dispatch lands in
-    /// a later task.
+    /// routes it to either a pending oneshot (responses) or the
+    /// per-task progress bus (`$/progress` notifications). T-9.5.6
+    /// wires the progress demux; reverse-path requests
+    /// (`host/*`/`workspace/*`) are accepted but not yet dispatched.
     async fn read_loop<R>(
         reader: R,
         pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Response>>>>,
+        progress: ProgressBus,
     ) where
         R: AsyncRead + Unpin,
     {
@@ -253,12 +269,37 @@ impl NdjsonClient {
                         }
                     }
                 }
-                WireMessage::Notification(_) | WireMessage::Request(_) => {
-                    // Notifications and reverse-path requests are
-                    // accepted but not surfaced in v1. T-9.5.6 wires
-                    // the bidirectional server-handler side.
+                WireMessage::Notification(notif) => {
+                    if notif.method == "$/progress" {
+                        if let Some(entry) = decode_progress(&notif.params) {
+                            Self::route_progress(&progress, entry).await;
+                        }
+                    }
+                    // Other notifications (`log/write`, etc.) are
+                    // not surfaced in v1.
+                }
+                WireMessage::Request(_) => {
+                    // Reverse-path requests are accepted but not yet
+                    // dispatched (T-9.5.8 wires the gate); the
+                    // server-side handler lives in the supervisor
+                    // crate.
                 }
             }
+        }
+    }
+
+    /// Forward one decoded [`TaskProgress`] entry to every live
+    /// subscriber for that task. Dead subscribers (receivers dropped)
+    /// are pruned in place — keeps the registry from growing
+    /// unbounded.
+    async fn route_progress(progress: &ProgressBus, entry: TaskProgress) {
+        let mut bus = progress.lock().await;
+        let Some(subscribers) = bus.get_mut(&entry.task) else {
+            return;
+        };
+        subscribers.retain(|tx| tx.send(entry.clone()).is_ok());
+        if subscribers.is_empty() {
+            bus.remove(&entry.task);
         }
     }
 
@@ -391,6 +432,77 @@ impl NdjsonClient {
             h.abort();
         }
     }
+
+    /// Register a subscriber for `$/progress` notifications keyed by
+    /// `task_id`. The returned [`ProgressReceiver`] yields one
+    /// [`TaskProgress`] entry per matching notification until the
+    /// extension stops emitting (no explicit "end" signal — callers
+    /// also hold the [`crate::TaskGetResponse::status`] field as the
+    /// authoritative completion marker).
+    ///
+    /// Multiple subscribers per task are allowed; each gets its own
+    /// receiver and sees every entry. Late subscribers (after some
+    /// entries have already been emitted) miss the earlier ones —
+    /// the bus is not buffered.
+    pub async fn subscribe_to_task(&self, task_id: &str) -> ProgressReceiver {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.inner
+            .progress
+            .lock()
+            .await
+            .entry(task_id.to_string())
+            .or_default()
+            .push(tx);
+        rx
+    }
+}
+
+/// Decode a `$/progress` notification's `params` payload into the
+/// transport-typed [`TaskProgress`] struct. Returns `None` when the
+/// payload doesn't carry a `token` (per JSON-RPC progress
+/// conventions); this guards against the read loop forwarding garbage.
+fn decode_progress(params: &Value) -> Option<TaskProgress> {
+    // The notification carries `{ token, value: <opaque> }` — the
+    // extension protocol's `ProgressRequest` type. `value` itself is
+    // an LSP-style envelope; we extract `percentage` and `message`
+    // best-effort and stash the raw payload for callers needing the
+    // full `kind`/etc fields.
+    let token = params.get("token")?.as_str()?.to_string();
+    let value = params.get("value").cloned().unwrap_or(Value::Null);
+    let raw = match &value {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    // The `value` field is an `OpaqueJson` — a JSON-encoded string.
+    // The extension's `ProgressRequest` carries the wrapper as a
+    // string; the inner LSP-style envelope lives inside that. Try to
+    // parse the inner form so we can pluck `message` + `percentage`.
+    let inner = match &value {
+        Value::String(s) => serde_json::from_str::<Value>(s).ok(),
+        other => Some(other.clone()),
+    };
+    let (percent, message) = inner
+        .as_ref()
+        .map(|v| {
+            let p = v
+                .get("percentage")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0)
+                .min(100) as u8;
+            let m = v
+                .get("message")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            (p, m)
+        })
+        .unwrap_or((0, String::new()));
+    Some(TaskProgress {
+        task: token,
+        percent,
+        message,
+        raw,
+    })
 }
 
 #[async_trait]
@@ -680,6 +792,12 @@ impl ExtensionClient for NdjsonClient {
         opts: RequestOptions,
     ) -> ExtResult<LogSetLevelResponse> {
         self.call("log/setLevel", req, opts).await
+    }
+
+    // -- Capability + progress hooks -----------------------------------------
+
+    async fn subscribe_progress(&self, task: TaskId) -> ProgressReceiver {
+        self.subscribe_to_task(&task.value).await
     }
 }
 
@@ -984,6 +1102,132 @@ mod tests {
         // The in-flight call is now orphaned — it will timeout on its
         // 5s deadline. Abort the task so the test finishes promptly.
         call.abort();
+        client.shutdown_transport().await;
+    }
+
+    /// T-9.5.6: end-to-end progress round-trip. The server writes a
+    /// task-create response then emits three `$/progress` notifications
+    /// whose `token` matches the minted task id; the client subscribes
+    /// before the notifications hit and sees all three.
+    #[tokio::test]
+    async fn progress_notifications_route_to_subscriber() {
+        let (client_io, server_io) = duplex(8192);
+        let (client_r, client_w) = tokio::io::split(client_io);
+        let (mut server_r, mut server_w) = tokio::io::split(server_io);
+
+        let client = NdjsonClient::from_halves(client_r, client_w);
+
+        // Subscribe BEFORE the server emits anything.
+        let mut rx = client.subscribe_to_task("task-1").await;
+
+        // Hand-roll the server side so we can interleave a response
+        // and three progress notifications on the same wire.
+        let server = tokio::spawn(async move {
+            let mut lines = BufReader::new(&mut server_r).lines();
+            // Wait for the task/create request.
+            let req_line = lines.next_line().await.unwrap().unwrap();
+            let req: Request = serde_json::from_str(&req_line).unwrap();
+            assert_eq!(req.method, "task/create");
+
+            // Reply with the task id.
+            let resp = Response {
+                jsonrpc: "2.0".into(),
+                id: Some(req.id),
+                result: Some(serde_json::json!({
+                    "task": { "value": "task-1" }
+                })),
+                error: None,
+            };
+            let line = serde_json::to_string(&resp).unwrap();
+            server_w.write_all(line.as_bytes()).await.unwrap();
+            server_w.write_all(b"\n").await.unwrap();
+            server_w.flush().await.unwrap();
+
+            // Emit three progress notifications.
+            for (pct, msg) in [(10u8, "starting"), (50, "halfway"), (100, "done")] {
+                let value = serde_json::json!({
+                    "kind": "report",
+                    "percentage": pct,
+                    "message": msg,
+                })
+                .to_string();
+                let n = Notification {
+                    jsonrpc: "2.0".into(),
+                    method: "$/progress".into(),
+                    params: serde_json::json!({
+                        "token": "task-1",
+                        "value": value,
+                    }),
+                };
+                let line = serde_json::to_string(&n).unwrap();
+                server_w.write_all(line.as_bytes()).await.unwrap();
+                server_w.write_all(b"\n").await.unwrap();
+                server_w.flush().await.unwrap();
+            }
+        });
+
+        // Drive the request; result not strictly needed.
+        let resp = client
+            .task_create(
+                TaskCreateRequest {
+                    label: "demo".into(),
+                    params: "null".into(),
+                },
+                RequestOptions::default(),
+            )
+            .await
+            .expect("task_create round-trip");
+        assert_eq!(resp.task.value, "task-1");
+
+        // Collect three progress entries.
+        let mut entries = Vec::new();
+        for _ in 0..3 {
+            let entry = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+                .await
+                .expect("recv timed out")
+                .expect("channel closed");
+            entries.push(entry);
+        }
+
+        assert_eq!(entries[0].task, "task-1");
+        assert_eq!(entries[0].percent, 10);
+        assert_eq!(entries[0].message, "starting");
+        assert_eq!(entries[1].percent, 50);
+        assert_eq!(entries[2].percent, 100);
+        assert_eq!(entries[2].message, "done");
+
+        server.await.unwrap();
+        client.shutdown_transport().await;
+    }
+
+    /// Subscribers for tasks the server never references receive nothing
+    /// — and dropping the receiver does not poison the bus.
+    #[tokio::test]
+    async fn progress_subscriber_is_pruned_when_dropped() {
+        let (client_io, _server_io) = duplex(8192);
+        let (client_r, client_w) = tokio::io::split(client_io);
+        let client = NdjsonClient::from_halves(client_r, client_w);
+
+        // Two subscribers for the same task; drop one, verify the bus
+        // has a single live entry left.
+        let _rx_alive = client.subscribe_to_task("t1").await;
+        let rx_drop = client.subscribe_to_task("t1").await;
+        drop(rx_drop);
+
+        // Synthesise a progress entry and route it; the alive
+        // subscriber receives it, the dropped one is pruned.
+        let entry = TaskProgress {
+            task: "t1".into(),
+            percent: 50,
+            message: "tick".into(),
+            raw: "{}".into(),
+        };
+        NdjsonClient::route_progress(&client.inner.progress, entry).await;
+
+        let bus = client.inner.progress.lock().await;
+        let subscribers = bus.get("t1").expect("bus entry should still exist");
+        assert_eq!(subscribers.len(), 1);
+        drop(bus);
         client.shutdown_transport().await;
     }
 
