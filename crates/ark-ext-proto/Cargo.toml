@@ -62,3 +62,8 @@ path = "src/bin/gen-extension-spec.rs"
 
 [dev-dependencies]
 tokio = { workspace = true }
+# T-9.5.9: `paste` powers the `both_transports!` macro in the
+# conformance suite that produces one `#[tokio::test]` per
+# (case, transport) pair — token concatenation can't be done in
+# stable Rust without a proc-macro helper.
+paste = "1"

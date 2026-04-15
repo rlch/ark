@@ -67,7 +67,10 @@ pub mod supervision;
 pub mod transport;
 
 pub use supervision::{CrashReport, ExtSupervisor, SupervisorHandle};
-pub use transport::{ExtensionClient, InProcClient, NdjsonClient, NdjsonServer, RequestOptions};
+pub use transport::{
+    ExtensionClient, InProcClient, NdjsonClient, NdjsonServer, ProgressReceiver, RequestOptions,
+    ReverseRequestGate, TaskProgress, method_to_capability,
+};
 
 /// Opaque JSON text carried as a UTF-8 string.
 ///

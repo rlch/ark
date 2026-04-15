@@ -426,6 +426,24 @@ impl NdjsonClient {
         Ok(())
     }
 
+    /// Inject a oneshot waiter into the pending map for `id`. Used by
+    /// the protocol conformance harness (T-9.5.9) when it hand-rolls a
+    /// wire frame and needs to capture the response. Hidden from
+    /// rustdoc — third-party callers should use the typed
+    /// [`ExtensionClient`] surface.
+    #[doc(hidden)]
+    pub async fn test_inject_pending(&self, id: u64, tx: oneshot::Sender<Response>) {
+        self.inner.pending.lock().await.insert(id, tx);
+    }
+
+    /// Push a raw NDJSON line onto the outgoing-message channel.
+    /// Companion to [`NdjsonClient::test_inject_pending`] for the
+    /// conformance harness; not for production use.
+    #[doc(hidden)]
+    pub fn test_push_raw(&self, body: String) {
+        let _ = self.inner.tx.send(body);
+    }
+
     /// Manually cancel an outstanding request by id. Exposed for tests
     /// and for any future hot-path that wants to short-circuit a call
     /// (`ark cancel` cli verb, for instance).
@@ -973,6 +991,85 @@ impl NdjsonServer {
                 ext,
                 req.params,
                 |e, r| async move { e.task_cancel(r).await },
+            )
+            .await,
+            "event/subscribe" => {
+                dispatch_typed::<E, EventSubscribeRequest, EventSubscribeResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.event_subscribe(r).await },
+                )
+                .await
+            }
+            "event/unsubscribe" => {
+                dispatch_typed::<E, EventUnsubscribeRequest, EventUnsubscribeResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.event_unsubscribe(r).await },
+                )
+                .await
+            }
+            "event/emit" => dispatch_typed::<E, EventEmitRequest, EventEmitResponse, _>(
+                ext,
+                req.params,
+                |e, r| async move { e.event_emit(r).await },
+            )
+            .await,
+            "intent/register" => {
+                dispatch_typed::<E, IntentRegisterRequest, IntentRegisterResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.intent_register(r).await },
+                )
+                .await
+            }
+            "intent/unregister" => {
+                dispatch_typed::<E, IntentUnregisterRequest, IntentUnregisterResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.intent_unregister(r).await },
+                )
+                .await
+            }
+            "intent/dispatch" => {
+                dispatch_typed::<E, IntentDispatchRequest, IntentDispatchResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.intent_dispatch(r).await },
+                )
+                .await
+            }
+            "ui/keybind/register" => {
+                dispatch_typed::<E, UiKeybindRegisterRequest, UiKeybindRegisterResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.ui_keybind_register(r).await },
+                )
+                .await
+            }
+            "ui/keybind/unregister" => {
+                dispatch_typed::<
+                    E,
+                    UiKeybindUnregisterRequest,
+                    UiKeybindUnregisterResponse,
+                    _,
+                >(ext, req.params, |e, r| async move {
+                    e.ui_keybind_unregister(r).await
+                })
+                .await
+            }
+            "ui/pane/request" => {
+                dispatch_typed::<E, UiPaneRequestRequest, UiPaneRequestResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.ui_pane_request(r).await },
+                )
+                .await
+            }
+            "ui/pane/close" => dispatch_typed::<E, UiPaneCloseRequest, UiPaneCloseResponse, _>(
+                ext,
+                req.params,
+                |e, r| async move { e.ui_pane_close(r).await },
             )
             .await,
             "host/fs/read" => dispatch_typed::<E, HostFsReadRequest, HostFsReadResponse, _>(
