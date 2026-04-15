@@ -88,6 +88,19 @@ strsim = "0.11"
 # with `cargo insta review` (or `INSTA_UPDATE=1 cargo test`).
 insta = "1"
 
+# T-ACP.1 (cavekit-scene R17, cavekit-distribution R4c): the Agent
+# Client Protocol crate is pinned to an equality version so every
+# ark build speaks the identical ACP wire format. Ark is a first-
+# class ACP client (R17): engines are ACP agents; ark does not
+# invent an agent protocol. Version 0.10.4 is the latest stable
+# release on crates.io as of ark v0.1.0 and is the version this
+# release ships. Bump policy: a minor ACP bump may broaden method
+# surface (R16-style MINOR rules apply transitively to ark's ACP
+# surface) — treat the pin as the only moving piece and re-run
+# the ACP conformance suite before bumping. Not yet added to any
+# crate's `[dependencies]`; wiring happens in T-ACP.2.
+agent-client-protocol = "=0.10.4"
+
 # T-131: wasm release-profile + size-reduction stack (cavekit-distribution
 # R3). Aggressive size-optimization settings applied to the shared
 # `[profile.release]` so both the `ark-cli` release binary and the

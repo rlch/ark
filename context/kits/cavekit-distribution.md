@@ -76,7 +76,7 @@ Building, packaging, and shipping ark. Cargo workspace layout, `cargo-dist` rele
 ### R4c: ACP crate pin
 **Description:** Ark pins a specific version of the `agent-client-protocol` Rust crate; an ark release's ACP compatibility is whatever range that pin declares.
 **Acceptance Criteria:**
-- [ ] Workspace dependency `agent-client-protocol = "=X.Y.Z"` (equality pin, not range) so every build uses the identical ACP implementation.
+- [ ] Workspace dependency `agent-client-protocol = "=X.Y.Z"` (equality pin, not range) so every build uses the identical ACP implementation. **ark v0.1.0 ships `agent-client-protocol = "=0.10.4"`** (T-ACP.1).
 - [ ] Release notes for each ark version cite the bundled ACP crate version + supported `protocolVersion` range declared at `initialize`.
 - [ ] `ark doctor` prints the bundled ACP version in its diagnostic header.
 - [ ] Unstable ACP methods (from `meta.unstable.json`: `session/fork`, `nes/*`, `elicitation/*`, `document/did*`, etc.) are NOT shipped as v1 surface; gated behind capability negotiation per scene R17.
