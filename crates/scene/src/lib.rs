@@ -6,6 +6,7 @@
 
 pub mod ast;
 pub mod cel;
+pub mod context;
 pub mod error;
 pub mod id;
 pub mod intent;

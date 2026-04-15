@@ -8,7 +8,15 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+# T-2.2: context builder consumes AgentEvent + AgentSnapshot/SessionSnapshot
+# placeholders; serde_json::Value is carried through AgentEvent::UserEvent
+# payloads. Path dep (no workspace entry) matches the convention used by
+# crates/supervisor/ and crates/core/.
+ark-types = { path = "../types" }
 facet = { workspace = true }
+# T-2.2: serde::Serialize for AgentSnapshot/SessionSnapshot placeholders,
+# serialized through cel-interpreter's TryIntoValue blanket impl.
+serde = { workspace = true }
 facet-kdl = { workspace = true }
 kdl = { workspace = true }
 miette = { workspace = true }
@@ -32,6 +40,9 @@ serde_json = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 insta = { workspace = true }
+# T-2.2 tests: build realistic AgentEvent samples for context-builder
+# unit tests; chrono for `Stall { since: DateTime<Utc> }`.
+chrono = { workspace = true }
 # T-4.1 tests: registry smoke tests spawn tokio tasks to exercise
 # concurrent dispatch, which needs the `macros` + multi-thread features
 # (already enabled by `tokio`'s `full` in the workspace) and a runtime

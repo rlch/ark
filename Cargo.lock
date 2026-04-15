@@ -413,9 +413,11 @@ dependencies = [
 name = "ark-scene"
 version = "0.1.0"
 dependencies = [
+ "ark-types",
  "async-trait",
  "blake3",
  "cel-interpreter",
+ "chrono",
  "facet",
  "facet-kdl",
  "globset",
@@ -423,6 +425,7 @@ dependencies = [
  "kdl 6.5.0",
  "miette 7.6.0",
  "minijinja",
+ "serde",
  "serde_json",
  "strsim 0.11.1",
  "tempfile",
