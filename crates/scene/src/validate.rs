@@ -29,10 +29,12 @@
 //! first failure, so `ark scene check` can render multiple
 //! diagnostics in one go.
 
-use crate::ast::{OnNode, PaneNode, SceneDoc, SceneNode, TabNode};
+use crate::ast::{KeybindNode, OnNode, PaneNode, SceneDoc, SceneNode, TabNode};
 use crate::cel;
+use crate::chord::{ChordError, validate_chord};
 use crate::error::SceneError;
 use crate::template;
+use miette::NamedSource;
 
 /// Upper bound on CEL expression length (bytes). Exceeding this
 /// yields [`SceneError::CelExpressionTooLong`].
@@ -112,6 +114,39 @@ fn walk_scene(scene: &SceneNode, errors: &mut Vec<SceneError>) {
     }
     for on in &scene.ons {
         walk_on(on, errors);
+    }
+    for kb in &scene.keybinds {
+        walk_keybind(kb, errors);
+    }
+}
+
+/// T-6.6: validate the keybind chord string against the loose grammar
+/// `(Mod )*KEY`. Stricter validation surfaces at first session-spawn
+/// via zellij's own lexer.
+///
+/// We synthesise a `NamedSource` from `<keybind>` here because the
+/// per-node span isn't tracked on `KeybindNode` today (facet-kdl spans
+/// are dropped at the typed-AST layer — see crate::ast module docs).
+/// When `KeybindNode` grows a span field in a later tier, the
+/// `NamedSource` and `SourceSpan` here will point into the original
+/// scene file.
+fn walk_keybind(kb: &KeybindNode, errors: &mut Vec<SceneError>) {
+    if let Err(e) = validate_chord(&kb.chord) {
+        errors.push(chord_error_to_scene_error(&kb.chord, e));
+    }
+}
+
+/// Wrap a [`ChordError`] in the miette-shaped
+/// [`SceneError::InvalidChord`] variant. Span is `(0, chord.len())`
+/// against a synthesised `<keybind>` source — sufficient for the
+/// `ark scene check` surface today; will sharpen once
+/// `KeybindNode` carries a real span (TODO upstream).
+fn chord_error_to_scene_error(chord: &str, e: ChordError) -> SceneError {
+    SceneError::InvalidChord {
+        chord: chord.to_string(),
+        reason: e.to_string(),
+        src: NamedSource::new("<keybind>", chord.to_string()),
+        at: (0, chord.len()).into(),
     }
 }
 
@@ -412,6 +447,76 @@ scene "s" {
     }
 
     /// Oversize `when=` on a pane surfaces CelExpressionTooLong via
+    // --- T-6.6 chord validation tests ---
+
+    /// Valid chords (`Alt p`, `Ctrl Shift t`, `F4`) pass the
+    /// validate_scene walk.
+    #[test]
+    fn scene_with_valid_keybind_chords_passes() {
+        let doc = parse_scene(
+            r#"
+scene "s" {
+    keybind "Alt p" intent="picker.show"
+    keybind "Ctrl Shift t" intent="tab.new"
+    keybind "F4" intent="quit"
+}
+"#,
+        );
+        validate_scene(&doc).expect("all chords legal");
+    }
+
+    /// Invalid chords surface as `scene/invalid-chord`.
+    #[test]
+    fn scene_with_invalid_chord_rejected() {
+        let doc = parse_scene(
+            r#"
+scene "s" {
+    keybind "Hyper p" intent="picker.show"
+}
+"#,
+        );
+        let errs = validate_scene(&doc).expect_err("must reject");
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].code_enum(), ErrorCode::InvalidChord);
+    }
+
+    /// Empty chord surfaces as `scene/invalid-chord` (not Grammar).
+    #[test]
+    fn scene_with_empty_chord_rejected_as_invalid_chord() {
+        let doc = parse_scene(
+            r#"
+scene "s" {
+    keybind "" intent="x"
+}
+"#,
+        );
+        let errs = validate_scene(&doc).expect_err("must reject");
+        assert!(
+            errs.iter().any(|e| e.code_enum() == ErrorCode::InvalidChord),
+            "expected at least one InvalidChord, got {errs:?}"
+        );
+    }
+
+    /// Multiple bad chords accumulate (the validator never
+    /// short-circuits).
+    #[test]
+    fn multiple_invalid_chords_accumulate() {
+        let doc = parse_scene(
+            r#"
+scene "s" {
+    keybind "Hyper p" intent="a"
+    keybind "Alt &!" intent="b"
+}
+"#,
+        );
+        let errs = validate_scene(&doc).expect_err("must reject");
+        assert_eq!(errs.len(), 2);
+        assert!(
+            errs.iter().all(|e| e.code_enum() == ErrorCode::InvalidChord),
+            "expected all InvalidChord, got {errs:?}"
+        );
+    }
+
     /// validate_scene.
     #[test]
     fn scene_with_oversize_when_rejected() {

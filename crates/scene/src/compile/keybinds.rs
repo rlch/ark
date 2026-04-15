@@ -54,6 +54,7 @@ use miette::NamedSource;
 use serde_json::Value as JsonValue;
 
 use crate::ast::{KeybindNode, OpNode};
+use crate::chord::validate_chord;
 use crate::error::SceneError;
 
 /// Default zellij `InputMode` keybinds are emitted under. v1 ships
@@ -113,11 +114,17 @@ pub fn compile_keybinds(
 /// Compile a single keybind into the `bind "<chord>" { MessagePlugin … }`
 /// shape.
 fn compile_one_keybind(kb: &KeybindNode) -> Result<KdlNode, SceneError> {
-    if kb.chord.trim().is_empty() {
-        return Err(SceneError::Grammar {
-            message: "keybind chord string is empty".to_string(),
-            src: NamedSource::new("<keybind>", String::new()),
-            at: (0, 0).into(),
+    // T-6.6: loose chord-string validation. The walking validator
+    // (`crate::validate::validate_scene`) catches this earlier in the
+    // compile pipeline; we re-check here so direct callers of the
+    // keybind compiler (e.g. tests, `ark scene render`) get the same
+    // protection.
+    if let Err(e) = validate_chord(&kb.chord) {
+        return Err(SceneError::InvalidChord {
+            chord: kb.chord.clone(),
+            reason: e.to_string(),
+            src: NamedSource::new("<keybind>", kb.chord.clone()),
+            at: (0, kb.chord.len()).into(),
         });
     }
 
@@ -451,8 +458,9 @@ mod tests {
         }
     }
 
-    /// Empty chord is rejected with a Grammar error (chord-string
-    /// validation proper lives in T-6.6).
+    /// Empty chord now surfaces as `InvalidChord` (T-6.6) — the
+    /// keybind compiler delegates the chord grammar check to
+    /// [`crate::chord::validate_chord`].
     #[test]
     fn empty_chord_is_rejected_synthetic() {
         let kb = KeybindNode {
@@ -461,7 +469,30 @@ mod tests {
             ops: vec![],
         };
         let err = compile_keybinds(std::slice::from_ref(&kb)).expect_err("must reject");
-        assert!(matches!(err, SceneError::Grammar { .. }));
+        assert!(
+            matches!(err, SceneError::InvalidChord { .. }),
+            "expected InvalidChord, got {err:?}"
+        );
+    }
+
+    /// Misshapen chord (`Hyper p` — unknown modifier) is rejected at
+    /// the compile pass with `scene/invalid-chord`, even though the
+    /// scope walker would also catch it.
+    #[test]
+    fn unknown_modifier_in_chord_is_rejected() {
+        let kb = KeybindNode {
+            chord: "Hyper p".to_string(),
+            intent: Some("foo".to_string()),
+            ops: vec![],
+        };
+        let err = compile_keybinds(std::slice::from_ref(&kb)).expect_err("must reject");
+        match &err {
+            SceneError::InvalidChord { chord, reason, .. } => {
+                assert_eq!(chord, "Hyper p");
+                assert!(reason.contains("Hyper"), "got: {reason}");
+            }
+            other => panic!("expected InvalidChord, got {other:?}"),
+        }
     }
 
     #[test]

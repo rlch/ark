@@ -93,6 +93,11 @@ pub enum ErrorCode {
     /// (T-5.5). Canonical values: `scene`, `ext:<n>`, `plugin:<n>`,
     /// `hook:<n>`, `core`, `agent`.
     EmitInvalidSource,
+    /// Scene `keybind "<chord>"` chord string violates the loose
+    /// grammar `(Mod )*KEY` (T-6.6). `Mod ∈ {Ctrl, Alt, Shift, Super}`,
+    /// `KEY` is alphanumeric or a single zellij-known special
+    /// (`Tab`, `Enter`, `Space`, arrow names, `F1`–`F12`).
+    InvalidChord,
 }
 
 impl ErrorCode {
@@ -121,6 +126,7 @@ impl ErrorCode {
             ErrorCode::EmitNonUserEvent => "scene/emit-non-user-event",
             ErrorCode::EmitCycle => "scene/emit-cycle",
             ErrorCode::EmitInvalidSource => "scene/emit-invalid-source",
+            ErrorCode::InvalidChord => "scene/invalid-chord",
         }
     }
 }
@@ -602,6 +608,36 @@ pub enum SceneError {
         /// The offending source string.
         value: String,
     },
+
+    /// Scene `keybind "<chord>"` chord string fails the loose
+    /// compile-time grammar (T-6.6).
+    ///
+    /// The grammar is intentionally loose — `(Mod )*KEY` where `Mod ∈
+    /// {Ctrl, Alt, Shift, Super}` and `KEY` is alphanumeric or one of
+    /// the canonical zellij specials (`Tab`, `Enter`, `Space`, arrow
+    /// names, `F1`–`F12`). Stricter validation (unknown KEY,
+    /// unsupported combo) surfaces at first session-spawn through
+    /// zellij's own chord lexer; that's the trade-off called out in
+    /// R5 (less strict compile-time validation in exchange for zero
+    /// maintenance burden as zellij's chord grammar evolves).
+    #[error("invalid keybind chord `{chord}`: {reason}")]
+    #[diagnostic(
+        code = "scene/invalid-chord",
+        help("Chord grammar: `(Mod )*KEY`. Mod ∈ {{Ctrl, Alt, Shift, Super}}. KEY is alphanumeric or one of: Tab, Enter, Esc, Space, Backspace, Delete, Insert, Home, End, PageUp, PageDown, Left, Right, Up, Down, F1..F12. Examples: `Alt p`, `Ctrl Shift t`, `F4`.")
+    )]
+    InvalidChord {
+        /// The offending chord string verbatim.
+        chord: String,
+        /// Human-readable reason the chord was rejected.
+        reason: String,
+        /// Source file containing the keybind.
+        #[source_code]
+        src: NamedSource<String>,
+        /// Span of the chord string (the first positional argument of
+        /// the `keybind` node).
+        #[label("chord rejected here")]
+        at: SourceSpan,
+    },
 }
 
 /// Canonical static help text for `scene/unknown-node` — the list
@@ -701,6 +737,7 @@ impl SceneError {
             SceneError::EmitNonUserEvent { .. } => ErrorCode::EmitNonUserEvent,
             SceneError::EmitCycle { .. } => ErrorCode::EmitCycle,
             SceneError::EmitInvalidSource { .. } => ErrorCode::EmitInvalidSource,
+            SceneError::InvalidChord { .. } => ErrorCode::InvalidChord,
         }
     }
 }

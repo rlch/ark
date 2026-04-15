@@ -6,6 +6,7 @@
 
 pub mod ast;
 pub mod cel;
+pub mod chord;
 pub mod compile;
 pub mod cycle;
 pub mod context;
