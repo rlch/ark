@@ -15,6 +15,7 @@ pub mod id;
 pub mod intent;
 pub mod ops;
 pub mod parse;
+pub mod plugin;
 pub mod reactions;
 pub mod selector;
 pub mod scope;
