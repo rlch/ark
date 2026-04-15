@@ -76,7 +76,11 @@ use ark_types::permission::{PermissionPolicy, decide, read_policy_for_agent};
 use ark_types::{AgentId, PermissionDecision};
 
 use crate::allow::write_allow_payload;
-use crate::cli::Cli;
+// `LegacyCli` is the strict (post-validation) shape of the hook-event
+// invocation — see `crate::cli::Cli::into_legacy`. Aliased to `Cli` here
+// so the legacy-flow body (and its tests) stays unchanged after the
+// outer parser grew bridge subcommands in T-6.2.
+use crate::cli::LegacyCli as Cli;
 use crate::event::HookEvent;
 use crate::payload::{HookPayload, payload_to_events};
 use crate::pipe::{TARGET_ARK_PICKER, TARGET_ARK_STATUS, pipe_to_zellij};
@@ -578,7 +582,10 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::allow::ALLOW_PAYLOAD_JSON;
-    use crate::cli::Cli;
+    // T-6.2: tests exercise the strict legacy invocation shape, not the
+    // top-level `Cli` parser. Aliased so the existing test bodies stay
+    // unchanged.
+    use crate::cli::LegacyCli as Cli;
     use crate::event::HookEvent;
 
     fn cli_for(event: HookEvent) -> Cli {

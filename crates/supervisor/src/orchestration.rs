@@ -193,6 +193,17 @@ pub async fn run_supervisor_with(
     let (events, _boot_rx) = channel(DEFAULT_EVENT_BUS_CAPACITY);
 
     // ---- Step 3: bind control socket ----
+    //
+    // T-6.2: the control-socket handler now accepts an optional
+    // `IntentBridge` so the `Intent { name, args }` command can route
+    // through the supervisor's intent registry. The registry itself is
+    // built once below (R3 step 9) for the reaction dispatcher; we
+    // build it again here, separately, so it's available before the
+    // dispatcher consumer spawns. The two registries are independent —
+    // each gets its own `register_core_ops` call. Sharing one registry
+    // would require restructuring boot ordering; this duplicates ~10
+    // hash inserts of pre-built ops, which is cheap.
+    let intent_bridge = build_intent_bridge_for_socket(&spec).await;
     let command_handler: Arc<dyn ControlCommandHandler> =
         Arc::new(SupervisorCommandHandler::new(SupervisorCommandCtx {
             agent_id: spec.id.clone(),
@@ -204,6 +215,7 @@ pub async fn run_supervisor_with(
             // None here so the T-069 smoke test suite stays behaviour-
             // equivalent.
             audit: None,
+            intents: Some(intent_bridge),
         }));
     let socket_handle = bind_control_socket(&state_layout, &spec.id, command_handler.clone())
         .await
@@ -613,6 +625,27 @@ pub fn finalize_state(
     };
     write_status_atomic(layout, id, &status)?;
     Ok(())
+}
+
+/// Build the [`IntentBridge`] that the control-socket handler dispatches
+/// `Intent` requests through (T-6.2).
+///
+/// Wires the same core op set the reaction dispatcher uses so the bridge
+/// can fire any built-in op a scene declares. `IntentContext` is a
+/// placeholder (no live mux / bus / supervisor handles yet — those live
+/// in scene's own `IntentContext` placeholder world); ops that don't
+/// touch those handles (most R7 ops at this tier) work end-to-end. Once
+/// the scene runtime grows real handles (T-7.x / T-8.x), this builder is
+/// the single point to thread them in.
+async fn build_intent_bridge_for_socket(spec: &AgentSpec) -> crate::commands::IntentBridge {
+    let registry = IntentRegistry::new();
+    register_core_ops(&registry).await;
+    let scene_id = SceneId::from_bytes(
+        spec.cwd.clone(),
+        format!("control-socket:{}", spec.id.as_str()).as_bytes(),
+    );
+    let ctx = IntentContext::placeholder(scene_id);
+    crate::commands::IntentBridge { registry, ctx }
 }
 
 #[cfg(test)]

@@ -217,6 +217,8 @@ dependencies = [
 name = "ark-bus"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
  "zellij-tile",
 ]
 
@@ -457,6 +459,7 @@ dependencies = [
  "fd-lock",
  "futures",
  "interprocess",
+ "kdl 6.5.0",
  "nix 0.29.0",
  "serde",
  "serde_json",

@@ -28,6 +28,7 @@
 //! - T-051 → expanded fail-open behavior
 
 pub mod allow;
+pub mod bridge;
 pub mod cli;
 pub mod event;
 pub mod payload;
@@ -36,7 +37,11 @@ pub mod run;
 pub mod writer;
 
 pub use allow::{ALLOW_PAYLOAD_JSON, write_allow_payload};
-pub use cli::Cli;
+pub use bridge::{
+    BridgeError, BridgeOutcome, dispatch_emit, dispatch_intent, dispatch_permit, resolve_agent_id,
+    resolve_socket_path,
+};
+pub use cli::{BridgeArgs, Cli, Command, LegacyCli, PermitArgs, PermitOutcome};
 pub use event::HookEvent;
 pub use payload::{FILE_EDIT_TOOLS, HookPayload, SUMMARY_MAX_CHARS, payload_to_events};
 pub use pipe::{

@@ -19,8 +19,16 @@ crate-type = ["cdylib"]
 # T-131 default-features audit (cavekit-distribution.md R3):
 #   - zellij-tile 0.44: `default = []` — nothing to strip.
 #
-# T-6.1: skeleton-only. Intent dispatch (T-6.2) and event forwarding
-# (T-6.3) will add further deps (serde/serde_json for control-socket
-# messages) when those tasks land — deliberately absent here so the
-# skeleton's wasm artifact is the minimum viable plugin.
+# T-6.2 / T-6.3: scene-bridge endpoints (`ark-intent`, `ark-rebind`,
+# pane-lifecycle event forwarding). The plugin parses incoming pipe
+# payloads as JSON to extract intent name + args before re-rendering as
+# a `--json` arg to `ark-hook`. `serde_json::Value` is the simplest
+# tolerant parser surface; the heavy validation lives in the supervisor's
+# `Intent`/`Emit` handlers per cavekit-scene.md R5/R6.
+#
+# T-131 default-features audit (cavekit-distribution.md R3):
+#   - serde_json: `default = ["std"]` — std is required (the wasm32-wasip1
+#     target supports std). Total wasm impact ~30 KB after wasm-opt.
 zellij-tile = "0.44"
+serde = { workspace = true }
+serde_json = { workspace = true }

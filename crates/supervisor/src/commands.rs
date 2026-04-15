@@ -55,7 +55,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use ark_core::{Response, read_status};
+use ark_scene::intent::{IntentContext, IntentRegistry};
+use ark_types::event::AgentEvent;
 use ark_types::{AgentId, EventSink, StateLayout};
+use kdl::{KdlEntry, KdlNode, KdlValue};
 use nix::sys::signal::Signal;
 use nix::unistd::Pid;
 use serde::{Deserialize, Serialize};
@@ -88,17 +91,51 @@ pub struct SupervisorCommandCtx {
     pub pid: Pid,
     /// Fired by `Kill` so the orchestrator loop can unwind cleanly.
     pub cancel: CancellationToken,
-    /// Held for future command-audit-log integration (cavekit-hook-ipc
-    /// R5 audit log is T-068 — this field lets T-066 ship without
-    /// coupling, and T-068 can emit from here without re-plumbing the
-    /// struct).
-    #[allow(dead_code)]
+    /// Event-bus sender used by the `Emit` control command (T-6.3) to
+    /// broadcast synthetic [`AgentEvent::UserEvent`] records onto the
+    /// supervisor bus. `Emit` returns `{ok: false}` when no receivers
+    /// are subscribed (closed bus); broadcasts to live consumers fan
+    /// out as usual.
     pub event_bus: EventSink,
     /// Optional audit logger (T-068). When `Some`, every handled command
     /// is recorded to `$STATE/control.log` as a JSONL line per
     /// cavekit-hook-ipc.md R5. Defaults to `None` to keep the T-066 test
     /// suite untouched; T-069 / production wiring injects one.
     pub audit: Option<Arc<AuditLogger>>,
+    /// Optional intent dispatch surface (T-6.2). When `Some`, the
+    /// supervisor's `Intent { name, args }` control command resolves
+    /// `name` against the registry and dispatches via
+    /// [`IntentRegistry::dispatch_dyn`], synthesising the `KdlNode` arg
+    /// from the JSON `args` shape. When `None`, every `Intent` request
+    /// returns an `ok: false` "intents disabled" error — this matches
+    /// the pre-T-6.2 semantics for tests that never wire a registry.
+    pub intents: Option<IntentBridge>,
+}
+
+/// Bundle of an [`IntentRegistry`] + [`IntentContext`] for control-socket
+/// dispatch (T-6.2).
+///
+/// The registry holds the op universe; the context carries the per-scene
+/// handles (mux, bus, supervisor) every op needs at dispatch. Kept as a
+/// single struct so [`SupervisorCommandCtx`] threads a single optional
+/// field rather than two correlated ones.
+#[derive(Clone)]
+pub struct IntentBridge {
+    /// The registry that resolves op names to implementations.
+    pub registry: IntentRegistry,
+    /// The context every dispatch sees as `&IntentContext`. Cloned per
+    /// dispatch (cheap — every field is `Arc`) so concurrent control
+    /// commands don't share mutable state.
+    pub ctx: IntentContext,
+}
+
+impl std::fmt::Debug for IntentBridge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IntentBridge")
+            .field("registry", &"<IntentRegistry>")
+            .field("ctx.scene_id", &self.ctx.scene_id)
+            .finish_non_exhaustive()
+    }
 }
 
 impl std::fmt::Debug for SupervisorCommandCtx {
@@ -155,6 +192,28 @@ impl SupervisorCommandHandler {
                 handle_rename(&self.ctx, args)
             }
             "Forget" => handle_forget(&self.ctx),
+            // ---- T-6.2: scene bridge dispatchers ----
+            "Intent" => {
+                let args: IntentArgs = match req.args_as() {
+                    Ok(a) => a,
+                    Err(e) => return Response::err(format!("Intent args: {e}")),
+                };
+                handle_intent(&self.ctx, args).await
+            }
+            "Emit" => {
+                let args: EmitArgs = match req.args_as() {
+                    Ok(a) => a,
+                    Err(e) => return Response::err(format!("Emit args: {e}")),
+                };
+                handle_emit(&self.ctx, args)
+            }
+            "Permit" => {
+                let args: PermitArgs = match req.args_as() {
+                    Ok(a) => a,
+                    Err(e) => return Response::err(format!("Permit args: {e}")),
+                };
+                handle_permit(&self.ctx, args)
+            }
             other => Response::err(format!("unknown command: {other}")),
         }
     }
@@ -229,6 +288,60 @@ struct RenameArgs {
     new_name: String,
 }
 
+/// Args for the T-6.2 `Intent { name, args }` command.
+///
+/// `name` is the registered op identifier (e.g. `ark.core.open_tab`).
+/// `args` is an arbitrary JSON object that the supervisor flattens into
+/// a synthetic `KdlNode` before handing to
+/// [`IntentRegistry::dispatch_dyn`]. See [`json_to_kdl_node`] for the
+/// JSON→KDL conversion rules.
+#[derive(Debug, Deserialize, Serialize)]
+struct IntentArgs {
+    /// Op name to dispatch.
+    name: String,
+    /// Arguments map. `null` / missing collapses to `{}`.
+    #[serde(default)]
+    args: JsonValue,
+}
+
+/// Args for the T-6.3 `Emit { event, payload, source }` command.
+///
+/// `event` is the user-event name (matched by scene selectors of the
+/// form `"UserEvent:<name>"`); `payload` is an arbitrary JSON map;
+/// `source` MUST be one of the canonical attribution strings per
+/// `cavekit-scene.md` R4 (`core` / `scene` / `ext:<name>` /
+/// `plugin:<name>` / `hook:<name>` / `agent`). The supervisor does NOT
+/// validate the source here — the scene compile pipeline already gates
+/// that for scene-emitted events; runtime emits are trusted.
+#[derive(Debug, Deserialize, Serialize)]
+struct EmitArgs {
+    /// User-event name (no namespace prefix; matched verbatim).
+    event: String,
+    /// Arbitrary JSON payload bound to `payload` in CEL predicates.
+    #[serde(default)]
+    payload: JsonValue,
+    /// Origin tag; see [`AgentEvent::UserEvent::source`].
+    source: String,
+}
+
+/// Args for the ACP-bridge `Permit { request_id, outcome, option_id? }`
+/// command.
+///
+/// The supervisor does not implement the ACP routing surface in this
+/// tier — the handler currently records the request and returns
+/// `{ok: true, data: {received: true}}`. T-ACP follow-ups will plumb
+/// the ACP session permissions registry through here.
+#[derive(Debug, Deserialize, Serialize)]
+struct PermitArgs {
+    /// ACP `session/request_permission` request id.
+    request_id: String,
+    /// One of `allow` / `reject_once` / `reject_always`.
+    outcome: String,
+    /// Optional `option_id` for ACP requests that present a list.
+    #[serde(default)]
+    option_id: Option<String>,
+}
+
 // ------- command implementations -----------------------------------------
 
 fn handle_status(ctx: &SupervisorCommandCtx) -> Response<JsonValue> {
@@ -301,6 +414,214 @@ fn handle_rename(ctx: &SupervisorCommandCtx, args: RenameArgs) -> Response<JsonV
             Response::ok(serde_json::json!({ "renamed_to": args.new_name }))
         }
         Err(e) => Response::err(format!("read spec.json: {e}")),
+    }
+}
+
+/// Dispatch a named intent through the supervisor's registry (T-6.2).
+///
+/// JSON args are converted to a synthetic KDL node via
+/// [`json_to_kdl_node`] before being handed to
+/// [`IntentRegistry::dispatch_dyn`] — every op's `Args: Facet<'static>`
+/// expects KDL-shaped input today, so we synthesise the simplest
+/// document that round-trips faithfully through the existing
+/// `dispatch_dyn` path. This keeps the scene crate's public API stable
+/// while letting us drive intents from the bridge dispatcher.
+async fn handle_intent(ctx: &SupervisorCommandCtx, args: IntentArgs) -> Response<JsonValue> {
+    let bridge = match &ctx.intents {
+        Some(b) => b.clone(),
+        None => return Response::err("intents disabled (no IntentRegistry wired)"),
+    };
+    // Synthesise a single-node KdlDocument: `<op-name> key="value" …`
+    // with one property per top-level field of `args.args`.
+    let node_name = node_name_for_intent(&args.name);
+    let kdl_node = match json_to_kdl_node(&node_name, &args.args) {
+        Ok(n) => n,
+        Err(e) => return Response::err(format!("synthesise KDL args: {e}")),
+    };
+    debug!(
+        agent = ctx.agent_id.as_str(),
+        intent = args.name.as_str(),
+        kdl_node = %kdl_node,
+        "Intent dispatch"
+    );
+    match bridge
+        .registry
+        .dispatch_dyn(&args.name, &kdl_node, &bridge.ctx)
+        .await
+    {
+        Ok(Some(value)) => Response::ok(serde_json::json!({
+            "dispatched": args.name,
+            "result": value,
+        })),
+        Ok(None) => Response::ok(serde_json::json!({
+            "dispatched": args.name,
+            "result": JsonValue::Null,
+        })),
+        Err(err) => Response::err(format!("intent `{}` failed: {err}", args.name)),
+    }
+}
+
+/// Broadcast a synthetic [`AgentEvent::UserEvent`] onto the supervisor
+/// event bus (T-6.3). Used by `ark-bus` for forwarding zellij
+/// pane-lifecycle events through the bus consumers.
+fn handle_emit(ctx: &SupervisorCommandCtx, args: EmitArgs) -> Response<JsonValue> {
+    let event = AgentEvent::UserEvent {
+        name: args.event.clone(),
+        payload: args.payload,
+        source: args.source,
+    };
+    match ctx.event_bus.send(event) {
+        Ok(receivers) => Response::ok(serde_json::json!({
+            "broadcast": args.event,
+            "receivers": receivers,
+        })),
+        Err(_) => Response::err(format!(
+            "no receivers subscribed to event bus for `{}`",
+            args.event
+        )),
+    }
+}
+
+/// Record an ACP permission response (skeleton).
+///
+/// The full ACP permission registry plumbing lives in the T-ACP follow-ups;
+/// today the handler validates the outcome string and returns success so
+/// the picker plugin can wire its modal UI. The supervisor logs every
+/// resolved permission via the `tracing` debug stream so operators can
+/// confirm wiring end-to-end without the registry yet existing.
+fn handle_permit(ctx: &SupervisorCommandCtx, args: PermitArgs) -> Response<JsonValue> {
+    if !matches!(args.outcome.as_str(), "allow" | "reject_once" | "reject_always") {
+        return Response::err(format!(
+            "Permit outcome must be one of allow/reject_once/reject_always, got `{}`",
+            args.outcome
+        ));
+    }
+    debug!(
+        agent = ctx.agent_id.as_str(),
+        request_id = %args.request_id,
+        outcome = %args.outcome,
+        option_id = args.option_id.as_deref().unwrap_or(""),
+        "Permit recorded (ACP routing TODO — T-ACP follow-up)"
+    );
+    Response::ok(serde_json::json!({
+        "recorded": true,
+        "request_id": args.request_id,
+        "outcome": args.outcome,
+    }))
+}
+
+/// Choose the synthesized KDL node name for an op.
+///
+/// Convention: `<namespace>.<verb>` → `<verb>` (e.g.
+/// `ark.core.open_tab` → `open_tab`). The Intent trait's
+/// `dispatch_dyn` round-trips the rendered node through
+/// `facet_kdl::from_str::<Self::Args>`, where `Args` is the op's
+/// document-wrapper struct whose single `#[facet(kdl::child)]` field's
+/// rename matches the bare verb. Using the namespaced form would
+/// require every op's wrapper to be named after the full path; the
+/// existing core-op crate already uses the bare-verb convention (see
+/// `crates/scene/src/ops/`), so we mirror it here.
+fn node_name_for_intent(intent_name: &str) -> String {
+    intent_name
+        .rsplit('.')
+        .next()
+        .unwrap_or(intent_name)
+        .to_string()
+}
+
+/// Build a `KdlNode` named `node_name` from a JSON value.
+///
+/// Conversion rules (v1 — sufficient for every R7 op's flat-arg shape):
+///
+/// * `JsonValue::Object` — each top-level entry becomes either:
+///   - a property `KdlEntry::new_prop(key, value)` for scalar values
+///     (string / bool / number);
+///   - a child node (recursively built) for nested objects;
+///   - a property carrying the JSON-string rendering for arrays.
+///     (The current op set has no array-shaped args; this branch is a
+///     forward-looking fallback rather than a tested path.)
+/// * `JsonValue::Null` — produces a bare node with no entries.
+/// * Any other root value — returns an error; intents always take a
+///   keyed args object, never a bare scalar at the top.
+///
+/// Number conversion goes through `KdlValue::Integer` for `i64`-fits
+/// and `KdlValue::Float` otherwise. JSON numbers that overflow `i128`
+/// fall back to `Float`.
+fn json_to_kdl_node(node_name: &str, args: &JsonValue) -> Result<KdlNode, String> {
+    let mut node = KdlNode::new(node_name);
+    match args {
+        JsonValue::Object(map) => {
+            for (key, val) in map.iter() {
+                match val {
+                    JsonValue::String(s) => node
+                        .entries_mut()
+                        .push(KdlEntry::new_prop(key.as_str(), s.clone())),
+                    JsonValue::Bool(b) => node
+                        .entries_mut()
+                        .push(KdlEntry::new_prop(key.as_str(), KdlValue::Bool(*b))),
+                    JsonValue::Number(n) => {
+                        let v = if let Some(i) = n.as_i64() {
+                            KdlValue::Integer(i as i128)
+                        } else if let Some(f) = n.as_f64() {
+                            KdlValue::Float(f)
+                        } else {
+                            KdlValue::String(n.to_string())
+                        };
+                        node.entries_mut().push(KdlEntry::new_prop(key.as_str(), v));
+                    }
+                    JsonValue::Null => {
+                        // Skip null fields — a missing facet field is
+                        // identical in shape to a present-but-null one
+                        // for every facet-kdl `Option<T>` field.
+                    }
+                    JsonValue::Object(_) => {
+                        // Nested object becomes a child node carrying its
+                        // own properties. Recurse with the key as the
+                        // node name.
+                        let mut inner = kdl::KdlDocument::new();
+                        let child = json_to_kdl_node(key, val)?;
+                        inner.nodes_mut().push(child);
+                        // If the node already has children, append to
+                        // them; otherwise initialise a fresh document.
+                        if let Some(existing) = node.children_mut() {
+                            for n in inner.nodes() {
+                                existing.nodes_mut().push(n.clone());
+                            }
+                        } else {
+                            node.set_children(inner);
+                        }
+                    }
+                    JsonValue::Array(_) => {
+                        // Render arrays as their JSON string form. The
+                        // op then re-parses if it wants the structured
+                        // value. Forward-looking only — no current op
+                        // takes an array arg.
+                        node.entries_mut()
+                            .push(KdlEntry::new_prop(key.as_str(), val.to_string()));
+                    }
+                }
+            }
+            Ok(node)
+        }
+        JsonValue::Null => Ok(node),
+        other => Err(format!(
+            "intent args must be a JSON object, got {}",
+            type_name_of(other)
+        )),
+    }
+}
+
+/// Lightweight type-name helper for the [`json_to_kdl_node`] error
+/// message. Avoids pulling in serde's `Display` impl which prints the
+/// value, not its kind.
+fn type_name_of(v: &JsonValue) -> &'static str {
+    match v {
+        JsonValue::Null => "null",
+        JsonValue::Bool(_) => "bool",
+        JsonValue::Number(_) => "number",
+        JsonValue::String(_) => "string",
+        JsonValue::Array(_) => "array",
+        JsonValue::Object(_) => "object",
     }
 }
 
@@ -459,6 +780,7 @@ mod tests {
             cancel: cancel.clone(),
             event_bus: tx,
             audit: None,
+            intents: None,
         };
         (ctx, cancel)
     }
@@ -480,6 +802,7 @@ mod tests {
             cancel: cancel.clone(),
             event_bus: tx,
             audit: Some(logger.clone()),
+            intents: None,
         };
         (ctx, cancel, logger)
     }
@@ -960,6 +1283,193 @@ mod tests {
         );
         // Signal must NOT have been sent on a malformed Kill.
         assert!(rec.calls().is_empty(), "no signal on malformed args");
+    }
+
+    // ---------- T-6.2 / T-6.3 control-bridge tests ----------
+
+    /// `Intent` returns a clear `intents disabled` error when no
+    /// IntentBridge is wired into the ctx — the legacy boot path
+    /// (T-066 tests + early T-069) should still work without a
+    /// registry.
+    #[tokio::test]
+    async fn intent_without_registry_errors_with_disabled_message() {
+        let tmp = short_tempdir();
+        let layout = layout_at(tmp.path());
+        let id = AgentId::new("cavekit", "intent-off");
+        let (ctx, _cancel) = make_ctx(id, layout);
+        let h = SupervisorCommandHandler::new(ctx);
+
+        let resp = h
+            .handle(serde_json::json!({
+                "cmd": "Intent",
+                "args": { "name": "ark.core.ping", "args": {} }
+            }))
+            .await;
+        assert_eq!(resp["ok"], JsonValue::Bool(false));
+        assert!(
+            resp["error"].as_str().unwrap().contains("intents disabled"),
+            "got {resp}"
+        );
+    }
+
+    /// `Intent` malformed args (missing `name`) → `ok: false` with an
+    /// arg-parse error message; never panics.
+    #[tokio::test]
+    async fn intent_malformed_args_returns_error() {
+        let tmp = short_tempdir();
+        let layout = layout_at(tmp.path());
+        let id = AgentId::new("cavekit", "intent-bad");
+        let (ctx, _cancel) = make_ctx(id, layout);
+        let h = SupervisorCommandHandler::new(ctx);
+
+        let resp = h
+            .handle(serde_json::json!({
+                "cmd": "Intent",
+                "args": { "args": {} } // no `name`
+            }))
+            .await;
+        assert_eq!(resp["ok"], JsonValue::Bool(false));
+        assert!(resp["error"].is_string());
+    }
+
+    /// `Emit` broadcasts a UserEvent onto the supervisor bus and
+    /// reports the receiver count.
+    #[tokio::test]
+    async fn emit_broadcasts_user_event_to_bus() {
+        let tmp = short_tempdir();
+        let layout = layout_at(tmp.path());
+        let id = AgentId::new("cavekit", "emit");
+        let (ctx, _cancel) = make_ctx(id, layout);
+        // Subscribe BEFORE emit so the broadcast has a receiver.
+        let mut rx = ctx.event_bus.subscribe();
+        let h = SupervisorCommandHandler::new(ctx);
+
+        let resp = h
+            .handle(serde_json::json!({
+                "cmd": "Emit",
+                "args": {
+                    "event": "ark.zellij.pane_closed",
+                    "payload": { "pane_id": 7 },
+                    "source": "ext:ark-bus"
+                }
+            }))
+            .await;
+        assert_eq!(resp["ok"], JsonValue::Bool(true), "resp: {resp}");
+        assert_eq!(
+            resp["data"]["broadcast"],
+            JsonValue::String("ark.zellij.pane_closed".into())
+        );
+
+        // Verify the bus actually received the event.
+        let ev = rx.recv().await.expect("event received");
+        match ev {
+            ark_types::AgentEvent::UserEvent {
+                name,
+                payload,
+                source,
+            } => {
+                assert_eq!(name, "ark.zellij.pane_closed");
+                assert_eq!(payload["pane_id"], serde_json::json!(7));
+                assert_eq!(source, "ext:ark-bus");
+            }
+            other => panic!("expected UserEvent, got {other:?}"),
+        }
+    }
+
+    /// `Permit` accepts only the canonical outcome strings.
+    #[tokio::test]
+    async fn permit_validates_outcome_string() {
+        let tmp = short_tempdir();
+        let layout = layout_at(tmp.path());
+        let id = AgentId::new("cavekit", "permit");
+        let (ctx, _cancel) = make_ctx(id, layout);
+        let h = SupervisorCommandHandler::new(ctx);
+
+        for outcome in ["allow", "reject_once", "reject_always"] {
+            let resp = h
+                .handle(serde_json::json!({
+                    "cmd": "Permit",
+                    "args": {
+                        "request_id": "req-1",
+                        "outcome": outcome
+                    }
+                }))
+                .await;
+            assert_eq!(
+                resp["ok"],
+                JsonValue::Bool(true),
+                "outcome {outcome}: {resp}"
+            );
+        }
+
+        let resp = h
+            .handle(serde_json::json!({
+                "cmd": "Permit",
+                "args": {
+                    "request_id": "req-2",
+                    "outcome": "bogus"
+                }
+            }))
+            .await;
+        assert_eq!(resp["ok"], JsonValue::Bool(false));
+        assert!(resp["error"].as_str().unwrap().contains("outcome"));
+    }
+
+    /// `json_to_kdl_node` flattens object args into `KdlEntry::new_prop`
+    /// entries the facet-kdl deserializer can read.
+    #[test]
+    fn json_to_kdl_node_flattens_scalars() {
+        use kdl::KdlValue;
+        let node = json_to_kdl_node(
+            "open_tab",
+            &serde_json::json!({
+                "name": "build",
+                "focus": true,
+                "size": 60
+            }),
+        )
+        .expect("ok");
+        assert_eq!(node.name().value(), "open_tab");
+
+        let entries = node.entries();
+        let by_key = |k: &str| {
+            entries.iter().find(|e| e.name().map(|n| n.value()) == Some(k))
+        };
+        assert!(matches!(by_key("name").unwrap().value(), KdlValue::String(s) if s == "build"));
+        assert!(matches!(by_key("focus").unwrap().value(), KdlValue::Bool(true)));
+        assert!(matches!(
+            by_key("size").unwrap().value(),
+            KdlValue::Integer(60)
+        ));
+    }
+
+    /// `node_name_for_intent` strips the namespace prefix.
+    #[test]
+    fn node_name_for_intent_strips_namespace() {
+        assert_eq!(node_name_for_intent("ark.core.open_tab"), "open_tab");
+        assert_eq!(node_name_for_intent("foo.bar.baz"), "baz");
+        assert_eq!(node_name_for_intent("bare"), "bare");
+    }
+
+    /// `Intent`/`Emit`/`Permit` parse cleanly from their wire shape — a
+    /// minimal mirror of the `every_command_variant_parses_as_request`
+    /// guard for the new variants.
+    #[test]
+    fn bridge_command_variants_parse_as_request() {
+        let lines: &[&[u8]] = &[
+            br#"{"cmd":"Intent","args":{"name":"ark.core.open_tab","args":{}}}"#,
+            br#"{"cmd":"Emit","args":{"event":"x","payload":{},"source":"ext:ark-bus"}}"#,
+            br#"{"cmd":"Permit","args":{"request_id":"r","outcome":"allow"}}"#,
+        ];
+        for line in lines {
+            let req: Request = serde_json::from_slice(line).unwrap_or_else(|e| {
+                panic!(
+                    "variant should parse: {} (err: {e})",
+                    std::str::from_utf8(line).unwrap_or("?")
+                )
+            });
+            assert!(matches!(req.cmd.as_str(), "Intent" | "Emit" | "Permit"));
+        }
     }
 
     #[tokio::test]

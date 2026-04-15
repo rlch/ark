@@ -40,8 +40,13 @@ pub use foreground::{
 pub use lock::{LockError, LockGuard, acquire_lock};
 
 // T-066: per-supervisor socket command handlers (cavekit-hook-ipc R5).
+//
+// T-6.2 grew the surface with `Intent` / `Emit` / `Permit` for the
+// scene-bridge dispatchers (`ark-hook intent | emit | permit`).
 pub mod commands;
-pub use commands::{SignalSender, SupervisorCommandCtx, SupervisorCommandHandler};
+pub use commands::{
+    IntentBridge, SignalSender, SupervisorCommandCtx, SupervisorCommandHandler,
+};
 
 // T-067: signal handlers + socket-cleanup guard (cavekit-supervisor R7).
 pub mod signals;

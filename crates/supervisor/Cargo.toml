@@ -37,6 +37,13 @@ interprocess = { workspace = true }
 signal-hook = { workspace = true }
 signal-hook-tokio = { workspace = true }
 futures = { workspace = true }
+# T-6.2: Intent dispatch via control socket. The supervisor builds a
+# synthesized `KdlNode` from the JSON args sent by `ark-hook intent`,
+# then dispatches through `ark_scene::intent::IntentRegistry`. The
+# upstream `kdl` crate lives in `[workspace.dependencies]` already
+# (used by scene); we pull it here so the synthesis lives next to
+# its only consumer.
+kdl = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
