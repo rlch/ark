@@ -370,20 +370,23 @@ fn chip_label_contains(chip: &Chip, needle: &str) -> bool {
 /// does not match that shape (e.g. legacy bare-name sessions, or any
 /// non-ark session the zellij host reports).
 ///
-/// The 8-char suffix must be Crockford-base32 uppercase — the format
-/// [`ark-cli::commands::spawn::unique_session_name`] emits — so an
-/// unrelated session name that merely contains hyphens does not get
-/// mis-parsed.
+/// The 8-char suffix must be Crockford-base32 (case-insensitive — see
+/// below) — the format [`ark-cli::commands::spawn::unique_session_name`]
+/// emits — so an unrelated session name that merely contains hyphens
+/// does not get mis-parsed.
+///
+/// F-610: `AgentId::new` lowercases the ULID before storing it, so the
+/// real zellij session tail is LOWERCASE Crockford-base32
+/// (e.g. `…-0abcdefg`), not uppercase. Validating case-sensitively
+/// caused every live-session chip lookup to miss: the focused-session
+/// highlight never pinned. We now accept both cases by uppercasing each
+/// character before checking against the Crockford alphabet.
 fn extract_bare_name_from_session(session: &str) -> Option<&str> {
     let body = session.strip_prefix("ark-")?;
     // Split into `orch-name-suffix`. We need the last hyphen to peel the
     // ulid8 suffix, and the first hyphen to drop the orchestrator slug.
     let (head, suffix) = body.rsplit_once('-')?;
-    if suffix.len() != 8
-        || !suffix
-            .chars()
-            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
-    {
+    if suffix.len() != 8 || !suffix.chars().all(is_crockford_base32_char) {
         return None;
     }
     let (_orch, name) = head.split_once('-')?;
@@ -391,6 +394,22 @@ fn extract_bare_name_from_session(session: &str) -> Option<&str> {
         return None;
     }
     Some(name)
+}
+
+/// Return `true` iff `c` is a Crockford-base32 character, case-insensitively.
+///
+/// Crockford-base32 excludes `I`, `L`, `O`, and `U` to reduce visual
+/// ambiguity with `1`/`0` and accidental profanity. ULIDs always produce
+/// characters from this alphabet, so anything outside it cannot be a
+/// valid ULID tail — the stricter check still prevents us from
+/// mis-parsing arbitrary 8-char hex-looking suffixes.
+fn is_crockford_base32_char(c: char) -> bool {
+    let up = c.to_ascii_uppercase();
+    match up {
+        '0'..='9' => true,
+        'A'..='Z' => !matches!(up, 'I' | 'L' | 'O' | 'U'),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -580,11 +599,25 @@ mod tests {
     }
 
     #[test]
-    fn chip_matches_session_rejects_lowercase_suffix() {
-        // ULIDs encode as UPPERCASE Crockford-base32; a lowercase tail
-        // is almost certainly an unrelated session and must not match.
+    fn chip_matches_session_accepts_lowercase_suffix() {
+        // F-610: AgentId::new lowercases the ULID before storing it, so
+        // the real zellij session tail is lowercase Crockford-base32.
+        // `chip_matches_session` must accept both cases — the earlier
+        // strict-uppercase check dropped every live-session highlight.
         let chip = build_chip(&summary("auth", "running"), false);
-        assert!(!chip_matches_session(&chip, "ark-cavekit-auth-deadbeef"));
+        assert!(chip_matches_session(&chip, "ark-cavekit-auth-01abcdef"));
+        // Mixed case still parses (Crockford is case-insensitive by spec).
+        assert!(chip_matches_session(&chip, "ark-cavekit-auth-01AbCdEf"));
+    }
+
+    #[test]
+    fn chip_matches_session_still_rejects_crockford_excluded_chars() {
+        // Crockford omits I, L, O, U — a tail containing those is NOT a
+        // ULID fragment and must still be rejected. Prevents arbitrary
+        // `aaaa-iiii` style suffixes from accidentally pinning a chip.
+        let chip = build_chip(&summary("auth", "running"), false);
+        assert!(!chip_matches_session(&chip, "ark-cavekit-auth-illusion"));
+        assert!(!chip_matches_session(&chip, "ark-cavekit-auth-ILLUSION"));
     }
 
     #[test]
@@ -612,5 +645,23 @@ mod tests {
         );
         assert_eq!(extract_bare_name_from_session("not-an-ark-session"), None);
         assert_eq!(extract_bare_name_from_session("ark-cavekit-auth"), None);
+    }
+
+    #[test]
+    fn extract_bare_name_lowercase_ulid_tail_roundtrip() {
+        // F-610: real sessions land on disk with lowercase ULID tails
+        // (AgentId::new → `.to_lowercase()`). The parser must return the
+        // bare name for those inputs — upper-only validation previously
+        // caused this to return None and the focused-session highlight
+        // never pinned.
+        assert_eq!(
+            extract_bare_name_from_session("ark-cavekit-auth-01abcdef"),
+            Some("auth")
+        );
+        // Crockford-excluded chars (I, L, O, U) in lowercase still fail.
+        assert_eq!(
+            extract_bare_name_from_session("ark-cavekit-auth-illusion"),
+            None
+        );
     }
 }

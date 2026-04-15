@@ -168,6 +168,37 @@ impl Picker {
         self.cache.resurrectable.remove(&summary.id);
         self.cache.active.insert(summary.id.clone(), summary);
     }
+
+    /// Update `self.focused_session` from a zellij `SessionUpdate` payload.
+    ///
+    /// F-611: the wasm-side `Event::SessionUpdate` arm used to return
+    /// `false` without reading the payload, so `focused_session` stayed
+    /// `None` forever — which meant the list screen never pinned the
+    /// currently-focused agent. We now scan the session list for the
+    /// entry flagged `is_current_session` and cache its name.
+    ///
+    /// Accepts an iterator of `(name, is_current_session)` tuples rather
+    /// than `Vec<SessionInfo>` directly so host tests can exercise the
+    /// extraction logic without constructing a full `SessionInfo`
+    /// (which is wasm-gated under zellij-tile's host-shim cfg).
+    ///
+    /// Returns `true` iff `focused_session` changed — the wasm caller
+    /// uses the return value as a redraw hint.
+    pub fn set_focused_session<'a, I>(&mut self, sessions: I) -> bool
+    where
+        I: IntoIterator<Item = (&'a str, bool)>,
+    {
+        let new_focus = sessions
+            .into_iter()
+            .find(|(_, focused)| *focused)
+            .map(|(name, _)| name.to_string());
+        if new_focus != self.focused_session {
+            self.focused_session = new_focus;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -766,7 +797,16 @@ mod wasm_plugin {
                     set_timeout(TIMER_INTERVAL_SECS);
                     changed
                 }
-                Event::SessionUpdate(_sessions, _resurrectable) => false,
+                Event::SessionUpdate(sessions, _resurrectable) => {
+                    // F-611: feed the focused session into self.focused_session
+                    // so the list screen can pin the currently-active agent.
+                    // Before this fix the arm returned `false` without reading
+                    // the payload and focused_session stayed None forever.
+                    let iter = sessions
+                        .iter()
+                        .map(|s| (s.name.as_str(), s.is_current_session));
+                    self.set_focused_session(iter)
+                }
                 Event::ModeUpdate(_mode_info) => false,
                 Event::PermissionRequestResult(_status) => false,
                 _ => false,
@@ -1067,5 +1107,43 @@ mod tests {
         let mut p = Picker::new();
         p.apply_pipe_update(AgentSummary::default());
         assert!(p.cache.active.is_empty());
+    }
+
+    // ---- F-611: SessionUpdate → focused_session --------------------------
+
+    #[test]
+    fn set_focused_session_picks_the_is_current_entry() {
+        let mut p = Picker::new();
+        let sessions = vec![
+            ("ark-cavekit-auth-01abcdef", false),
+            ("ark-cavekit-billing-02abcdef", true),
+            ("unrelated-session", false),
+        ];
+        let changed = p.set_focused_session(sessions.iter().map(|(n, f)| (*n, *f)));
+        assert!(changed);
+        assert_eq!(
+            p.focused_session.as_deref(),
+            Some("ark-cavekit-billing-02abcdef")
+        );
+    }
+
+    #[test]
+    fn set_focused_session_none_when_no_current() {
+        let mut p = Picker::new();
+        p.focused_session = Some("stale".into());
+        let sessions = vec![("a", false), ("b", false)];
+        let changed = p.set_focused_session(sessions.iter().map(|(n, f)| (*n, *f)));
+        assert!(changed, "transition Some → None counts as a change");
+        assert!(p.focused_session.is_none());
+    }
+
+    #[test]
+    fn set_focused_session_no_change_returns_false() {
+        let mut p = Picker::new();
+        p.focused_session = Some("same".into());
+        let sessions = vec![("same", true)];
+        let changed = p.set_focused_session(sessions.iter().map(|(n, f)| (*n, *f)));
+        assert!(!changed);
+        assert_eq!(p.focused_session.as_deref(), Some("same"));
     }
 }

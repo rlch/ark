@@ -39,6 +39,42 @@ pub const REACHABILITY_TIMEOUT_MS: u64 = 50;
 
 /// Resolve the `(state_dir, runtime_dir)` pair the picker scans.
 ///
+/// Thin wrapper over [`resolve_xdg_paths_with_uid`] that plugs in the
+/// canonical UID fallback (`libc::geteuid()` on unix). Callers that want
+/// to exercise the no-uid path (host tests, or the no-libc fallback)
+/// can call [`resolve_xdg_paths_with_uid`] directly with a closure that
+/// returns `None`.
+pub fn resolve_xdg_paths(env: impl Fn(&str) -> Option<String>) -> (PathBuf, PathBuf) {
+    resolve_xdg_paths_with_uid(env, current_uid_fallback)
+}
+
+/// OS-level UID fallback used when the env closure doesn't surface `UID`.
+///
+/// F-609: zellij plugin harnesses (and many service-launched shells)
+/// don't export `UID` — it's a shell-convention variable. Falling back
+/// to `libc::geteuid()` gives us the real effective uid so the picker
+/// can construct `/tmp/ark-$UID/agents` (or `$XDG_RUNTIME_DIR/ark-$UID/
+/// agents`) and find live supervisor sockets. Without this fallback,
+/// every live agent was being classified as crashed because the socket
+/// scan was being skipped.
+#[cfg(unix)]
+fn current_uid_fallback() -> Option<String> {
+    // SAFETY: geteuid() is infallible and thread-safe on all unix
+    // platforms per POSIX.1-2017.
+    let uid = unsafe { libc::geteuid() };
+    Some(uid.to_string())
+}
+
+#[cfg(not(unix))]
+fn current_uid_fallback() -> Option<String> {
+    None
+}
+
+/// Test-friendly variant of [`resolve_xdg_paths`] with an injected UID
+/// fallback getter. The production path wires this to
+/// [`current_uid_fallback`]; tests can inject `|| None` to verify the
+/// "truly no uid available" branch still returns an empty runtime path.
+///
 /// Precedence mirrors `ark-types::EnvPaths::resolve` (F-604). ark-types is
 /// NOT imported here — the picker is WASM-only at runtime and pulling the
 /// crate in would break that constraint; the host-side env injector
@@ -55,18 +91,19 @@ pub const REACHABILITY_TIMEOUT_MS: u64 = 50;
 /// Runtime side:
 ///   1. `$ARK_RUNTIME_DIR/agents` — verbatim (no `ark-$UID` segment);
 ///      matches `EnvPaths::resolve_runtime` semantics.
-///   2. `$XDG_RUNTIME_DIR/ark-$UID/agents` — XDG fallback, needs a UID.
-///   3. `/tmp/ark-$UID/agents` — platform fallback, needs a UID.
-///   4. When neither `$ARK_RUNTIME_DIR`, `$XDG_RUNTIME_DIR` nor `UID` is
-///      surfaced by the env closure, we cannot construct a safe
-///      per-user-isolated path (`/tmp/ark/agents` would be shared across
-///      users on a multi-tenant host). Rather than pick a questionable
-///      default, the runtime side returns `PathBuf::new()` and the
+///   2. `$XDG_RUNTIME_DIR/ark-$UID/agents` — XDG fallback, UID sourced
+///      from env closure or `uid_fallback` (F-609).
+///   3. `/tmp/ark-$UID/agents` — platform fallback, UID sourced likewise.
+///   4. When neither `$ARK_RUNTIME_DIR` is set nor the uid is recoverable
+///      (env closure + `uid_fallback` both return `None`), we cannot
+///      construct a safe per-user-isolated path
+///      (`/tmp/ark/agents` would be shared across users on a multi-tenant
+///      host). The runtime side then returns `PathBuf::new()` and the
 ///      caller skips the socket scan — pipe-only liveness still works.
-///
-/// `env` is injected rather than read via `std::env::var` so host tests can
-/// assert every branch without mutating process env.
-pub fn resolve_xdg_paths(env: impl Fn(&str) -> Option<String>) -> (PathBuf, PathBuf) {
+pub fn resolve_xdg_paths_with_uid(
+    env: impl Fn(&str) -> Option<String>,
+    uid_fallback: impl FnOnce() -> Option<String>,
+) -> (PathBuf, PathBuf) {
     // --- state_dir ---
     let state_dir = if let Some(ark) = env("ARK_STATE_DIR").filter(|s| !s.is_empty()) {
         PathBuf::from(ark)
@@ -85,9 +122,15 @@ pub fn resolve_xdg_paths(env: impl Fn(&str) -> Option<String>) -> (PathBuf, Path
     }
 
     // For the XDG / /tmp branches we need a UID to disambiguate between
-    // users on a shared host. Without one, return an empty PathBuf and
-    // let the caller skip the socket scan (pipe liveness still works).
-    let Some(uid) = env("UID").filter(|s| !s.is_empty()) else {
+    // users on a shared host. Prefer `env("UID")` (shell convention) but
+    // fall back to the uid_fallback closure — F-609: zellij plugin
+    // harnesses routinely don't export UID, and without a fallback every
+    // live agent was being classified as crashed.
+    let uid = env("UID")
+        .filter(|s| !s.is_empty())
+        .or_else(uid_fallback)
+        .filter(|s| !s.is_empty());
+    let Some(uid) = uid else {
         return (state_dir, PathBuf::new());
     };
     let uid_suffix = format!("ark-{uid}");
@@ -180,6 +223,140 @@ pub(crate) fn find_u64_field(json: &str, key: &str) -> Option<u64> {
         return None;
     }
     slice[..end].parse::<u64>().ok()
+}
+
+/// Extract a timestamp field that may be serialised either as a numeric
+/// epoch-seconds (test-fixture / legacy shape) or as an ISO-8601 string
+/// (chrono `DateTime<Utc>` default, which is what supervisors write).
+/// Returns epoch-seconds in both cases, or `None` if parse fails.
+///
+/// F-612: the supervisor emits `"last_event_at":"2026-04-15T04:30:00Z"`
+/// to `status.json` via chrono's default Serialize impl. Before this
+/// fix the picker only ran `find_u64_field`, which rejected the string
+/// and left `last_event_at` as `None` for every real agent — so the
+/// list screen's age column was always blank and the age-sort was
+/// effectively disabled.
+///
+/// Returning seconds (not milliseconds) keeps the numeric path
+/// behaviourally identical to `find_u64_field` so all downstream code
+/// (e.g. `render_list.rs::format_row` which calls
+/// `ts.saturating_mul(1000)`) keeps working unchanged.
+pub(crate) fn find_timestamp_field(json: &str, key: &str) -> Option<u64> {
+    if let Some(secs) = find_u64_field(json, key) {
+        return Some(secs);
+    }
+    let s = find_string_field(json, key)?;
+    iso8601_to_epoch_secs(&s)
+}
+
+/// Parse a minimal subset of ISO-8601 into epoch seconds.
+///
+/// Accepts `YYYY-MM-DDTHH:MM:SS[.fff][Z|±HH[:]MM]`. Fractional seconds are
+/// dropped (second-precision is enough for the picker's age column).
+/// Timezone offsets are honoured; missing offset treated as UTC.
+///
+/// Hand-rolled rather than pulling chrono/humantime into the picker's
+/// wasm budget per cavekit-plugin-picker R1 — only a handful of fields
+/// in `status.json` need this and the logic is ~60 lines of pure arith.
+pub(crate) fn iso8601_to_epoch_secs(s: &str) -> Option<u64> {
+    let (date_part, time_part) = s.split_once('T')?;
+
+    // --- date: YYYY-MM-DD ---
+    let mut date_iter = date_part.split('-');
+    let year: i64 = date_iter.next()?.parse().ok()?;
+    let month: u32 = date_iter.next()?.parse().ok()?;
+    let day: u32 = date_iter.next()?.parse().ok()?;
+    if date_iter.next().is_some() {
+        return None;
+    }
+    if !(1970..=9999).contains(&year) || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+
+    // --- split time from optional offset / Z ---
+    // Strategy: find the first char after position 0 that is `Z`, `+`, or
+    // `-` (the ISO offset markers). Everything before it is the HH:MM:SS
+    // [.fff] body; everything after is the offset.
+    let (time_body, offset_str) = split_iso_offset(time_part);
+
+    // --- time: HH:MM:SS[.fff] — drop fractional seconds ---
+    let time_no_frac = time_body.split('.').next()?;
+    let mut time_iter = time_no_frac.split(':');
+    let hour: u32 = time_iter.next()?.parse().ok()?;
+    let minute: u32 = time_iter.next()?.parse().ok()?;
+    let second: u32 = time_iter.next()?.parse().ok()?;
+    if time_iter.next().is_some() {
+        return None;
+    }
+    if hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+
+    // --- offset: Z | ±HH[:]MM ---
+    let offset_secs: i64 = match offset_str {
+        "" | "Z" | "z" => 0,
+        rest => parse_iso_offset_secs(rest)?,
+    };
+
+    // --- build epoch seconds from proleptic-Gregorian date ---
+    let days = days_from_civil(year, month, day)?;
+    let secs = days as i64 * 86_400 + hour as i64 * 3600 + minute as i64 * 60 + second as i64;
+    let secs = secs.checked_sub(offset_secs)?;
+    if secs < 0 {
+        return None;
+    }
+    Some(secs as u64)
+}
+
+/// Peel off the trailing ISO-8601 offset (Z, +HH:MM, -HHMM, …) from a
+/// time string. Returns `(body_without_offset, offset_str)` where
+/// `offset_str` is empty if no offset was present.
+fn split_iso_offset(time_part: &str) -> (&str, &str) {
+    let bytes = time_part.as_bytes();
+    for (i, &b) in bytes.iter().enumerate().skip(1) {
+        if b == b'Z' || b == b'z' || b == b'+' || b == b'-' {
+            return (&time_part[..i], &time_part[i..]);
+        }
+    }
+    (time_part, "")
+}
+
+/// Parse `±HH:MM` or `±HHMM` → offset in seconds. Caller peels the `Z`
+/// case separately.
+fn parse_iso_offset_secs(s: &str) -> Option<i64> {
+    let (sign, rest) = match s.as_bytes().first()? {
+        b'+' => (1i64, &s[1..]),
+        b'-' => (-1i64, &s[1..]),
+        _ => return None,
+    };
+    let rest = rest.replace(':', "");
+    if rest.len() != 4 {
+        return None;
+    }
+    let hh: i64 = rest[..2].parse().ok()?;
+    let mm: i64 = rest[2..].parse().ok()?;
+    if hh > 23 || mm > 59 {
+        return None;
+    }
+    Some(sign * (hh * 3600 + mm * 60))
+}
+
+/// Days since 1970-01-01 for `(year, month, day)` in the proleptic
+/// Gregorian calendar. Implementation from Howard Hinnant's well-known
+/// `days_from_civil` algorithm (public domain, <http://howardhinnant.github.io/date_algorithms.html>).
+/// Returns `None` for years < 1970 (our on-disk timestamps never go that
+/// far back — they're bounded by supervisor start).
+fn days_from_civil(y: i64, m: u32, d: u32) -> Option<i64> {
+    if y < 1970 {
+        return None;
+    }
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = (y - era * 400) as i64; // [0, 399]
+    let m_adj = if m > 2 { m as i64 - 3 } else { m as i64 + 9 };
+    let doy = (153 * m_adj + 2) / 5 + d as i64 - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    Some(era * 146097 + doe - 719468)
 }
 
 /// Extract a `(u32, u32)` two-element array for a top-level `"key"`, e.g.
@@ -363,12 +540,15 @@ pub fn parse_agent_status_minimal(s: &str) -> Option<AgentSummary> {
     let phase = find_string_field(s, "phase").unwrap_or_default();
     let progress = find_progress_field(s, "progress");
 
-    // Timestamps: supervisors write `last_event_at` as an ISO-8601 string
-    // (chrono default). For the list screen we only need epoch-ish seconds
-    // for ordering, so we skip parsing ISO here — T-103 detail screen
-    // fetches fresh via the socket anyway. Leave both as None.
-    let started_at = find_u64_field(s, "started_at");
-    let last_event_at = find_u64_field(s, "last_event_at");
+    // Timestamps: supervisors write `last_event_at` / `started_at` as an
+    // ISO-8601 string (chrono default serialises `DateTime<Utc>` to
+    // `"2026-04-15T04:30:00Z"`). F-612: previously this site only tried
+    // `find_u64_field`, so the ISO-8601 form produced by real supervisors
+    // returned `None` and the list screen's age column stayed blank /
+    // sorted agents incorrectly. We now accept both: numeric epoch-ms
+    // first (older shape / test fixtures), then ISO-8601 string.
+    let started_at = find_timestamp_field(s, "started_at");
+    let last_event_at = find_timestamp_field(s, "last_event_at");
 
     if id.is_empty() && name.is_empty() {
         return None;
@@ -695,6 +875,58 @@ mod tests {
         assert_eq!(s.name, "real");
     }
 
+    // --- F-612: ISO-8601 timestamp parsing ------------------------------
+
+    #[test]
+    fn iso8601_utc_round_number() {
+        // 2026-04-15T00:00:00Z = 1_776_211_200 seconds since epoch
+        // (verified via `date -u -j -f %FT%TZ 2026-04-15T00:00:00Z +%s`).
+        assert_eq!(
+            iso8601_to_epoch_secs("2026-04-15T00:00:00Z"),
+            Some(1_776_211_200)
+        );
+    }
+
+    #[test]
+    fn iso8601_with_fractional_and_offset() {
+        // Fractional seconds are dropped; +02:00 offset subtracts 2h.
+        // 2026-04-15T02:00:00+02:00 is exactly 2026-04-15T00:00:00Z.
+        assert_eq!(
+            iso8601_to_epoch_secs("2026-04-15T02:00:00.123+02:00"),
+            Some(1_776_211_200)
+        );
+    }
+
+    #[test]
+    fn iso8601_rejects_malformed() {
+        assert!(iso8601_to_epoch_secs("not-a-date").is_none());
+        assert!(iso8601_to_epoch_secs("2026-04-15").is_none()); // no T
+        assert!(iso8601_to_epoch_secs("1969-01-01T00:00:00Z").is_none()); // pre-1970
+        assert!(iso8601_to_epoch_secs("2026-13-15T00:00:00Z").is_none()); // bad month
+    }
+
+    #[test]
+    fn parse_agent_status_accepts_iso8601_timestamps() {
+        // Real status.json shape: `last_event_at` is a chrono
+        // ISO-8601 string, not a number. F-612: before this fix
+        // `last_event_at` was always None for real agents.
+        let json = r#"{"spec":{"id":"x","name":"y"},"phase":"running","started_at":"2026-04-15T00:00:00Z","last_event_at":"2026-04-15T00:00:30Z"}"#;
+        let s = parse_agent_status_minimal(json).expect("parse");
+        assert_eq!(s.started_at, Some(1_776_211_200));
+        assert_eq!(s.last_event_at, Some(1_776_211_230));
+    }
+
+    #[test]
+    fn parse_agent_status_still_accepts_numeric_timestamps() {
+        // Backcompat: the numeric-epoch-seconds shape (used by existing
+        // tests and any tooling that wrote status.json before chrono's
+        // ISO-8601 default landed) must continue to parse.
+        let json = r#"{"spec":{"id":"x","name":"y"},"phase":"running","started_at":1700000000,"last_event_at":1700000500}"#;
+        let s = parse_agent_status_minimal(json).expect("parse");
+        assert_eq!(s.started_at, Some(1_700_000_000));
+        assert_eq!(s.last_event_at, Some(1_700_000_500));
+    }
+
     // --- scan_state_dir --------------------------------------------------
 
     #[test]
@@ -963,14 +1195,75 @@ mod tests {
         // (`/tmp/ark/agents` would collide across users on a shared
         // host). Return an empty PathBuf so the caller skips the socket
         // scan; pipe liveness is still functional.
+        //
+        // F-609: the public `resolve_xdg_paths` now pulls a UID from
+        // libc::geteuid() as a fallback, so to exercise the true
+        // "no UID anywhere" branch we call the injectable variant
+        // with a closure that returns `None`.
         let env = |k: &str| match k {
             "HOME" => Some("/home/u".to_string()),
             "XDG_RUNTIME_DIR" => Some("/run".to_string()),
             _ => None,
         };
-        let (state, rt) = resolve_xdg_paths(env);
+        let (state, rt) = resolve_xdg_paths_with_uid(env, || None);
         assert_eq!(state, PathBuf::from("/home/u/.local/state/ark"));
         assert_eq!(rt, PathBuf::new());
+    }
+
+    // ---- F-609: UID-fallback closure seeds the socket path -----------------
+
+    #[test]
+    fn resolve_xdg_paths_uses_uid_fallback_when_env_lacks_uid() {
+        // Zellij plugin harnesses frequently don't export `UID` — before
+        // F-609 we'd return PathBuf::new() for runtime_dir and the socket
+        // scan got skipped, so live agents were classified as crashed.
+        // With the fallback closure the path is constructed cleanly.
+        let env = |k: &str| match k {
+            "HOME" => Some("/home/u".to_string()),
+            "XDG_RUNTIME_DIR" => Some("/run".to_string()),
+            _ => None,
+        };
+        let (_state, rt) = resolve_xdg_paths_with_uid(env, || Some("4242".to_string()));
+        assert_eq!(rt, PathBuf::from("/run/ark-4242/agents"));
+    }
+
+    #[test]
+    fn resolve_xdg_paths_env_uid_wins_over_fallback() {
+        // Shell-convention env wins: if the user already exported UID,
+        // honour it rather than poking geteuid() (useful for tests and
+        // sandboxed run modes that re-map uids).
+        let env = |k: &str| match k {
+            "XDG_RUNTIME_DIR" => Some("/run".to_string()),
+            "UID" => Some("1000".into()),
+            _ => None,
+        };
+        let (_state, rt) = resolve_xdg_paths_with_uid(env, || Some("9999".to_string()));
+        assert_eq!(rt, PathBuf::from("/run/ark-1000/agents"));
+    }
+
+    #[test]
+    fn resolve_xdg_paths_fallback_empty_string_skips_runtime() {
+        // Pathological fallback that yields an empty string must not
+        // produce `ark-/agents` — treat it as "no uid available".
+        let env = |_: &str| -> Option<String> { None };
+        let (_state, rt) = resolve_xdg_paths_with_uid(env, || Some(String::new()));
+        assert_eq!(rt, PathBuf::new());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_xdg_paths_default_uses_libc_geteuid_on_unix() {
+        // Sanity: on unix hosts the production wrapper yields a non-empty
+        // runtime path even when env is utterly empty — libc::geteuid
+        // supplies the uid.
+        let env = |_: &str| -> Option<String> { None };
+        let (_state, rt) = resolve_xdg_paths(env);
+        assert_ne!(rt, PathBuf::new(), "expected libc fallback to seed uid");
+        let rt_str = rt.to_string_lossy();
+        assert!(
+            rt_str.starts_with("/tmp/ark-") && rt_str.ends_with("/agents"),
+            "unexpected runtime path shape: {rt_str}"
+        );
     }
 
     #[test]

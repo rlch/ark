@@ -25,6 +25,15 @@ serde = { workspace = true }
 # version keeps wasm dedup clean and doesn't grow the dep graph.
 shlex = { workspace = true }
 
+# libc — F-609: picker bootstrap needs `geteuid()` as a UID fallback when
+# the zellij plugin harness doesn't export `UID` in the env. libc is
+# already transitively in the graph (via zellij-tile's deps) so pulling
+# it in directly adds no resolved versions. Only used on unix; the
+# wasm32-wasip1 target's unix cfg is satisfied but `geteuid()` is still
+# gated behind `cfg(unix)` for the non-wasm non-unix host test fallback.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # NOTE: serde_json, humantime, and chrono are intentionally NOT listed here.
 # cavekit-plugin-picker R1 and cavekit-distribution.md R3 ban them from the
 # picker plugin to keep the wasm binary inside the T-131/T-132 size budget —

@@ -601,3 +601,66 @@ Three findings from the next codex pass: an advertised-but-unwired CLI flag (`ar
 `cargo build --workspace` zero new warnings (the two pre-existing `embedded ark-plugin-*` cargo-warnings are just build-script byte-count notices, not code warnings). `cargo fmt --all` clean.
 
 **Gate status after Tier 5 cycle 3:** OPEN pending next codex pass.
+
+## Tier 5 Gate — Cycle 4 (2026-04-15)
+
+Four findings raised by codex against the picker + status-chip plugin work. All four fixed in a single commit; test counts bumped for each.
+
+### F-609 — P1 picker bootstrap UID fallback too strict (FIXED)
+
+**Source:** codex
+**Tier:** 5
+**Severity:** P1
+**Status:** fixed
+**Location:** crates/plugins/picker/src/bootstrap.rs (`resolve_xdg_paths` / new `resolve_xdg_paths_with_uid`), crates/plugins/picker/Cargo.toml
+
+**Description:** The runtime-dir resolver required `ARK_RUNTIME_DIR` OR (`XDG_RUNTIME_DIR` + `UID` env). Zellij plugin harnesses routinely don't export `UID` (it's a shell-convention variable, not a POSIX guarantee), so in the common case with no `ARK_RUNTIME_DIR` set, `resolve_xdg_paths` returned `PathBuf::new()` for the runtime side. The socket scan then got skipped entirely, `bootstrap()` saw zero active sockets, and every live agent was classified as crashed on the list screen. The picker's primary job — tell live from dead — was broken under normal launch conditions.
+
+**Resolution:** Split the old `resolve_xdg_paths` into a thin public wrapper + a new `resolve_xdg_paths_with_uid(env, uid_fallback)` that takes an injectable UID-fallback closure. The public wrapper plugs in a production `current_uid_fallback()` which calls `libc::geteuid()` on unix (gated behind `#[cfg(unix)]`) so the host-side code path (tests, CLI) always recovers a uid. `libc = "0.2"` is added as a unix-only target dependency (it's already transitively in the graph via zellij-tile, so no new resolved versions). On non-unix targets (including wasm32-wasip1, which is `target_os="wasi"` not unix) the fallback returns `None`, preserving the existing skip-socket-scan behaviour — the real zellij wasm plugin still relies on whatever env the host forwards, but every host-side call-site (and the eventual T-107+ direct-spawn path) now gets the real uid without any env wrangling. The existing `resolve_xdg_paths_returns_empty_runtime_when_uid_missing` test was updated to call the injectable variant with `|| None` so it still exercises the "truly no uid" branch. Four new tests: `resolve_xdg_paths_uses_uid_fallback_when_env_lacks_uid`, `resolve_xdg_paths_env_uid_wins_over_fallback`, `resolve_xdg_paths_fallback_empty_string_skips_runtime`, and `resolve_xdg_paths_default_uses_libc_geteuid_on_unix` (sanity check that the production wrapper yields a non-empty path with fully empty env on unix hosts).
+
+### F-610 — P1 status chip ULID matcher case-sensitive but AgentId stores lowercase (FIXED)
+
+**Source:** codex
+**Tier:** 5
+**Severity:** P1
+**Status:** fixed
+**Location:** crates/plugins/status/src/chip.rs (`extract_bare_name_from_session`)
+
+**Description:** `extract_bare_name_from_session` validated the 8-char ULID suffix against `c.is_ascii_uppercase() || c.is_ascii_digit()`. But `AgentId::new` / `AgentId::from_parts` in `crates/types/src/id.rs` both lowercase the ULID before storing it (`Ulid::new().to_string().to_lowercase()`), and `cli/src/commands/spawn.rs::unique_session_name` appends the last 8 chars of that lowercased ULID to the session identifier. So the real session shape is `ark-cavekit-auth-01abcdef` (lowercase tail) — the strict-uppercase check rejected every real session, `chip_matches_session` returned `false`, and the focused-session highlight never pinned to the user's current chip in the status bar.
+
+**Resolution:** Introduced a local `is_crockford_base32_char(c)` helper that uppercases `c` before checking against the Crockford alphabet (`0-9`, `A-Z` minus `I`, `L`, `O`, `U`). `extract_bare_name_from_session` now calls `suffix.chars().all(is_crockford_base32_char)`, accepting both cases while still rejecting non-ULID tails. The previous `chip_matches_session_rejects_lowercase_suffix` test (which asserted the BROKEN behaviour) was renamed to `chip_matches_session_accepts_lowercase_suffix` and now asserts both the lowercase-roundtrip and the mixed-case variant. Two additional tests: `chip_matches_session_still_rejects_crockford_excluded_chars` (guards against a too-loose `[A-Za-z0-9]` acceptance — tails containing `I`/`L`/`O`/`U` in either case must still miss), and `extract_bare_name_lowercase_ulid_tail_roundtrip` (direct unit test of the parser for the lowercase-real-world input). No changes needed to `chip_matches_session` or its other callers — the Crockford relaxation was isolated to the tail validator.
+
+### F-611 — P2 picker SessionUpdate handler must populate focused_session (FIXED)
+
+**Source:** codex
+**Tier:** 5
+**Severity:** P2
+**Status:** fixed
+**Location:** crates/plugins/picker/src/lib.rs (`Picker::set_focused_session`, wasm `Event::SessionUpdate` arm)
+
+**Description:** The wasm `update()` arm for `Event::SessionUpdate(_sessions, _resurrectable)` was a no-op that returned `false` without reading the payload. `self.focused_session` stayed `None` forever, so the list screen never pinned the currently-focused agent (R3 requires the focused chip / row to be visually distinct). The event subscription was already in place (`load()` subscribes to `SessionUpdate`), but the payload was discarded.
+
+**Resolution:** Added a host-testable `Picker::set_focused_session(sessions)` helper that accepts `impl IntoIterator<Item = (&str, bool)>` — i.e. an iterator of `(session_name, is_current_session)` tuples. It scans for the first entry with `is_current_session == true`, assigns its name to `self.focused_session`, and returns `true` iff the focus changed (used as the redraw hint). Decoupling from `SessionInfo` directly keeps the helper host-testable: `SessionInfo` lives inside zellij-tile's host-shim `cfg`, so host tests can't easily construct one, but they can pass `(&str, bool)` pairs trivially. The wasm arm now maps the `Vec<SessionInfo>` to `(name, is_current_session)` tuples via `.iter().map(|s| (s.name.as_str(), s.is_current_session))` and delegates to `set_focused_session`. Three new host-side tests: `set_focused_session_picks_the_is_current_entry` (basic selection across a mixed list), `set_focused_session_none_when_no_current` (Some → None transition counts as a change), `set_focused_session_no_change_returns_false` (idempotent when focus is unchanged, so a redraw is not requested unnecessarily).
+
+### F-612 — P2 parse last_event_at / started_at as ISO-8601 string (FIXED)
+
+**Source:** codex
+**Tier:** 5
+**Severity:** P2
+**Status:** fixed
+**Location:** crates/plugins/picker/src/bootstrap.rs (`parse_agent_status_minimal`, new `find_timestamp_field` / `iso8601_to_epoch_secs`)
+
+**Description:** `parse_agent_status_minimal` read `last_event_at` / `started_at` via `find_u64_field`, i.e. numeric epoch. But `AgentStatus` in `crates/types/src/status.rs` declares `last_event_at: DateTime<Utc>` and chrono's default `Serialize` emits ISO-8601 strings (`"2026-04-15T04:30:00Z"`). So for every real supervisor-written status.json, both timestamp fields parsed as `None`. The list screen's `format_row` fell back to an empty age column and the age-based ordering was effectively disabled.
+
+**Resolution:** Added two pure-Rust helpers: `find_timestamp_field(json, key)` which tries numeric first (backcompat with existing tests and any tooling that wrote epoch-seconds) then falls back to `iso8601_to_epoch_secs(s)` on the string value; and `iso8601_to_epoch_secs(s)` which parses `YYYY-MM-DDTHH:MM:SS[.fff][Z|±HH[:]MM]` into epoch seconds via Howard Hinnant's `days_from_civil` algorithm. Fractional seconds are dropped (second-precision is all the age column needs), and `±HH:MM` / `±HHMM` offsets are honoured. The implementation is ~80 lines of pure arith — no chrono / humantime pulled in (cavekit-plugin-picker R1 / cavekit-distribution.md R3 forbid those in the picker's wasm budget). `parse_agent_status_minimal` now calls `find_timestamp_field` for both `started_at` and `last_event_at`; the helper returns seconds in both branches so downstream callers (e.g. `render_list.rs::format_row`'s `ts.saturating_mul(1000)`) keep working with zero further changes. Four new tests: `iso8601_utc_round_number` (verified externally via `date -u -j -f ...`), `iso8601_with_fractional_and_offset` (fractional + `+02:00` offset round-trip through UTC), `iso8601_rejects_malformed` (non-date, missing T, pre-1970, bad month), `parse_agent_status_accepts_iso8601_timestamps` (end-to-end through `parse_agent_status_minimal`), and `parse_agent_status_still_accepts_numeric_timestamps` (backcompat with old numeric-epoch-seconds fixtures).
+
+## Test Delta — Tier 5 Cycle 4
+
+- ark-plugin-picker: 203 baseline → 215 (+12: F-609 added 4 tests around uid-fallback wiring; F-611 added 3 tests around focused-session extraction; F-612 added 5 tests around ISO-8601 parsing + numeric-backcompat).
+- ark-plugin-status: 45 baseline → 47 (+2: F-610 replaced `chip_matches_session_rejects_lowercase_suffix` with `chip_matches_session_accepts_lowercase_suffix`, added `chip_matches_session_still_rejects_crockford_excluded_chars`, and added `extract_bare_name_lowercase_ulid_tail_roundtrip`).
+- ark-cli: 265 unchanged (no picker-path or status-path changes in `cli/`).
+- Workspace: `cargo test --workspace -- --test-threads=1` fully green with the new counts.
+
+`cargo build --workspace` zero new warnings (the two pre-existing `embedded ark-plugin-*` cargo-warnings are build-script byte-count notices, not code warnings). `cargo fmt --all` clean. `cargo build --target wasm32-wasip1 --release -p ark-plugin-picker` still compiles cleanly (libc dependency only pulls in on `cfg(unix)` targets; wasm32-wasip1 is `target_os="wasi"` and sees the `None` fallback).
+
+**Gate status after Tier 5 cycle 4:** OPEN pending next codex pass.

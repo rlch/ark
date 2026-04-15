@@ -282,6 +282,7 @@ dependencies = [
 name = "ark-plugin-picker"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "nucleo-matcher",
  "serde",
  "shlex",
