@@ -407,7 +407,7 @@ name = "ark-scene"
 version = "0.1.0"
 dependencies = [
  "cel-interpreter",
- "facet 0.1.0",
+ "facet",
  "facet-kdl",
  "kdl 6.5.0",
  "miette 7.6.0",
@@ -1164,12 +1164,6 @@ dependencies = [
 
 [[package]]
 name = "facet"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8224e41701ed661523f0f9737b1844bf722c28fd88ba9191af50d8cf1b19a34"
-
-[[package]]
-name = "facet"
 version = "0.42.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac3244604535a5d0a7c79403f3c6a6184b49be89be99f33c4e8177aebca0167b"
@@ -1209,7 +1203,7 @@ version = "0.42.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0a3459c7f26a83a45199b73d48f2708fa482b5d50bee30bd88a8f90f0765322b"
 dependencies = [
- "facet 0.42.0",
+ "facet",
  "facet-core",
  "facet-format",
  "facet-path",
@@ -1259,6 +1253,7 @@ dependencies = [
  "facet-macro-types",
  "proc-macro2",
  "quote",
+ "strsim 0.11.1",
  "unsynn",
 ]
 
