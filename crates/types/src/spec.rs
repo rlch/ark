@@ -161,4 +161,80 @@ mod tests {
         let alias: OrchestratorSpec = spec.clone();
         assert_eq!(alias, spec);
     }
+
+    // ---- T-117 additions ----
+
+    /// Minimal spec (all optional-feeling fields empty / null / None)
+    /// must roundtrip through serde cleanly. Guards against any future
+    /// `#[serde(skip_serializing_if = "…")]` breaking "empty" reads.
+    #[test]
+    fn serde_roundtrip_minimal_spec() {
+        let id = AgentId::new("cavekit", "min");
+        let spec = AgentSpec::new(
+            id,
+            "",
+            "cavekit",
+            "claude-code",
+            PathBuf::from(""),
+            Vec::new(),
+        );
+        assert!(spec.env.is_empty());
+        assert!(spec.layout.is_none());
+        assert_eq!(spec.runner_config, serde_json::Value::Null);
+
+        let json = serde_json::to_string(&spec).expect("ser minimal");
+        let back: AgentSpec = serde_json::from_str(&json).expect("de minimal");
+        assert_eq!(back, spec);
+    }
+
+    /// Maximal spec (all optional fields populated + deeply nested
+    /// runner_config) roundtrips.
+    #[test]
+    fn serde_roundtrip_maximal_spec_with_nested_runner_config() {
+        let mut spec = sample_spec();
+        spec.layout = Some("split".to_string());
+        spec.runner_config = serde_json::json!({
+            "iterations": 5,
+            "nested": {
+                "flags": ["a", "b", "c"],
+                "deep": { "k": [1, 2, 3], "m": null, "b": true }
+            },
+            "paths": ["/a", "/b"],
+        });
+        for i in 0..8 {
+            spec.env.insert(format!("K{i}"), format!("v{i}"));
+        }
+
+        let json = serde_json::to_string(&spec).expect("ser maximal");
+        let back: AgentSpec = serde_json::from_str(&json).expect("de maximal");
+        assert_eq!(back, spec);
+
+        // Pretty form also roundtrips.
+        let pretty = serde_json::to_string_pretty(&spec).expect("ser pretty");
+        let back2: AgentSpec = serde_json::from_str(&pretty).expect("de pretty");
+        assert_eq!(back2, spec);
+    }
+
+    /// AgentSpec whose embedded AgentId was built from adversarial input
+    /// (spaces, slashes) still roundtrips — because sanitize ran at
+    /// construction time, the serialized form contains no unsafe chars.
+    #[test]
+    fn serde_roundtrip_spec_with_adversarial_id() {
+        let id = AgentId::new("Cave Kit/", "my feat/../bad");
+        let spec = AgentSpec::new(
+            id.clone(),
+            "nasty",
+            "cavekit",
+            "claude-code",
+            PathBuf::from("/tmp/w"),
+            vec!["claude".into()],
+        );
+        let json = serde_json::to_string(&spec).expect("ser");
+        let back: AgentSpec = serde_json::from_str(&json).expect("de");
+        assert_eq!(back, spec);
+        assert_eq!(back.id, id);
+        // Post-sanitize id contains no `/` or spaces.
+        assert!(!back.id.as_str().contains('/'));
+        assert!(!back.id.as_str().contains(' '));
+    }
 }

@@ -276,4 +276,193 @@ mod tests {
         let back: AgentId = serde_json::from_str(&json).expect("de");
         assert_eq!(back, id);
     }
+
+    // ---- T-117 additions: generation uniqueness + session-name safety ----
+
+    /// Two successive `AgentId::new` calls must produce distinct IDs.
+    /// ULID embeds millisecond timestamp + random — even same-ms calls diverge
+    /// in the random tail.
+    #[test]
+    fn new_generates_distinct_ids() {
+        let a = AgentId::new("cavekit", "auth");
+        let b = AgentId::new("cavekit", "auth");
+        assert_ne!(a, b, "two generate calls must diverge: {a} vs {b}");
+        assert_ne!(a.ulid(), b.ulid());
+    }
+
+    /// Many back-to-back calls must all be unique (cheap fuzz vs ULID
+    /// collision).
+    #[test]
+    fn new_uniqueness_under_burst() {
+        use std::collections::HashSet;
+        let mut seen = HashSet::new();
+        for _ in 0..64 {
+            let id = AgentId::new("cavekit", "burst");
+            assert!(seen.insert(id.clone()), "collision for {id}");
+        }
+    }
+
+    /// `FromStr` (the trait, exercised via `str::parse`) must be equivalent to
+    /// `AgentId::parse` for both happy and sad paths.
+    #[test]
+    fn fromstr_trait_matches_parse() {
+        let id = AgentId::new("cavekit", "auth");
+        let parsed: AgentId = id.as_str().parse().expect("parse via FromStr");
+        assert_eq!(parsed, id);
+
+        let err: Result<AgentId, _> = "".parse();
+        assert_eq!(err, Err(AgentIdParseError::Empty));
+
+        let err: Result<AgentId, _> = "bad/chars-foo-bar".parse();
+        assert!(matches!(err, Err(AgentIdParseError::UnsafeCharacters(_))));
+    }
+
+    /// `AsRef<str>` and `Display` must both surface the canonical wire form.
+    #[test]
+    fn as_ref_and_display_match_as_str() {
+        let id = AgentId::new("cavekit", "auth");
+        let r: &str = id.as_ref();
+        assert_eq!(r, id.as_str());
+        assert_eq!(format!("{id}"), id.as_str());
+    }
+
+    /// Session name must never contain filesystem-unsafe or shell-unsafe
+    /// characters regardless of orchestrator/name input. Covers:
+    /// `/`, `\`, `..` as a segment, space, tab, newline, null byte,
+    /// quotes, backticks, `$`, `;`, `|`, `&`, `*`, `?`, `<`, `>`, `(`, `)`,
+    /// and unicode.
+    #[test]
+    fn session_name_is_fs_and_shell_safe_against_adversarial_input() {
+        let adversarial: &[(&str, &str)] = &[
+            ("foo/bar", "baz/qux"),
+            ("..", ".."),
+            ("foo\\bar", "baz\\qux"),
+            ("foo bar", "baz qux"),
+            ("foo\tbar", "baz\nqux"),
+            ("foo\0bar", "baz\0qux"),
+            ("foo'bar", "baz\"qux"),
+            ("foo`bar", "baz$qux"),
+            ("foo;bar", "baz|qux"),
+            ("foo&bar", "baz*qux"),
+            ("foo?bar", "baz<qux>"),
+            ("foo(bar)", "baz{qux}"),
+            ("caf\u{00e9}", "na\u{00ef}ve"),
+            ("--dashes--", "..dots.."),
+            ("", ""), // empty collapses to "_"
+        ];
+        for (orch, name) in adversarial {
+            let id = AgentId::new(orch, name);
+            let session = id.session_name();
+
+            // Filesystem safety: no separators, no parent-dir segments, no nulls.
+            assert!(
+                !session.contains('/'),
+                "session {session:?} contains `/` (orch={orch:?}, name={name:?})"
+            );
+            assert!(!session.contains('\\'), "session {session:?} contains `\\`");
+            assert!(!session.contains('\0'), "session {session:?} contains NUL");
+            for segment in session.split('-') {
+                assert_ne!(
+                    segment, "..",
+                    "session {session:?} has `..` segment (orch={orch:?}, name={name:?})"
+                );
+                assert_ne!(
+                    segment, ".",
+                    "session {session:?} has `.` segment (orch={orch:?}, name={name:?})"
+                );
+            }
+
+            // Shell safety: no whitespace, no quotes, no metachars.
+            for ch in session.chars() {
+                assert!(
+                    !ch.is_whitespace(),
+                    "session {session:?} has whitespace {ch:?}"
+                );
+                assert!(
+                    !matches!(
+                        ch,
+                        '\'' | '"'
+                            | '`'
+                            | '$'
+                            | ';'
+                            | '|'
+                            | '&'
+                            | '*'
+                            | '?'
+                            | '<'
+                            | '>'
+                            | '('
+                            | ')'
+                            | '{'
+                            | '}'
+                            | '['
+                            | ']'
+                            | '!'
+                            | '#'
+                            | '~'
+                    ),
+                    "session {session:?} has shell metachar {ch:?}"
+                );
+                assert!(
+                    matches!(ch, 'a'..='z' | '0'..='9' | '_' | '-'),
+                    "session {session:?} has non-alphanum-underscore-dash char {ch:?}"
+                );
+            }
+
+            // Always begins with the documented prefix.
+            assert!(
+                session.starts_with("ark-"),
+                "session {session:?} missing `ark-` prefix"
+            );
+        }
+    }
+
+    /// Very long inputs survive sanitization (no truncation contract today;
+    /// test simply verifies no panic and still-safe output).
+    #[test]
+    fn session_name_handles_very_long_input_safely() {
+        let long_name = "x".repeat(10_000);
+        let id = AgentId::new("cavekit", &long_name);
+        let session = id.session_name();
+        assert!(session.starts_with("ark-cavekit-"));
+        assert!(session.len() > 10_000);
+        for ch in session.chars() {
+            assert!(matches!(ch, 'a'..='z' | '0'..='9' | '_' | '-'));
+        }
+    }
+
+    /// Empty orchestrator/name must produce a parseable id — sanitize collapses
+    /// empty to `_` so the three-segment invariant still holds.
+    #[test]
+    fn new_with_empty_inputs_still_parseable() {
+        let id = AgentId::new("", "");
+        let parsed = AgentId::parse(id.as_str()).expect("parse empty-derived id");
+        assert_eq!(parsed, id);
+        assert_eq!(id.orchestrator(), "_");
+        assert_eq!(id.name(), "_");
+    }
+
+    /// Unicode input sanitizes to `_` runs but preserves the three-segment
+    /// shape and parseability.
+    #[test]
+    fn new_with_unicode_is_sanitized_and_parseable() {
+        let id = AgentId::new("caf\u{00e9}", "na\u{00ef}ve");
+        let parsed = AgentId::parse(id.as_str()).expect("parse unicode-derived id");
+        assert_eq!(parsed, id);
+        // Non-ASCII code points should have become `_`.
+        assert!(!id.as_str().chars().any(|c| !c.is_ascii()));
+    }
+
+    /// state_dir must not resolve outside its base even with adversarial inputs
+    /// — because `sanitize` strips `/` from the id, no path traversal is
+    /// possible.
+    #[test]
+    fn state_dir_cannot_escape_base_via_adversarial_input() {
+        let id = AgentId::new("../evil", "../../../etc/passwd");
+        let base = Path::new("/state");
+        let dir = id.state_dir(base);
+        let s = dir.to_string_lossy();
+        assert!(s.starts_with("/state/agents/"));
+        assert!(!s.contains("/.."), "path traversal via id: {s}");
+    }
 }
