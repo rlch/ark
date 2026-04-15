@@ -1088,3 +1088,74 @@ Extensive comment explains why each is needed. Cost is free — cargo just mtime
 - `cargo fmt --all --check` clean. `cargo build --workspace` clean (zero real warnings; only the expected `cargo:warning=` telemetry from `build.rs`).
 
 **Gate status after Tier 6 cycle 7:** CLOSED. Cycle 7 resolved one P1 (`doctor --fix` exit code drift) and one P2 (build.rs stale-embed window) and raised zero new findings; the Tier 6 ledger now spans F-500 through F-712.
+
+### F-713 — P2 `artifact_is_fresh` ignored manifest + lockfile mtimes (FIXED)
+
+**Source:** codex
+**Tier:** 6
+**Severity:** P2
+**Status:** fixed
+**Location:** `crates/cli/build.rs` — `artifact_is_fresh`, `maybe_build_wasm` caller, new `plugin_manifest_files` helper.
+
+**Description:** F-712 wired up `cargo:rerun-if-changed` for the workspace `Cargo.toml`, `Cargo.lock`, and `crates/types/Cargo.toml`, so `build.rs` correctly re-runs when a manifest / lockfile edit bumps `[profile.release]` flags, a feature flag, or a resolver pick that changes the compiled wasm bytes. But the companion `artifact_is_fresh` mtime short-circuit in `maybe_build_wasm` only compared the artifact's mtime against the plugin's own `src/` and the transitive dep `src/` roots (F-704). A manifest-only change therefore re-invoked `build.rs` yet immediately short-circuited against the stale artifact — the nested `cargo build --target wasm32-wasip1` was skipped and the previous (now-stale) wasm kept getting embedded in `$OUT_DIR/wasm-target`. The drift window F-712 intended to close remained half-open.
+
+**Resolution:**
+
+1. Added `PLUGIN_MANIFEST_FILES: &[&str] = &["Cargo.toml", "Cargo.lock", "crates/types/Cargo.toml"]` next to the existing `STATUS_PLUGIN_DEP_ROOTS` / `PICKER_PLUGIN_DEP_ROOTS` lists. Paths are workspace-root-relative, matching the F-704 convention.
+2. Added `plugin_manifest_files(workspace_root, plugin_pkg)` helper that resolves the constant list against the workspace root and appends the plugin's own `crates/plugins/<subdir>/Cargo.toml`. Returns `Vec<PathBuf>`, mirroring `plugin_dep_roots`.
+3. Extended `artifact_is_fresh` with a fourth parameter `manifest_files: &[PathBuf]`. For each file it calls `fs::metadata(file).modified()` (single-file stat, no directory walk) and folds the mtime into the same `newest` accumulator as the `src/` walk. Missing files are skipped harmlessly — same pattern the dep-root loop already uses for absent roots.
+4. Updated the single caller in `maybe_build_wasm` to compute `manifest_files = plugin_manifest_files(workspace_root, plugin_pkg)` and pass it into `artifact_is_fresh` alongside the existing `dep_roots`.
+
+**Why not re-walk the `Cargo.toml` parent directories:** `fs::metadata` on a fixed list of files is O(N) with N ≤ 4 and avoids the risk of picking up unrelated siblings (IDE swap files, editor `.bak`s) that a full directory walk would surface. The manifest set is small and stable, so the explicit list is both cheaper and more predictable.
+
+**Tests added:** none. Same rationale as F-712 — build-script re-run / freshness behaviour is exercised by the standard gate (cargo build + full workspace test run) and, in the worst case, by a manual touch of each watched file. A unit test of `artifact_is_fresh` against synthetic paths would validate the mtime arithmetic but not the end-to-end cargo integration, and the function is pure-`std::fs`/`SystemTime` with no branching beyond the existing `None`-safe walk loops.
+
+**Gate evidence:**
+
+- `cargo fmt --all` clean (rustfmt collapsed the 3-element `PLUGIN_MANIFEST_FILES` array onto one line).
+- `cargo build --workspace` emits zero real warnings; only the intentional `cargo:warning=` telemetry from `build.rs` (both plugins reported "artifact already fresh" on the post-fix build, confirming the manifest-aware freshness check still correctly short-circuits when nothing changed).
+- `cargo test -p ark-cli` → 279 lib + 0 doc + 3 cli_help + 9 e2e + 0 integration = 291 total (baseline preserved — no behaviour change outside `build.rs`).
+- `cargo test --workspace -- --test-threads=1` fully green (41 `ok` result lines, 0 `FAILED`).
+
+### F-714 — P3 release.yml derives homebrew tap owner from `github.repository_owner` (FIXED)
+
+**Source:** codex
+**Tier:** 6
+**Severity:** P3
+**Status:** fixed
+**Location:** `.github/workflows/release.yml` — `homebrew-publish` job (`env:`, `Render formula` step, `Clone tap and push formula` step).
+
+**Description:** The `homebrew-publish` job in `release.yml` passed `${{ github.repository_owner }}` into `scripts/generate-brew-formula.sh` and used the same context for the git clone target `https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${OWNER}/homebrew-ark.git`. On the canonical repo (`rlch/ark`) that expression resolves to `rlch`, matching the hard-coded `rlch/homebrew-ark` references in surrounding metadata (`scripts/generate-brew-formula.sh` banner comment, `CONTRIBUTING.md`, README install block). On a fork — say a contributor running the release workflow on `alice/ark` to test a tag push — the expression resolved to `alice`, which produced:
+
+1. A formula whose `url "${base_url}/ark-${version}-..."` lines pointed at `https://github.com/alice/ark/releases/download/...`. That URL has no tarballs (the release artifacts only exist on `rlch/ark`), so anyone installing from the fork's tap would get 404s.
+2. A git clone target of `alice/homebrew-ark` which usually doesn't exist, failing the publish step with an opaque clone error.
+
+The right canonical owner was always `rlch`, and the workflow is safe to hard-code.
+
+**Resolution:**
+
+1. Added a job-level env var `HOMEBREW_TAP_OWNER: ${{ vars.HOMEBREW_TAP_OWNER || 'rlch' }}` alongside the existing `HOMEBREW_TAP_TOKEN`. Default is `rlch` — matches the canonical owner referenced everywhere else. Forks that genuinely mirror the tap can override by setting the `HOMEBREW_TAP_OWNER` repo-level actions variable (no workflow edit required).
+2. `Render formula` step now passes `${HOMEBREW_TAP_OWNER}` (shell env) to `generate-brew-formula.sh` instead of `${{ github.repository_owner }}` (GitHub context). A comment explains why: forks cannot emit a formula that points at `<fork>/ark/releases/...` because the tarballs only live on the canonical repo.
+3. `Clone tap and push formula` step reads `OWNER="${HOMEBREW_TAP_OWNER}"` instead of `OWNER="${{ github.repository_owner }}"`. Same comment pattern, pointing at the real failure mode (`<fork>/homebrew-ark` usually doesn't exist).
+
+`scripts/generate-brew-formula.sh` itself is unchanged — it already takes `owner` as argument 2 and uses it consistently in both the `homepage` line and the `base_url`. The bug was purely in how `release.yml` sourced that argument.
+
+**Tests added:** none. YAML syntax validated (`python3 -c "import yaml; yaml.safe_load(...)"` returns clean). Behaviour is observable only in CI on an actual release tag push; locally running `scripts/generate-brew-formula.sh 0.3.1 rlch <shas>` still produces the canonical formula, confirming the script contract.
+
+**Gate evidence:**
+
+- `cargo fmt --all` clean (no Rust changes in this finding).
+- `cargo build --workspace` unchanged — this fix is workflow-only.
+- `cargo test -p ark-cli` → 279 lib + 3 + 9 = 291 total (baseline preserved).
+- `cargo test --workspace -- --test-threads=1` fully green (41 `ok` result lines, 0 `FAILED`).
+- `release.yml` parses as valid YAML.
+
+## Test Delta — Tier 6 Cycle 8
+
+- ark-cli: 279 lib baseline → 279 passing (no new tests; F-713 is a pure freshness-check extension with no new behaviour paths worth a unit test, F-714 is a workflow-only fix).
+- ark-cli cli_help integration: 3 unchanged. ark-cli e2e: 9 unchanged.
+- Other crates: unchanged.
+- Workspace: `cargo test --workspace -- --test-threads=1` fully green (41 `ok` result lines, 0 `FAILED`).
+- `cargo fmt --all` clean. `cargo build --workspace` clean (zero real warnings; only the expected `cargo:warning=` telemetry from `build.rs`).
+
+**Gate status after Tier 6 cycle 8:** CLOSED — **Tier 6 gate closing**. Cycle 8 resolved one P2 (`artifact_is_fresh` stale-embed window matching F-712's `cargo:rerun-if-changed` additions) and one P3 (release.yml homebrew tap owner), raised **zero new P1 findings**, and completes the Tier 6 review arc. The Tier 6 ledger now spans F-500 through F-714 across eight cycles; no P1-severity findings remain open and no new P1s were raised in this cycle.

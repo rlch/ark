@@ -314,6 +314,13 @@ jobs:
     # reading via env works universally).
     env:
       HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      # F-714: hard-code the canonical tap owner so forks don't
+      # accidentally push to `<fork>/homebrew-ark` (which usually
+      # doesn't exist) and so the rendered formula references the
+      # canonical `rlch/ark` release tarballs. Forks that genuinely
+      # mirror the tap can override `HOMEBREW_TAP_OWNER` via
+      # `vars.HOMEBREW_TAP_OWNER` without editing the workflow.
+      HOMEBREW_TAP_OWNER: ${{ vars.HOMEBREW_TAP_OWNER || 'rlch' }}
     if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
     steps:
       - uses: actions/checkout@v4
@@ -385,9 +392,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p out/Formula
+          # F-714: pass the canonical tap owner (HOMEBREW_TAP_OWNER, defaults
+          # to `rlch`) rather than `github.repository_owner`, so forks don't
+          # emit a formula that points at `<fork>/ark/releases/...` — the
+          # release tarballs only live on the canonical repo.
           scripts/generate-brew-formula.sh \
             "${{ steps.ver.outputs.version }}" \
-            "${{ github.repository_owner }}" \
+            "${HOMEBREW_TAP_OWNER}" \
             "${{ steps.sums.outputs.arm_darwin }}" \
             "${{ steps.sums.outputs.x86_darwin }}" \
             "${{ steps.sums.outputs.arm_linux }}" \
@@ -402,7 +413,11 @@ jobs:
         run: |
           set -euo pipefail
           V="${{ steps.ver.outputs.version }}"
-          OWNER="${{ github.repository_owner }}"
+          # F-714: clone the canonical tap repo (HOMEBREW_TAP_OWNER,
+          # defaults to `rlch`) rather than `github.repository_owner`.
+          # Prevents a fork from pushing a formula into a nonexistent
+          # `<fork>/homebrew-ark` and failing the release publish.
+          OWNER="${HOMEBREW_TAP_OWNER}"
           tap_dir="$(mktemp -d)"
           git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${OWNER}/homebrew-ark.git" "${tap_dir}"
           mkdir -p "${tap_dir}/Formula"

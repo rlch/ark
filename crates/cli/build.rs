@@ -95,6 +95,17 @@ use std::process::Command;
 const STATUS_PLUGIN_DEP_ROOTS: &[&str] = &["crates/types/src"];
 const PICKER_PLUGIN_DEP_ROOTS: &[&str] = &["crates/types/src"];
 
+/// F-713: manifest + lockfile files the plugin compile output depends on.
+///
+/// `cargo:rerun-if-changed` (F-712) makes `build.rs` re-run when any of
+/// these move, but the mtime-based freshness short-circuit in
+/// [`artifact_is_fresh`] also needs to see them — otherwise a manifest
+/// edit that bumps `[profile.release]` or a Cargo.lock resolver pick
+/// that produces different wasm bytes would re-invoke `build.rs` yet
+/// then short-circuit against the old artifact because only `src/`
+/// mtimes were consulted. Paths are workspace-root-relative.
+const PLUGIN_MANIFEST_FILES: &[&str] = &["Cargo.toml", "Cargo.lock", "crates/types/Cargo.toml"];
+
 fn main() {
     // Re-run when either plugin source changes so developers iterating
     // on a plugin crate pick up new bytes on the next `cargo build`
@@ -339,8 +350,18 @@ fn maybe_build_wasm(
     // workspace crates. Without this an edit to e.g. `crates/types/src`
     // leaves the previous wasm artifact embedded until the plugin's
     // own source changes.
+    //
+    // F-713: and must also consider manifest + lockfile mtimes. F-712's
+    // `cargo:rerun-if-changed` list makes `build.rs` re-run when the
+    // workspace `Cargo.toml`, `Cargo.lock`, per-plugin `Cargo.toml`, or
+    // any transitive `Cargo.toml` is touched — but if the freshness
+    // check below only looks at source-tree mtimes it short-circuits
+    // against the old artifact, and the nested `cargo build` is skipped
+    // even though the manifest edit would produce different wasm bytes.
+    // Feeding the manifest files into the mtime walk closes that window.
     let dep_roots = plugin_dep_roots(workspace_root, plugin_pkg);
-    if artifact_is_fresh(&artifact, &plugin_src, &dep_roots) {
+    let manifest_files = plugin_manifest_files(workspace_root, plugin_pkg);
+    if artifact_is_fresh(&artifact, &plugin_src, &dep_roots, &manifest_files) {
         println!(
             "cargo:warning=inline wasm build: {plugin_pkg} artifact already fresh at {}",
             artifact.display()
@@ -403,7 +424,22 @@ fn maybe_build_wasm(
 /// listed in [`STATUS_PLUGIN_DEP_ROOTS`] / [`PICKER_PLUGIN_DEP_ROOTS`].
 /// The artifact is considered fresh only when its mtime is at least as
 /// recent as the newest source file across the entire set.
-fn artifact_is_fresh(artifact: &Path, plugin_src: &Path, dep_roots: &[PathBuf]) -> bool {
+///
+/// F-713: also folds in each file in `manifest_files` — the workspace
+/// `Cargo.toml`, `Cargo.lock`, the plugin's own `Cargo.toml`, and any
+/// transitive `Cargo.toml` (e.g. `crates/types/Cargo.toml`). Without
+/// this, a manifest-only change (profile tweak, feature flag bump, or
+/// a new Cargo.lock pick) re-triggers `build.rs` via F-712's
+/// `cargo:rerun-if-changed` list yet then short-circuits here against
+/// the stale artifact, because none of the `src/` mtimes moved.
+/// Single-file `fs::metadata` calls avoid re-walking a directory tree
+/// for what is in practice a tiny fixed set of paths.
+fn artifact_is_fresh(
+    artifact: &Path,
+    plugin_src: &Path,
+    dep_roots: &[PathBuf],
+    manifest_files: &[PathBuf],
+) -> bool {
     let Ok(art_meta) = fs::metadata(artifact) else {
         return false;
     };
@@ -424,6 +460,20 @@ fn artifact_is_fresh(artifact: &Path, plugin_src: &Path, dep_roots: &[PathBuf]) 
             });
         }
     }
+    // F-713: fold in manifest + lockfile mtimes. Missing files are
+    // treated the same as a missing dep root — harmless skip.
+    for file in manifest_files {
+        let Ok(meta) = fs::metadata(file) else {
+            continue;
+        };
+        let Ok(m) = meta.modified() else {
+            continue;
+        };
+        newest = Some(match newest {
+            Some(n) if n >= m => n,
+            _ => m,
+        });
+    }
     let newest_src = newest.unwrap_or(art_mtime);
     art_mtime >= newest_src
 }
@@ -437,6 +487,26 @@ fn plugin_dep_roots(workspace_root: &Path, plugin_pkg: &str) -> Vec<PathBuf> {
         _ => &[],
     };
     rels.iter().map(|p| workspace_root.join(p)).collect()
+}
+
+/// F-713: resolve the manifest + lockfile files a given plugin package's
+/// compile output depends on, as absolute paths under `workspace_root`.
+/// Includes the workspace `Cargo.toml`, `Cargo.lock`, the plugin's own
+/// `Cargo.toml`, and every entry in [`PLUGIN_MANIFEST_FILES`] (the set
+/// of transitive `Cargo.toml`s the plugin graph currently touches).
+fn plugin_manifest_files(workspace_root: &Path, plugin_pkg: &str) -> Vec<PathBuf> {
+    let subdir = plugin_pkg.trim_start_matches("ark-plugin-");
+    let plugin_manifest = workspace_root
+        .join("crates")
+        .join("plugins")
+        .join(subdir)
+        .join("Cargo.toml");
+    let mut files: Vec<PathBuf> = PLUGIN_MANIFEST_FILES
+        .iter()
+        .map(|p| workspace_root.join(p))
+        .collect();
+    files.push(plugin_manifest);
+    files
 }
 
 /// Return the newest `SystemTime` mtime among regular files under
