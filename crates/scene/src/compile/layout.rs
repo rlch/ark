@@ -14,10 +14,34 @@
 //! unchanged — `name`, `command`, `args` (surface-equivalent via pane
 //! body; see note on [`AST PaneNode`](crate::ast::PaneNode)), `size`,
 //! `split_direction`, `focus`, `cwd`. Ark-owned attributes that mean
-//! nothing to zellij — `when=` — are stripped during lowering. Pruning
-//! of `when=false` branches is T-3.2 (next commit): this module
-//! unconditionally emits every branch for now, with `when=` simply
-//! omitted from the rendered output.
+//! nothing to zellij — `when=` — are stripped during lowering.
+//!
+//! # `when=` branch pruning (T-3.2)
+//!
+//! When a `tab` / `pane` carries a `when="<CEL>"` predicate, the
+//! compiler evaluates the expression against the **static
+//! compile-time context** ([`CompileContext`]) before lowering. The
+//! CEL surface at spawn time is deliberately narrower than at
+//! reaction time:
+//!
+//! - `agent.{id, name, orchestrator, engine, cwd, cmd, args}` — from
+//!   the `AgentSpec` that drove this spawn.
+//! - `session.{name}` — the resolved zellij session name.
+//!
+//! There is no `phase`, no `event`, no `payload` because none of
+//! those exist yet at spawn. Dynamic predicates belong in a reaction
+//! `if=` guard, not a layout `when=`. Authors who reach for
+//! `event.*` in a layout `when=` get a CEL-evaluate error surfaced
+//! through [`SceneError::CelEvaluate`] — consistent with the rest
+//! of the scene pipeline.
+//!
+//! Branches that evaluate to `false` are **pruned** — the node and
+//! its entire subtree are dropped before they reach the rendered
+//! KDL. Branches that evaluate to `true`, or carry no `when=` at
+//! all, are lowered unchanged (sans `when=` attribute). The
+//! compiler emits a single `tracing::debug!(target = "scene::compile",
+//! retained, pruned)` record summarising the pass so operators can
+//! follow pruning decisions via `RUST_LOG=scene::compile=debug`.
 //!
 //! # Scope
 //!
@@ -31,22 +55,24 @@
 //!
 //! # Error surface
 //!
-//! The compiler returns [`SceneError::Grammar`] if the rendered output
-//! fails to re-parse (belt-and-suspenders check — in practice the
-//! builder API never produces invalid KDL, but the guard is cheap
-//! and catches upstream bugs early).
+//! Invalid `when=` predicates surface as [`SceneError::CelParse`]
+//! (compile-time) or [`SceneError::CelEvaluate`] (runtime type
+//! mismatch, undefined reference, etc.). The compiler returns
+//! [`SceneError::Grammar`] if the rendered output fails to re-parse
+//! (belt-and-suspenders check — in practice the builder API never
+//! produces invalid KDL, but the guard is cheap and catches upstream
+//! bugs early).
 
+use cel_interpreter::Context;
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 use miette::NamedSource;
+use serde_json::Value as JsonValue;
 
 use crate::ast::{LayoutNode, PaneNode, TabNode};
+use crate::cel;
 use crate::error::SceneError;
 
 /// Static compile-time context for `when=` predicate evaluation.
-///
-/// T-3.1 does not yet evaluate predicates — every branch is emitted
-/// unconditionally. T-3.2 adds CEL evaluation against the agent /
-/// session fields below.
 ///
 /// Fields mirror the documented spawn-time CEL surface:
 /// - `agent.{id, name, orchestrator, engine, cwd, cmd, args}`
@@ -70,6 +96,44 @@ impl CompileContext {
     ) -> Self {
         Self { agent, session }
     }
+
+    /// Build a `cel_interpreter::Context` bound with **only** the
+    /// spawn-time surface (no `event`, no `payload`).
+    ///
+    /// Used internally by the pruning pass. Kept crate-public so
+    /// downstream compile passes (extension merge, keybind lowering)
+    /// can reuse the exact same binding set.
+    pub(crate) fn to_cel_context(&self) -> Result<Context<'_>, SceneError> {
+        let mut ctx = Context::default();
+        cel::register_custom_functions(&mut ctx);
+
+        let agent_json =
+            serde_json::to_value(&self.agent).unwrap_or(JsonValue::Null);
+        ctx.add_variable("agent", agent_json)
+            .map_err(|e| SceneError::CelEvaluate {
+                message: format!("failed to bind `agent`: {e}"),
+            })?;
+
+        let session_json =
+            serde_json::to_value(&self.session).unwrap_or(JsonValue::Null);
+        ctx.add_variable("session", session_json)
+            .map_err(|e| SceneError::CelEvaluate {
+                message: format!("failed to bind `session`: {e}"),
+            })?;
+
+        Ok(ctx)
+    }
+}
+
+/// Counters returned from the compile pass, for debug logging.
+///
+/// The pair is not part of the public `compile_layout` signature — it
+/// rides along in the `tracing::debug!` record. Exposed as a private
+/// struct so the recursion below can mutate it uniformly.
+#[derive(Default)]
+struct PruneStats {
+    retained: u32,
+    pruned: u32,
 }
 
 /// Lower a scene layout AST to a zellij-compatible KDL string.
@@ -79,23 +143,29 @@ impl CompileContext {
 /// guaranteed to re-parse via [`kdl::KdlDocument::parse`] before
 /// return.
 ///
-/// `_ctx` is currently unused (see module-level note on T-3.2 pruning)
-/// but is part of the stable public signature so callers can wire it
-/// through without churn when the pruning pass lands.
+/// Branches whose `when=` predicate evaluates to `false` against
+/// [`CompileContext`] are pruned before rendering.
 pub fn compile_layout(
     layout: &LayoutNode,
-    _ctx: &CompileContext,
+    ctx: &CompileContext,
 ) -> Result<String, SceneError> {
+    let cel_ctx = ctx.to_cel_context()?;
+    let mut stats = PruneStats::default();
+
     let mut doc = KdlDocument::new();
 
     // Build the single outer `layout { … }` node.
     let mut layout_node = KdlNode::new("layout");
     let mut inner = KdlDocument::new();
     for tab in &layout.tabs {
-        inner.nodes_mut().push(lower_tab(tab));
+        if let Some(node) = lower_tab(tab, &cel_ctx, &mut stats)? {
+            inner.nodes_mut().push(node);
+        }
     }
     for pane in &layout.panes {
-        inner.nodes_mut().push(lower_pane(pane));
+        if let Some(node) = lower_pane(pane, &cel_ctx, &mut stats)? {
+            inner.nodes_mut().push(node);
+        }
     }
     layout_node.set_children(inner);
     doc.nodes_mut().push(layout_node);
@@ -103,6 +173,13 @@ pub fn compile_layout(
     // Autoformat applies consistent indentation + newlines.
     doc.autoformat();
     let rendered = doc.to_string();
+
+    tracing::debug!(
+        target: "scene::compile",
+        retained = stats.retained,
+        pruned = stats.pruned,
+        "layout when= pass"
+    );
 
     // Belt-and-suspenders: the builder API guarantees valid KDL, but
     // re-parse so any future AST bug surfaces at compile time rather
@@ -116,8 +193,36 @@ pub fn compile_layout(
     Ok(rendered)
 }
 
-/// Lower a `TabNode` to a `KdlNode`. Ark-only `when=` is stripped.
-fn lower_tab(tab: &TabNode) -> KdlNode {
+/// Evaluate a `when=` predicate against the compile-time context.
+///
+/// Returns `Ok(true)` when the predicate is absent (unconditional
+/// retention). Returns `Ok(false)` when the predicate evaluates to
+/// `false`. Any parse / evaluation / non-bool-result error surfaces
+/// as a [`SceneError`].
+fn retain_branch(
+    when: Option<&str>,
+    cel_ctx: &Context<'_>,
+) -> Result<bool, SceneError> {
+    let Some(expr) = when else {
+        return Ok(true);
+    };
+    let prog = cel::compile(expr, "<when>", 0)?;
+    cel::eval_bool(&prog, cel_ctx)
+}
+
+/// Lower a `TabNode` to a `KdlNode`, or `None` if its `when=`
+/// predicate evaluates to `false`. Ark-only `when=` is stripped.
+fn lower_tab(
+    tab: &TabNode,
+    cel_ctx: &Context<'_>,
+    stats: &mut PruneStats,
+) -> Result<Option<KdlNode>, SceneError> {
+    if !retain_branch(tab.when.as_deref(), cel_ctx)? {
+        stats.pruned += 1;
+        return Ok(None);
+    }
+    stats.retained += 1;
+
     let mut node = KdlNode::new("tab");
 
     if let Some(name) = &tab.name {
@@ -131,18 +236,36 @@ fn lower_tab(tab: &TabNode) -> KdlNode {
     if !tab.panes.is_empty() {
         let mut inner = KdlDocument::new();
         for pane in &tab.panes {
-            inner.nodes_mut().push(lower_pane(pane));
+            if let Some(child) = lower_pane(pane, cel_ctx, stats)? {
+                inner.nodes_mut().push(child);
+            }
         }
-        node.set_children(inner);
+        // Only attach an empty children doc if at least one pane
+        // survived pruning; otherwise keep the node childless so zellij
+        // doesn't see an empty body.
+        if !inner.nodes().is_empty() {
+            node.set_children(inner);
+        }
     }
 
-    node
+    Ok(Some(node))
 }
 
-/// Lower a `PaneNode` to a `KdlNode`. Ark-only `when=` is stripped.
-/// Every zellij-owned attribute (`name`, `command`, `size`,
-/// `split_direction`, `focus`, `cwd`) passes through unchanged.
-fn lower_pane(pane: &PaneNode) -> KdlNode {
+/// Lower a `PaneNode` to a `KdlNode`, or `None` if its `when=`
+/// predicate evaluates to `false`. Every zellij-owned attribute
+/// (`name`, `command`, `size`, `split_direction`, `focus`, `cwd`)
+/// passes through unchanged.
+fn lower_pane(
+    pane: &PaneNode,
+    cel_ctx: &Context<'_>,
+    stats: &mut PruneStats,
+) -> Result<Option<KdlNode>, SceneError> {
+    if !retain_branch(pane.when.as_deref(), cel_ctx)? {
+        stats.pruned += 1;
+        return Ok(None);
+    }
+    stats.retained += 1;
+
     let mut node = KdlNode::new("pane");
 
     // Properties — emit in a stable order so rendered output is
@@ -175,12 +298,16 @@ fn lower_pane(pane: &PaneNode) -> KdlNode {
     if !pane.panes.is_empty() {
         let mut inner = KdlDocument::new();
         for child in &pane.panes {
-            inner.nodes_mut().push(lower_pane(child));
+            if let Some(lowered) = lower_pane(child, cel_ctx, stats)? {
+                inner.nodes_mut().push(lowered);
+            }
         }
-        node.set_children(inner);
+        if !inner.nodes().is_empty() {
+            node.set_children(inner);
+        }
     }
 
-    node
+    Ok(Some(node))
 }
 
 // ---------------------------------------------------------------------------
@@ -369,9 +496,11 @@ scene "s" {
         assert!(rendered.contains("/tmp/wt"), "rendered: {rendered}");
     }
 
-    /// Strip: `when="…"` on a pane never appears in the rendered output.
+    /// Strip: `when="…"` on a retained pane never appears in the
+    /// rendered output (the branch is kept because the predicate is
+    /// `true` against the default test context).
     #[test]
-    fn strip_when_on_pane() {
+    fn strip_when_on_retained_pane() {
         let doc = parse_scene(
             r#"
 scene "s" {
@@ -386,16 +515,19 @@ scene "s" {
         let rendered = compile_layout(doc.scene.layout.as_ref().unwrap(), &ctx()).unwrap();
         assert!(!rendered.contains("when="), "rendered: {rendered}");
         assert!(!rendered.contains("agent.engine"), "rendered: {rendered}");
+        // The pane was retained (predicate true) so its `name=` survived.
+        assert!(rendered.contains("editor"), "rendered: {rendered}");
     }
 
-    /// Strip: `when="…"` on a tab never appears in the rendered output.
+    /// Strip: `when="…"` on a retained tab never appears in the
+    /// rendered output.
     #[test]
-    fn strip_when_on_tab() {
+    fn strip_when_on_retained_tab() {
         let doc = parse_scene(
             r#"
 scene "s" {
     layout {
-        tab "work" when="session.name == 'x'" {
+        tab "work" when="session.name == 'ark-cavekit-auth'" {
             pane name="e"
         }
     }
@@ -405,6 +537,8 @@ scene "s" {
         let rendered = compile_layout(doc.scene.layout.as_ref().unwrap(), &ctx()).unwrap();
         assert!(!rendered.contains("when="), "rendered: {rendered}");
         assert!(!rendered.contains("session.name"), "rendered: {rendered}");
+        // Tab retained.
+        assert!(rendered.contains("work"), "rendered: {rendered}");
     }
 
     /// Structure preserved: nested `pane` inside `tab` renders with the
@@ -482,6 +616,180 @@ scene "s" {
                 .any(|n| n.name().value() == "layout"),
             "expected `layout` root node; rendered: {rendered}"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // T-3.2 pruning tests
+    // ---------------------------------------------------------------
+
+    /// `when="agent.engine == 'claude'"` against `agent.engine =
+    /// "claude"` retains the branch (predicate evaluates to `true`).
+    #[test]
+    fn when_true_retains_branch() {
+        let doc = parse_scene(
+            r#"
+scene "s" {
+    layout {
+        tab "work" {
+            pane name="editor" when="agent.engine == 'claude-code'"
+        }
+    }
+}
+"#,
+        );
+        let rendered = compile_layout(doc.scene.layout.as_ref().unwrap(), &ctx()).unwrap();
+        assert!(rendered.contains("editor"), "retained: {rendered}");
+    }
+
+    /// `when="agent.engine == 'codex'"` against `agent.engine =
+    /// "claude-code"` prunes the branch.
+    #[test]
+    fn when_false_prunes_branch() {
+        let doc = parse_scene(
+            r#"
+scene "s" {
+    layout {
+        tab "work" {
+            pane name="editor" when="agent.engine == 'codex'"
+            pane name="kept"
+        }
+    }
+}
+"#,
+        );
+        let rendered = compile_layout(doc.scene.layout.as_ref().unwrap(), &ctx()).unwrap();
+        assert!(!rendered.contains("editor"), "should be pruned: {rendered}");
+        assert!(rendered.contains("kept"), "should survive: {rendered}");
+    }
+
+    /// Pruning a tab drops its entire subtree.
+    #[test]
+    fn when_false_on_tab_prunes_subtree() {
+        let doc = parse_scene(
+            r#"
+scene "s" {
+    layout {
+        tab "pruned" when="agent.engine == 'codex'" {
+            pane name="child_should_die"
+        }
+        tab "kept" {
+            pane name="kept_pane"
+        }
+    }
+}
+"#,
+        );
+        let rendered = compile_layout(doc.scene.layout.as_ref().unwrap(), &ctx()).unwrap();
+        assert!(!rendered.contains("pruned"), "tab pruned: {rendered}");
+        assert!(
+            !rendered.contains("child_should_die"),
+            "subtree pruned: {rendered}"
+        );
+        assert!(rendered.contains("kept_pane"), "sibling kept: {rendered}");
+    }
+
+    /// Nested panes under a retained parent still evaluate their own
+    /// `when=` independently.
+    #[test]
+    fn nested_pane_pruning_is_independent() {
+        let doc = parse_scene(
+            r#"
+scene "s" {
+    layout {
+        tab "t" {
+            pane split_direction="horizontal" {
+                pane name="visible"
+                pane name="invisible" when="agent.engine == 'codex'"
+            }
+        }
+    }
+}
+"#,
+        );
+        let rendered = compile_layout(doc.scene.layout.as_ref().unwrap(), &ctx()).unwrap();
+        assert!(rendered.contains("visible"), "{rendered}");
+        assert!(!rendered.contains("invisible"), "{rendered}");
+    }
+
+    /// `session.*` bindings are readable from layout `when=`.
+    #[test]
+    fn session_bindings_available_in_when() {
+        let doc = parse_scene(
+            r#"
+scene "s" {
+    layout {
+        tab "t" {
+            pane name="logs" when="starts_with(session.name, 'ark-')"
+        }
+    }
+}
+"#,
+        );
+        let rendered = compile_layout(doc.scene.layout.as_ref().unwrap(), &ctx()).unwrap();
+        assert!(rendered.contains("logs"), "{rendered}");
+    }
+
+    /// Reaching for an unavailable binding (`event.*`, `payload.*`,
+    /// `phase`) in a layout `when=` is a CEL evaluate error — dynamic
+    /// predicates must use reaction `if=`, not layout `when=`.
+    #[test]
+    fn event_binding_unavailable_in_layout_when() {
+        use crate::error::ErrorCode;
+        let doc = parse_scene(
+            r#"
+scene "s" {
+    layout {
+        tab "t" {
+            pane when="event.kind == 'started'"
+        }
+    }
+}
+"#,
+        );
+        let err = compile_layout(doc.scene.layout.as_ref().unwrap(), &ctx())
+            .expect_err("event.* should be unbound at spawn-time");
+        assert_eq!(err.code_enum(), ErrorCode::CelEvaluate);
+    }
+
+    /// A malformed CEL expression surfaces as a `cel/parse` error.
+    #[test]
+    fn malformed_when_surfaces_cel_parse() {
+        use crate::error::ErrorCode;
+        let doc = parse_scene(
+            r#"
+scene "s" {
+    layout {
+        tab "t" {
+            pane when="agent.engine =="
+        }
+    }
+}
+"#,
+        );
+        let err = compile_layout(doc.scene.layout.as_ref().unwrap(), &ctx())
+            .expect_err("malformed CEL should fail");
+        assert_eq!(err.code_enum(), ErrorCode::CelParse);
+    }
+
+    /// A non-bool `when=` result (e.g. arithmetic) surfaces as a
+    /// `cel/evaluate` error — `when=` must evaluate to a bool.
+    #[test]
+    fn non_bool_when_surfaces_cel_evaluate() {
+        use crate::error::ErrorCode;
+        let doc = parse_scene(
+            r#"
+scene "s" {
+    layout {
+        tab "t" {
+            pane when="1 + 1"
+        }
+    }
+}
+"#,
+        );
+        let err = compile_layout(doc.scene.layout.as_ref().unwrap(), &ctx())
+            .expect_err("non-bool when= should fail");
+        assert_eq!(err.code_enum(), ErrorCode::CelEvaluate);
     }
 
     /// Multiple tabs render in source order.
