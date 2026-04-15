@@ -19,6 +19,7 @@ pub mod ops;
 pub mod parse;
 pub mod path;
 pub mod plugin;
+pub mod plugin_reactions;
 pub mod reactions;
 pub mod selector;
 pub mod scope;

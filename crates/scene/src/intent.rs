@@ -281,13 +281,18 @@ pub struct SupervisorHandle;
 /// keybind compile path need to attribute distinctly. The current
 /// two-variant enum keeps the dispatcher-visible Debug rendering
 /// stable while we add the legacy compat path.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReactionOrigin {
     /// Reaction parsed straight from the user's scene KDL.
     UserScene,
     /// Reaction synthesised from a legacy `[[hooks]]` TOML entry by the
     /// T-5.7 hook-compat layer ([`crate::hook_compat`]).
     HookConfig,
+    /// Reaction synthesised from a `plugin { }` block's lifecycle markers
+    /// (summon / dismiss / plugin-body `on`) or `subscribes` selectors
+    /// by the T-7.3 / T-7.4 / T-7.5 reaction-synthesis pass in
+    /// [`crate::plugin_reactions`].
+    PluginLifecycle,
 }
 
 impl Default for ReactionOrigin {
