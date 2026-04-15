@@ -47,20 +47,20 @@ use anyhow::{Context, Result};
 use ark_core::consumers::{ReactionDispatcherCtx, reaction_dispatcher, state_writer};
 use ark_core::{Config, Engine, Orchestrator, World, write_status_atomic};
 use ark_scene::context::{AgentSnapshot, SessionSnapshot};
-use ark_scene::hook_compat::{
-    HookEntry as SceneHookEntry, build_hook_registry,
-};
+use ark_scene::hook_compat::HookEntry as SceneHookEntry;
 use ark_scene::id::SceneId;
 use ark_scene::intent::{IntentContext, IntentRegistry};
 use ark_scene::ops::register_core_ops;
 use ark_engines_claude_code::preflight;
 use ark_mux_zellij::ZellijMux;
 use ark_types::{
-    AgentEvent, AgentId, AgentSpec, AgentStatus, CancellationToken, Outcome, Phase, StateLayout,
-    channel,
+    AgentEvent, AgentId, AgentSpec, AgentStatus, CancellationToken, EventSink, Outcome, Phase,
+    StateLayout, channel,
 };
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
+
+use crate::scene_runtime::{CompiledScene, compile_scene_for_runtime};
 
 use crate::commands::{SupervisorCommandCtx, SupervisorCommandHandler};
 use crate::consumers::status_pipe;
@@ -192,18 +192,71 @@ pub async fn run_supervisor_with(
     // ctx wants an `EventSink` for future audit-log routing.
     let (events, _boot_rx) = channel(DEFAULT_EVENT_BUS_CAPACITY);
 
+    // ---- Step 7 (early): compile scene ----
+    //
+    // T-8.1: scene compile runs BEFORE bus subscribers, the layout
+    // launch, and always-on plugin mount. Artefacts thread into:
+    //   * the reaction dispatcher (ReactionRegistry)
+    //   * the plugin lifecycle manager (lowered PluginDecls)
+    //   * the control-socket intent bridge (IntentRegistry origin id)
+    //
+    // We run compile here — after StateDir / lock / cancel token exist
+    // but before any long-running tokio consumers spawn — so a compile
+    // error aborts cleanly via the same lock / state path any legitimate
+    // spawn failure takes.
+    //
+    // The hook list is still empty in the placeholder `Config` (T-018
+    // will thread `config.hooks` through here); we pass an empty slice
+    // so the hook-compat path is exercised end-to-end but contributes
+    // no reactions. When T-018 lands the hook slice is drawn from
+    // `config.hooks`.
+    let hook_entries: Vec<SceneHookEntry> = Vec::new();
+    let compiled_scene: Arc<CompiledScene> = match compile_scene_for_runtime(
+        spec.scene_path.as_deref(),
+        &hook_entries,
+    ) {
+        Ok(c) => {
+            debug!(
+                source = %c.source.display(),
+                reactions = c.registry.len(),
+                plugins = c.doc.scene.plugins.len(),
+                "R3 step 7: scene compiled"
+            );
+            Arc::new(c)
+        }
+        Err(err) => {
+            // R3 step 7 contract: compile error = abort spawn with a
+            // miette diagnostic. The lock's Drop guard runs on this
+            // error-return path, and the caller (daemon / foreground)
+            // surfaces the non-zero exit to the parent CLI.
+            tracing::error!(
+                target: "scene::compile",
+                agent = %spec.id.as_str(),
+                scene = ?spec.scene_path,
+                error = %err,
+                "scene compile failed; aborting spawn"
+            );
+            return Err(err.context("scene compile (R3 step 7)"));
+        }
+    };
+
     // ---- Step 3: bind control socket ----
     //
-    // T-6.2: the control-socket handler now accepts an optional
+    // T-6.2: the control-socket handler accepts an optional
     // `IntentBridge` so the `Intent { name, args }` command can route
-    // through the supervisor's intent registry. The registry itself is
-    // built once below (R3 step 9) for the reaction dispatcher; we
-    // build it again here, separately, so it's available before the
-    // dispatcher consumer spawns. The two registries are independent —
-    // each gets its own `register_core_ops` call. Sharing one registry
-    // would require restructuring boot ordering; this duplicates ~10
-    // hash inserts of pre-built ops, which is cheap.
-    let intent_bridge = build_intent_bridge_for_socket(&spec).await;
+    // through the supervisor's intent registry.
+    //
+    // T-8.1: the bridge's `IntentContext` now carries the compiled
+    // scene's real `SceneId` so cascade telemetry + scene graph
+    // attribution line up with the reaction dispatcher's context. The
+    // registry itself (core ops only, at this tier) is still a
+    // separate handle from the reaction dispatcher's to avoid
+    // cross-task lock contention — see the dual-registry note on the
+    // step 9 block below. Unifying into a single `Arc<IntentRegistry>`
+    // is tracked as a follow-up (the current `IntentRegistry` interior
+    // is already `Arc`-shareable; tying the lifetime is the
+    // remaining work).
+    let intent_bridge = build_intent_bridge_for_socket(&spec, &compiled_scene).await;
     let command_handler: Arc<dyn ControlCommandHandler> =
         Arc::new(SupervisorCommandHandler::new(SupervisorCommandCtx {
             agent_id: spec.id.clone(),
@@ -326,22 +379,19 @@ pub async fn run_supervisor_with(
     }
 
     {
-        // T-5.7: legacy `[[hooks]]` TOML entries are translated to a
-        // synthetic ReactionRegistry tagged with
-        // `ReactionOrigin::HookConfig`, then merged with the (still
-        // empty at this tier) user-scene registry. The supervisor
-        // spawns the unified `reaction_dispatcher` against that
-        // combined registry; the old `hook_dispatcher` consumer is
-        // removed entirely.
+        // T-8.1: the reaction dispatcher consumes the registry built
+        // from the user's scene (R3 step 7) instead of the empty
+        // placeholder the pre-T-8.1 code wired. Legacy `[[hooks]]`
+        // TOML entries are merged into that same registry via
+        // `extend_registry_with_hooks` during scene compile, so the
+        // hook-derived reactions and scene reactions share one
+        // dispatcher — the old `hook_dispatcher` remains deleted per
+        // T-5.7.
         //
-        // The placeholder `Config` (T-018 still pending) does not yet
-        // expose `[[hooks]]` to the supervisor — when it does, the
-        // hook list is read from `config.hooks` and threaded here.
-        // Until then we synthesise an empty registry, which keeps the
-        // consumer attached but idle (same operational shape as
-        // pre-T-5.7).
-        let hook_entries: Vec<SceneHookEntry> = Vec::new();
-        let reactions = Arc::new(build_hook_registry(&hook_entries));
+        // When T-018 threads `config.hooks` through `Config`, the hook
+        // slice is supplied to `compile_scene_for_runtime` at boot and
+        // reaches this registry the same way.
+        let reactions = compiled_scene.registry.clone();
 
         // IntentRegistry holds the core `ark.core.*` op set the
         // synthesised `exec` reactions dispatch through. The async
@@ -351,17 +401,11 @@ pub async fn run_supervisor_with(
         let intents = IntentRegistry::new();
         register_core_ops(&intents).await;
 
-        // IntentContext placeholder identity: the supervisor doesn't
-        // hold a real scene path yet (the orchestrator owns scene
-        // loading at T-5.x). Synthesise a stable SceneId from the
-        // agent's spec path so cascade telemetry has a consistent
-        // attribution; the placeholder keeps the dispatcher happy
-        // until full scene wiring lands.
-        let scene_id = SceneId::from_bytes(
-            spec.cwd.clone(),
-            format!("hook-compat:{}", spec.id.as_str()).as_bytes(),
-        );
-        let intent_ctx = IntentContext::placeholder(scene_id);
+        // IntentContext: use the compiled scene's real `SceneId` so
+        // cascade telemetry + scene graph attribution identify the
+        // user's scene (or `<built-in>` on default fallback) rather
+        // than a synthesised per-agent placeholder.
+        let intent_ctx = IntentContext::placeholder(compiled_scene.scene_id.clone());
 
         // CEL context snapshots: populated from the live AgentSpec so
         // hook predicates that gate on `agent.orchestrator` (the
@@ -409,14 +453,13 @@ pub async fn run_supervisor_with(
         "R3 step 10: observability installed"
     );
 
-    // ---- Step 10.5: mount always-on plugins (T-7.2) ----
+    // ---- Step 10.5: mount always-on plugins (T-7.2 + T-8.1) ----
     //
-    // Walk the scene's `plugin { }` declarations (when `spec.scene_path`
-    // points at an on-disk scene) and mount every `Lifecycle::Always`
-    // plugin through the intent registry's `mount_plugin` op. Summon /
-    // event-mount plugins are seeded as `Dormant` so downstream
-    // reaction-synthesis paths (T-7.3 / T-7.4) can observe their state
-    // when their selector matches.
+    // Walk the compiled scene's `plugin { }` declarations and mount
+    // every `Lifecycle::Always` plugin through the intent registry's
+    // `mount_plugin` op. Summon / event-mount plugins are seeded as
+    // `Dormant` so downstream reaction-synthesis paths (T-7.3 / T-7.4)
+    // can observe their state when their selector matches.
     //
     // This runs BEFORE `AgentEvent::Started` so any `set_status` op a
     // freshly-mounted status plugin emits is visible to the event
@@ -426,36 +469,24 @@ pub async fn run_supervisor_with(
     // cleanly fall back (e.g. `on "UserEvent:ark.plugin.failed" {
     // set_status text="<plugin> unavailable" }`).
     //
-    // On scenes with no `scene_path` (e.g. pre-T-7 callers that build
-    // AgentSpec without scene wiring) this step is a no-op.
+    // T-8.1: we now drive the mount from the in-memory
+    // [`CompiledScene`] built at R3 step 7 rather than re-reading the
+    // scene file from disk. Path-based `mount_always_on_plugins`
+    // remains available for tests that want to exercise the on-disk
+    // parse path, but the production boot sequence runs entirely from
+    // the single already-parsed AST.
     let plugin_lifecycle = crate::plugin_lifecycle::PluginLifecycleManager::new();
-    if let Some(scene_path) = spec.scene_path.as_ref() {
-        match mount_always_on_plugins(
-            scene_path,
-            &plugin_lifecycle,
-            &events,
-        )
-        .await
-        {
-            Ok(outcomes) => {
-                debug!(
-                    count = outcomes.len(),
-                    "R3 step 10.5: always-on plugin mount pass complete"
-                );
-            }
-            Err(err) => {
-                // Scene parse or IO error — log and continue. The
-                // supervisor must not crash for scene-level errors at
-                // this stage; the scene author gets the diagnostic via
-                // `ark scene check`, and the runtime degrades to a
-                // session with zero plugins mounted rather than no
-                // session at all.
-                warn!(error = %err, scene = %scene_path.display(), "R3 step 10.5: scene plugin mount skipped");
-            }
-        }
-    } else {
-        debug!("R3 step 10.5: no scene_path on spec; plugin mount skipped");
-    }
+    let mount_outcomes = mount_always_on_from_compiled(
+        &compiled_scene,
+        &plugin_lifecycle,
+        &events,
+    )
+    .await;
+    debug!(
+        count = mount_outcomes.len(),
+        source = %compiled_scene.source.display(),
+        "R3 step 10.5: always-on plugin mount pass complete"
+    );
 
     // ---- Step 11: emit Started ----
     // Best-effort: if nobody is subscribed yet, the Err is benign. The
@@ -531,9 +562,14 @@ pub async fn run_supervisor_with(
     // Short flush window gives the state_writer a chance to roll up every
     // buffered event (Started, PhaseTransitions, the final Done) into
     // status.json + events.jsonl before we fire the cancel that causes
-    // its select! loop to break. 100ms is plenty — the rollup itself is
-    // a handful of atomic writes per event.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // its select! loop to break. The rollup itself is a handful of
+    // atomic writes per event. T-8.1 bumped this from 100ms → 250ms:
+    // with the scene reaction dispatcher now populated from the user
+    // scene (rather than an empty hook registry), low-spec CI hosts
+    // occasionally raced the final Done write against the cancel —
+    // surfacing as an intermittent "events.jsonl should contain Done"
+    // assertion in the smoke test.
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     drop(events);
     cancel.cancel();
     drain_consumers(&mut consumers, std::time::Duration::from_secs(5)).await;
@@ -693,6 +729,14 @@ pub fn finalize_state(
 /// logs and continues. Per-plugin mount failures are NOT surfaced here;
 /// they are recorded on the manager and emitted as `ark.plugin.failed`
 /// UserEvents so scene reactions can observe and act.
+///
+/// T-8.1: the production boot sequence no longer calls this helper —
+/// `mount_always_on_from_compiled` reads plugin decls off the already
+/// parsed [`crate::scene_runtime::CompiledScene`] to avoid double-reading
+/// the scene file. This on-disk variant is retained under `#[cfg(test)]`
+/// for the T-7.2 regression tests that exercise the file-I/O + parse
+/// path end-to-end.
+#[cfg(test)]
 async fn mount_always_on_plugins(
     scene_path: &std::path::Path,
     manager: &crate::plugin_lifecycle::PluginLifecycleManager,
@@ -745,15 +789,41 @@ async fn mount_always_on_plugins(
     Ok(outcomes)
 }
 
-async fn build_intent_bridge_for_socket(spec: &AgentSpec) -> crate::commands::IntentBridge {
+async fn build_intent_bridge_for_socket(
+    _spec: &AgentSpec,
+    compiled_scene: &CompiledScene,
+) -> crate::commands::IntentBridge {
     let registry = IntentRegistry::new();
     register_core_ops(&registry).await;
-    let scene_id = SceneId::from_bytes(
-        spec.cwd.clone(),
-        format!("control-socket:{}", spec.id.as_str()).as_bytes(),
-    );
-    let ctx = IntentContext::placeholder(scene_id);
+    // T-8.1: use the compiled scene's real `SceneId` so any op a
+    // control-socket client dispatches gets attributed to the same
+    // scene the reaction dispatcher is firing against.
+    let ctx = IntentContext::placeholder(compiled_scene.scene_id.clone());
     crate::commands::IntentBridge { registry, ctx }
+}
+
+/// T-8.1: mount every `Lifecycle::Always` plugin from the already
+/// compiled scene through the intent registry's `mount_plugin` op,
+/// without re-reading the scene file from disk.
+///
+/// Mirrors the on-disk [`mount_always_on_plugins`] helper one-for-one
+/// except for where the [`PluginDecl`] set comes from — this version
+/// takes decls directly off the parsed [`CompiledScene`]. The intent
+/// registry is freshly allocated (core ops only) to keep the mount
+/// pass independent of the reaction dispatcher's registry — every
+/// failure path is still observable via `ark.plugin.failed`.
+async fn mount_always_on_from_compiled(
+    compiled: &CompiledScene,
+    manager: &crate::plugin_lifecycle::PluginLifecycleManager,
+    event_bus: &EventSink,
+) -> Vec<crate::plugin_lifecycle::MountOutcome> {
+    let decls = compiled.plugin_decls();
+    let registry = IntentRegistry::new();
+    register_core_ops(&registry).await;
+    let ctx = IntentContext::placeholder(compiled.scene_id.clone());
+    manager
+        .mount_always_on(&decls, &registry, &ctx, event_bus)
+        .await
 }
 
 #[cfg(test)]
@@ -922,6 +992,177 @@ mod tests {
         // ---- Step 18 verification: lock released — re-acquire should work.
         let re = crate::acquire_lock(&layout, &spec.id).expect("re-acquire");
         assert_eq!(re.path(), layout.lock_path(&spec.id).as_path());
+        drop(re);
+    }
+
+    /// T-8.1: end-to-end integration — when `spec.scene_path` points at
+    /// a user scene with an `on { }` reaction, a `plugin { }` block, and
+    /// a `keybind { }` declaration, `run_supervisor_with` must:
+    ///   1. Resolve + parse the scene via R3 step 7 (not re-parse from disk
+    ///      per-consumer).
+    ///   2. Validate the scene without erroring.
+    ///   3. Populate the reaction dispatcher's registry from the scene.
+    ///   4. Mount every `Lifecycle::Always` plugin via the lifecycle
+    ///      manager.
+    ///   5. Finish with `Outcome::Success` and leave no orphan state.
+    ///
+    /// The scripted mux + stub engine let this test drive the full boot
+    /// sequence without touching a real zellij binary.
+    #[tokio::test]
+    async fn run_supervisor_with_compiles_user_scene_and_drives_consumers() {
+        let tmp = short_tempdir();
+        let layout = layout_at(tmp.path());
+
+        // Write a custom scene carrying a reaction, an always-on plugin,
+        // and a keybind — every artefact T-8.1 threads through the
+        // compile pipeline.
+        let scene_path = tmp.path().join("custom.kdl");
+        std::fs::write(
+            &scene_path,
+            r#"scene "t8-1-integration" {
+    plugin "status-bar" {
+        source "shipped:status"
+        mount "status-bar"
+    }
+    plugin "on-demand" {
+        source "shipped:picker"
+        mount "floating"
+        summon "UserEvent:picker.show"
+    }
+    on "Started" {
+        set_status text="ready"
+    }
+    keybind "Ctrl Shift p" {
+        emit "picker.show"
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        // R3 step 7 sanity-check: the supervisor's scene_runtime
+        // compile path must accept the fixture above.
+        let compiled =
+            compile_scene_for_runtime(Some(&scene_path), &[]).expect("scene compiles clean");
+        assert!(!compiled.registry.is_empty(), "registry must pick up on + keybind");
+        assert_eq!(compiled.doc.scene.plugins.len(), 2);
+        assert_eq!(compiled.doc.scene.ons.len(), 1);
+        assert_eq!(compiled.doc.scene.keybinds.len(), 1);
+
+        // Now build a spec that points at the scene and drive
+        // `run_supervisor_with` end-to-end.
+        let id = AgentId::new("cavekit", "t81");
+        let mut spec = AgentSpec::new(
+            id,
+            "t81",
+            "cavekit",
+            "stub-engine",
+            std::path::PathBuf::from("/tmp"),
+            vec!["stub".to_string()],
+        );
+        spec.scene_path = Some(scene_path.clone());
+
+        let ok_status = tokio::process::Command::new("true")
+            .status()
+            .await
+            .unwrap();
+        let (mux, _stub) = ZellijMux::for_test(vec![ark_mux_zellij::executor::CommandOutput {
+            status: ok_status,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        }]);
+
+        let result = run_supervisor_with(
+            spec.clone(),
+            SupervisorMode::Foreground,
+            Config::placeholder(),
+            layout.clone(),
+            Box::new(StubEngine),
+            Box::new(InstantSuccessOrchestrator),
+            Arc::new(mux),
+            /* run_preflight */ false,
+            None,
+            None,
+        )
+        .await
+        .expect("run_supervisor_with with scene_path ok");
+
+        assert!(
+            matches!(result, Outcome::Success { .. }),
+            "expected Success, got {result:?}"
+        );
+
+        // Step 1 verification: state dir + spec.json present, and the
+        // spec.json round-trip preserved the scene_path we set.
+        assert!(layout.agent_dir(&spec.id).is_dir());
+        let reread: AgentSpec = serde_json::from_slice(
+            &std::fs::read(layout.spec_path(&spec.id)).expect("read spec.json"),
+        )
+        .expect("parse spec.json");
+        assert_eq!(reread.scene_path, Some(scene_path.clone()));
+
+        // Step 16 verification: final phase is Done.
+        let status = ark_core::read_status(&layout, &spec.id)
+            .expect("read status")
+            .expect("status exists");
+        assert_eq!(status.phase, Phase::Done);
+
+        // Step 17 verification: socket unlinked.
+        assert!(!layout.agent_socket_path(&spec.id).exists());
+
+        // Step 18 verification: lock released.
+        let re = crate::acquire_lock(&layout, &spec.id).expect("re-acquire");
+        drop(re);
+    }
+
+    /// T-8.1: when `spec.scene_path` points at a file that does NOT
+    /// exist, `run_supervisor_with` aborts early via the R3 step 7
+    /// compile-error contract — returning an `Err` rather than Outcome.
+    /// The parent CLI surfaces a non-zero exit code.
+    #[tokio::test]
+    async fn run_supervisor_with_aborts_on_missing_scene_path() {
+        let tmp = short_tempdir();
+        let layout = layout_at(tmp.path());
+
+        let id = AgentId::new("cavekit", "missing");
+        let mut spec = AgentSpec::new(
+            id,
+            "missing",
+            "cavekit",
+            "stub-engine",
+            std::path::PathBuf::from("/tmp"),
+            vec!["stub".to_string()],
+        );
+        spec.scene_path = Some(tmp.path().join("nope.kdl"));
+
+        // No mux scripting needed — the compile error fires before the
+        // mux is touched.
+        let (mux, _stub) = ZellijMux::for_test(Vec::new());
+
+        let result = run_supervisor_with(
+            spec.clone(),
+            SupervisorMode::Foreground,
+            Config::placeholder(),
+            layout.clone(),
+            Box::new(StubEngine),
+            Box::new(InstantSuccessOrchestrator),
+            Arc::new(mux),
+            false,
+            None,
+            None,
+        )
+        .await;
+
+        let err = result.expect_err("missing scene_path must abort");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("scene") && (msg.contains("does not exist") || msg.contains("not a regular file")),
+            "expected abort message to mention missing scene, got: {msg}"
+        );
+
+        // On abort the lock is released (LockGuard Drop runs) and the
+        // socket was never bound — subsequent re-attempts must succeed.
+        let re = crate::acquire_lock(&layout, &spec.id).expect("re-acquire after abort");
         drop(re);
     }
 

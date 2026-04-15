@@ -87,3 +87,11 @@ pub mod plugin_lifecycle;
 pub use plugin_lifecycle::{
     MountOutcome, MountState, PluginLifecycleManager, PLUGIN_FAILED_EVENT,
 };
+
+// T-8.1: scene compile at supervisor boot. Reads `AgentSpec.scene_path`
+// (falling back to the embedded built-in default), parses + validates
+// the scene, builds a `ReactionRegistry` from its `on { }` / `keybind`
+// nodes, and exposes lowered plugin decls for the always-on mount
+// pass. See cavekit-supervisor.md R3 step 7.
+pub mod scene_runtime;
+pub use scene_runtime::{CompiledScene, SceneSource, compile_scene_for_runtime};
