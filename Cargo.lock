@@ -420,6 +420,7 @@ dependencies = [
  "kdl 6.5.0",
  "miette 7.6.0",
  "minijinja",
+ "strsim 0.11.1",
  "tempfile",
  "thiserror 2.0.18",
 ]

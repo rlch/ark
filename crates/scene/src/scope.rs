@@ -58,6 +58,7 @@ use kdl::{KdlDocument, KdlNode};
 use miette::{NamedSource, SourceSpan};
 
 use crate::error::SceneError;
+use crate::suggest::suggest_similar;
 
 /// Scene-root node names admitted by R1.
 ///
@@ -189,6 +190,14 @@ pub fn check_scope(src: &str, path: &Path) -> Vec<SceneError> {
 }
 
 
+/// Top-3 did-you-mean candidates for a purported scene-root node
+/// name. Thin convenience wrapper over [`crate::suggest::suggest_similar`]
+/// so downstream tooling (`ark scene check` etc.) uses the same
+/// haystack and threshold as the scope walker.
+pub fn scene_root_suggestions(name: &str) -> Vec<String> {
+    suggest_similar(name, SCENE_ROOT_NODES)
+}
+
 // ---------------------------------------------------------------------------
 // Internal walker
 // ---------------------------------------------------------------------------
@@ -217,11 +226,13 @@ impl<'a> Ctx<'a> {
     /// node, so anything else at this position is unknown.
     fn emit_unknown_root_sibling(&mut self, node: &KdlNode) {
         let name = node.name().value();
-        // TODO(T-1.3): wire `suggest_similar` here so stray top-level
-        // nodes close to `scene` get a concrete suggestion.
+        // Only `scene` is admitted at the top level (R1), so that's
+        // the entire haystack. Typos near `scene` (`sceen`, `scen`)
+        // surface as hints; further-away names stay unsuggested.
+        let suggestion = suggest_similar(name, &["scene"]).into_iter().next();
         self.errors.push(SceneError::UnknownNode {
             node: name.to_string(),
-            suggestion: None,
+            suggestion,
             src: self.named_source(),
             at: node.name().span(),
         });
@@ -232,12 +243,14 @@ impl<'a> Ctx<'a> {
         let name = node.name().value();
 
         if !SCENE_ROOT_NODES.contains(&name) {
-            // Unknown root node — R1 "did you mean …?" path.
-            // TODO(T-1.3): populate `suggestion` via the
-            // `suggest::suggest_similar` helper (added in T-1.3).
+            // Unknown root node — R1 "did you mean …?" path, backed by
+            // Jaro-Winkler similarity over the admitted root-node set.
+            let suggestion = suggest_similar(name, SCENE_ROOT_NODES)
+                .into_iter()
+                .next();
             self.errors.push(SceneError::UnknownNode {
                 node: name.to_string(),
-                suggestion: None,
+                suggestion,
                 src: self.named_source(),
                 at: node.name().span(),
             });
@@ -667,9 +680,7 @@ scene "x" {
         assert!(errs.is_empty(), "unexpected errors: {errs:#?}");
     }
 
-    /// R1 — unknown scene-root node emits `scene/unknown-node`. The
-    /// suggestion field is wired by T-1.3 (see `suggest.rs`); at this
-    /// tier we only guarantee the diagnostic surface, not the hint.
+    /// R1 — unknown scene-root node emits `scene/unknown-node`.
     #[test]
     fn unknown_scene_root_node_emits_unknown_node() {
         let input = r#"
@@ -683,6 +694,69 @@ scene "x" {
             panic!("expected UnknownNode");
         };
         assert_eq!(node, "reaction");
+    }
+
+    /// T-1.3 wiring: a typo close to an existing scene-root node
+    /// surfaces as a concrete did-you-mean suggestion.
+    #[test]
+    fn unknown_scene_root_typo_yields_suggestion() {
+        let input = r#"
+scene "x" {
+    keybnd "Alt p" intent="x"
+}
+"#;
+        let errs = check_scope(input, &p());
+        assert_eq!(errs.len(), 1);
+        let SceneError::UnknownNode { node, suggestion, .. } = &errs[0] else {
+            panic!("expected UnknownNode");
+        };
+        assert_eq!(node, "keybnd");
+        assert_eq!(suggestion.as_deref(), Some("keybind"));
+    }
+
+    /// T-1.3 wiring: a typo on the top-level `scene` node name
+    /// yields a suggestion pointing at `scene`.
+    #[test]
+    fn stray_top_level_typo_suggests_scene() {
+        let input = r#"
+sceen "x" { }
+"#;
+        let errs = check_scope(input, &p());
+        assert_eq!(errs.len(), 1);
+        let SceneError::UnknownNode { node, suggestion, .. } = &errs[0] else {
+            panic!("expected UnknownNode");
+        };
+        assert_eq!(node, "sceen");
+        assert_eq!(suggestion.as_deref(), Some("scene"));
+    }
+
+    /// T-1.3 wiring: distant unknown node names do not produce a
+    /// spurious suggestion (threshold-gated).
+    #[test]
+    fn distant_unknown_node_has_no_suggestion() {
+        let input = r#"
+scene "x" {
+    xyzzy "?"
+}
+"#;
+        let errs = check_scope(input, &p());
+        assert_eq!(errs.len(), 1);
+        let SceneError::UnknownNode { suggestion, .. } = &errs[0] else {
+            panic!("expected UnknownNode");
+        };
+        assert!(suggestion.is_none(), "got: {suggestion:?}");
+    }
+
+    /// T-1.3 wiring: exported helper covers both the happy path and
+    /// the no-match case so downstream tooling can share the same
+    /// surface.
+    #[test]
+    fn scene_root_suggestions_helper_is_exposed() {
+        let hits = scene_root_suggestions("keybnd");
+        assert!(!hits.is_empty());
+        assert_eq!(hits[0], "keybind");
+        let misses = scene_root_suggestions("xyzzy");
+        assert!(misses.is_empty(), "got: {misses:?}");
     }
 
     /// Leaf-shape root nodes (`extends`, `include`, `use`, …) MUST
