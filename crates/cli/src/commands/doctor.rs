@@ -33,6 +33,7 @@ use nix::unistd::Pid;
 use serde::Serialize;
 
 use crate::ctx::Ctx;
+use crate::embedded;
 use crate::error::CliError;
 
 /// Minimum zellij version required (mirrors mux/zellij R6).
@@ -110,6 +111,9 @@ pub enum FixAction {
     RemoveAgentDir(PathBuf),
     /// Create a missing config dir.
     CreateDir(PathBuf),
+    /// Write embedded wasm plugin bytes to a target path (T-098).
+    /// Tuple is `(plugin-name, wasm bytes, target path)`.
+    WritePluginWasm(&'static str, &'static [u8], PathBuf),
 }
 
 impl CheckResult {
@@ -580,6 +584,83 @@ fn check_dangling_worktrees(layout: &StateLayout) -> Vec<CheckResult> {
     out
 }
 
+// --- status plugin (T-098) ----------------------------------------
+
+/// T-098: verify `ark-status.wasm` is installed in the user's ark
+/// plugins dir with bytes matching the copy embedded in this binary.
+///
+/// Contract (cavekit-plugin-status R5 / cavekit-distribution R3):
+/// - Build shipped without the embedded plugin → Ok ("plugin not
+///   embedded in this build"); skip silently.
+/// - Target file missing → Warn with WritePluginWasm fix.
+/// - Target file present but content mismatches embedded bytes →
+///   Warn with WritePluginWasm fix (stale / overwrite allowed).
+/// - Target file present and matches → Ok.
+pub(crate) fn check_status_plugin_installed(ctx: &Ctx) -> CheckResult {
+    check_status_plugin_installed_with(ctx, embedded::STATUS_WASM, embedded::STATUS_WASM_AVAILABLE)
+}
+
+/// Testable variant — accepts the embedded bytes explicitly so
+/// tests can simulate both the real and placeholder paths without
+/// touching build-time state.
+pub(crate) fn check_status_plugin_installed_with(
+    ctx: &Ctx,
+    embedded_bytes: &'static [u8],
+    available: bool,
+) -> CheckResult {
+    if !available || embedded_bytes.is_empty() {
+        return CheckResult::ok(
+            "status-plugin",
+            "plugin not embedded in this build (run a release build with wasm32-wasip1 \
+             installed to embed ark-plugin-status.wasm)",
+        );
+    }
+    let target = ctx.config_dir.join("plugins").join("ark-status.wasm");
+    match fs::read(&target) {
+        Ok(existing) if existing == embedded_bytes => CheckResult::ok(
+            "status-plugin",
+            format!("installed and up to date at {}", target.display()),
+        ),
+        Ok(_) => CheckResult::warn(
+            "status-plugin",
+            format!(
+                "{} differs from embedded plugin ({} bytes) — run with --fix to overwrite",
+                target.display(),
+                embedded_bytes.len()
+            ),
+        )
+        .with_fix(FixAction::WritePluginWasm(
+            "ark-status",
+            embedded_bytes,
+            target,
+        )),
+        Err(_) => CheckResult::warn(
+            "status-plugin",
+            format!(
+                "{} missing — run with --fix to install ({} bytes)",
+                target.display(),
+                embedded_bytes.len()
+            ),
+        )
+        .with_fix(FixAction::WritePluginWasm(
+            "ark-status",
+            embedded_bytes,
+            target,
+        )),
+    }
+}
+
+/// KDL snippet printed after installing a plugin so the user can
+/// paste it into their zellij config. Kept as a helper so tests can
+/// assert the exact shape. Mirrors the example in
+/// cavekit-plugin-status.md §"Example KDL snippet".
+fn status_plugin_kdl_snippet(path: &Path) -> String {
+    format!(
+        "plugins {{\n    ark-status location=\"file:{}\"\n}}\n",
+        path.display()
+    )
+}
+
 // --- rendering ----------------------------------------------------
 
 fn glyph(st: Status, no_color: bool) -> &'static str {
@@ -643,6 +724,18 @@ fn apply_fix(fix: &FixAction) -> io::Result<String> {
             fs::create_dir_all(p)?;
             Ok(format!("created dir {}", p.display()))
         }
+        FixAction::WritePluginWasm(name, bytes, target) => {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(target, bytes)?;
+            Ok(format!(
+                "wrote {} plugin ({} bytes) to {}",
+                name,
+                bytes.len(),
+                target.display()
+            ))
+        }
     }
 }
 
@@ -655,6 +748,12 @@ fn run_fixes(rs: &[CheckResult], auto_yes: bool) -> io::Result<()> {
             FixAction::RemoveLock(p) => format!("remove stale lock {}", p.display()),
             FixAction::RemoveAgentDir(p) => format!("remove dead-agent state dir {}", p.display()),
             FixAction::CreateDir(p) => format!("create dir {}", p.display()),
+            FixAction::WritePluginWasm(name, bytes, target) => format!(
+                "install {} plugin ({} bytes) to {}",
+                name,
+                bytes.len(),
+                target.display()
+            ),
         };
         let go = auto_yes || prompt_yes(&desc)?;
         if !go {
@@ -663,6 +762,20 @@ fn run_fixes(rs: &[CheckResult], auto_yes: bool) -> io::Result<()> {
         match apply_fix(fix) {
             Ok(msg) => {
                 writeln!(stderr, "  -> {msg}").ok();
+                // T-098: after installing a plugin, print the KDL
+                // snippet so the user knows how to wire it into
+                // their zellij config.
+                if let FixAction::WritePluginWasm(_name, _bytes, target) = fix {
+                    writeln!(
+                        stderr,
+                        "\n  Add this to your zellij config to enable the plugin:\n"
+                    )
+                    .ok();
+                    for line in status_plugin_kdl_snippet(target).lines() {
+                        writeln!(stderr, "    {line}").ok();
+                    }
+                    writeln!(stderr).ok();
+                }
             }
             Err(e) => {
                 writeln!(stderr, "  !! {desc}: {e}").ok();
@@ -691,6 +804,7 @@ pub(crate) fn run_all(ctx: &Ctx) -> Vec<CheckResult> {
     rs.push(check_config_dir(ctx));
     rs.push(check_config_file(ctx));
     rs.push(check_editor());
+    rs.push(check_status_plugin_installed(ctx));
     rs.extend(check_orphan_sockets(&layout));
     rs.extend(check_stale_locks(&layout));
     rs.extend(check_dangling_worktrees(&layout));
@@ -1430,5 +1544,114 @@ mod tests {
             sock.exists(),
             "orphan socket must still exist after --json --fix"
         );
+    }
+
+    // ---- T-098: status plugin distribution ----
+
+    /// Non-empty fake wasm bytes — the test never actually loads this.
+    const FAKE_WASM: &[u8] = b"\0asm\x01\x00\x00\x00fake-status-plugin-bytes";
+
+    #[test]
+    fn status_plugin_ok_when_installed_and_matches() {
+        let tmp = tempfile::Builder::new()
+            .prefix("arkd-t098-ok")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let ctx = test_ctx(tmp.path());
+        let target = ctx.config_dir.join("plugins").join("ark-status.wasm");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, FAKE_WASM).unwrap();
+
+        let r = check_status_plugin_installed_with(&ctx, FAKE_WASM, true);
+        assert_eq!(r.status, Status::Ok, "{r:?}");
+        assert!(r.fix.is_none(), "{r:?}");
+        assert!(r.message.contains("up to date"), "{r:?}");
+    }
+
+    #[test]
+    fn status_plugin_warn_when_missing() {
+        let tmp = tempfile::Builder::new()
+            .prefix("arkd-t098-missing")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let ctx = test_ctx(tmp.path());
+        let r = check_status_plugin_installed_with(&ctx, FAKE_WASM, true);
+        assert_eq!(r.status, Status::Warn, "{r:?}");
+        match &r.fix {
+            Some(FixAction::WritePluginWasm(name, bytes, target)) => {
+                assert_eq!(*name, "ark-status");
+                assert_eq!(*bytes, FAKE_WASM);
+                assert_eq!(
+                    target,
+                    &ctx.config_dir.join("plugins").join("ark-status.wasm")
+                );
+            }
+            other => panic!("expected WritePluginWasm fix, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn status_plugin_warn_when_stale() {
+        let tmp = tempfile::Builder::new()
+            .prefix("arkd-t098-stale")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let ctx = test_ctx(tmp.path());
+        let target = ctx.config_dir.join("plugins").join("ark-status.wasm");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, b"old-bytes").unwrap();
+
+        let r = check_status_plugin_installed_with(&ctx, FAKE_WASM, true);
+        assert_eq!(r.status, Status::Warn, "{r:?}");
+        assert!(r.message.contains("differs"), "{r:?}");
+        assert!(matches!(r.fix, Some(FixAction::WritePluginWasm(..))));
+    }
+
+    #[test]
+    fn status_plugin_skips_when_not_embedded() {
+        let tmp = tempfile::Builder::new()
+            .prefix("arkd-t098-unavail")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let ctx = test_ctx(tmp.path());
+        // Empty bytes / not available → Ok with skip message.
+        let r = check_status_plugin_installed_with(&ctx, b"", false);
+        assert_eq!(r.status, Status::Ok, "{r:?}");
+        assert!(r.fix.is_none());
+        assert!(r.message.contains("not embedded"), "{r:?}");
+
+        // Defensive: even if available==true but bytes are empty, skip.
+        let r2 = check_status_plugin_installed_with(&ctx, b"", true);
+        assert_eq!(r2.status, Status::Ok, "{r2:?}");
+    }
+
+    #[test]
+    fn write_plugin_wasm_fix_creates_file_with_embedded_bytes() {
+        let tmp = tempfile::Builder::new()
+            .prefix("arkd-t098-fix")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let ctx = test_ctx(tmp.path());
+        let target = ctx.config_dir.join("plugins").join("ark-status.wasm");
+        assert!(!target.exists());
+
+        let r = check_status_plugin_installed_with(&ctx, FAKE_WASM, true);
+        assert_eq!(r.status, Status::Warn);
+        run_fixes(&[r], true).expect("fix");
+
+        assert!(target.is_file(), "plugin must be materialized");
+        let installed = fs::read(&target).unwrap();
+        assert_eq!(installed, FAKE_WASM);
+    }
+
+    #[test]
+    fn status_plugin_kdl_snippet_shape() {
+        let path = PathBuf::from("/home/u/.config/ark/plugins/ark-status.wasm");
+        let s = status_plugin_kdl_snippet(&path);
+        assert!(s.contains("plugins {"));
+        assert!(
+            s.contains("ark-status location=\"file:/home/u/.config/ark/plugins/ark-status.wasm\"")
+        );
+        assert!(s.ends_with("}\n"));
     }
 }
