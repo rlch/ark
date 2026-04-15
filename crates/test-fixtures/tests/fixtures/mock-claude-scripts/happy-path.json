@@ -1,0 +1,45 @@
+{
+  "events": [
+    {
+      "session_id": "01HZXHAPPY000000000000001",
+      "cwd": "/Users/example/Coding/demo",
+      "hook_event_name": "PostToolUse",
+      "tool_name": "Edit",
+      "tool_input": {
+        "file_path": "/Users/example/Coding/demo/src/lib.rs",
+        "old_string": "fn old()",
+        "new_string": "fn new()"
+      },
+      "tool_output": { "success": true, "lines_changed": 1 },
+      "transcript_path": "/Users/example/.claude/sessions/01HZXHAPPY000000000000001.jsonl",
+      "permission_mode": "auto"
+    },
+    {
+      "session_id": "01HZXHAPPY000000000000001",
+      "cwd": "/Users/example/Coding/demo",
+      "hook_event_name": "PostToolUse",
+      "tool_name": "Bash",
+      "tool_input": { "command": "cargo test", "description": "Run tests" },
+      "tool_output": { "success": true, "exit_code": 0 },
+      "transcript_path": "/Users/example/.claude/sessions/01HZXHAPPY000000000000001.jsonl",
+      "permission_mode": "auto"
+    },
+    {
+      "session_id": "01HZXHAPPY000000000000001",
+      "cwd": "/Users/example/Coding/demo",
+      "hook_event_name": "TaskCompleted",
+      "task_id": "T-EXAMPLE",
+      "description": "Demo task",
+      "message": "All green",
+      "transcript_path": "/Users/example/.claude/sessions/01HZXHAPPY000000000000001.jsonl"
+    },
+    {
+      "session_id": "01HZXHAPPY000000000000001",
+      "cwd": "/Users/example/Coding/demo",
+      "hook_event_name": "Stop",
+      "transcript_path": "/Users/example/.claude/sessions/01HZXHAPPY000000000000001.jsonl",
+      "stop_reason": "assistant_finished"
+    }
+  ],
+  "final_exit": 0
+}

@@ -1,0 +1,16 @@
+{
+  "events": [
+    {
+      "session_id": "01HZXSTALL00000000000001",
+      "cwd": "/Users/example/Coding/demo",
+      "hook_event_name": "PostToolUse",
+      "tool_name": "Bash",
+      "tool_input": { "command": "sleep 9999", "description": "Stalling tool" },
+      "tool_output": { "success": true },
+      "transcript_path": "/Users/example/.claude/sessions/01HZXSTALL00000000000001.jsonl",
+      "permission_mode": "auto",
+      "delay_ms": 0
+    }
+  ],
+  "final_exit": 0
+}

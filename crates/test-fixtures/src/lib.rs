@@ -48,6 +48,13 @@ pub mod paths {
     /// Populated by T-113.
     pub const HOOK_PAYLOADS: &str =
         concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hook-payloads");
+
+    /// Scripts consumed by the `mock-claude` shim binary. Each script drives a
+    /// scripted Claude Code session for end-to-end tests (T-126).
+    pub const MOCK_CLAUDE_SCRIPTS: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/mock-claude-scripts"
+    );
 }
 
 pub mod loaders {
@@ -78,6 +85,16 @@ pub mod loaders {
     pub fn load_hook_payload(event: &str) -> String {
         let path = Path::new(paths::HOOK_PAYLOADS).join(format!("{event}.json"));
         read_to_string_or_panic(&path, "hook payload", event)
+    }
+
+    /// Read `{MOCK_CLAUDE_SCRIPTS}/{name}.json` into a String. Used by end-to-end
+    /// tests that drive the `mock-claude` shim binary (T-126).
+    ///
+    /// # Panics
+    /// Panics if the file does not exist or cannot be read.
+    pub fn load_mock_claude_script(name: &str) -> String {
+        let path = Path::new(paths::MOCK_CLAUDE_SCRIPTS).join(format!("{name}.json"));
+        read_to_string_or_panic(&path, "mock-claude script", name)
     }
 
     /// Return the cavekit-project fixture directory as a `PathBuf`.
@@ -166,6 +183,7 @@ mod tests {
             ("cavekit-project", paths::CAVEKIT_PROJECT),
             ("claude-transcripts", paths::CLAUDE_TRANSCRIPTS),
             ("hook-payloads", paths::HOOK_PAYLOADS),
+            ("mock-claude-scripts", paths::MOCK_CLAUDE_SCRIPTS),
         ] {
             let meta = fs::metadata(dir)
                 .unwrap_or_else(|err| panic!("{label} fixture dir missing at {dir}: {err}"));
@@ -190,6 +208,22 @@ mod tests {
     #[should_panic(expected = "ark-test-fixtures: failed to load hook payload")]
     fn load_hook_payload_panics_on_missing_file() {
         let _ = loaders::load_hook_payload("nope-not-a-real-event");
+    }
+
+    #[test]
+    #[should_panic(expected = "ark-test-fixtures: failed to load mock-claude script")]
+    fn load_mock_claude_script_panics_on_missing_file() {
+        let _ = loaders::load_mock_claude_script("no-such-script");
+    }
+
+    #[test]
+    fn load_mock_claude_script_reads_happy_path() {
+        let raw = loaders::load_mock_claude_script("happy-path");
+        assert!(raw.contains("\"events\""), "happy-path must list events");
+        assert!(
+            raw.contains("\"Stop\""),
+            "happy-path must terminate with a Stop event"
+        );
     }
 
     #[test]

@@ -1,0 +1,12 @@
+{
+  "events": [
+    {
+      "session_id": "01HZXSTOPONLY000000000001",
+      "cwd": "/Users/example/Coding/demo",
+      "hook_event_name": "Stop",
+      "transcript_path": "/Users/example/.claude/sessions/01HZXSTOPONLY000000000001.jsonl",
+      "stop_reason": "assistant_finished"
+    }
+  ],
+  "final_exit": 0
+}
