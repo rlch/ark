@@ -16,7 +16,7 @@ Build site: context/plans/build-site.md (134 tasks, 7 tiers).
 | 2 | 16 | 16 | ✅ COMPLETE |
 | 3 | 22 | 22 | ✅ COMPLETE |
 | 4 | 10 | 10 | ✅ COMPLETE (post-gate) |
-| 5 | 16 | 16 | ✅ COMPLETE (pre-gate) |
+| 5 | 16 | 16 | ✅ COMPLETE (post-gate, 16 findings fixed across 5 cycles) |
 | 6 | 0 | 26 | pending |
 
 **Overall: 94/134 tasks done (70%) · 197 ark-cli tests + workspace green**
