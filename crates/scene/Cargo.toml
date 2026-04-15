@@ -15,6 +15,7 @@ miette = { workspace = true }
 cel-interpreter = { workspace = true }
 minijinja = { workspace = true }
 thiserror = { workspace = true }
+blake3 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
