@@ -1,36 +1,70 @@
 //! `ark spawn` — create a new agent (cavekit-cli R2).
 //!
-//! T-087 wires the full argument surface into a working handler:
-//! orchestrator auto-detect, AgentId generation, spec.json write,
-//! zellij session branching via subprocess, and a parent-side
-//! supervisor launch. The supervisor launch itself is STUBBED —
-//! no `ark-supervisor` binary exists yet (tracked under T-062 /
-//! T-069). The handler prints a warning and proceeds so the rest
-//! of the pipe (spec.json, id echo, zellij dispatch) remains
-//! exercisable end-to-end.
+//! ## Pipeline ordering (post W-3 / W-4)
 //!
-//! Design choices:
-//! - Supervisor launch uses `std::process::Command` (no fork, no
-//!   daemonize crate, no nix).
-//! - Zellij is invoked as a subprocess — always a dedicated
-//!   per-agent session via `zellij -s <name> --layout <path>`
-//!   (R2: 1:1 agent↔session). The inside-vs-outside-zellij
-//!   distinction collapses at spawn time (F-516 / F-517).
-//! - TTY detach uses a POSIX-native `pre_exec(setsid)` via `nix`
-//!   (F-526) rather than shelling out to the external `setsid(1)`
-//!   binary, which macOS does not ship by default. Factored into
-//!   [`apply_detach`] so call sites stay one line.
-//! - Zellij invocation is factored through `build_zellij_command`
-//!   so tests can introspect argv without actually spawning a
-//!   process (F-511).
-//! - KDL layouts are minijinja templates (F-525). The handler
-//!   resolves the layout stem to its template (user override in
-//!   `{config_dir}/layouts/` or an embedded shipped layout),
-//!   renders it with `{cwd, agent_cmd, agent_args, id, name}`,
-//!   writes the rendered KDL to `{state_dir}/agents/{id}/layout.kdl`,
-//!   and hands THAT path to zellij via `--layout`.
-//! - All parsing / detection helpers are pure functions so the
-//!   tests don't touch the filesystem unless they want to.
+//! `run()` walks the spawn happy-path in this order:
+//!
+//! 1. Parse args → resolve orchestrator + name + env + hooks (pure).
+//! 2. `require_zellij_on_path()` — preflight. Failure returns
+//!    `PreflightFail` BEFORE any filesystem mutation (F-503).
+//! 3. Build `AgentSpec`, mint `AgentId`, write `spec.json` + render
+//!    `layout.kdl` to `$STATE/agents/{id}/`.
+//! 4. **Fork supervisor** (W-3): create a `pipe(2)`-based ready
+//!    handshake (`supervisor_handoff::create_ready_pipe`), then call
+//!    `ark_supervisor::daemonize`. The grandchild builds a tokio
+//!    runtime and runs `run_supervisor`; on R3 step 12 it writes the
+//!    ACK byte to its end of the pipe and the parent unblocks. The
+//!    parent has a 5 s `wait_for_ready` timeout — failure cleans up
+//!    agent state (F-528 invariant).
+//! 5. **Launch zellij** — three-way split keyed on `$ZELLIJ` and
+//!    `--no-detach` (F-730):
+//!    - `$ZELLIJ` set → `zellij action switch-session` (IPC dispatch
+//!      over the live socket; no nesting).
+//!    - `--no-detach` → foreground attach with inherited stdio.
+//!    - default → pty allocation (`portable-pty`) so zellij's TUI
+//!      client gets a real controlling TTY.
+//! 6. Print `spawned {id} -> Ctrl+o w to switch`, exit 0.
+//!
+//! The supervisor must be ready BEFORE step 5 because zellij plugins
+//! (status, picker) read `$STATE/agents/*/status.json` and the control
+//! socket on bootstrap. Ordering them after the supervisor is alive
+//! avoids a startup race where a plugin sees no agent.
+//!
+//! ## `--no-detach` mode (W-4)
+//!
+//! With `--no-detach`, ark stays in the foreground and runs the
+//! supervisor inline in a background `std::thread` (with its own
+//! current-thread tokio runtime). Zellij is spawned as a foreground
+//! subprocess in its own process group via `pre_exec(setpgid(0, 0))`,
+//! and `tcsetpgrp` hands it the controlling tty so terminal SIGINT
+//! goes to zellij only. When zellij exits, `child.wait()` unblocks,
+//! the cli reclaims the tty, fires `cancel.cancel()` on the shared
+//! `CancellationToken`, and joins the supervisor thread (which
+//! drains consumers + finalizes state under the cancel).
+//!
+//! This mode produces all the same artifacts as default detach
+//! (events.jsonl, status.json, control socket, pid file) but the
+//! supervisor's lifetime is bounded by zellij's. Useful for CI and
+//! foreground debugging; default-detach remains the user-facing
+//! workflow.
+//!
+//! ## Design choices (historical)
+//!
+//! - Zellij is invoked as a subprocess — always a dedicated per-agent
+//!   session via `zellij -s <name> --layout <path>` (R2: 1:1
+//!   agent↔session).
+//! - F-730: outside-zellij detach uses `portable-pty` to give zellij a
+//!   real TTY. Null stdio + setsid is forbidden because zellij's TUI
+//!   client cannot boot without a controlling terminal (no
+//!   `--daemonize` mode). Inside-zellij uses `zellij action
+//!   switch-session` over the existing socket.
+//! - `apply_detach` (F-526) wires `pre_exec(setsid)` POSIX-natively
+//!   instead of shelling out to the external `setsid(1)` binary that
+//!   macOS does not ship by default.
+//! - KDL layouts are minijinja templates (F-525). Render → persist to
+//!   `{state_dir}/agents/{id}/layout.kdl` → hand THAT path to zellij.
+//! - Parsing / detection helpers are pure functions so the tests don't
+//!   touch the filesystem unless they want to.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -44,6 +78,7 @@ use clap::Args;
 
 use crate::ctx::Ctx;
 use crate::error::CliError;
+use crate::supervisor_handoff::{create_ready_pipe, wait_for_ready_default};
 
 /// Orchestrator runtime selected by `--orchestrator`.
 ///
@@ -465,6 +500,82 @@ pub fn zellij_startup_failure(child: &mut std::process::Child) -> Option<CliErro
     }
 }
 
+/// F-730: inside-zellij dispatch — `zellij action switch-session
+/// [--layout <path>] <session>`.
+///
+/// When `$ZELLIJ` is set, the caller is already attached to a running
+/// zellij daemon. We do NOT spawn a new zellij client — that would nest.
+/// Instead we ask the existing client to switch the user to a new
+/// session (create-if-missing is the default for `switch-session`, no
+/// `--create` flag). Works without pty, setsid, or stdio changes because
+/// the command is an IPC dispatch over the caller's live zellij socket;
+/// `Command::status()` blocks until the dispatch acks and returns.
+///
+/// Mirrors the argv shape used by `crates/mux/zellij/src/mux.rs:266`.
+pub fn build_switch_session_command(plan: &ZellijSpawn) -> Command {
+    let mut c = Command::new("zellij");
+    c.arg("action").arg("switch-session");
+    if let Some(p) = &plan.layout {
+        c.arg("--layout").arg(p);
+    }
+    c.arg(&plan.session);
+    c
+}
+
+// F-730 / F-731: the `PtyZellijHandle` + `spawn_zellij_with_pty` +
+// `pty_child_startup_failure` helpers used to live here. They moved to
+// `ark_mux_zellij::pty` so the same code path drives BOTH the
+// outside-zellij `ark spawn` detach path AND the supervisor's
+// `ZellijMux::create_tab` outside-zellij first-tab spawn — keeping a
+// single source of truth for the pty lifetime contract and the
+// startup-grace poll. The `cli_*_pty` wrappers below adapt the
+// mux-crate `PtySpawnError` to the local `CliError` surface.
+
+/// Adapter: spawn zellij in a pty using the shared mux helper, mapping
+/// the mux's `PtySpawnError` to `CliError::Internal` with the same
+/// reason text the prior in-crate helper produced.
+fn cli_spawn_zellij_with_pty(
+    plan: &ZellijSpawn,
+    cwd: &Path,
+) -> Result<ark_mux_zellij::PtyZellijHandle, CliError> {
+    let layout = plan.layout.as_deref().unwrap_or("");
+    let layout_path = std::path::Path::new(layout);
+    ark_mux_zellij::spawn_zellij_with_pty(&plan.session, layout_path, cwd).map_err(|e| match e {
+        ark_mux_zellij::PtySpawnError::OpenPty(reason) => CliError::Internal {
+            reason: format!("openpty: {reason}"),
+        },
+        ark_mux_zellij::PtySpawnError::Spawn(reason) => CliError::Internal {
+            reason: format!("spawn zellij in pty: {reason}"),
+        },
+        ark_mux_zellij::PtySpawnError::EarlyExit { code } => CliError::Internal {
+            reason: format!("zellij exited with code {code} before session came up"),
+        },
+        ark_mux_zellij::PtySpawnError::Wait(reason) => CliError::Internal {
+            reason: format!("wait on zellij pty child: {reason}"),
+        },
+    })
+}
+
+/// Adapter: run the shared startup-grace poll, mapping its error
+/// variants to `CliError::Internal` with the same wording the prior
+/// in-crate helper produced.
+fn cli_pty_child_startup_failure(
+    child: &mut (dyn portable_pty::Child + Send + Sync),
+) -> Option<CliError> {
+    match ark_mux_zellij::pty_child_startup_failure(child) {
+        Ok(()) => None,
+        Err(ark_mux_zellij::PtySpawnError::EarlyExit { code }) => Some(CliError::Internal {
+            reason: format!("zellij exited with code {code} before session came up"),
+        }),
+        Err(ark_mux_zellij::PtySpawnError::Wait(reason)) => Some(CliError::Internal {
+            reason: format!("wait on zellij pty child: {reason}"),
+        }),
+        Err(other) => Some(CliError::Internal {
+            reason: format!("pty child startup poll: {other}"),
+        }),
+    }
+}
+
 /// Preflight: `zellij` must be on PATH. Returns `PreflightFail`
 /// with a clear reason when the binary is missing. No-op on success.
 pub fn require_zellij_on_path() -> Result<(), CliError> {
@@ -763,11 +874,96 @@ pub fn run(args: SpawnArgs, ctx: &Ctx) -> Result<(), CliError> {
     };
     tracing::debug!(path = %layout_path.display(), "wrote rendered layout");
 
-    // F-511: actually launch zellij. We snapshot the env, pick a
-    // plan, and spawn the subprocess via `build_zellij_command`.
-    // `Command::spawn()` (not `.status()`) because the parent agent
-    // is typically already inside zellij and must not block.
+    // W-3: fork the supervisor BEFORE launching zellij so the control
+    // socket exists by the time zellij plugins boot. Pipe-inheritance
+    // ready handshake (W-2) ensures the parent does not return until
+    // the supervisor has bound its socket and emitted Started — the
+    // <1 s parent-return contract from cavekit-supervisor R1.
     //
+    // `--no-detach` is currently exempt: the existing foreground path
+    // launches zellij inline without a supervisor. W-4 will wire an
+    // inline supervisor for that mode; until then, `--no-detach` keeps
+    // the F-730 behaviour with no supervisor (debugging-only).
+    if !args.no_detach {
+        let (ready_rfd, ready_wfd) = create_ready_pipe()?;
+        let state_layout = ark_types::StateLayout::new(
+            ctx.state_dir.clone(),
+            ctx.runtime_dir.clone(),
+            ctx.config_dir.clone(),
+        );
+
+        // SAFETY: `daemonize()` calls `fork(2)`. Per its contract,
+        // there must be no tokio runtime or worker threads alive at
+        // this point — `run()` has not started either. The single-
+        // threaded check is therefore satisfied for both Linux and
+        // macOS.
+        match ark_supervisor::daemonize(&state_layout, &spec.id) {
+            Err(e) => {
+                cleanup_agent_state(&ctx.state_dir, &spec.id);
+                return Err(CliError::Internal {
+                    reason: format!("daemonize supervisor: {e}"),
+                });
+            }
+            Ok(ark_supervisor::DaemonizeOutcome::Daemon) => {
+                // We are the supervisor grandchild. `setup_supervisor_log`
+                // already redirected stdio to `supervisor.log` and
+                // installed a tracing subscriber. Drop the parent's
+                // read end — only the write end is ours.
+                drop(ready_rfd);
+                let writer = ark_supervisor::ReadyWriter::from_owned_fd(ready_wfd);
+                let config = ark_core::Config::placeholder();
+
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        tracing::error!(error = %e, "build tokio runtime in supervisor");
+                        std::process::exit(3);
+                    }
+                };
+
+                let outcome = runtime.block_on(ark_supervisor::run_supervisor(
+                    spec,
+                    ark_supervisor::SupervisorMode::Daemon,
+                    config,
+                    Some(writer),
+                    None, // daemon mode uses internal cancel + signal handler
+                ));
+                match outcome {
+                    Ok(o) => {
+                        tracing::info!(?o, "supervisor exited cleanly");
+                        std::process::exit(ark_supervisor::outcome_exit_code(&o));
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "supervisor returned Err");
+                        std::process::exit(3);
+                    }
+                }
+            }
+            Ok(ark_supervisor::DaemonizeOutcome::Parent { child_pid }) => {
+                // We are the original `ark spawn` process. Drop the
+                // supervisor's write end so EOF fires at the parent if
+                // the supervisor dies before signalling ready.
+                drop(ready_wfd);
+                tracing::debug!(
+                    child_pid = %child_pid,
+                    "daemonized supervisor; waiting for ready"
+                );
+                if let Err(e) = wait_for_ready_default(ready_rfd) {
+                    tracing::warn!(
+                        child_pid = %child_pid,
+                        error = ?e,
+                        "supervisor failed to ready; cleaning state",
+                    );
+                    cleanup_agent_state(&ctx.state_dir, &spec.id);
+                    return Err(e);
+                }
+            }
+        }
+    }
+
     // F-522: the session name returned by `AgentId::session_name()`
     // deliberately drops the ULID suffix (`ark-{orchestrator}-{name}`),
     // which means two agents sharing orchestrator+name collide on the
@@ -786,21 +982,28 @@ pub fn run(args: SpawnArgs, ctx: &Ctx) -> Result<(), CliError> {
         &session,
         Some(layout_str.as_str()),
     );
-    let mut zcmd = build_zellij_command(&plan);
-    // F-606: honor `--no-detach`. The detach path (default) nullifies
-    // stdio + wires `pre_exec(setsid)` via `apply_detach` so the child
-    // becomes a new session leader. The `--no-detach` path skips BOTH
-    // — stdio is inherited and no session split happens, so the
-    // operator sees zellij output live and we block on the child until
-    // zellij exits.
-    configure_zellij_stdio_and_detach(&mut zcmd, args.no_detach, apply_detach);
 
-    if args.no_detach {
-        // Foreground path: `Command::status()` inherits stdio and blocks
-        // on the child. A non-zero exit is a spawn / runtime failure —
-        // we still run `cleanup_agent_state` so a foreground launch that
-        // fails before the session is listenable doesn't leave an
-        // orphan spec.json / layout.kdl behind.
+    // F-730: three-way split on how to hand off to zellij. The unified
+    // `setsid + null stdio` path introduced in F-516 broke both the
+    // inside and outside branches — zellij's TUI client has no
+    // `--daemonize` mode and cannot boot without a real controlling
+    // TTY. Restore the split:
+    //
+    //   inside-zellij    → `zellij action switch-session` (IPC only)
+    //   outside + -nd    → foreground attach on inherited stdio
+    //   outside + detach → pty allocation so zellij sees a real TTY
+    let inside_zellij_flag = std::env::var("ZELLIJ")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .is_some();
+
+    if inside_zellij_flag {
+        // INSIDE-ZELLIJ: the caller is already attached to a running
+        // zellij daemon. Dispatch `switch-session` over the live
+        // socket; the existing client is moved into the new session
+        // (or one is created on demand — `switch-session` is
+        // create-if-missing). No nesting, no new pty, no setsid.
+        let mut zcmd = build_switch_session_command(&plan);
         let status = match zcmd.status() {
             Ok(s) => s,
             Err(e) => {
@@ -814,36 +1017,174 @@ pub fn run(args: SpawnArgs, ctx: &Ctx) -> Result<(), CliError> {
             let code = status.code().unwrap_or(-1);
             cleanup_agent_state(&ctx.state_dir, &spec.id);
             return Err(CliError::Internal {
+                reason: format!("zellij action switch-session exited with code {code}"),
+            });
+        }
+        tracing::debug!(spec = %spec_path.display(), "spawned and ready");
+        println!("spawned {} -> Ctrl+o w to switch", spec.id);
+        return Ok(());
+    }
+
+    if args.no_detach {
+        // OUTSIDE-ZELLIJ + --no-detach (W-4): inline supervisor in a
+        // background std thread + foreground zellij subprocess in its
+        // own process group. Pattern documented in `context/impl/
+        // impl-supervisor-wiring.md` and grounded in the external
+        // research summary at the top of this file's W-4 history.
+        //
+        // Architecture (main thread owns the TTY):
+        //
+        //   ┌──────────────── main thread ────────────────┐
+        //   │ 1. build CancellationToken                  │
+        //   │ 2. std::thread::spawn supervisor:           │
+        //   │      tokio current_thread runtime           │
+        //   │      block_on(run_supervisor(spec, ...,     │
+        //   │                Some(cancel)))               │
+        //   │ 3. spawn zellij with pre_exec(setpgid 0,0)  │
+        //   │ 4. tcsetpgrp(stdin, child_pgid) — make      │
+        //   │    zellij the foreground pgrp; SIGINT from  │
+        //   │    terminal goes only to zellij             │
+        //   │ 5. child.wait() blocks                      │
+        //   │ 6. tcsetpgrp(stdin, our pgid) reclaim       │
+        //   │ 7. cancel.cancel() → supervisor drains      │
+        //   │ 8. supervisor_thread.join()                 │
+        //   └─────────────────────────────────────────────┘
+        //
+        // Why setpgid + tcsetpgrp: on Ctrl+C the kernel sends SIGINT
+        // to the *foreground* process group only. By making zellij
+        // its own pgrp and handing it the controlling tty, terminal-
+        // generated signals reach zellij directly while our CLI
+        // process stays uninterrupted. Zellij exits → child.wait()
+        // unblocks → we reclaim the tty + drive supervisor shutdown.
+        // Mirrors job-control behaviour in shells (bash, fish) and
+        // the foreground-job pattern in nushell.
+
+        use std::os::unix::process::CommandExt;
+
+        let cancel = ark_types::CancellationToken::new();
+        let cancel_for_thread = cancel.clone();
+        let spec_for_thread = spec.clone();
+        let supervisor_thread = std::thread::Builder::new()
+            .name("ark-supervisor".into())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| format!("build tokio runtime: {e}"))?;
+                runtime
+                    .block_on(ark_supervisor::run_supervisor(
+                        spec_for_thread,
+                        ark_supervisor::SupervisorMode::Foreground,
+                        ark_core::Config::placeholder(),
+                        None, // no ack — same process; we own the cancel
+                        Some(cancel_for_thread),
+                    ))
+                    .map_err(|e| format!("supervisor returned Err: {e}"))
+            })
+            .map_err(|e| {
+                cleanup_agent_state(&ctx.state_dir, &spec.id);
+                CliError::Internal {
+                    reason: format!("spawn supervisor thread: {e}"),
+                }
+            })?;
+
+        // Build zellij command with pre_exec(setpgid(0,0)) so it
+        // becomes its own process group leader.
+        let mut zcmd = build_zellij_command(&plan);
+        unsafe {
+            zcmd.pre_exec(|| {
+                match nix::unistd::setpgid(
+                    nix::unistd::Pid::from_raw(0),
+                    nix::unistd::Pid::from_raw(0),
+                ) {
+                    Ok(_) => Ok(()),
+                    Err(e) => Err(std::io::Error::from_raw_os_error(e as i32)),
+                }
+            });
+        }
+
+        // Spawn zellij. On failure, signal supervisor + clean up.
+        let mut child = match zcmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                cancel.cancel();
+                let _ = supervisor_thread.join();
+                cleanup_agent_state(&ctx.state_dir, &spec.id);
+                return Err(CliError::Internal {
+                    reason: format!("launch zellij: {e}"),
+                });
+            }
+        };
+
+        // Hand zellij the controlling tty so terminal SIGINT is
+        // routed to it, not us. Best-effort: if stdin isn't a tty
+        // (e.g. test harness, CI without a TTY), skip silently —
+        // zellij will still run and operator can SIGTERM it.
+        let child_pid = nix::unistd::Pid::from_raw(child.id() as i32);
+        // Stdin's fd is always 0 on Unix; nix isatty/tcsetpgrp take
+        // any AsFd, but std::io::Stdin doesn't impl AsFd. Borrow the
+        // raw fd 0 directly.
+        let stdin_fd: std::os::fd::RawFd = 0;
+        if nix::unistd::isatty(stdin_fd).unwrap_or(false) {
+            let borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(stdin_fd) };
+            let _ = nix::unistd::tcsetpgrp(borrowed, child_pid);
+        }
+
+        // Block on zellij. On EINTR, std re-tries internally.
+        let status = child.wait().map_err(|e| {
+            // Best-effort cleanup before bubbling.
+            cancel.cancel();
+            CliError::Internal {
+                reason: format!("wait on zellij: {e}"),
+            }
+        })?;
+
+        // Reclaim foreground for the outer shell. Use our actual pgrp.
+        if nix::unistd::isatty(stdin_fd).unwrap_or(false) {
+            let borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(stdin_fd) };
+            let our_pgrp = nix::unistd::getpgrp();
+            let _ = nix::unistd::tcsetpgrp(borrowed, our_pgrp);
+        }
+
+        // Trigger supervisor shutdown + join its thread. The
+        // supervisor's R3 sequence runs steps 14–18 (drain consumers,
+        // teardown engine, finalize state, unlink socket, release
+        // lock) under the cancel.
+        cancel.cancel();
+        let join_result = supervisor_thread.join();
+        match join_result {
+            Ok(Ok(_outcome)) => {}
+            Ok(Err(reason)) => {
+                tracing::warn!(reason, "supervisor thread returned Err");
+            }
+            Err(_panic) => {
+                tracing::warn!("supervisor thread panicked");
+            }
+        }
+
+        if !status.success() {
+            // Zellij failed (vs. operator-initiated detach which exits
+            // 0). Clean up state + bubble so the operator sees the
+            // exit code.
+            let code = status.code().unwrap_or(-1);
+            cleanup_agent_state(&ctx.state_dir, &spec.id);
+            return Err(CliError::Internal {
                 reason: format!("zellij exited with code {code} before session came up"),
             });
         }
-        eprintln!(
-            "warning: supervisor launch is stubbed in this build; \
-             spec.json written at {}",
-            spec_path.display()
-        );
+
         println!("spawned {} -> Ctrl+o w to switch", spec.id);
-        // F-705 / F-708: `--no-detach` success exits need to distinguish
-        // two cases. (a) The operator terminated zellij → no supervisor
-        // owns the agent, leaving spec.json / layout.kdl on disk would
-        // surface a ghost entry in `ark list` / picker / doctor. (b) The
-        // operator detached from zellij (Ctrl+P, D) → zellij is still
-        // running the session in the background, and `status()` returned
-        // success because the attach client exited cleanly. In case (b)
-        // wiping state would orphan a live session (no more spec.json to
-        // reattach against).
-        //
-        // Query `zellij list-sessions` for the session name we just
-        // attached to. If the session is still listed → keep state. If
-        // it is definitively absent → cleanup (F-705 ghost-state fix).
-        // If liveness is Unknown (zellij missing from PATH post-spawn,
-        // command errored) fall back to keeping state — losing a live
-        // session is worse than a transient ghost.
+        // F-705 / F-708 ghost-state guard: distinguish "operator
+        // detached (Ctrl+P, D — zellij still alive)" from "zellij
+        // terminated cleanly". With supervisor shutdown above, the
+        // session is gone either way — the supervisor's finalize_state
+        // wrote a terminal phase. We keep the state so `ark list`
+        // still surfaces the run for post-mortem; cleanup happens via
+        // `ark doctor` if the operator wants it gone.
         match zellij_session_liveness(&session) {
             ZellijSessionLiveness::Gone => {
-                cleanup_agent_state(&ctx.state_dir, &spec.id);
                 eprintln!(
-                    "note: removed transient agent state {} (no-detach mode)",
+                    "note: zellij session {session} ended; agent state retained for {} (use `ark doctor --fix` to GC)",
                     spec.id
                 );
             }
@@ -863,48 +1204,33 @@ pub fn run(args: SpawnArgs, ctx: &Ctx) -> Result<(), CliError> {
         return Ok(());
     }
 
-    // F-528: `zcmd.spawn()` itself can fail (ENOENT after racy PATH
-    // change, EACCES on a non-executable binary, EAGAIN / ENOMEM under
-    // fork pressure). The prior code returned the error directly and
-    // left spec.json + layout.kdl on disk, an orphan that `ark list`
-    // would then advertise as a live agent. Route the error through
-    // the same `cleanup_agent_state` helper the startup-poll branch
-    // uses so the "no orphan state on spawn failure" invariant holds
-    // for BOTH failure modes.
-    let mut child = match zcmd.spawn() {
-        Ok(c) => c,
+    // OUTSIDE-ZELLIJ + --detach (default): pty path. Allocate a pty,
+    // spawn zellij attached to the slave. zellij initialises against
+    // a real TTY, forks its server daemon (server double-forks and
+    // detaches from the pty), then we poll the client for 500 ms to
+    // catch fast failures (bad layout, missing plugins). The returned
+    // `PtyZellijHandle` holds the PtyPair; dropping it at the end of
+    // this function closes the master fd, which SIGHUPs the client.
+    // By then the server daemon owns the session and survives.
+    let mut handle = match cli_spawn_zellij_with_pty(&plan, &spec.cwd) {
+        Ok(h) => h,
         Err(e) => {
             cleanup_agent_state(&ctx.state_dir, &spec.id);
-            return Err(CliError::Internal {
-                reason: format!("launch zellij: {e}"),
-            });
+            return Err(e);
         }
     };
 
-    // F-523: `Command::spawn()` only confirms the child forked. zellij
-    // may still exec-fail, layout-parse-fail, or otherwise die before
-    // the session is listenable. Poll briefly with `try_wait()`; if
-    // the child has already exited non-zero inside the grace window we
-    // treat this as a spawn failure, clean up the agent state dir we
-    // just created, and surface an Internal error. A ~500ms grace is
-    // enough to catch fast failures (missing layout, bad config) while
-    // staying snappy for the success path — zellij is still alive at
-    // the end of the window because it forks its own detached daemon.
-    if let Some(err) = zellij_startup_failure(&mut child) {
+    if let Some(err) = cli_pty_child_startup_failure(handle.child.as_mut()) {
         cleanup_agent_state(&ctx.state_dir, &spec.id);
         return Err(err);
     }
 
-    // Supervisor spawn is STUBBED until the `ark-supervisor` binary
-    // lands (see T-062 / T-069). We print a warning so the operator
-    // isn't surprised when nothing appears in `ark list`.
-    eprintln!(
-        "warning: supervisor launch is stubbed in this build; \
-         spec.json written at {}",
-        spec_path.display()
-    );
-
+    tracing::debug!(spec = %spec_path.display(), "spawned and ready (pty path)");
     println!("spawned {} -> Ctrl+o w to switch", spec.id);
+    // `handle` drops here → master closes → SIGHUP to zellij client.
+    // Harmless because the server daemon has already forked and owns
+    // the session.
+    drop(handle);
     Ok(())
 }
 
@@ -1366,10 +1692,12 @@ mod tests {
 
     #[test]
     fn build_zellij_command_inside_zellij_env_still_creates_session() {
-        // Guard against regression: even when the env getter reports
-        // $ZELLIJ is set, the produced command must be the session-
-        // creator, NOT `zellij action new-tab`.
-        // F-526: argv is pure zellij — detach is wired separately.
+        // F-730 guard: `build_zellij_command` is now only used on the
+        // OUTSIDE-zellij path (the INSIDE path dispatches via
+        // `build_switch_session_command`). But the plan builder itself
+        // is env-agnostic, so the produced argv must still be the
+        // session-creator form regardless of what env the plan was
+        // resolved under.
         let plan = zellij_plan(
             |k| (k == "ZELLIJ").then(|| "1".to_string()),
             "ark-cavekit-auth",
@@ -1382,6 +1710,93 @@ mod tests {
         assert!(!argv.iter().any(|a| a == "new-tab"));
         assert!(!argv.iter().any(|a| a == "attach"));
         assert!(!argv.iter().any(|a| a == "setsid"));
+        assert!(
+            !argv.iter().any(|a| a == "switch-session"),
+            "outside-path command must not contain switch-session: {argv:?}"
+        );
+    }
+
+    // --- F-730: build_switch_session_command argv shape -----------------
+
+    #[test]
+    fn build_switch_session_command_with_layout() {
+        // F-730: inside-zellij dispatch. argv is
+        // `zellij action switch-session --layout <path> <session>`
+        // (no `--create` — create-if-missing is the default; see
+        // cavekit-mux-zellij R1 and crates/mux/zellij/src/mux.rs:266).
+        let cmd = build_switch_session_command(&ZellijSpawn {
+            session: "ark-cavekit-auth".into(),
+            layout: Some("/tmp/builder.kdl".into()),
+        });
+        assert_eq!(
+            argv_of(&cmd),
+            vec![
+                "zellij",
+                "action",
+                "switch-session",
+                "--layout",
+                "/tmp/builder.kdl",
+                "ark-cavekit-auth",
+            ]
+        );
+    }
+
+    #[test]
+    fn build_switch_session_command_without_layout_omits_layout_arg() {
+        let cmd = build_switch_session_command(&ZellijSpawn {
+            session: "ark-cavekit-auth".into(),
+            layout: None,
+        });
+        assert_eq!(
+            argv_of(&cmd),
+            vec!["zellij", "action", "switch-session", "ark-cavekit-auth"]
+        );
+    }
+
+    #[test]
+    fn build_switch_session_command_does_not_nest() {
+        // F-730 regression guard: inside-zellij path must not emit
+        // `attach` (which would nest clients) or `-s` (which would
+        // fork a new client outside the running daemon).
+        let cmd = build_switch_session_command(&ZellijSpawn {
+            session: "ark-cavekit-auth".into(),
+            layout: Some("/tmp/b.kdl".into()),
+        });
+        let argv = argv_of(&cmd);
+        assert!(!argv.iter().any(|a| a == "attach"));
+        assert!(!argv.iter().any(|a| a == "-s"));
+        assert!(!argv.iter().any(|a| a == "--create"));
+    }
+
+    // --- F-731: pty helpers moved to ark-mux-zellij ----------------------
+    //
+    // The full pty spawn + startup-grace tests now live in
+    // `ark-mux-zellij/src/pty.rs`. Here we keep an adapter test to
+    // confirm that the cli's `cli_pty_child_startup_failure` wrapper
+    // preserves the exact "zellij exited with code N" wording that
+    // `ark spawn` surfaces to the operator (the wording is asserted
+    // by external scripts that grep ark's stderr).
+
+    #[test]
+    fn cli_pty_child_startup_failure_preserves_exit_wording() {
+        use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("openpty");
+        let builder = CommandBuilder::new("/usr/bin/false");
+        let mut child = pair.slave.spawn_command(builder).expect("spawn false");
+        let err = cli_pty_child_startup_failure(child.as_mut()).expect("false must trip the poll");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("zellij exited with code"),
+            "wording must be stable for downstream stderr-grepping; got {msg}"
+        );
+        drop(pair);
     }
 
     // --- require_zellij_on_path error variant -------------------------

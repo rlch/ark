@@ -132,13 +132,20 @@ impl E2eEnv {
         // the total path length must stay under SUN_LEN (104 bytes on
         // macOS). Long tempdir prefixes plus the `agents/<long-id>.sock`
         // suffix can trip that limit even on short agent names.
+        //
+        // macOS's default `$TMPDIR` resolves to `/var/folders/<long>/T/`
+        // — already 50+ bytes before the prefix. With a 36-char agent
+        // id and a 5-char `.sock` extension the total blows past 104.
+        // We force `/tmp` (a short, always-writable path) for the
+        // runtime dir specifically. State + config dirs can stay on
+        // the default tempdir — they don't host sockets.
         let state_dir = tempfile::Builder::new()
             .prefix("ark-s-")
             .tempdir()
             .expect("state tempdir");
         let runtime_dir = tempfile::Builder::new()
             .prefix("ark-r-")
-            .tempdir()
+            .tempdir_in("/tmp")
             .expect("runtime tempdir");
         let config_dir = tempfile::Builder::new()
             .prefix("ark-c-")

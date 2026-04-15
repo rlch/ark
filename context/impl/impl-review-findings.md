@@ -1159,3 +1159,68 @@ The right canonical owner was always `rlch`, and the workflow is safe to hard-co
 - `cargo fmt --all` clean. `cargo build --workspace` clean (zero real warnings; only the expected `cargo:warning=` telemetry from `build.rs`).
 
 **Gate status after Tier 6 cycle 8:** CLOSED — **Tier 6 gate closing**. Cycle 8 resolved one P2 (`artifact_is_fresh` stale-embed window matching F-712's `cargo:rerun-if-changed` additions) and one P3 (release.yml homebrew tap owner), raised **zero new P1 findings**, and completes the Tier 6 review arc. The Tier 6 ledger now spans F-500 through F-714 across eight cycles; no P1-severity findings remain open and no new P1s were raised in this cycle.
+
+## Post-v1 user-reported findings
+
+### F-730 — P1 `ark spawn` from a bare shell exited with "zellij exited with code 2" (FIXED)
+
+**Source:** user report (post-v1 installation smoke-test)
+**Tier:** post-v1
+**Severity:** P1
+**Status:** fixed
+**Location:** `crates/cli/src/commands/spawn.rs` — `run()`, new `build_switch_session_command`, `spawn_zellij_with_pty`, `pty_child_startup_failure`, `PtyZellijHandle`; `crates/cli/Cargo.toml` (+`portable-pty`); `context/kits/cavekit-mux-zellij.md` R1; `context/kits/cavekit-cli.md` R2.
+
+**Description:** Running `ark spawn -- claude` from a fresh fish shell (outside any zellij session) surfaced:
+
+```
+ark: internal error: zellij exited with code 2 before session came up
+```
+
+The 500ms `zellij_startup_failure` grace poll introduced in F-523 caught the zellij child exiting non-zero immediately after `Command::spawn()`. Root cause: F-516 unified the inside-vs-outside-zellij spawn paths into a single `zellij -s <name> --layout <path>` invocation with `/dev/null` stdin/stdout/stderr and a `pre_exec(setsid)` hook (wired via `apply_detach`, landed in F-526). That combination is incompatible with zellij's client model:
+
+- zellij has NO `--daemonize` flag. The first `zellij -s <name>` invocation forks the zellij-server daemon AND attaches a TUI client to the parent's controlling TTY.
+- `setsid()` strips the child's controlling TTY.
+- `/dev/null` on stdin/stdout/stderr leaves the child with no TTY device to initialise the TUI against.
+- Result: the zellij client exits with code 2 before it gets far enough to fork the server. No session ever gets created.
+
+The cavekit got the same fact wrong in two places:
+
+- `context/kits/cavekit-mux-zellij.md:19` — "outside zellij: spawn new session via `zellij -s {session} --layout {path.kdl}` wrapped in `setsid` (POSIX) or double-fork to detach"
+- `context/kits/cavekit-cli.md:48` — same assumption
+
+F-526 had correctly diagnosed one adjacent failure — macOS lacks the external `setsid(1)` binary, so the argv had to drop `setsid` and move to POSIX `setsid(2)` via `pre_exec`. But F-526 did NOT re-examine the underlying "null stdio + setsid is enough to detach a TUI" premise, so the fix preserved the broken invariant.
+
+The inside-zellij path was collapsed into the same broken invocation: F-516 explicitly removed the `zellij action switch-session` branch referenced in `cavekit-mux-zellij.md:20`, unifying everything on `setsid zellij -s ...`. This broke *both* paths — inside-zellij, too, tried to fork a detached session client with null stdio, which could not boot. The symptom was the same error, regardless of `$ZELLIJ`.
+
+**Resolution:** Restored the two-path split and corrected each branch's mechanism.
+
+1. **Added `portable-pty = "0.8"`** to `crates/cli/Cargo.toml [dependencies]`. portable-pty's Unix backend (`portable-pty-0.8.1/src/unix.rs:200-247`) already implements the exact pre_exec sequence we need — `setsid()`, `TIOCSCTTY` on the slave, signal disposition reset, stdio wiring from the slave fd — so we did not need to roll our own `openpty` + `pre_exec` code.
+
+2. **New `build_switch_session_command(&ZellijSpawn) -> Command`** (inside-zellij path). Returns `zellij action switch-session [--layout <path>] <session>`. No pty, no setsid, no stdio changes — the command is an IPC dispatch over the caller's live zellij socket and `Command::status()` blocks until zellij acks. Mirrors the argv shape at `crates/mux/zellij/src/mux.rs:266`. `switch-session` is create-if-missing by default (there is no `--create` flag on it — that flag exists on `attach` only).
+
+3. **New `spawn_zellij_with_pty(&ZellijSpawn, &Path) -> Result<PtyZellijHandle, CliError>`** (outside-zellij detach path). Allocates a pty pair, builds a `portable_pty::CommandBuilder` for `zellij -s <session> --layout <path>` with `cwd = spec.cwd`, spawns via `pair.slave.spawn_command(builder)`. `set_controlling_tty` is left at its default `true`, so portable-pty issues `TIOCSCTTY` for us. Returns a `PtyZellijHandle { child, pair }` struct; the pair must outlive the 500ms startup grace poll (dropping the master fd earlier SIGHUPs the client before the server has forked).
+
+4. **New `pty_child_startup_failure(&mut dyn Child)`** mirrors the existing `zellij_startup_failure` but polls `portable_pty::Child::try_wait()` (its own `ExitStatus` type with `exit_code()`).
+
+5. **`run()` rewired** — three branches, selected in order:
+   - `std::env::var("ZELLIJ").ok().filter(|v| !v.is_empty()).is_some()` → `build_switch_session_command` + `Command::status()`. Both `--detach` and `--no-detach` behave identically here because the command returns as soon as zellij acks.
+   - `args.no_detach` (outside-zellij + foreground) → `build_zellij_command` + `Command::status()` with inherited stdio (zellij draws to the operator's terminal; Ctrl+P, D detaches). Unchanged from the F-708 landing behaviour.
+   - default (outside-zellij + detach) → `spawn_zellij_with_pty` + `pty_child_startup_failure`. Handle is held in scope to end-of-function, dropped on return (master closes → SIGHUP to the zellij client → client dies — but zellij's server daemon has already forked by then and survives).
+
+   The `configure_zellij_stdio_and_detach` + `apply_detach` helpers are kept (tests reference them directly) but are no longer called from `run()` — the pty path doesn't need them, the inside-zellij path doesn't need them, the foreground path inherits stdio by default.
+
+**Tests added (4):**
+- `build_switch_session_command_with_layout` — argv is `["zellij", "action", "switch-session", "--layout", "<p>", "<s>"]`.
+- `build_switch_session_command_without_layout_omits_layout_arg` — argv is `["zellij", "action", "switch-session", "<s>"]`.
+- `build_switch_session_command_does_not_nest` — argv must not contain `attach`, `-s`, or `--create` (regression guards against F-516-style collapsing).
+- `pty_child_startup_failure_none_for_successful_exit` + `pty_child_startup_failure_reports_nonzero_exit` + `spawn_zellij_with_pty_returns_handle_with_child_and_pair` — pty helper against `/usr/bin/true` and `/usr/bin/false` (no dependency on a real zellij binary in the test environment).
+
+The existing `build_zellij_command_inside_zellij_env_still_creates_session` test was updated to add a negative assertion that the outside-path command MUST NOT contain `switch-session`, guarding the direction of the two-path split.
+
+**Out of scope (follow-up):** `crates/mux/zellij/src/mux.rs` still shells out to the external `setsid(1)` binary at line 281 (`["setsid", "zellij", "-s", session, "--layout", layout_str]`). That path is unused in the current binary because the supervisor is still stubbed (see T-062 / T-069); it will need the same pty treatment when the supervisor wires up.
+
+**Gate evidence:**
+
+- `cargo check -p ark-cli` clean — zero warnings.
+- `cargo test -p ark-cli --lib commands::spawn` — 68 passing (baseline 64 + 4 new F-730 tests).
+- `cargo test --workspace -- --test-threads=1` — all test binaries green (reviewed `test result` lines individually: 288 + 98 + 75 + 86 + 73 + 119 + 99 + ... with zero `FAILED`).

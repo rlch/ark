@@ -11,13 +11,14 @@
 //!   3. Platform fallback (`$HOME/.local/state/ark`, `/tmp/ark-{uid}`,
 //!      `$HOME/.config/ark`).
 //!
-//! Runtime dir scheme per cavekit-hook-ipc.md R4: always ends in `ark-{uid}`
-//! relative to the base runtime root. When `XDG_RUNTIME_DIR` IS set, runtime =
-//! `$XDG_RUNTIME_DIR/ark-{uid}/`; otherwise `/tmp/ark-{uid}/`. On macOS
-//! `XDG_RUNTIME_DIR` is never set by default so the `/tmp` branch is taken.
-//! `ARK_RUNTIME_DIR`, when set, is used verbatim without appending the
-//! `ark-{uid}` segment (caller is assumed to have picked an already-isolated
-//! path — e.g. a test tempdir).
+//! Runtime dir precedence (cavekit-hook-ipc.md R4, option D2 — 2026-04-15):
+//!   1. `$ARK_RUNTIME_DIR` — verbatim (caller already isolated).
+//!   2. `$XDG_RUNTIME_DIR/ark-{uid}` — Linux systemd idiom.
+//!   3. `$TMPDIR/ark` — macOS idiom. `$TMPDIR` is already a per-user
+//!      sandboxed path (`/var/folders/.../T/`) so the `ark-{uid}` segment
+//!      is redundant; we use a short `ark/` leaf so the path stays pretty.
+//!   4. `/tmp/ark-{uid}` — bare-Linux last-resort with explicit uid
+//!      segment to avoid collision on multi-tenant hosts.
 //!
 //! **Naming note:** the kit references `ARK_CONFIG_PATH`, but a single-file
 //! "path" env is a poor fit for a multi-file config directory. We expose
@@ -121,17 +122,18 @@ fn resolve_config<E: Env>(env: &E) -> Result<PathBuf, EnvPathsError> {
     Ok(PathBuf::from(home).join(".config/ark"))
 }
 
-/// Runtime resolution. `ARK_RUNTIME_DIR` is taken verbatim. Otherwise the
-/// scheme is `{XDG_RUNTIME_DIR or /tmp}/ark-{uid}/` per hook-ipc R4.
+/// Runtime resolution. See module-level docs for precedence (option D2).
 fn resolve_runtime<E: Env>(env: &E, uid: u32) -> PathBuf {
     if let Some(v) = env.var("ARK_RUNTIME_DIR") {
         return PathBuf::from(v);
     }
-    let leaf = format!("ark-{uid}");
-    match env.var("XDG_RUNTIME_DIR") {
-        Some(v) => PathBuf::from(v).join(leaf),
-        None => PathBuf::from("/tmp").join(leaf),
+    if let Some(v) = env.var("XDG_RUNTIME_DIR") {
+        return PathBuf::from(v).join(format!("ark-{uid}"));
     }
+    if let Some(v) = env.var("TMPDIR") {
+        return PathBuf::from(v).join("ark");
+    }
+    PathBuf::from("/tmp").join(format!("ark-{uid}"))
 }
 
 #[cfg(test)]
@@ -229,11 +231,46 @@ mod tests {
     }
 
     #[test]
-    fn runtime_falls_back_to_tmp_when_xdg_unset() {
-        // Simulates macOS default (XDG_RUNTIME_DIR unset).
+    fn runtime_falls_back_to_tmp_when_xdg_and_tmpdir_unset() {
+        // Bare-Linux path: no XDG, no TMPDIR.
         let env = MapEnv::with(&[("HOME", "/home/u")]);
         let layout = EnvPaths::resolve_with(&env, 1000).expect("resolve");
         assert_eq!(layout.runtime(), PathBuf::from("/tmp/ark-1000"));
+    }
+
+    #[test]
+    fn runtime_uses_tmpdir_without_uid_when_xdg_unset() {
+        // macOS default: XDG_RUNTIME_DIR unset, TMPDIR sandboxed per-user.
+        let env = MapEnv::with(&[("TMPDIR", "/var/folders/ab/cd/T/"), ("HOME", "/home/u")]);
+        let layout = EnvPaths::resolve_with(&env, 501).expect("resolve");
+        assert_eq!(
+            layout.runtime(),
+            PathBuf::from("/var/folders/ab/cd/T/").join("ark")
+        );
+    }
+
+    #[test]
+    fn xdg_wins_over_tmpdir() {
+        // If both are set (pathological on macOS, normal on Linux),
+        // XDG_RUNTIME_DIR still wins.
+        let env = MapEnv::with(&[
+            ("XDG_RUNTIME_DIR", "/run/user/1000"),
+            ("TMPDIR", "/var/folders/ab/cd/T/"),
+            ("HOME", "/home/u"),
+        ]);
+        let layout = EnvPaths::resolve_with(&env, 1000).expect("resolve");
+        assert_eq!(layout.runtime(), PathBuf::from("/run/user/1000/ark-1000"));
+    }
+
+    #[test]
+    fn ark_runtime_dir_wins_over_tmpdir() {
+        let env = MapEnv::with(&[
+            ("ARK_RUNTIME_DIR", "/explicit/rt"),
+            ("TMPDIR", "/var/folders/ab/cd/T/"),
+            ("HOME", "/home/u"),
+        ]);
+        let layout = EnvPaths::resolve_with(&env, 501).expect("resolve");
+        assert_eq!(layout.runtime(), PathBuf::from("/explicit/rt"));
     }
 
     #[test]
@@ -266,6 +303,13 @@ mod tests {
 
         let env = MapEnv::with(&[("ARK_RUNTIME_DIR", "/verbatim")]);
         assert_eq!(resolve_runtime(&env, 42), PathBuf::from("/verbatim"));
+
+        // TMPDIR branch (macOS).
+        let env = MapEnv::with(&[("TMPDIR", "/var/folders/a/b/T/")]);
+        assert_eq!(
+            resolve_runtime(&env, 501),
+            PathBuf::from("/var/folders/a/b/T/").join("ark")
+        );
     }
 
     #[test]

@@ -68,6 +68,8 @@ _binstall_shim = []
 ark-types = { path = "../types" }
 ark-pane = { path = "../pane" }
 ark-config = { path = "../config" }
+ark-core = { path = "../core" }
+ark-supervisor = { path = "../supervisor" }
 ark-orchestrators-cavekit = { path = "../orchestrators/cavekit" }
 ark-orchestrators-claude-code = { path = "../orchestrators/claude-code" }
 ark-mux-zellij = { path = "../mux/zellij" }
@@ -84,6 +86,7 @@ tracing-subscriber = { workspace = true }
 nix = { workspace = true }
 shlex = { workspace = true }
 ulid = { workspace = true }
+portable-pty = "0.8"
 
 [dev-dependencies]
 tempfile = { workspace = true }

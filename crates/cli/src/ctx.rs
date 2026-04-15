@@ -17,8 +17,14 @@
 //! State/config/runtime dirs are resolved through
 //! [`ark_types::StateLayout::from_env`] — the single source of truth for
 //! ark path resolution. We hold the three resolved `PathBuf`s directly.
+//!
+//! Option E (2026-04-15): on `Ctx::from_env` we best-effort create the
+//! runtime_dir and `runtime_dir/agents` up-front so the first CLI call on
+//! a fresh machine doesn't make the user run `ark doctor --fix` just to
+//! materialize an empty socket directory. Creation failures are swallowed
+//! — doctor remains the reporting surface for unwritable paths.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ark_types::StateLayout;
 
@@ -102,16 +108,29 @@ impl Ctx {
     ///
     /// Path resolution goes through [`StateLayout::from_env`]; if that
     /// fails (e.g. `HOME` unset) we surface the error to the caller.
+    /// See option E in the module docs for the runtime-dir auto-create.
     pub fn from_env() -> Result<Self, ark_types::StateLayoutError> {
         let layout = StateLayout::from_env()?;
-        Ok(Self {
+        let ctx = Self {
             no_color: detect_no_color(),
             log_level: detect_log_level(),
             state_dir: layout.base().to_path_buf(),
             config_dir: layout.config().to_path_buf(),
             runtime_dir: layout.runtime().to_path_buf(),
-        })
+        };
+        ensure_runtime_dirs(&ctx.runtime_dir);
+        Ok(ctx)
     }
+}
+
+/// Best-effort: create `runtime_dir` and `runtime_dir/agents` so doctor
+/// doesn't flag them missing on first run. Swallows errors — doctor will
+/// surface anything actually broken (e.g. unwritable parent).
+fn ensure_runtime_dirs(runtime_dir: &Path) {
+    if runtime_dir.as_os_str().is_empty() {
+        return;
+    }
+    let _ = std::fs::create_dir_all(runtime_dir.join("agents"));
 }
 
 #[cfg(test)]
@@ -300,6 +319,42 @@ mod tests {
         };
         let ctx = Ctx::from_env().expect("from_env");
         assert_eq!(ctx.runtime_dir, PathBuf::from("/explicit/rt-t093"));
+    }
+
+    #[test]
+    fn ctx_from_env_auto_creates_runtime_dirs() {
+        // Option E: fresh ARK_RUNTIME_DIR shouldn't force the user
+        // through `doctor --fix`. from_env should materialize it and
+        // its agents/ subdir transparently.
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let rt_target = tmp.path().join("ark-runtime");
+        let _rt = EnvGuard::set("ARK_RUNTIME_DIR", rt_target.to_str().unwrap());
+        let _home = match std::env::var("HOME") {
+            Ok(_) => EnvGuard::set("HOME", &std::env::var("HOME").unwrap()),
+            Err(_) => EnvGuard::set("HOME", "/tmp"),
+        };
+        assert!(!rt_target.exists(), "precondition: runtime_dir absent");
+        let ctx = Ctx::from_env().expect("from_env");
+        assert_eq!(ctx.runtime_dir, rt_target);
+        assert!(rt_target.exists(), "runtime_dir should be auto-created");
+        assert!(
+            rt_target.join("agents").exists(),
+            "agents/ should be auto-created"
+        );
+    }
+
+    #[test]
+    fn ensure_runtime_dirs_swallows_errors_for_unwritable_paths() {
+        // Best-effort contract: an unwritable target must not panic.
+        // `/nonexistent-root-path` can't be created by a non-root user.
+        ensure_runtime_dirs(Path::new("/nonexistent-root-path/ark"));
+        // No assertion — the point is no panic + no propagated error.
+    }
+
+    #[test]
+    fn ensure_runtime_dirs_noop_on_empty_path() {
+        ensure_runtime_dirs(Path::new(""));
     }
 
     #[test]

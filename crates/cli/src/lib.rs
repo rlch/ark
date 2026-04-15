@@ -27,6 +27,7 @@ pub mod embedded;
 pub mod error;
 pub mod exit;
 pub mod id_resolver;
+pub mod supervisor_handoff;
 
 pub use cli::Cli;
 pub use commands::Commands;

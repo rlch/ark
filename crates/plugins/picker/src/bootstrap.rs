@@ -88,16 +88,19 @@ fn current_uid_fallback() -> Option<String> {
 ///   3. `$HOME/.local/state/ark` — platform fallback.
 ///   4. Empty `PathBuf` — caller skips the state scan.
 ///
-/// Runtime side:
+/// Runtime side (option D2, mirrors `ark_types::env_paths::resolve_runtime`):
 ///   1. `$ARK_RUNTIME_DIR/agents` — verbatim (no `ark-$UID` segment);
 ///      matches `EnvPaths::resolve_runtime` semantics.
-///   2. `$XDG_RUNTIME_DIR/ark-$UID/agents` — XDG fallback, UID sourced
+///   2. `$XDG_RUNTIME_DIR/ark-$UID/agents` — Linux systemd idiom.
+///   3. `$TMPDIR/ark/agents` — macOS idiom. `$TMPDIR` is already a
+///      per-user sandboxed path, so no `ark-$UID` disambiguator is
+///      needed and the path stays pretty. UID missing is fine here.
+///   4. `/tmp/ark-$UID/agents` — bare-Linux last resort, UID sourced
 ///      from env closure or `uid_fallback` (F-609).
-///   3. `/tmp/ark-$UID/agents` — platform fallback, UID sourced likewise.
-///   4. When neither `$ARK_RUNTIME_DIR` is set nor the uid is recoverable
-///      (env closure + `uid_fallback` both return `None`), we cannot
-///      construct a safe per-user-isolated path
-///      (`/tmp/ark/agents` would be shared across users on a multi-tenant
+///   5. When none of 1-3 apply and the uid is unrecoverable (env
+///      closure + `uid_fallback` both return `None`), we cannot
+///      construct a safe per-user path on `/tmp`
+///      (`/tmp/ark/agents` would collide across users on a multi-tenant
 ///      host). The runtime side then returns `PathBuf::new()` and the
 ///      caller skips the socket scan — pipe-only liveness still works.
 pub fn resolve_xdg_paths_with_uid(
@@ -121,26 +124,40 @@ pub fn resolve_xdg_paths_with_uid(
         return (state_dir, PathBuf::from(ark_rt).join("agents"));
     }
 
-    // For the XDG / /tmp branches we need a UID to disambiguate between
-    // users on a shared host. Prefer `env("UID")` (shell convention) but
-    // fall back to the uid_fallback closure — F-609: zellij plugin
-    // harnesses routinely don't export UID, and without a fallback every
-    // live agent was being classified as crashed.
+    // For $XDG_RUNTIME_DIR and `/tmp` branches we need a UID to
+    // disambiguate between users on a shared host. Prefer `env("UID")`
+    // (shell convention) but fall back to the uid_fallback closure —
+    // F-609: zellij plugin harnesses routinely don't export UID, and
+    // without a fallback every live agent was being classified as crashed.
     let uid = env("UID")
         .filter(|s| !s.is_empty())
         .or_else(uid_fallback)
         .filter(|s| !s.is_empty());
+
+    // 2. $XDG_RUNTIME_DIR/ark-$UID/agents.
+    if let Some(xdg) = env("XDG_RUNTIME_DIR").filter(|s| !s.is_empty()) {
+        let Some(uid) = uid else {
+            return (state_dir, PathBuf::new());
+        };
+        return (
+            state_dir,
+            PathBuf::from(xdg).join(format!("ark-{uid}")).join("agents"),
+        );
+    }
+
+    // 3. $TMPDIR/ark/agents — macOS idiom. $TMPDIR is already per-user,
+    // no uid needed; works even when UID isn't recoverable.
+    if let Some(tmpdir) = env("TMPDIR").filter(|s| !s.is_empty()) {
+        return (state_dir, PathBuf::from(tmpdir).join("ark").join("agents"));
+    }
+
+    // 4. /tmp/ark-$UID/agents — bare-Linux last resort.
     let Some(uid) = uid else {
         return (state_dir, PathBuf::new());
     };
-    let uid_suffix = format!("ark-{uid}");
-
-    // 2. $XDG_RUNTIME_DIR/ark-$UID/agents, else 3. /tmp/ark-$UID/agents.
-    let runtime_root = env("XDG_RUNTIME_DIR")
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
-    let runtime_dir = runtime_root.join(uid_suffix).join("agents");
+    let runtime_dir = PathBuf::from("/tmp")
+        .join(format!("ark-{uid}"))
+        .join("agents");
 
     (state_dir, runtime_dir)
 }
@@ -1264,6 +1281,56 @@ mod tests {
             rt_str.starts_with("/tmp/ark-") && rt_str.ends_with("/agents"),
             "unexpected runtime path shape: {rt_str}"
         );
+    }
+
+    // ---- option D2: TMPDIR branch (macOS idiomatic fallback) ---------------
+
+    #[test]
+    fn resolve_xdg_paths_uses_tmpdir_without_uid_when_xdg_unset() {
+        // macOS idiom: $TMPDIR is already per-user sandboxed
+        // (/var/folders/…/T/), so no ark-$UID segment needed. Works even
+        // when UID isn't recoverable.
+        let env = |k: &str| match k {
+            "TMPDIR" => Some("/var/folders/a/b/T/".to_string()),
+            _ => None,
+        };
+        let (_state, rt) = resolve_xdg_paths_with_uid(env, || None);
+        assert_eq!(rt, PathBuf::from("/var/folders/a/b/T/ark/agents"));
+    }
+
+    #[test]
+    fn resolve_xdg_paths_xdg_wins_over_tmpdir() {
+        let env = |k: &str| match k {
+            "XDG_RUNTIME_DIR" => Some("/run".to_string()),
+            "TMPDIR" => Some("/var/folders/a/b/T/".to_string()),
+            "UID" => Some("1000".into()),
+            _ => None,
+        };
+        let (_state, rt) = resolve_xdg_paths(env);
+        assert_eq!(rt, PathBuf::from("/run/ark-1000/agents"));
+    }
+
+    #[test]
+    fn resolve_xdg_paths_ark_runtime_dir_wins_over_tmpdir() {
+        let env = |k: &str| match k {
+            "ARK_RUNTIME_DIR" => Some("/explicit/rt".to_string()),
+            "TMPDIR" => Some("/var/folders/a/b/T/".to_string()),
+            _ => None,
+        };
+        let (_state, rt) = resolve_xdg_paths(env);
+        assert_eq!(rt, PathBuf::from("/explicit/rt/agents"));
+    }
+
+    #[test]
+    fn resolve_xdg_paths_empty_tmpdir_falls_through() {
+        let env = |k: &str| match k {
+            "TMPDIR" => Some(String::new()),
+            "UID" => Some("501".into()),
+            _ => None,
+        };
+        let (_state, rt) = resolve_xdg_paths(env);
+        // Empty TMPDIR skipped → /tmp/ark-501/agents bare-Linux fallback.
+        assert_eq!(rt, PathBuf::from("/tmp/ark-501/agents"));
     }
 
     #[test]

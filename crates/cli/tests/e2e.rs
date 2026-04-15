@@ -380,3 +380,151 @@ fn scenario_doctor_fix_removes_stale_socket() {
         sock_path.display()
     );
 }
+
+// ---- W-8: spawn → live supervisor artifacts -------------------------------
+
+/// W-8 (cavekit-supervisor R1, R3 step 12). With the in-process daemon
+/// model wired (W-3) and the pipe-inheritance ready handshake (W-2),
+/// `ark spawn` returns ONLY after the supervisor has written its
+/// PID file, bound the control socket, and emitted `Started` (which
+/// the state_writer consumer rolls up into `status.json`).
+///
+/// This scenario asserts each of those artifacts exists by the time
+/// `ark spawn` returns. Then it sends SIGTERM to the supervisor's PID
+/// (avoiding `ark kill` so this test stays decoupled from the kill
+/// command's own surface) and asserts the artifacts are cleaned up
+/// within ~10 s.
+///
+/// Prerequisites:
+/// - `zellij` on PATH (preflighted by `ark spawn`).
+/// - `mock-claude` from `ark-test-fixtures` available; we prepend its
+///   directory to PATH so the engine preflight (`claude` on PATH)
+///   succeeds without needing a real Claude install.
+#[test]
+fn scenario_spawn_supervisor_lives_then_dies() {
+    if !e2e_support::require_e2e() {
+        return;
+    }
+    if !zellij_on_path() {
+        eprintln!("SKIP: zellij not on PATH (required by ark spawn preflight)");
+        return;
+    }
+    let Some(mock_claude) = e2e_support::mock_claude_bin() else {
+        eprintln!(
+            "SKIP: mock-claude binary not built next to ark; cargo build -p ark-test-fixtures"
+        );
+        return;
+    };
+
+    let env = e2e_support::E2eEnv::new();
+
+    // Prepend mock-claude's parent dir to PATH so `claude` resolves
+    // to it (engine preflight requires `claude` somewhere on PATH).
+    let mock_dir = mock_claude.parent().unwrap().to_path_buf();
+    let prior_path = std::env::var("PATH").unwrap_or_default();
+    let new_path = format!("{}:{}", mock_dir.display(), prior_path);
+
+    let cwd = env.state_dir().to_path_buf();
+    let out = capture(
+        env.ark()
+            .env("PATH", &new_path)
+            .arg("spawn")
+            .arg("--orchestrator")
+            .arg("claude-code")
+            .arg("--cwd")
+            .arg(&cwd)
+            .arg("--name")
+            .arg("w8")
+            // default --detach: forks supervisor + waits for ready
+            .arg("--")
+            .arg("/bin/sleep")
+            .arg("60"),
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        out.status.success(),
+        "ark spawn must succeed; stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        stdout.starts_with("spawned "),
+        "expected `spawned <id>` line, got stdout={stdout:?}"
+    );
+
+    // Resolve the agent id from the spawn stdout: `spawned <id> -> ...`
+    let id_str = stdout
+        .split_whitespace()
+        .nth(1)
+        .expect("spawn stdout must include id token");
+
+    let agent_dir = env.state_dir().join("agents").join(id_str);
+    let spec_path = agent_dir.join("spec.json");
+    let status_path = agent_dir.join("status.json");
+    let pid_path = agent_dir.join("pid");
+    let socket_path = env
+        .runtime_dir()
+        .join("agents")
+        .join(format!("{id_str}.sock"));
+
+    assert!(
+        spec_path.is_file(),
+        "spec.json must exist at {}",
+        spec_path.display()
+    );
+    assert!(
+        pid_path.is_file(),
+        "pid file must exist at {}",
+        pid_path.display()
+    );
+    assert!(
+        socket_path.exists(),
+        "control socket must exist at {} (stderr={stderr:?})",
+        socket_path.display()
+    );
+
+    // status.json may take a beat to land — the Started event needs to
+    // round-trip through the state_writer consumer. Allow ~3 s.
+    let status_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while !status_path.is_file() && std::time::Instant::now() < status_deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(
+        status_path.is_file(),
+        "status.json must appear within 3 s at {}",
+        status_path.display()
+    );
+
+    // Read the supervisor pid + assert it's alive (kill(pid, 0)).
+    let pid_str = std::fs::read_to_string(&pid_path).expect("read pid file");
+    let pid: i32 = pid_str.trim().parse().expect("parse pid");
+    e2e_support::track_pid(&env, pid as u32);
+    assert!(
+        nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok(),
+        "supervisor pid {pid} must be alive immediately after spawn returns",
+    );
+
+    // Send SIGTERM directly. Supervisor's signal handler unwinds the
+    // R3 sequence: cancel orchestrator, drain consumers, finalize
+    // status.json, unlink socket, release lock, exit. We give it 10 s
+    // — should normally complete in well under 1 s.
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(pid),
+        nix::sys::signal::Signal::SIGTERM,
+    )
+    .expect("send SIGTERM");
+
+    let cleanup_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let socket_gone = !socket_path.exists();
+        let pid_dead = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_err();
+        if socket_gone && pid_dead {
+            break;
+        }
+        if std::time::Instant::now() >= cleanup_deadline {
+            panic!(
+                "supervisor cleanup timed out after 10 s: socket_gone={socket_gone} pid_dead={pid_dead}",
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}

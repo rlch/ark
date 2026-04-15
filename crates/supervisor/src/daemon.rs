@@ -161,7 +161,16 @@ pub fn setup_supervisor_log(log_path: &Path) -> Result<(), DaemonizeError> {
         .with_level(true)
         .finish();
 
-    tracing::subscriber::set_global_default(subscriber).map_err(|_| DaemonizeError::TracingInit)?;
+    // Ignore "global subscriber already installed" — the grandchild
+    // inherits the parent CLI's subscriber via `fork(2)`, which CANNOT
+    // be replaced. The existing subscriber writes to fd 2, and we just
+    // dup2'd fd 2 to the log file in `redirect_stdio` above, so all
+    // emitted spans end up in the same `supervisor.log` we'd have
+    // opened ourselves. Surfacing this as a fatal `TracingInit` error
+    // bricks the entire daemonize chain (spawn.rs's failure path then
+    // cleans up the agent dir, which masquerades as "supervisor failed
+    // to ready"). See the W-3 / W-8 debug session and F-740.
+    let _ = tracing::subscriber::set_global_default(subscriber);
 
     Ok(())
 }

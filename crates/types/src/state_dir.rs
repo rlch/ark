@@ -11,9 +11,10 @@ use crate::id::AgentId;
 /// macOS-correct fallbacks. See cavekit-types-state-events.md R5 and
 /// cavekit-hook-ipc.md R4 for the runtime-dir macOS note.
 ///
-/// Runtime paths always sit under an `ark-{uid}` segment, either as
-/// `$XDG_RUNTIME_DIR/ark-{uid}/` on Linux where `XDG_RUNTIME_DIR` is set, or
-/// as `/tmp/ark-{uid}/` on macOS / any host without `XDG_RUNTIME_DIR`.
+/// Runtime path precedence (option D2): `$ARK_RUNTIME_DIR` (verbatim) →
+/// `$XDG_RUNTIME_DIR/ark-{uid}` (Linux systemd) → `$TMPDIR/ark` (macOS,
+/// no uid since `$TMPDIR` is already per-user) → `/tmp/ark-{uid}`
+/// (bare-Linux last resort). See `env_paths.rs` for the full rationale.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StateLayout {
     base: PathBuf,

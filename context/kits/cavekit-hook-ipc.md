@@ -8,7 +8,7 @@ last_edited: "2026-04-14T00:00:00Z"
 ## Scope
 Two inter-process surfaces:
 1. **`ark-hook` sidecar binary** — invoked by Claude Code when a hook event fires, reads JSON from stdin, writes structured AgentEvent-shaped record to the agent's state dir and pipes to the status plugin.
-2. **Per-supervisor control sockets** — each supervisor binds a unix socket at `${XDG_RUNTIME_DIR:-/tmp}/ark-$UID/agents/{agent-id}.sock`. Picker enumerates the directory and connects to per-agent sockets. No central daemon. Modeled on kakoune's session-per-socket pattern (`kak -s`/`kak -l`/`kak -p`). New-agent spawn does NOT use the socket — picker `exec`s `ark spawn` as a subprocess (wezterm "connect-or-spawn" pattern coarsened).
+2. **Per-supervisor control sockets** — each supervisor binds a unix socket at `<runtime_root>/agents/{agent-id}.sock` where `runtime_root` resolves per R4 (ARK_RUNTIME_DIR → XDG_RUNTIME_DIR/ark-$UID → $TMPDIR/ark → /tmp/ark-$UID). Picker enumerates the directory and connects to per-agent sockets. No central daemon. Modeled on kakoune's session-per-socket pattern (`kak -s`/`kak -l`/`kak -p`). New-agent spawn does NOT use the socket — picker `exec`s `ark spawn` as a subprocess (wezterm "connect-or-spawn" pattern coarsened).
 
 ## Requirements — ark-hook sidecar
 
@@ -55,10 +55,11 @@ Two inter-process surfaces:
 ### R4: Per-supervisor control socket (kakoune model)
 **Description:** Each supervisor binds its own unix socket. Picker enumerates the agents directory and connects to per-agent sockets. No central daemon, no shared listener, no bind-race. Precedent: kakoune (one socket per `kak -s` session, `kak -l` enumerates by `read_dir`, dead sessions GC'd by reachability check).
 **Acceptance Criteria:**
-- [ ] Path scheme: `${XDG_RUNTIME_DIR:-/tmp}/ark-$UID/agents/{agent-id}.sock` (flat directory, one socket per supervisor)
+- [ ] Path scheme (option D2, revised 2026-04-15): runtime root resolves in this order — `$ARK_RUNTIME_DIR` (verbatim) → `$XDG_RUNTIME_DIR/ark-$UID` (Linux systemd) → `$TMPDIR/ark` (macOS idiom; `$TMPDIR` is already per-user so no uid disambiguator) → `/tmp/ark-$UID` (bare-Linux last resort). Sockets live at `<runtime_root>/agents/{agent-id}.sock` (flat directory, one socket per supervisor).
 - [ ] Parent dir mode 0700; socket file mode 0700
-- [ ] **macOS:** `XDG_RUNTIME_DIR` is unset by default. The shell-style `:-/tmp` fallback handles this — resolved path becomes `/tmp/ark-$UID/agents/{id}.sock`. `dirs::runtime_dir()` returns `None` on macOS; ark MUST handle the fallback explicitly. Precedent: kakoune uses `/tmp/kakoune-$USER`, tmux uses `$TMPDIR/tmux-$UID`.
-- [ ] **Path length cap:** macOS unix sockets cap at ~104 bytes (Linux 108). Typical resolved path is ~60 chars (`/tmp/ark-501/agents/cavekit-myfeat-01JX....sock`) — well under. If agent-id schema ever grows, validate at bind time.
+- [ ] **Runtime-dir auto-create (option E):** CLI entry points (`Ctx::from_env`) best-effort create `<runtime_root>` and `<runtime_root>/agents` so `ark doctor --fix` is not required on a fresh install. Creation failures are swallowed; doctor remains the reporting surface for unwritable paths.
+- [ ] **macOS:** `XDG_RUNTIME_DIR` is unset by default, but `$TMPDIR` is set to a sandboxed per-user path (`/var/folders/.../T/`). That path is pretty, already exists, and is the macOS equivalent of `XDG_RUNTIME_DIR` — hence no `ark-$UID` suffix in the TMPDIR branch. Precedent: tmux uses `$TMPDIR/tmux-$UID`; ark simplifies to `$TMPDIR/ark`. `dirs::runtime_dir()` returns `None` on macOS; ark MUST handle the TMPDIR fallback explicitly.
+- [ ] **Path length cap:** macOS unix sockets cap at ~104 bytes (Linux 108). Typical macOS path `/var/folders/ab/cd/T/ark/agents/cavekit-myfeat-01JX....sock` is ~80 chars. `/tmp/ark-501/agents/…` is ~60 chars. Both well under. If agent-id schema ever grows, validate at bind time.
 - [ ] Supervisor binds the socket immediately after `setsid` and StateDir creation, before signaling readiness to the parent CLI (see cavekit-supervisor.md R3 + R7). Listener lifetime = supervisor lifetime; no daemon process exists.
 - [ ] Cleanup (graceful): supervisor unlinks its socket via `Drop` guard + `signal_hook` SIGTERM/SIGINT handler. On SIGKILL or hard crash the socket file remains stale until GC.
 - [ ] **Stale socket GC:** any client (picker, CLI) that finds a `.sock` for which `connect()` returns `ECONNREFUSED` or `ENOENT`-during-handshake (50ms timeout) MUST `unlink()` it. This is the kakoune `kak -l` pattern.

@@ -45,7 +45,7 @@ The `ark` binary's command-line interface — 6 user-facing top-level subcommand
 - [ ] On failure: prints reason + exits nonzero (see R6 exit codes)
 - [ ] Spawn acquires file lock `$STATE/locks/{id}.lock` — aborts if another process holds it
 - [ ] Spawn writes `spec.json` before forking supervisor
-- [ ] If `$ZELLIJ` set: supervisor uses `zellij action switch-session --name {session} --create` (in-zellij mode); else `zellij -s {session} --layout {path}` backgrounded via setsid
+- [ ] If `$ZELLIJ` set: supervisor dispatches `zellij action switch-session [--layout {path}] {session}` over the caller's live socket (create-if-missing is the default; there is no `--create` flag on `switch-session`). Else: allocate a pty pair and spawn `zellij -s {session} --layout {path}` with the slave as the child's controlling TTY (setsid via pre_exec). The `setsid + null stdio` shortcut is FORBIDDEN — zellij's client cannot boot without a real TTY (F-730; see cavekit-mux-zellij R1).
 **Dependencies:** cavekit-supervisor, cavekit-mux-zellij, cavekit-orchestrator-cavekit, cavekit-orchestrator-claude-code
 
 ### R3: `ark list`
