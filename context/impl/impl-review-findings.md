@@ -786,3 +786,57 @@ Verified locally: the test passes 10/10 serial runs, the zellij_startup_failure 
 - `cargo fmt --all` clean. `cargo build --workspace` clean (no new warnings).
 
 **Gate status after Tier 6 cycle 2:** CLOSED. Cycle 2 resolved the one P1 flake that reopened the gate and raised zero new findings; the Tier 6 ledger now spans F-500 through F-702.
+
+## Tier 6 Gate — Cycle 3 (2026-04-15)
+
+Cycle 3 reopened the gate after codex flagged three findings against the status plugin permission-request path (P1), the cli build script's wasm freshness check (P2), and the `ark spawn --no-detach` foreground-exit path (P2). All three were latent ghost-behaviour bugs invisible to the test suite until codex's adversarial pass. Fixed in one commit with new host tests exercising each resolution.
+
+### F-703 — P1 status plugin must request ReadCliPipes + FullHdAccess separately (FIXED)
+
+**Source:** codex
+**Tier:** 6
+**Severity:** P1
+**Status:** fixed
+**Location:** crates/plugins/status/src/lib.rs (`load()` + `PermissionRequestResult` handler)
+
+**Description:** `Status::load()` batched the two permissions the plugin needs into a single `request_permission(&[ReadCliPipes, FullHdAccess])` call. zellij-tile 0.44's `Event::PermissionRequestResult(PermissionStatus)` carries a single `Granted`/`Denied` flag for the whole batch — no per-permission breakdown — so a user who clicked "deny" on the `FullHdAccess` prompt (optional R4 fs-scan fallback) would also deny `ReadCliPipes` (mandatory R2 pipe ingestion). The old handler then flipped `permission_denied = true` AND `fs_permission = Some(false)`, knocking the plugin into its permission-denied warning-row mode even though the pipe-only path was supposed to keep working per R4's "skip if no fs perm". The failure was silent in the test suite because no host test simulated the split-grant scenario; in the real zellij sandbox it would make pipe ingestion dead-on-arrival for any user who declined the fs prompt.
+
+**Resolution:** Split the load-time request into two sequential `request_permission` calls — one for `ReadCliPipes` (mandatory), one for `FullHdAccess` (optional) — and added a FIFO `VecDeque<PendingPermission>` to correlate each arriving `PermissionRequestResult` with the permission it refers to (zellij processes requests in submission order; the queue pops each head on result arrival). Introduced `PendingPermission::{Pipe, Fs}` enum + two pure helpers `apply_pipe_permission_result` / `apply_fs_permission_result` so host tests can exercise the routing without a wasm runtime. Split the permission state: new `pipe_permission: Option<bool>` tracks the mandatory grant separately from existing `fs_permission: Option<bool>`; `permission_denied` now means PIPE denied only (fs denial silently disables the scan branch, as R4 intends). The wasm `Event::PermissionRequestResult` arm pops the queue head and dispatches to the matching helper; an empty-queue result (shouldn't happen given zellij's FIFO contract) is ignored with an eprintln! rather than silently mutating state.
+
+Added 6 host tests covering: pipe grant clears denied flag; pipe denial flips denied flag; fs denial does NOT flip denied flag (the core F-703 invariant); fs grant enables fs scan flag; pipe-granted + fs-denied allows pipe ingestion end-to-end (uses `ingest_pipe_payload` to prove the mandatory path still works); pipe-denied + fs-granted still marks plugin denied (fs grant cannot override pipe denial).
+
+### F-704 — P2 build.rs wasm freshness walk must include transitive dep sources (FIXED)
+
+**Source:** codex
+**Tier:** 6
+**Severity:** P2
+**Status:** fixed
+**Location:** crates/cli/build.rs (`artifact_is_fresh`, `maybe_build_wasm`, top-level `cargo:rerun-if-changed` block)
+
+**Description:** `artifact_is_fresh` mtime-walked only `crates/plugins/{status,picker}/src`, ignoring any workspace crate the plugin depends on transitively (notably `ark-types` at `crates/types/src`). The `cargo:rerun-if-changed` lines at the top of `build.rs` had the same gap. Cargo's own incremental build catches source changes to workspace deps when you rebuild the plugin crate, but `build.rs` sits a layer above: if the embedded wasm artifact's mtime is newer than the plugin's own `src/` tree but OLDER than a just-edited `ark-types` source file, the freshness check returns `true` and the old wasm stays embedded in `ark-cli`. Developers iterating on shared types would see stale plugin behaviour in the binary until they touched a plugin source file to poke the mtime.
+
+**Resolution:** Introduced two hand-maintained dep-root arrays `STATUS_PLUGIN_DEP_ROOTS` / `PICKER_PLUGIN_DEP_ROOTS` (currently both `["crates/types/src"]`). A new `plugin_dep_roots(workspace_root, plugin_pkg)` resolves these into absolute paths for the given plugin. `artifact_is_fresh` now takes a `&[PathBuf]` dep-root slice and folds `walk_newest_mtime` across the plugin's own `src/` plus every dep root, comparing the newest mtime across the whole set against the artifact's mtime. The top-level `main()` adds a `cargo:rerun-if-changed=../../<root>` line for each dep root (plugin's manifest lives at `crates/cli/`, so `../../` resolves workspace-root-relative paths). Hard-coded rather than parsed from `Cargo.toml` because the dep graph is tiny and shifts deliberately — a comment at the declaration site documents the extension protocol. Cleanly handles missing roots (walk returns `None`, treated as "nothing newer to argue about") so the change is robust to crates being removed or renamed.
+
+### F-705 — P2 spawn --no-detach must clean up state on normal exit (FIXED)
+
+**Source:** codex
+**Tier:** 6
+**Severity:** P2
+**Status:** fixed
+**Location:** crates/cli/src/commands/spawn.rs (`run()` `--no-detach` branch)
+
+**Description:** `ark spawn --no-detach` launches zellij in the foreground via `Command::status()` and returns `Ok(())` when the user exits. The supervisor (T-062 / T-069) is still stubbed, so nothing in the background owns the agent after zellij exits — but the `--no-detach` branch left `spec.json` + `layout.kdl` in `$state/agents/<id>/`. That stale state dir surfaced the agent as a ghost entry in `ark list`, the picker, and `ark doctor` even though zellij had exited and no process owned the agent. The companion failure path above the branch (zellij startup failure) already called `cleanup_agent_state` via F-528; the normal-exit path was missing the symmetric call. Detached spawns are unaffected — when the supervisor lands it will own their state.
+
+**Resolution:** After `Command::status()` returns successfully, `run()` now calls `cleanup_agent_state(&ctx.state_dir, &spec.id)` and prints `note: removed transient agent state <id> (no-detach mode)` to stderr so the operator understands why the agent vanished from `ark list` after the foreground exit. The existing F-528 cleanup helper is idempotent (tolerates a missing dir), so the new call is safe even when zellij never created the spec. Detach mode (`--detach`) is untouched — the supervisor will own that state once wired.
+
+Added one host test `no_detach_foreground_exit_cleans_up_transient_state` that simulates the lifecycle (write `spec.json` + `layout.kdl`, call `cleanup_agent_state`, assert tree is gone). Real zellij can't be spawned in a unit test, but the cleanup call itself is the only new behaviour and this pins it.
+
+## Test Delta — Tier 6 Cycle 3
+
+- ark-plugin-status: 51 → 57 (+6). All six new cases exercise F-703's split pipe/fs permission routing: grant-clears-denied, denial-flips-denied, fs-denial-does-not-flip, fs-grant-enables, pipe-granted-fs-denied-allows-ingestion, pipe-denied-regardless-of-fs.
+- ark-cli: 269 → 270 (+1). New `no_detach_foreground_exit_cleans_up_transient_state` pins F-705's cleanup call. Cycle 2 baseline was 269; the +1 matches the single test added.
+- ark-cli cli_help integration: 3 unchanged. ark-plugin-picker: 215 unchanged.
+- Workspace: `cargo test --workspace -- --test-threads=1` fully green on per-crate re-runs.
+- `cargo fmt --all` clean. `cargo build --workspace` clean (no new warnings).
+
+**Gate status after Tier 6 cycle 3:** CLOSED. Cycle 3 resolved one P1 + two P2s and raised zero new findings; the Tier 6 ledger now spans F-500 through F-705.

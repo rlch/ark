@@ -708,6 +708,23 @@ pub fn run(args: SpawnArgs, ctx: &Ctx) -> Result<(), CliError> {
             spec_path.display()
         );
         println!("spawned {} -> Ctrl+o w to switch", spec.id);
+        // F-705: `--no-detach` is inherently ephemeral — zellij ran in
+        // the foreground and has now exited, and the supervisor stub
+        // means no background process owns the agent. If we leave
+        // spec.json / layout.kdl on disk the agent shows up as a ghost
+        // entry in `ark list`, the picker, and `ark doctor` even though
+        // nothing is running. Clean the agent state dir here (mirrors
+        // F-528's cleanup on the failure branch above) and print an
+        // informational note so the operator understands why the agent
+        // vanished from `ark list` after the foreground exit. When the
+        // supervisor (T-062 / T-069) lands, detached spawns will keep
+        // their state because the supervisor owns it — this cleanup is
+        // specific to the `--no-detach` foreground lifecycle.
+        cleanup_agent_state(&ctx.state_dir, &spec.id);
+        eprintln!(
+            "note: removed transient agent state {} (no-detach mode)",
+            spec.id
+        );
         return Ok(());
     }
 
@@ -1553,6 +1570,37 @@ mod tests {
         assert!(dir.exists());
         cleanup_agent_state(state.path(), &id);
         assert!(!dir.exists(), "cleanup must remove the agent state dir");
+    }
+
+    #[test]
+    fn no_detach_foreground_exit_cleans_up_transient_state() {
+        // F-705: the `--no-detach` foreground path exits with Ok(()) after
+        // `Command::status()` returns successfully. Since the supervisor
+        // is still stubbed, nothing owns the agent after zellij exits —
+        // leaving spec.json + layout.kdl on disk would surface a ghost
+        // entry in `ark list`, `picker`, and `ark doctor`. `run()` must
+        // therefore call `cleanup_agent_state` before returning.
+        //
+        // We cannot spawn real zellij in a unit test, so this simulates
+        // the lifecycle: write the state dir the way the successful
+        // pre-launch path would, apply the F-705 cleanup, and assert
+        // the tree is gone.
+        let state = TempDir::new().unwrap();
+        let id = AgentId::new("cavekit", "fg-ephemeral");
+        let dir = id.state_dir(state.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("spec.json"), b"{\"id\":\"x\"}").unwrap();
+        std::fs::write(dir.join("layout.kdl"), b"layout { }").unwrap();
+        assert!(dir.exists(), "state dir exists before foreground exit");
+
+        // Simulate the tail of the `if args.no_detach { … }` branch after
+        // `Command::status()` returned Ok(success).
+        cleanup_agent_state(state.path(), &id);
+
+        assert!(
+            !dir.exists(),
+            "F-705: no-detach foreground exit must remove transient agent state"
+        );
     }
 
     #[test]

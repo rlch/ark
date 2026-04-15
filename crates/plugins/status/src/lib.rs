@@ -137,8 +137,17 @@ pub struct Status {
     /// Epoch-ms of the last eviction pass (diagnostic — not yet surfaced).
     #[allow(dead_code)]
     pub(crate) last_eviction_at: u64,
-    /// Set when `PermissionRequestResult` reports a denial so R3 render can
-    /// show a warning chip instead of silently failing.
+    /// Mandatory pipe-ingestion permission state (`PermissionType::ReadCliPipes`).
+    ///
+    /// Set to `Some(false)` when `PermissionRequestResult` reports a denial
+    /// for the pipe request so R3 render can show a warning chip instead of
+    /// silently failing. `true` iff the pipe permission was denied (render
+    /// keys the "ReadCliPipes denied" warning row on this).
+    ///
+    /// F-703: this flag is dedicated to the PIPE permission only. The R4
+    /// `FullHdAccess` request is tracked separately on [`Self::fs_permission`]
+    /// so an optional-fs denial cannot knock the plugin into permission-
+    /// denied mode and silence pipe ingestion.
     #[allow(dead_code)]
     pub(crate) permission_denied: bool,
     /// Name of the session currently focused by the client, learned from the
@@ -148,17 +157,25 @@ pub struct Status {
     /// arrives; render handles that by not pinning anything.
     #[allow(dead_code)]
     pub(crate) focused_session: Option<String>,
+    /// Tri-state flag tracking whether `PermissionType::ReadCliPipes` was
+    /// granted (R2 pipe ingestion — mandatory).
+    ///
+    /// - `None` — request pending (permission-result event not yet seen).
+    /// - `Some(false)` — user denied → [`Self::permission_denied`] is
+    ///   flipped to `true` and render shows the warning row.
+    /// - `Some(true)` — granted; pipe ingestion works.
+    #[allow(dead_code)]
+    pub(crate) pipe_permission: Option<bool>,
     /// Tri-state flag tracking whether `PermissionType::FullHdAccess` was
-    /// granted (R4 fallback scanning).
+    /// granted (R4 fallback scanning — optional).
     ///
     /// - `None` — request pending (permission-result event not yet seen).
     /// - `Some(false)` — user denied, or zellij rejected the request.
     /// - `Some(true)` — granted; `Event::Timer` will run the fs scan.
     ///
-    /// The timer branch only scans when `Some(true)`. This keeps the plugin
-    /// from retrying (and logging) on every 1 Hz tick when the user has
-    /// declined filesystem access — pipe-only operation is a supported mode
-    /// per R4's "skip if no fs perm".
+    /// The timer branch only scans when `Some(true)`. A denial here does
+    /// NOT flip [`Self::permission_denied`] — pipe-only operation is a
+    /// supported mode per R4's "skip if no fs perm" (F-703).
     #[allow(dead_code)]
     pub(crate) fs_permission: Option<bool>,
     /// Latch set the first time we skip the fs scan for lack of permission,
@@ -166,6 +183,31 @@ pub struct Status {
     /// tests don't exercise this; it's a wasm-only quality-of-life guard.
     #[allow(dead_code)]
     pub(crate) fs_permission_warned: bool,
+    /// FIFO queue of pending `request_permission` calls used to correlate
+    /// `PermissionRequestResult` events with the permission they belong to.
+    ///
+    /// zellij-tile 0.44's `Event::PermissionRequestResult(PermissionStatus)`
+    /// carries a single Granted/Denied flag with no indication of WHICH
+    /// permission was just resolved. F-703 splits the load-time request
+    /// into two separate `request_permission` calls (one for `ReadCliPipes`,
+    /// one for `FullHdAccess`) so an optional-fs denial cannot also deny
+    /// the mandatory pipe permission. zellij processes the calls in order,
+    /// so we pop the head of this queue on each result event and route the
+    /// status to [`Self::pipe_permission`] or [`Self::fs_permission`]
+    /// accordingly.
+    #[allow(dead_code)]
+    pub(crate) pending_permissions: std::collections::VecDeque<PendingPermission>,
+}
+
+/// Which permission a queued `request_permission` call corresponds to.
+///
+/// See [`Status::pending_permissions`] for the routing contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingPermission {
+    /// Mandatory `ReadCliPipes` request — denial flips `permission_denied`.
+    Pipe,
+    /// Optional `FullHdAccess` request — denial silently disables fs scan.
+    Fs,
 }
 
 /// Public, host-testable accessor for the cached focused session name.
@@ -238,6 +280,35 @@ pub(crate) fn evict_stale(
     before - cache.len()
 }
 
+/// Apply the outcome of a `ReadCliPipes` `PermissionRequestResult` to
+/// plugin state (F-703).
+///
+/// Mandatory permission: a denial flips [`Status::permission_denied`] to
+/// `true` so the render path shows the "ReadCliPipes denied" warning row
+/// and pipe ingestion becomes a no-op. A grant clears the flag and
+/// stamps [`Status::pipe_permission`] with `Some(true)`.
+///
+/// Split out as a pure helper so host tests can exercise the routing
+/// without a wasm runtime — the wasm `PermissionRequestResult` handler
+/// just forwards here.
+#[allow(dead_code)] // consumed by wasm_plugin + tests; host-only builds skip wasm_plugin
+pub(crate) fn apply_pipe_permission_result(status: &mut Status, granted: bool) {
+    status.pipe_permission = Some(granted);
+    status.permission_denied = !granted;
+}
+
+/// Apply the outcome of a `FullHdAccess` `PermissionRequestResult` to
+/// plugin state (F-703).
+///
+/// Optional permission: a denial silently disables the fs-scan branch
+/// (timer loop checks `fs_permission == Some(true)`) but does NOT flip
+/// [`Status::permission_denied`] — pipe-only operation is a supported
+/// mode per R4's "skip if no fs perm".
+#[allow(dead_code)] // consumed by wasm_plugin + tests; host-only builds skip wasm_plugin
+pub(crate) fn apply_fs_permission_result(status: &mut Status, granted: bool) {
+    status.fs_permission = Some(granted);
+}
+
 /// Wire-level phase strings considered terminal (agent known to be gone).
 /// Matches `ark-types::Phase`'s terminal set (`Done`, `Failed`, `Crashed`,
 /// `Killed`, `Timeout`). Kept local so the plugin does not depend on
@@ -250,7 +321,7 @@ fn is_terminal_phase(phase: &str) -> bool {
 mod wasm_plugin {
     use super::chip::{CHIP_SEPARATOR_WIDTH, Chip, Severity, build_chip, fit_chips};
     use super::fs_scan::{merge_fs_scan, resolve_state_dir, scan_state_dir};
-    use super::{EVICTION_TTL_MS, Status, evict_stale, ingest_pipe_payload};
+    use super::{EVICTION_TTL_MS, PendingPermission, Status, evict_stale, ingest_pipe_payload};
     use zellij_tile::prelude::*;
 
     /// Text `color_range` level indices used by `Text::serialize`. Zellij's
@@ -280,13 +351,22 @@ mod wasm_plugin {
 
     impl ZellijPlugin for Status {
         fn load(&mut self, _configuration: std::collections::BTreeMap<String, String>) {
-            // R1: request the pipe-ingestion permission. R4 optionally adds
-            // `FullHdAccess` for the `$XDG_STATE_HOME/ark/agents/*/status.json`
-            // fallback scan — requesting it here is best-effort; the plugin
-            // still works as pipe-only if the user denies it.
-            // Both grants/denials surface via
-            // `EventType::PermissionRequestResult`.
-            request_permission(&[PermissionType::ReadCliPipes, PermissionType::FullHdAccess]);
+            // F-703: request the two permissions SEPARATELY. zellij-tile
+            // 0.44's `PermissionRequestResult` carries a single
+            // Granted/Denied flag for the whole batch — so bundling
+            // `ReadCliPipes` + `FullHdAccess` in one call means a denied
+            // `FullHdAccess` also denies `ReadCliPipes`, knocking the
+            // plugin into permission_denied mode even though pipe
+            // ingestion is the mandatory path. Splitting into two calls
+            // lets the user decline fs-scan without losing pipe
+            // ingestion. We push a FIFO marker for each so the handler
+            // for the arriving `PermissionRequestResult` events knows
+            // which permission each event corresponds to (zellij
+            // processes requests in the order we submit them).
+            self.pending_permissions.push_back(PendingPermission::Pipe);
+            request_permission(&[PermissionType::ReadCliPipes]);
+            self.pending_permissions.push_back(PendingPermission::Fs);
+            request_permission(&[PermissionType::FullHdAccess]);
 
             // R1: subscribe to the 1 Hz timer (freshness ticks — R2 uses it
             // to redraw / evict when no pipe message arrived) and permission
@@ -344,16 +424,38 @@ mod wasm_plugin {
                     evicted > 0 || fs_changed
                 }
                 Event::PermissionRequestResult(status) => {
+                    // F-703: we issue two separate `request_permission`
+                    // calls in `load()` (one for `ReadCliPipes`, one for
+                    // `FullHdAccess`) and zellij processes them in order.
+                    // Pop the FIFO queue head to know which permission
+                    // this result event refers to.
+                    //
                     // `PermissionStatus::Granted` is the happy path; any
                     // other variant (present + future) is treated as a
-                    // denial so render can surface a warning. The same grant
-                    // state also gates the R4 fs fallback scan — zellij
-                    // reports a single status for the whole request batch,
-                    // so granting implies both `ReadCliPipes` and
-                    // `FullHdAccess` are available.
+                    // denial. A denial on the mandatory pipe permission
+                    // flips `permission_denied` so the render path shows
+                    // the warning row; a denial on the optional fs
+                    // permission only disables the fs scan branch.
                     let granted = matches!(status, PermissionStatus::Granted);
-                    self.permission_denied = !granted;
-                    self.fs_permission = Some(granted);
+                    match self.pending_permissions.pop_front() {
+                        Some(PendingPermission::Pipe) => {
+                            super::apply_pipe_permission_result(self, granted);
+                        }
+                        Some(PendingPermission::Fs) => {
+                            super::apply_fs_permission_result(self, granted);
+                        }
+                        None => {
+                            // Result arrived without a matching outbound
+                            // request — shouldn't happen given zellij's
+                            // FIFO contract, but be defensive: don't
+                            // silently mutate permission state on a
+                            // stray event.
+                            eprintln!(
+                                "{}: PermissionRequestResult with empty pending queue; ignoring",
+                                super::PLUGIN_NAME
+                            );
+                        }
+                    }
                     true
                 }
                 Event::SessionUpdate(session_infos, _resurrectable) => {
@@ -667,6 +769,105 @@ mod tests {
             );
             assert!(cache.is_empty());
         }
+    }
+
+    // ---- F-703: split pipe/fs permission routing --------------------------
+
+    #[test]
+    fn apply_pipe_permission_grant_clears_denied_flag() {
+        // Grant of the mandatory `ReadCliPipes` permission must:
+        //   - stamp `pipe_permission = Some(true)`
+        //   - leave `permission_denied = false` so render does not show
+        //     the warning row and pipe ingestion runs.
+        let mut status = Status::default();
+        apply_pipe_permission_result(&mut status, true);
+        assert_eq!(status.pipe_permission, Some(true));
+        assert!(!status.permission_denied);
+    }
+
+    #[test]
+    fn apply_pipe_permission_denial_flips_permission_denied() {
+        // Denial of the mandatory `ReadCliPipes` permission must flip
+        // `permission_denied` so render surfaces the warning row. Pipe
+        // ingestion is dead without this permission, so the plugin
+        // intentionally fails loud.
+        let mut status = Status::default();
+        apply_pipe_permission_result(&mut status, false);
+        assert_eq!(status.pipe_permission, Some(false));
+        assert!(status.permission_denied);
+    }
+
+    #[test]
+    fn apply_fs_permission_denial_does_not_flip_permission_denied() {
+        // F-703 contract: denial of the OPTIONAL `FullHdAccess`
+        // permission must NOT flip `permission_denied`. Pipe ingestion
+        // is orthogonal — losing fs fallback only disables the fs-scan
+        // branch of the timer loop. If this test regresses, a user who
+        // clicks "deny" on the fs prompt loses pipe ingestion too.
+        let mut status = Status::default();
+        // Simulate the happy-path pipe grant that arrives first.
+        apply_pipe_permission_result(&mut status, true);
+        apply_fs_permission_result(&mut status, false);
+        assert_eq!(status.fs_permission, Some(false));
+        assert_eq!(
+            status.pipe_permission,
+            Some(true),
+            "pipe permission untouched by fs result"
+        );
+        assert!(
+            !status.permission_denied,
+            "fs denial must NOT mark the plugin permission-denied"
+        );
+    }
+
+    #[test]
+    fn apply_fs_permission_grant_enables_fs_scan_flag() {
+        // Grant of the optional `FullHdAccess` permission stamps
+        // `fs_permission = Some(true)`; the wasm timer branch gates
+        // on exactly this value before running `scan_state_dir`.
+        let mut status = Status::default();
+        apply_pipe_permission_result(&mut status, true);
+        apply_fs_permission_result(&mut status, true);
+        assert_eq!(status.fs_permission, Some(true));
+        assert_eq!(status.pipe_permission, Some(true));
+        assert!(!status.permission_denied);
+    }
+
+    #[test]
+    fn pipe_granted_fs_denied_allows_pipe_ingestion() {
+        // End-to-end host simulation: mandatory pipe granted + optional
+        // fs denied → plugin must still accept pipe payloads (render's
+        // `permission_denied` warning-row early return is the gate).
+        let mut status = Status::default();
+        apply_pipe_permission_result(&mut status, true);
+        apply_fs_permission_result(&mut status, false);
+        assert!(!status.permission_denied);
+
+        // Pipe ingestion works — the real proof that "pipe still works
+        // even when fs was denied".
+        let payload = payload_for("agent-1", 1_000);
+        ingest_pipe_payload(&mut status.cache, PLUGIN_NAME, &payload)
+            .expect("pipe ingestion works when pipe permission granted");
+        assert_eq!(status.cache.len(), 1);
+        assert!(status.cache.contains_key("agent-1"));
+    }
+
+    #[test]
+    fn pipe_denied_marks_plugin_denied_regardless_of_fs() {
+        // Denial on the mandatory pipe permission MUST mark the plugin
+        // permission-denied — that's the signal the render path keys on
+        // to show the "ReadCliPipes denied" warning row. A later fs
+        // grant cannot un-deny the plugin.
+        let mut status = Status::default();
+        apply_pipe_permission_result(&mut status, false);
+        assert!(status.permission_denied);
+        apply_fs_permission_result(&mut status, true);
+        assert!(
+            status.permission_denied,
+            "fs grant must not override pipe denial"
+        );
+        assert_eq!(status.pipe_permission, Some(false));
+        assert_eq!(status.fs_permission, Some(true));
     }
 
     #[test]

@@ -65,6 +65,21 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// F-704: source roots the plugin crates transitively depend on.
+///
+/// The freshness check in [`artifact_is_fresh`] walks every path in this
+/// list (plus the plugin's own `src/`) and compares the newest mtime
+/// against the embedded artifact's mtime. Without this, edits to a
+/// workspace crate the plugin depends on leave a stale wasm embedded
+/// on the next `cargo build -p ark-cli` because cargo has no reason to
+/// re-run build.rs when only a transitive-source file changed.
+///
+/// Hard-coded rather than parsed from `Cargo.toml` for simplicity: the
+/// plugin dep graph is small and shifts deliberately. Extend this list
+/// whenever a plugin picks up a new `path = "..."` workspace dep.
+const STATUS_PLUGIN_DEP_ROOTS: &[&str] = &["crates/types/src"];
+const PICKER_PLUGIN_DEP_ROOTS: &[&str] = &["crates/types/src"];
+
 fn main() {
     // Re-run when either plugin source changes so developers iterating
     // on a plugin crate pick up new bytes on the next `cargo build`
@@ -73,6 +88,17 @@ fn main() {
     println!("cargo:rerun-if-changed=../plugins/status/Cargo.toml");
     println!("cargo:rerun-if-changed=../plugins/picker/src");
     println!("cargo:rerun-if-changed=../plugins/picker/Cargo.toml");
+    // F-704: also re-run when any transitively-depended workspace
+    // crate's source changes. `cargo:rerun-if-changed` wants absolute
+    // paths relative to CARGO_MANIFEST_DIR — `crates/cli/build.rs`
+    // lives at the workspace root's `crates/cli/`, so `../../<path>`
+    // resolves the workspace-relative source root.
+    for root in STATUS_PLUGIN_DEP_ROOTS
+        .iter()
+        .chain(PICKER_PLUGIN_DEP_ROOTS.iter())
+    {
+        println!("cargo:rerun-if-changed=../../{root}");
+    }
     println!("cargo:rerun-if-changed=build.rs");
     // F-615: CARGO_TARGET_DIR / `--target-dir` may move the wasm
     // artifact out of `<workspace>/target/`. Re-run when it changes.
@@ -216,7 +242,12 @@ fn maybe_build_wasm(
     let subdir = plugin_pkg.trim_start_matches("ark-plugin-");
     let plugin_src = workspace_root.join("crates").join("plugins").join(subdir);
 
-    if artifact_is_fresh(&artifact, &plugin_src) {
+    // F-704: freshness must also consider transitively-depended
+    // workspace crates. Without this an edit to e.g. `crates/types/src`
+    // leaves the previous wasm artifact embedded until the plugin's
+    // own source changes.
+    let dep_roots = plugin_dep_roots(workspace_root, plugin_pkg);
+    if artifact_is_fresh(&artifact, &plugin_src, &dep_roots) {
         println!(
             "cargo:warning=ARK_BUILD_WASM=1: {plugin_pkg} artifact already fresh at {}",
             artifact.display()
@@ -274,7 +305,12 @@ fn maybe_build_wasm(
 /// Cheap mtime-based freshness check. The nested `cargo build` itself
 /// is incremental, so this guard mostly exists to avoid re-spawning
 /// cargo on every ark-cli rebuild when nothing changed.
-fn artifact_is_fresh(artifact: &Path, plugin_src: &Path) -> bool {
+///
+/// F-704: walks the plugin's own `src/` *and* each transitive dep root
+/// listed in [`STATUS_PLUGIN_DEP_ROOTS`] / [`PICKER_PLUGIN_DEP_ROOTS`].
+/// The artifact is considered fresh only when its mtime is at least as
+/// recent as the newest source file across the entire set.
+fn artifact_is_fresh(artifact: &Path, plugin_src: &Path, dep_roots: &[PathBuf]) -> bool {
     let Ok(art_meta) = fs::metadata(artifact) else {
         return false;
     };
@@ -282,8 +318,32 @@ fn artifact_is_fresh(artifact: &Path, plugin_src: &Path) -> bool {
         return false;
     };
 
-    let newest_src = walk_newest_mtime(plugin_src).unwrap_or(art_mtime);
+    // Start with the plugin's own src/ tree.
+    let mut newest: Option<std::time::SystemTime> = walk_newest_mtime(plugin_src);
+    // Fold in each transitively-depended source root. `None` from a
+    // missing root is harmless — it means there's nothing newer there
+    // to argue about.
+    for root in dep_roots {
+        if let Some(m) = walk_newest_mtime(root) {
+            newest = Some(match newest {
+                Some(n) if n >= m => n,
+                _ => m,
+            });
+        }
+    }
+    let newest_src = newest.unwrap_or(art_mtime);
     art_mtime >= newest_src
+}
+
+/// F-704: resolve the transitive source roots a given plugin package
+/// should watch for freshness, as absolute paths under `workspace_root`.
+fn plugin_dep_roots(workspace_root: &Path, plugin_pkg: &str) -> Vec<PathBuf> {
+    let rels: &[&str] = match plugin_pkg {
+        "ark-plugin-status" => STATUS_PLUGIN_DEP_ROOTS,
+        "ark-plugin-picker" => PICKER_PLUGIN_DEP_ROOTS,
+        _ => &[],
+    };
+    rels.iter().map(|p| workspace_root.join(p)).collect()
 }
 
 /// Return the newest `SystemTime` mtime among regular files under
