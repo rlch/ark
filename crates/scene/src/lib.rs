@@ -8,6 +8,7 @@ pub mod ast;
 pub mod cel;
 pub mod chord;
 pub mod compile;
+pub mod config_schema;
 pub mod cycle;
 pub mod context;
 pub mod engine;

@@ -29,8 +29,6 @@ pub use ark_ext_metadata_types::{
     StringNode,
 };
 
-pub mod search_path;
-
 /// Serialize an [`ExtensionMetadata`] to KDL bytes.
 ///
 /// Produced bytes are what goes into the wasm `ark.metadata` custom

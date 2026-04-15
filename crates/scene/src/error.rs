@@ -98,6 +98,13 @@ pub enum ErrorCode {
     /// `KEY` is alphanumeric or a single zellij-known special
     /// (`Tab`, `Enter`, `Space`, arrow names, `F1`–`F12`).
     InvalidChord,
+    /// Plugin `config { }` block failed schema validation against the
+    /// shipped-plugin Config struct registered in
+    /// [`crate::config_schema::ConfigSchemaRegistry`] (R10 / T-7.6).
+    PluginBadConfig,
+    /// Plugin `config { }` block declared a key the shipped-plugin's
+    /// Config schema doesn't recognise (R10 / T-7.6).
+    PluginUnknownConfigKey,
 }
 
 impl ErrorCode {
@@ -127,6 +134,8 @@ impl ErrorCode {
             ErrorCode::EmitCycle => "scene/emit-cycle",
             ErrorCode::EmitInvalidSource => "scene/emit-invalid-source",
             ErrorCode::InvalidChord => "scene/invalid-chord",
+            ErrorCode::PluginBadConfig => "plugin/bad-config",
+            ErrorCode::PluginUnknownConfigKey => "plugin/unknown-config-key",
         }
     }
 }
@@ -638,6 +647,46 @@ pub enum SceneError {
         #[label("chord rejected here")]
         at: SourceSpan,
     },
+
+    /// Plugin `config { }` block failed type / value validation against
+    /// the shipped-plugin's in-proc Config schema (R10 / T-7.6).
+    ///
+    /// Emitted when a user scene provides a `config { }` block under a
+    /// `plugin "<name>" { }` whose schema exists in
+    /// [`crate::config_schema::ConfigSchemaRegistry`] but whose
+    /// declared value shape violates the schema.
+    #[error("plugin `{plugin}` config block failed validation: {message}")]
+    #[diagnostic(
+        code = "plugin/bad-config",
+        help("The `config {{ … }}` block under this plugin must match the shipped Config schema. Run `ark scene check` to see the expected shape (facet SHAPE reflection surfaces field docs + types).")
+    )]
+    PluginBadConfig {
+        /// Plugin name whose config block failed validation.
+        plugin: String,
+        /// Human-readable failure summary from the schema walker.
+        message: String,
+    },
+
+    /// Plugin `config { }` block declared a key that the shipped
+    /// plugin's Config schema does not recognise (R10 / T-7.6).
+    ///
+    /// Distinct from [`SceneError::PluginBadConfig`]: this variant fires
+    /// specifically on unknown KEYS, not on bad values / wrong types.
+    /// The scene compile pipeline surfaces this so typos surface at
+    /// compile time rather than being silently passed through to the
+    /// plugin (which zellij's flat-string env surface has no way to
+    /// reject).
+    #[error("plugin `{plugin}` config key `{key}` is not in the schema")]
+    #[diagnostic(
+        code = "plugin/unknown-config-key",
+        help("The shipped plugin's Config schema does not declare this key. Remove it, or correct the spelling. Run `ark scene check` to see the expected keys.")
+    )]
+    PluginUnknownConfigKey {
+        /// Plugin name whose config block carried the unknown key.
+        plugin: String,
+        /// The unknown key as it appeared in source.
+        key: String,
+    },
 }
 
 /// Canonical static help text for `scene/unknown-node` — the list
@@ -738,6 +787,8 @@ impl SceneError {
             SceneError::EmitCycle { .. } => ErrorCode::EmitCycle,
             SceneError::EmitInvalidSource { .. } => ErrorCode::EmitInvalidSource,
             SceneError::InvalidChord { .. } => ErrorCode::InvalidChord,
+            SceneError::PluginBadConfig { .. } => ErrorCode::PluginBadConfig,
+            SceneError::PluginUnknownConfigKey { .. } => ErrorCode::PluginUnknownConfigKey,
         }
     }
 }
