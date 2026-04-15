@@ -1,0 +1,20 @@
+[package]
+name = "ark-scene"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+facet = { workspace = true }
+facet-kdl = { workspace = true }
+kdl = { workspace = true }
+miette = { workspace = true }
+cel-interpreter = { workspace = true }
+minijinja = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
