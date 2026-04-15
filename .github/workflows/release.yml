@@ -78,6 +78,11 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # workflow_dispatch supplies inputs.tag; tag-push uses github.ref.
+          # Without this, workflow_dispatch would check out the default
+          # branch tip instead of the requested tag.
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -163,6 +168,11 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Same dual-trigger guard as the build job: workflow_dispatch
+          # passes the requested tag via inputs.tag; tag-push uses
+          # github.ref. Default behaviour would grab the branch tip.
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Determine version
         id: ver
@@ -242,6 +252,10 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Keep the release job on the tag under workflow_dispatch so the
+          # release body's auto-generated notes diff the right commit range.
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
@@ -263,7 +277,11 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
+          # Under workflow_dispatch github.ref_name is the branch (e.g. "main"),
+          # not the v* tag — the release would land on the wrong ref. Prefer
+          # inputs.tag when present (manual dispatch) and fall back to
+          # github.ref_name for the tag-push path.
+          tag_name: ${{ inputs.tag || github.ref_name }}
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |

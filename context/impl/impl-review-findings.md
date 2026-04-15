@@ -716,3 +716,40 @@ Cycle 5 is the closing pass. Codex's final review raised three P2 findings and z
 `cargo build --workspace` zero new warnings (the two pre-existing `embedded ark-plugin-*` cargo-warnings are build-script byte-count notices, not code warnings). `cargo fmt --all` clean.
 
 **Gate status after Tier 5 cycle 5:** CLOSED. Cycle 5 raised zero P1s (three P2s, all fixed); this is the final Tier 5 convergence signal. The impl-review-findings.md ledger now spans F-500 through F-615 across five cycles, all findings fixed, workspace tests fully green on single-threaded runs.
+
+## Tier 6 Gate — Cycle 1 (2026-04-15) — FINAL
+
+Tier 6 opens a new sweep focused on the release pipeline (`.github/workflows/release.yml`) now that cavekit-distribution R2/R3/R4 are wired. Codex flagged two P2 findings against the workflow_dispatch path and zero P1s — the convergence signal that ends the Tier 6 gate in a single cycle. Both fixed in one commit; no Rust sources touched, so no test counts move.
+
+### F-700 — P2 release.yml workflow_dispatch must checkout the requested tag (FIXED)
+
+**Source:** codex
+**Tier:** 6
+**Severity:** P2
+**Status:** fixed
+**Location:** .github/workflows/release.yml (actions/checkout steps in `build`, `wasm-release`, and `release` jobs)
+
+**Description:** Every `actions/checkout@v4` step in release.yml invoked the action with no `ref:` parameter. On the tag-push trigger (`push.tags: ['v*']`) that's fine — GitHub sets the default ref to the pushed tag. But under `workflow_dispatch`, GitHub defaults the checkout ref to the workflow file's branch tip (typically `main`), NOT the tag the operator typed into `inputs.tag`. The three affected jobs would then build from `main` HEAD instead of the requested release tag: `build` would produce tarballs with the wrong commit's code, `wasm-release` would ship the wrong wasm, and the `release` job's auto-generated release notes would diff the wrong range. The bug was latent while only the tag-push path had been exercised but would silently mis-release on the first manual dispatch.
+
+**Resolution:** Added `with: { ref: ${{ inputs.tag || github.ref }} }` to all three `actions/checkout@v4` invocations (one per job). The expression is a two-branch guard: `inputs.tag` is only defined on the `workflow_dispatch` trigger and resolves to the string the operator supplied (the workflow's own `inputs.tag` has `required: true`, so it's guaranteed non-empty on manual dispatch); `github.ref` carries `refs/tags/vX.Y.Z` on the tag-push path. The `||` falls through to `github.ref` when `inputs.tag` is unset (tag-push), preserving existing behaviour. Each call-site carries a comment documenting the dual-trigger intent so future editors don't strip the `with:` block. Verified `python3 -c "import yaml; yaml.safe_load(...)"` still parses the workflow.
+
+### F-701 — P2 release.yml publish step must use input tag in workflow_dispatch (FIXED)
+
+**Source:** codex
+**Tier:** 6
+**Severity:** P2
+**Status:** fixed
+**Location:** .github/workflows/release.yml (`release` job, `softprops/action-gh-release@v2` step)
+
+**Description:** The publish step passed `tag_name: ${{ github.ref_name }}` to `softprops/action-gh-release@v2`. On tag-push, `github.ref_name` is the short tag (`v0.2.0`) and the release lands correctly. On `workflow_dispatch`, `github.ref_name` is the dispatching branch's name (typically `main`) — the action would create a GitHub Release titled `main` or fail if `main` doesn't exist as a git tag. Either outcome diverges from the operator's intent (release the tag they typed into `inputs.tag`). The grep for `ref_name|GITHUB_REF` confirmed the Stage artifacts (line 127) and Determine version (line 182) shell scripts already had explicit `workflow_dispatch` fallbacks to `github.event.inputs.tag`; only this one publish-step use needed the guard.
+
+**Resolution:** Replaced `tag_name: ${{ github.ref_name }}` with `tag_name: ${{ inputs.tag || github.ref_name }}`, mirroring the pattern from F-700. Under workflow_dispatch the operator's `inputs.tag` wins; under tag-push `inputs.tag` is unset and the expression falls through to `github.ref_name` (the short tag), preserving prior behaviour. Added an inline comment describing the failure mode so future maintainers don't "simplify" the expression back. No other `ref_name` use in the workflow constructs a release tag (the two shell-script references already have their own `github.event.inputs.tag` fallbacks per the grep audit).
+
+## Test Delta — Tier 6 Cycle 1 (FINAL)
+
+- No Rust sources touched (YAML-only change). All workspace crate test counts unchanged: ark-cli 269, ark-cli cli_help 3, ark-plugin-picker 215, ark-plugin-status 47.
+- Workspace: `cargo test --workspace -- --test-threads=1` fully green on per-crate re-runs. The pre-existing timing-sensitive flake `ark-engines-claude-code::transcript::tests::append_path_emits_initial_then_appended` (3s/5s async deadlines in a tokio filesystem-tail test) intermittently fails under single-threaded full-workspace load and passes on isolated re-run — unrelated to this cycle (YAML-only change cannot affect Rust test execution) and pre-dates Tier 6.
+- YAML gate: `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/release.yml'))"` parses cleanly.
+- `cargo fmt --all` clean (no Rust changes). `cargo build --workspace` clean (no new warnings).
+
+**Gate status after Tier 6 cycle 1:** CLOSED. Cycle 1 raised zero P1s (two P2s, both fixed); this is the Tier 6 convergence signal in a single cycle. The impl-review-findings.md ledger now spans F-500 through F-701.
