@@ -67,7 +67,8 @@ pub use render_detail::{
 };
 pub use render_list::{
     KeyInput, PickerAction, build_footer, build_header, format_age, format_progress, format_row,
-    fuzzy_filter_and_sort, fuzzy_haystack, handle_list_key, phase_extra, phase_icon,
+    fuzzy_filter_and_sort, fuzzy_haystack, handle_list_key, handle_resurrect_prompt_key,
+    is_terminal_phase, phase_extra, phase_icon, render_resurrect_prompt,
 };
 pub use render_new_agent::{
     Direction, apply_backspace, apply_char, basename_of, build_new_agent_rows, build_spawn_argv,
@@ -82,8 +83,9 @@ pub use socket_cmd::{
 };
 pub use state::{
     AgentSummary, ConfirmKillState, DetailSnapshot, DetailState, ErrorState, FormField, ListState,
-    NewAgentState, Orchestrator, PickerCache, PickerScreen, RenamePromptState, apply_scroll,
-    filter_matches, move_selection_down, move_selection_up,
+    NewAgentState, Orchestrator, PickerCache, PickerScreen, RenamePromptState,
+    ResurrectPromptState, ResurrectReason, apply_scroll, filter_matches, move_selection_down,
+    move_selection_up,
 };
 
 /// Registered plugin name used by supervisors when targeting `zellij pipe
@@ -170,11 +172,12 @@ impl Picker {
 mod wasm_plugin {
     use super::{
         ConfirmKillState, DetailState, ErrorState, KeyInput, NewAgentState, Picker, PickerAction,
-        PickerScreen, RenamePromptState, ResurrectError, bootstrap, build_detail_rows,
-        build_footer, build_header, build_new_agent_rows, build_spawn_argv, forget_cmd, format_row,
-        fuzzy_filter_and_sort, handle_confirm_kill_key, handle_detail_key, handle_list_key,
-        handle_new_agent_key, handle_rename_prompt_key, kill_cmd, rename_cmd, render_confirm_kill,
-        render_rename_prompt, resurrect, socket_cmd::SocketError,
+        PickerScreen, RenamePromptState, ResurrectError, ResurrectPromptState, ResurrectReason,
+        bootstrap, build_detail_rows, build_footer, build_header, build_new_agent_rows,
+        build_spawn_argv, forget_cmd, format_row, fuzzy_filter_and_sort, handle_confirm_kill_key,
+        handle_detail_key, handle_list_key, handle_new_agent_key, handle_rename_prompt_key,
+        handle_resurrect_prompt_key, is_terminal_phase, kill_cmd, rename_cmd, render_confirm_kill,
+        render_rename_prompt, render_resurrect_prompt, resurrect, socket_cmd::SocketError,
     };
     use zellij_tile::prelude::*;
 
@@ -404,7 +407,22 @@ mod wasm_plugin {
                                     // defend once more here so a stale
                                     // cache can't run resurrect against a
                                     // live agent.
-                                    if !self.cache.resurrectable.contains_key(&id) {
+                                    //
+                                    // T-107 also permits resurrect on an
+                                    // *active* agent when its phase is
+                                    // terminal (Done/Failed/Killed/Timeout)
+                                    // — the R8 prompt routes that case
+                                    // through this branch after the
+                                    // operator confirms.
+                                    let allow_active_terminal = self
+                                        .cache
+                                        .active
+                                        .get(&id)
+                                        .map(|s| is_terminal_phase(&s.phase))
+                                        .unwrap_or(false);
+                                    if !self.cache.resurrectable.contains_key(&id)
+                                        && !allow_active_terminal
+                                    {
                                         return true;
                                     }
                                     let (state_dir, _runtime_dir) = wasm_paths();
@@ -438,6 +456,34 @@ mod wasm_plugin {
                                                 PickerScreen::Error(ErrorState { message: msg });
                                         }
                                     }
+                                    true
+                                }
+                                PickerAction::OpenResurrectPrompt(id) => {
+                                    // R8: route the id to the right
+                                    // prompt variant based on cache
+                                    // classification. Resurrectable →
+                                    // "crashed — resurrect?"; active
+                                    // with terminal phase → "is {phase}
+                                    // — spawn a fresh replacement?".
+                                    let (reason, name) = if let Some(summary) =
+                                        self.cache.resurrectable.get(&id)
+                                    {
+                                        (ResurrectReason::Crashed, summary.name.clone())
+                                    } else if let Some(summary) = self.cache.active.get(&id) {
+                                        (
+                                            ResurrectReason::TerminatedPhase(summary.phase.clone()),
+                                            summary.name.clone(),
+                                        )
+                                    } else {
+                                        // Id vanished between the key
+                                        // press and dispatch — drop back
+                                        // to the list rather than opening
+                                        // a prompt we can't satisfy.
+                                        return true;
+                                    };
+                                    self.screen = PickerScreen::ResurrectPrompt(
+                                        ResurrectPromptState::new(id, name, reason),
+                                    );
                                     true
                                 }
                                 PickerAction::FilterChanged
@@ -555,11 +601,73 @@ mod wasm_plugin {
                                 _ => true,
                             }
                         }
+                        PickerScreen::ResurrectPrompt(ref prompt_state) => {
+                            // R8: `y` confirms → route back through the
+                            // same Resurrect pipeline used by `r` on the
+                            // list, preserving the T-106 exec flow. `n` /
+                            // Esc drops back to the list. Clone the id
+                            // before mutating self.screen so the borrow
+                            // from `prompt_state` doesn't outlive us.
+                            let action = handle_resurrect_prompt_key(prompt_state, input);
+                            match action {
+                                PickerAction::Resurrect(id) => {
+                                    let allow_active_terminal = self
+                                        .cache
+                                        .active
+                                        .get(&id)
+                                        .map(|s| is_terminal_phase(&s.phase))
+                                        .unwrap_or(false);
+                                    if !self.cache.resurrectable.contains_key(&id)
+                                        && !allow_active_terminal
+                                    {
+                                        self.screen = PickerScreen::default();
+                                        return true;
+                                    }
+                                    let (state_dir, _runtime_dir) = wasm_paths();
+                                    match resurrect::resurrect(&state_dir, &id) {
+                                        Ok(argv) => {
+                                            let argv_refs: Vec<&str> =
+                                                argv.iter().map(|s| s.as_str()).collect();
+                                            run_command(
+                                                &argv_refs,
+                                                std::collections::BTreeMap::new(),
+                                            );
+                                            self.screen = PickerScreen::default();
+                                        }
+                                        Err(e) => {
+                                            let msg = match e {
+                                                ResurrectError::SpecNotFound => {
+                                                    format!("spec.json missing for {id}")
+                                                }
+                                                ResurrectError::SpecParseError(m) => {
+                                                    format!("spec.json unreadable: {m}")
+                                                }
+                                                ResurrectError::ArchiveFailed(m) => {
+                                                    format!("archive failed: {m}")
+                                                }
+                                            };
+                                            self.screen =
+                                                PickerScreen::Error(ErrorState { message: msg });
+                                        }
+                                    }
+                                    true
+                                }
+                                PickerAction::CancelResurrect => {
+                                    self.screen = PickerScreen::default();
+                                    true
+                                }
+                                _ => false,
+                            }
+                        }
                         PickerScreen::Error(_) => {
                             // R7 "agent no longer alive — refresh? [y/n]".
                             // `y` fires a refresh and returns to List; `n`
                             // / Esc just returns to List. Any other key is
                             // a no-op so the banner stays visible.
+                            //
+                            // T-107: Esc anywhere off List returns to
+                            // List rather than hide_self — only List's
+                            // Esc → Close propagates to hide_self().
                             match input {
                                 KeyInput::Char('y') | KeyInput::Char('r') => {
                                     let (state_dir, runtime_dir) = wasm_paths();
@@ -654,6 +762,9 @@ mod wasm_plugin {
                 PickerScreen::RenamePrompt(rename_state) => {
                     render_rename_prompt_screen(rename_state, rows, cols);
                 }
+                PickerScreen::ResurrectPrompt(prompt_state) => {
+                    render_resurrect_prompt_screen(prompt_state, rows, cols);
+                }
                 PickerScreen::Error(err) => {
                     let text = Text::new(&format!("Error: {}", err.message));
                     print_text_with_coordinates(text, 0, 0, Some(cols), Some(1));
@@ -709,6 +820,27 @@ mod wasm_plugin {
             print_text_with_coordinates(Text::new(line), 0, y, Some(cols), Some(1));
         }
     }
+
+    /// T-107 R8: render the resurrect-confirm prompt. Mirrors the
+    /// confirm-kill + rename-prompt renderers so the three modals share
+    /// one layout convention.
+    fn render_resurrect_prompt_screen(state: &ResurrectPromptState, rows: usize, cols: usize) {
+        if rows == 0 || cols == 0 {
+            return;
+        }
+        let body = render_resurrect_prompt(state);
+        for (y, line) in body.iter().enumerate() {
+            if y >= rows {
+                break;
+            }
+            print_text_with_coordinates(Text::new(line), 0, y, Some(cols), Some(1));
+        }
+    }
+
+    // Silence dead_code warning when ResurrectReason / handle helpers are
+    // only consumed via the above renderer + dispatcher.
+    #[allow(dead_code)]
+    fn _keep_resurrect_reason_used(_r: &ResurrectReason) {}
 
     // Silence dead_code warning when ErrorState isn't otherwise referenced in
     // wasm_plugin — it is used by future T-105 wiring.

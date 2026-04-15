@@ -40,6 +40,10 @@ pub enum PickerScreen {
     /// in-flight new-name buffer plus cursor position so typing keeps the
     /// same lossless round-trip behaviour the new-agent form gets.
     RenamePrompt(RenamePromptState),
+    /// Resurrect prompt modal (R8 — Enter on a Crashed/Done agent).
+    /// Asks the operator to confirm `y`/`n` before re-spawning via the
+    /// T-106 pipeline.
+    ResurrectPrompt(ResurrectPromptState),
     /// Help overlay (W5).
     Help,
     /// Error banner — one-off message, cleared on next key (R6 exec
@@ -265,6 +269,57 @@ impl RenamePromptState {
             agent_id: agent_id.into(),
             new_name: String::new(),
             focus_cursor: 0,
+        }
+    }
+}
+
+/// Reason variant carried alongside a resurrect prompt (R8).
+///
+/// `Crashed` fires for agents whose supervisor is no longer alive —
+/// the prompt wording is "crashed — resurrect?". `TerminatedPhase`
+/// fires for agents whose last published phase is `Done` / `Failed`
+/// / `Killed` / `Timeout`, where the prompt becomes "is {phase} — spawn
+/// a fresh replacement?". Keeping the discriminator on the state
+/// instead of computing it at render time means the key handler only
+/// looks at what's in hand, not at the cache it was built from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResurrectReason {
+    /// Supervisor unreachable / PID dead. Agent lives in the
+    /// resurrectable cache.
+    Crashed,
+    /// Agent's last phase was a terminal state (Done / Failed /
+    /// Killed / Timeout). Re-spawn replaces it. The carried string
+    /// is the raw phase value so the prompt can render it verbatim.
+    TerminatedPhase(String),
+}
+
+/// State for the `Enter`-on-crashed / `Enter`-on-terminal resurrect prompt
+/// (R8). Captures the agent id the prompt targets plus the reason variant
+/// used to drive the prompt's wording. The action handler only needs to
+/// know "confirm or cancel" — the lib.rs dispatcher looks up the cache
+/// entry to produce the resurrect argv via the T-106 pipeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResurrectPromptState {
+    /// Agent id whose spec will drive the resurrect.
+    pub agent_id: String,
+    /// Human-facing agent name (from the cache entry) used for the
+    /// prompt's banner line.
+    pub agent_name: String,
+    /// Why we're prompting — drives the wording variant.
+    pub reason: ResurrectReason,
+}
+
+impl ResurrectPromptState {
+    /// Build a fresh prompt for `agent_id` with the given name + reason.
+    pub fn new(
+        agent_id: impl Into<String>,
+        agent_name: impl Into<String>,
+        reason: ResurrectReason,
+    ) -> Self {
+        Self {
+            agent_id: agent_id.into(),
+            agent_name: agent_name.into(),
+            reason,
         }
     }
 }
