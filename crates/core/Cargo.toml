@@ -10,6 +10,10 @@ rust-version.workspace = true
 [dependencies]
 ark-types = { path = "../types" }
 ark-config = { path = "../config" }
+# T-5.3: ReactionDispatcher consumer reads the compiled ReactionRegistry
+# + selector matcher from ark-scene. Scene depends only on ark-types so
+# this path stays acyclic.
+ark-scene = { path = "../scene" }
 ark-test-fixtures = { path = "../test-fixtures" }
 # `test-support` is enabled unconditionally so the publicly-exported
 # `orchestrator_contract_suite` can construct a scripted `ZellijMux`. The
@@ -31,3 +35,6 @@ tempfile = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# T-5.3 tests: reaction_dispatcher tests build `CompiledOp`s from raw
+# KDL fragments.
+kdl = { workspace = true }

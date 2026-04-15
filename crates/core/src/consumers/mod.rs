@@ -17,9 +17,11 @@
 //! `tokio_util::sync::CancellationToken` for supervisor-driven shutdown.
 
 pub mod hook_dispatcher;
+pub mod reaction_dispatcher;
 pub mod state_writer;
 
 pub use hook_dispatcher::hook_dispatcher;
+pub use reaction_dispatcher::{reaction_dispatcher, ReactionDispatcherCtx};
 pub use state_writer::state_writer;
 
 /// Shared helper: classify an `AgentEvent` to its serde tag slug used by
