@@ -1,0 +1,34 @@
+[package]
+name = "ark-ext-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# T-9.5.1 (cavekit-scene R16): canonical Rust `ArkExtension` trait plus the
+# request/response structs that define the runtime-RPC wire contract
+# (JSON-RPC 2.0 for subprocess / wit-bindgen for wasm-component / in-process
+# trait-object dispatch for compiled-in extensions). Every struct derives
+# `Facet` so the same SHAPE reflection that ark uses for scene KDL can
+# generate a canonical JSON-Schema for foreign-language extension authors
+# (R16 "protocol-first, trait-derived"). No network, tokio, or IO deps here
+# — this crate is the pure-contract surface; transports live elsewhere.
+[dependencies]
+# T-9.5.1: `facet` drives SHAPE reflection on every request/response type
+# so ark's future ext-host can emit a canonical JSON-Schema per method
+# (R16 "protocol-first, trait-derived"). `async-trait` lets the trait
+# stay object-safe with async methods on stable Rust. `thiserror` owns
+# the `ExtensionError` variant wiring. `serde` is pulled in so downstream
+# wasm / subprocess shims can round-trip opaque JSON payloads via their
+# own serde path — this crate itself does not serialize with serde, but
+# re-exporting it here via workspace dep keeps compile-tested versions
+# aligned.
+facet = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

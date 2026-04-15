@@ -10,6 +10,8 @@ members = [
     "crates/supervisor",
     "crates/test-fixtures",
     "crates/types",
+    # T-9.5.1: extension-protocol trait + request/response types (R16).
+    "crates/ark-ext-proto",
     "crates/engines/*",
     "crates/orchestrators/*",
     "crates/mux/*",
