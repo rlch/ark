@@ -1,0 +1,206 @@
+# CI workflow for Ark.
+#
+# Covers build-site T-129 (cavekit-testing R4 + cavekit-distribution R1):
+#   - lint     : rustfmt + clippy on ubuntu
+#   - unit     : cargo build + cargo test --workspace on ubuntu + macOS
+#   - e2e      : ARK_E2E=1 integration suite on ubuntu + macOS (zellij + delta installed)
+#   - wasm     : wasm32-wasip1 release build for plugin-status + plugin-picker,
+#                plugin sizes recorded as a build artifact so T-132 can delta-watch.
+#
+# Design notes:
+#   * All cargo-using jobs share Swatinem/rust-cache for fast warm runs. The
+#     cache key is keyed on Cargo.lock + rust-toolchain + OS + job, so lint /
+#     unit / e2e / wasm each keep their own target dir.
+#   * Tests run with --test-threads=1 because the e2e + supervisor tests share
+#     real filesystem sockets + control paths. The unit suite uses the same
+#     flag for consistency so local and CI output match.
+#   * zellij is pinned to 0.44.1 per cavekit-mux-zellij Q5 (keybind contract).
+#     On ubuntu we install via `cargo install zellij` and cache it; on macOS we
+#     go through Homebrew (fast, prebuilt).
+#   * delta is installed as `git-delta` on macOS brew, `git-delta` apt package
+#     on ubuntu (fall back to `cargo install git-delta` if the apt package is
+#     absent on the runner image).
+#   * No secrets / tokens are used — this workflow only reads public package
+#     registries and the repo itself.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  # Pin zellij to the cavekit-mux-zellij Q5 minimum. Bump deliberately when the
+  # keybind contract changes — see context/refs/cavekit-mux-zellij.md.
+  ZELLIJ_VERSION: 0.44.1
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # lint: rustfmt + clippy. Fast gate so bad formatting / obvious warnings fail
+  # before we burn compute on the full matrix.
+  # ---------------------------------------------------------------------------
+  lint:
+    name: lint (fmt + clippy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable + rustfmt + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint
+
+      - name: cargo fmt --all -- --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # ---------------------------------------------------------------------------
+  # unit: build the workspace + run the non-e2e test suite on ubuntu + macOS.
+  # ---------------------------------------------------------------------------
+  unit:
+    name: unit (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: unit-${{ matrix.os }}
+
+      - name: cargo build --workspace
+        run: cargo build --workspace --locked
+
+      # --test-threads=1: supervisor + control-socket tests own real FS paths
+      # that collide under parallel execution. Matches local dev instructions.
+      - name: cargo test --workspace
+        run: cargo test --workspace --locked -- --test-threads=1
+
+  # ---------------------------------------------------------------------------
+  # e2e: runs the ARK_E2E=1 suite from crates/cli/tests/e2e.rs. Needs a real
+  # zellij binary (pane mux) and delta (diff viewer) available on PATH.
+  # ---------------------------------------------------------------------------
+  e2e:
+    name: e2e (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: unit
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: e2e-${{ matrix.os }}
+
+      # zellij + delta install: macOS uses Homebrew (prebuilt, fast), ubuntu
+      # uses cargo install for zellij (apt ships an older version) and apt for
+      # delta with cargo fallback.
+      - name: Install zellij + delta (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew install zellij git-delta
+          zellij --version
+          delta --version
+
+      - name: Cache cargo-installed zellij (ubuntu)
+        if: runner.os == 'Linux'
+        id: zellij-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/zellij
+          key: zellij-${{ runner.os }}-${{ env.ZELLIJ_VERSION }}
+
+      - name: Install zellij (ubuntu)
+        if: runner.os == 'Linux' && steps.zellij-cache.outputs.cache-hit != 'true'
+        run: cargo install zellij --locked --version "${ZELLIJ_VERSION}"
+
+      - name: Install delta (ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          # apt ships git-delta on recent ubuntu images; fall back to cargo if missing.
+          if ! sudo apt-get install -y git-delta; then
+            cargo install git-delta --locked
+          fi
+          zellij --version
+          delta --version
+
+      - name: ARK_E2E=1 cargo test -p ark-cli --test e2e
+        env:
+          ARK_E2E: "1"
+        run: cargo test -p ark-cli --test e2e --locked -- --test-threads=1
+
+  # ---------------------------------------------------------------------------
+  # wasm-build: compile the two wasm plugins for the zellij plugin target and
+  # record their release-mode byte size. T-132 will compare the recorded size
+  # against a budget; this job just publishes the artifact.
+  # ---------------------------------------------------------------------------
+  wasm-build:
+    name: wasm build (status + picker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable + wasm32-wasip1)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: wasm
+
+      - name: Build ark-plugin-status + ark-plugin-picker (wasm32-wasip1, release)
+        run: |
+          cargo build --locked --release --target wasm32-wasip1 \
+            -p ark-plugin-status -p ark-plugin-picker
+
+      - name: Record plugin sizes
+        run: |
+          out=target/wasm32-wasip1/release
+          mkdir -p wasm-sizes
+          {
+            echo "plugin,bytes"
+            for p in ark_plugin_status ark_plugin_picker; do
+              path="$out/${p}.wasm"
+              if [ -f "$path" ]; then
+                size=$(wc -c < "$path" | tr -d ' ')
+                echo "${p},${size}"
+              else
+                echo "${p},MISSING"
+              fi
+            done
+          } | tee wasm-sizes/sizes.csv
+
+      - name: Upload wasm size artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-sizes
+          path: wasm-sizes/sizes.csv
+          if-no-files-found: error
