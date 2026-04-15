@@ -95,8 +95,11 @@ pub enum OrchestratorChoice {
     ClaudeCode,
 }
 
-/// Engine selection. Only `claude-code` is valid in v1 — the flag is
-/// accepted so end-state scripts stay stable. See cavekit-cli R2.
+/// Engine selection. The legacy v1 slug surface — kept for backwards
+/// compat with existing `ark spawn --engine claude-code` invocations.
+/// New ACP-style engine names travel through the free-form
+/// [`SpawnArgs::acp_engine`] / `--engine NAME` string flag
+/// (T-ACP.4a).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum EngineChoice {
     #[value(name = "claude-code")]
@@ -136,15 +139,21 @@ pub struct SpawnArgs {
     )]
     pub orchestrator: OrchestratorChoice,
 
-    /// Engine (v1: only `claude-code`).
-    #[arg(
-        long,
-        value_enum,
-        default_value_t = EngineChoice::ClaudeCode,
-        hide_default_value = true,
-        hide_possible_values = true,
-    )]
-    pub engine: EngineChoice,
+    /// Engine name.
+    ///
+    /// For legacy orchestration (hook-injection path), `claude-code`
+    /// is the only valid value. For the ACP resolver
+    /// (T-ACP.4a rung 1), this flag is forwarded to
+    /// [`ark_supervisor::engine_resolution::resolve_engine`] as the
+    /// first-rung override — any value present in
+    /// `[engines.<name>]` (or one of the shipped defaults
+    /// `claude | codex | gemini-cli`) resolves cleanly.
+    ///
+    /// The default remains `"claude-code"` so existing spawn flows
+    /// continue to work without change; ACP-first users write
+    /// `--engine claude` / `--engine codex` / etc.
+    #[arg(long, default_value = "claude-code", hide_default_value = true)]
+    pub engine: String,
 
     /// Worktree path (default: current directory).
     #[arg(long, default_value = ".")]
@@ -997,6 +1006,33 @@ pub fn run(args: SpawnArgs, ctx: &Ctx) -> Result<(), CliError> {
         args.layout.clone(),
         hooks,
     );
+    // T-ACP.4a: stash the raw `--engine NAME` on the spec so the
+    // supervisor's engine-resolution chain (rung 1) can read it back
+    // at boot. The flag's value already lands in `spec.engine` for
+    // the legacy factory path, but the ACP resolver wants to
+    // distinguish "user asked for `claude-code` via the legacy
+    // default" from "user explicitly wrote `--engine codex`" — mirror
+    // the flag verbatim onto `runner_config.acp_engine_flag`. A null
+    // entry means "no explicit flag", i.e. the spawn relied on the
+    // default.
+    {
+        let flag_value = serde_json::Value::String(args.engine.clone());
+        match &mut spec.runner_config {
+            serde_json::Value::Object(map) => {
+                map.insert("acp_engine_flag".into(), flag_value);
+            }
+            other if other.is_null() => {
+                let mut map = serde_json::Map::new();
+                map.insert("acp_engine_flag".into(), flag_value);
+                *other = serde_json::Value::Object(map);
+            }
+            _ => {
+                // Non-object runner_config (shouldn't happen in
+                // practice) — leave untouched; resolver falls back
+                // to the legacy slug from `spec.engine`.
+            }
+        }
+    }
 
     // F-600: `AgentSpec::new` initialises `spec.session` to
     // `AgentId::session_name()` — the bare `ark-{orch}-{name}` form that
@@ -2010,7 +2046,7 @@ mod tests {
 
         let args = SpawnArgs {
             orchestrator: OrchestratorChoice::ClaudeCode,
-            engine: EngineChoice::ClaudeCode,
+            engine: "claude-code".to_string(),
             cwd: state.path().to_path_buf(),
             name: Some("preflighttest".into()),
             layout: None,

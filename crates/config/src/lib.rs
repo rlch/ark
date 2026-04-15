@@ -60,9 +60,9 @@ pub mod schema;
 
 pub use hooks::{HookContext, HookEntry};
 pub use schema::{
-    Config, DefaultsSection, DiffSection, EngineClaudeCodeSection, EngineSection, MuxSection,
-    MuxZellijSection, OrchestratorCavekitSection, OrchestratorClaudeCodeSection,
-    OrchestratorSection,
+    AcpSection, Config, DEFAULT_ACP_PERMISSION_TIMEOUT_MS, DefaultsSection, DiffSection,
+    EngineClaudeCodeSection, EngineLaunchSpec, EngineSection, MuxSection, MuxZellijSection,
+    OrchestratorCavekitSection, OrchestratorClaudeCodeSection, OrchestratorSection,
 };
 
 /// Default env-var prefix for ark config overrides.

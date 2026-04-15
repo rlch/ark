@@ -59,7 +59,14 @@ pub use audit_log::AuditLogger;
 // T-069: factory + full R3 boot sequence.
 pub mod factory;
 pub mod orchestration;
-pub use factory::{build_engine, build_multiplexer, build_orchestrator};
+pub use factory::{SupervisorError, build_engine, build_multiplexer, build_orchestrator};
+
+// T-ACP.4a/4b: engine-resolution chain (--engine flag / scene engine{} /
+// extension engine / config.engines / hardcoded default).
+pub mod engine_resolution;
+pub use engine_resolution::{
+    DEFAULT_ENGINE_NAME, default_engine_launch, resolve_engine, shipped_engine,
+};
 pub use orchestration::{
     SupervisorMode, finalize_state, outcome_exit_code, run_supervisor, run_supervisor_with,
 };

@@ -29,6 +29,41 @@ use ark_mux_zellij::ZellijMux;
 use ark_orchestrators_cavekit::CavekitOrchestrator;
 use ark_orchestrators_claude_code::ClaudeCodeOrchestrator;
 use ark_types::{is_v1_engine, is_v1_mux, is_v1_orchestrator};
+use thiserror::Error;
+
+// ---------------------------------------------------------------------------
+// SupervisorError — typed-error surface shared by the supervisor crate.
+// ---------------------------------------------------------------------------
+
+/// Thin typed-error surface used by the supervisor's non-trait entry
+/// points (engine resolution, future ACP wiring).
+///
+/// Kept as a lightweight `thiserror` enum rather than a miette
+/// diagnostic because most supervisor-level errors already carry rich
+/// underlying `anyhow::Error` context; this surface exists for the few
+/// paths (engine resolution, permission dispatch) where the caller
+/// wants a typed discriminant instead of a stringy error.
+#[derive(Debug, Error)]
+pub enum SupervisorError {
+    /// `--engine NAME` was supplied but `NAME` is not declared in
+    /// `config.engines` and is not a shipped default
+    /// (`claude` / `codex` / `gemini-cli`).
+    ///
+    /// T-ACP.4a: surfaced by
+    /// [`crate::engine_resolution::resolve_engine`] when the CLI flag
+    /// fails to resolve at rung 1.
+    #[error(
+        "unknown engine `{name}` in --engine flag — known engines: {known_list}",
+        known_list = known.join(", ")
+    )]
+    UnknownEngine {
+        /// The unknown engine name the caller asked for.
+        name: String,
+        /// Engines currently known to the supervisor (from both
+        /// `config.engines` + the shipped defaults).
+        known: Vec<String>,
+    },
+}
 
 // ---------------------------------------------------------------- engines ----
 

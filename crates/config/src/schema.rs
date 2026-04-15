@@ -14,11 +14,15 @@
 //! [orchestrator.claude_code]
 //! [mux.zellij]            # multiplexer-specific
 //! [[hooks]]               # repeatable hook definitions
+//! [acp]                   # ACP behaviour knobs (T-ACP.5b timeout)
+//! [engines.<name>]        # ACP engine launch specs (T-ACP.4a rung 4)
 //! ```
 //!
 //! `Config::defaults()` is the canonical entry point — the same as
 //! `Config::default()` but named to match the kit (R3) and the call-site at
 //! [`crate::ConfigLoader::load`].
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -77,6 +81,15 @@ pub const DEFAULT_ZELLIJ_PICKER_PLUGIN: &str = "~/.config/zellij/plugins/ark-pic
 /// Default `mux.zellij.default_layout_dir`.
 pub const DEFAULT_ZELLIJ_LAYOUT_DIR: &str = "~/.config/ark/layouts";
 
+/// Default `[acp] permission_timeout_ms` (interactive).
+///
+/// T-ACP.5b: picker picks the permission prompt by default; the dispatcher
+/// auto-rejects with `option_id = "timeout"` after this many milliseconds
+/// when the scene hasn't supplied an auto-allow / auto-deny rule. The spec
+/// defines `0` as "no timeout" — used automatically when the process is
+/// non-interactive (`ARK_NONINTERACTIVE=1` or non-TTY stdin).
+pub const DEFAULT_ACP_PERMISSION_TIMEOUT_MS: u64 = 300_000;
+
 // ---------------------------------------------------------------------------
 // Top-level
 // ---------------------------------------------------------------------------
@@ -102,6 +115,16 @@ pub struct Config {
     /// Repeatable hook definitions. Empty by default — users opt in.
     #[serde(default)]
     pub hooks: Vec<HookEntry>,
+    /// `[acp]` — Agent Client Protocol runtime knobs (T-ACP.5b).
+    #[serde(default)]
+    pub acp: AcpSection,
+    /// `[engines.<name>]` — ACP engine launch specs keyed by name
+    /// (T-ACP.4a rung 4). Empty when the user hasn't defined any;
+    /// built-in defaults are merged in separately at engine-resolution
+    /// time so a missing `[engines.claude]` still resolves to the shipped
+    /// default.
+    #[serde(default)]
+    pub engines: BTreeMap<String, EngineLaunchSpec>,
 }
 
 impl Default for Config {
@@ -123,8 +146,73 @@ impl Config {
             orchestrator: OrchestratorSection::default(),
             mux: MuxSection::default(),
             hooks: Vec::new(),
+            acp: AcpSection::default(),
+            engines: BTreeMap::new(),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// [acp]
+// ---------------------------------------------------------------------------
+
+/// `[acp]` section — Agent Client Protocol runtime knobs.
+///
+/// Today only the permission-timeout knob (T-ACP.5b) lives here; future
+/// ACP-wide knobs (default session-mode, `allow-unstable`, …) slot in
+/// as new fields with `#[serde(default)]`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct AcpSection {
+    /// Permission-request timeout in milliseconds. When the agent sends
+    /// `session/request_permission` and no scene rule or picker
+    /// decision arrives inside this window, the dispatcher auto-rejects
+    /// with `option_id = "timeout"` (T-ACP.5b).
+    ///
+    /// Default `300_000` (5 minutes). `0` disables the timeout
+    /// entirely — useful for automation or when the scene always
+    /// supplies an auto-rule. When `ARK_NONINTERACTIVE=1` or stdin is
+    /// non-TTY, the supervisor overrides the effective value to `0`
+    /// regardless of the configured value.
+    pub permission_timeout_ms: u64,
+}
+
+impl Default for AcpSection {
+    fn default() -> Self {
+        Self {
+            permission_timeout_ms: DEFAULT_ACP_PERMISSION_TIMEOUT_MS,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [engines.<name>]
+// ---------------------------------------------------------------------------
+
+/// `[engines.<name>]` — a single ACP engine launch spec.
+///
+/// Mirrors [`ark_scene::engine::EngineLaunch`] shape but lives on the
+/// config crate so downstream consumers (cli `--engine` flag resolver,
+/// supervisor engine resolution) can load it without depending on
+/// scene. Each entry declares the argv and environment a named engine
+/// spawns with; the supervisor uses this during T-ACP.4a rung 4
+/// lookup.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct EngineLaunchSpec {
+    /// `argv[0]` — the binary to spawn. Resolved via `$PATH` (or
+    /// absolute path). Required at runtime; an empty string trips the
+    /// resolver.
+    pub command: String,
+
+    /// `argv[1..]` — positional arguments passed to the engine.
+    #[serde(default)]
+    pub args: Vec<String>,
+
+    /// Environment variables merged over the parent process env before
+    /// spawn. `BTreeMap` so rendered order is deterministic.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 // ---------------------------------------------------------------------------
