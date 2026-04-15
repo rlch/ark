@@ -64,6 +64,12 @@ pub enum PickerAction {
     MoveUp,
     /// Selection moved down.
     MoveDown,
+    /// Enter on the list screen when the detail expand-tree should open
+    /// instead of switching sessions (T-103). Carries the agent id so the
+    /// wasm side can queue the on-demand socket fetch.
+    ExpandDetail(String),
+    /// Left / Tab / Esc on the detail screen: collapse back to the list.
+    CollapseDetail,
     /// Key ignored (no matching action).
     None,
 }
@@ -94,6 +100,11 @@ pub enum KeyInput {
     Char(char),
     /// `Ctrl+N` — open new-agent form. (`N` by itself also maps to this.)
     CtrlN,
+    /// `Tab` — on the detail screen this collapses back to the list.
+    Tab,
+    /// `Left` arrow — on the detail screen this collapses back to the
+    /// list; otherwise ignored.
+    Left,
     /// Any key we don't care about.
     Other,
 }
@@ -403,7 +414,10 @@ pub fn handle_list_key(state: &mut ListState, cache: &PickerCache, key: KeyInput
             PickerAction::MoveDown
         }
         KeyInput::Enter => match selected_agent(cache, state) {
-            Some((id, false)) => PickerAction::OpenSession(id.to_string()),
+            // T-103: Enter on the list now expands the detail tree
+            // (session-manager style). The wasm layer queues the on-demand
+            // Status socket fetch when this action fires.
+            Some((id, false)) => PickerAction::ExpandDetail(id.to_string()),
             Some((id, true)) => PickerAction::Resurrect(id.to_string()),
             None => PickerAction::None,
         },
@@ -441,7 +455,9 @@ pub fn handle_list_key(state: &mut ListState, cache: &PickerCache, key: KeyInput
                 c => append_to_filter(state, c),
             }
         }
-        KeyInput::Other => PickerAction::None,
+        // Tab/Left are meaningful on the detail screen (collapse back
+        // to list) but ignored on the list screen itself.
+        KeyInput::Tab | KeyInput::Left | KeyInput::Other => PickerAction::None,
     }
 }
 
@@ -663,11 +679,14 @@ mod tests {
     }
 
     #[test]
-    fn key_enter_opens_selected_session() {
+    fn key_enter_expands_detail_on_active() {
+        // T-103: Enter on the list screen expands the detail pane rather
+        // than jumping straight to the session — OpenSession now fires
+        // from the detail-screen Enter handler.
         let mut st = ListState::default();
         let c = cache_of(&[("a", "x")], &[]);
         let action = handle_list_key(&mut st, &c, KeyInput::Enter);
-        assert_eq!(action, PickerAction::OpenSession("a".to_string()));
+        assert_eq!(action, PickerAction::ExpandDetail("a".to_string()));
     }
 
     #[test]

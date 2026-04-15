@@ -69,16 +69,51 @@ pub struct ListState {
 
 /// State for the expanded-detail screen.
 ///
-/// Intentionally minimal — the richer [`AgentSummary`] lives in the cache,
-/// and T-103 will fetch a fresh snapshot over the agent socket when the
-/// screen opens. Keeping just the id here prevents stale data from
-/// leaking across screen transitions.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Carries the agent id (required) plus the optional fresh snapshot fetched
+/// from the supervisor's control socket on expand. `snapshot == None` with
+/// `error == None` is the "fetch in-flight" state; once the fetch completes
+/// exactly one of the two is populated.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DetailState {
     /// Agent id whose detail to display. Must exist in
-    /// `PickerCache::active` at render time; T-103 will branch to an
-    /// `Error` screen if the socket is gone mid-transition.
+    /// `PickerCache::active` at render time.
     pub agent_id: String,
+    /// Fresh snapshot pulled from the supervisor via `{"cmd":"Status"}`.
+    /// `None` while the fetch is in-flight or before it ran.
+    pub snapshot: Option<DetailSnapshot>,
+    /// Transient connect/parse error for inline display. Cleared on the
+    /// next successful fetch.
+    pub error: Option<String>,
+}
+
+/// Full per-agent snapshot surfaced on the detail screen (R5).
+///
+/// Shape is deserialised from the supervisor's `Status` reply — the R1
+/// serde_json ban means we parse with the hand-rolled extractors in
+/// [`crate::bootstrap`]. Optional epoch-seconds fields stay `Option<u64>`
+/// so missing values render as a dash rather than "0s ago".
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DetailSnapshot {
+    /// Zellij session name (from `spec.session`).
+    pub session: String,
+    /// Working directory (home-relative rendering happens at draw time).
+    pub cwd: String,
+    /// Orchestrator slug.
+    pub orchestrator: String,
+    /// Engine slug.
+    pub engine: String,
+    /// Phase string from the top-level `phase` field.
+    pub phase: String,
+    /// Current iteration (may not be surfaced by all orchestrators).
+    pub iter: Option<u32>,
+    /// Epoch-seconds of agent start.
+    pub started_at: Option<u64>,
+    /// Epoch-seconds of last event.
+    pub last_event_at: Option<u64>,
+    /// Epoch-seconds of most recent review round (reviewing orchestrator).
+    pub last_review_at: Option<u64>,
+    /// Short message from the most recent event.
+    pub last_event: Option<String>,
 }
 
 /// Orchestrator choice for a spawn request (R6 first field).

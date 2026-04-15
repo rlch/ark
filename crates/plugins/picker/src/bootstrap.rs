@@ -129,7 +129,7 @@ pub fn classify(state_summary: Option<&AgentSummary>, socket_fresh: bool) -> Cla
 /// Good enough for the 8 top-level fields in `status.json` that the picker
 /// needs — a real JSON parser would cost ~100kB of wasm. Nested objects
 /// must be located with a dedicated scan (see `find_object`).
-fn find_string_field(json: &str, key: &str) -> Option<String> {
+pub(crate) fn find_string_field(json: &str, key: &str) -> Option<String> {
     let pat = format!("\"{key}\"");
     let start = find_key_colon(json, &pat)?;
     let rest = &json[start..];
@@ -139,7 +139,7 @@ fn find_string_field(json: &str, key: &str) -> Option<String> {
 /// Extract the raw integer / float value for a top-level `"key"`, best-
 /// effort parsed as `u64`. Numbers with fractional parts are truncated by
 /// the `parse::<u64>()` branch failing — callers treat that as "missing".
-fn find_u64_field(json: &str, key: &str) -> Option<u64> {
+pub(crate) fn find_u64_field(json: &str, key: &str) -> Option<u64> {
     let pat = format!("\"{key}\"");
     let start = find_key_colon(json, &pat)?;
     let slice = json[start..].trim_start();
@@ -179,7 +179,7 @@ fn find_progress_field(json: &str, key: &str) -> Option<(u32, u32)> {
 /// Extract the JSON object body (content between `{` and matching `}`) for
 /// a top-level `"key":{ ... }`. Respects brace depth so nested objects work
 /// correctly. Returns `None` if the field is missing or not an object.
-fn find_object_field<'a>(json: &'a str, key: &str) -> Option<&'a str> {
+pub(crate) fn find_object_field<'a>(json: &'a str, key: &str) -> Option<&'a str> {
     let pat = format!("\"{key}\"");
     let start = find_key_colon(json, &pat)?;
     let slice = &json[start..];

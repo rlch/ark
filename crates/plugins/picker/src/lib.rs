@@ -45,6 +45,7 @@
 //! [`Picker::new`].
 
 pub mod bootstrap;
+pub mod render_detail;
 pub mod render_list;
 pub mod state;
 
@@ -53,14 +54,18 @@ pub use bootstrap::{
     classify, gc_stale_sockets, parse_agent_status_minimal, resolve_xdg_paths, scan_socket_dir,
     scan_state_dir,
 };
+pub use render_detail::{
+    DETAIL_CONT, DETAIL_INDENT, DETAIL_TREE, DetailError, build_detail_rows, format_humantime,
+    handle_detail_key, home_rel, parse_status_response, query_agent_status,
+};
 pub use render_list::{
     KeyInput, PickerAction, build_footer, build_header, format_age, format_progress, format_row,
     fuzzy_filter_and_sort, fuzzy_haystack, handle_list_key, phase_extra, phase_icon,
 };
 pub use state::{
-    AgentSummary, ConfirmKillState, DetailState, ErrorState, FormField, ListState, NewAgentState,
-    Orchestrator, PickerCache, PickerScreen, apply_scroll, filter_matches, move_selection_down,
-    move_selection_up,
+    AgentSummary, ConfirmKillState, DetailSnapshot, DetailState, ErrorState, FormField, ListState,
+    NewAgentState, Orchestrator, PickerCache, PickerScreen, apply_scroll, filter_matches,
+    move_selection_down, move_selection_up,
 };
 
 /// Registered plugin name used by supervisors when targeting `zellij pipe
@@ -91,6 +96,12 @@ pub struct Picker {
     /// highlight / pin the current agent (R3/R4). `None` until the first
     /// `SessionUpdate` lands.
     pub focused_session: Option<String>,
+    /// Cached list-state snapshot kept around while the detail screen is
+    /// open so that the list render underneath the expand-tree retains
+    /// the filter/selection/scroll the user left it in. Mirrors the
+    /// session-manager expand-tree UX from R5 — Enter expands, ← collapses
+    /// back to exactly the same list view.
+    pub last_list_state: state::ListState,
 }
 
 impl Picker {
@@ -140,8 +151,9 @@ impl Picker {
 #[cfg(target_arch = "wasm32")]
 mod wasm_plugin {
     use super::{
-        KeyInput, Picker, PickerAction, PickerScreen, bootstrap, build_footer, build_header,
-        format_row, fuzzy_filter_and_sort, handle_list_key,
+        DetailState, KeyInput, Picker, PickerAction, PickerScreen, bootstrap, build_detail_rows,
+        build_footer, build_header, format_row, fuzzy_filter_and_sort, handle_detail_key,
+        handle_list_key,
     };
     use zellij_tile::prelude::*;
 
@@ -164,6 +176,8 @@ mod wasm_plugin {
             BareKey::Char('n') if ctrl => KeyInput::CtrlN,
             BareKey::Char('k') if key.has_no_modifiers() => KeyInput::Up,
             BareKey::Char('j') if key.has_no_modifiers() => KeyInput::Down,
+            BareKey::Tab => KeyInput::Tab,
+            BareKey::Left => KeyInput::Left,
             BareKey::Char(c) => KeyInput::Char(c),
             _ => KeyInput::Other,
         }
@@ -243,29 +257,72 @@ mod wasm_plugin {
         fn update(&mut self, event: Event) -> bool {
             match event {
                 Event::Key(key) => {
-                    // Only the List screen is wired in T-102; other screens
-                    // land in later tasks.
-                    if let PickerScreen::List(ref mut list_state) = self.screen {
-                        let input = map_key(&key);
-                        let action = handle_list_key(list_state, &self.cache, input);
-                        match action {
-                            PickerAction::Close => {
-                                hide_self();
-                                false
+                    let input = map_key(&key);
+                    match self.screen {
+                        PickerScreen::List(ref mut list_state) => {
+                            let action = handle_list_key(list_state, &self.cache, input);
+                            // Snapshot list state each key press — cheap,
+                            // keeps `last_list_state` always fresh for any
+                            // expand transition.
+                            self.last_list_state = list_state.clone();
+                            match action {
+                                PickerAction::Close => {
+                                    hide_self();
+                                    false
+                                }
+                                PickerAction::OpenSession(name) => {
+                                    switch_session(Some(&name));
+                                    false
+                                }
+                                PickerAction::ExpandDetail(id) => {
+                                    // T-103: transition to the detail
+                                    // screen and kick off an on-demand
+                                    // Status fetch over the agent's
+                                    // socket. The fetch is host-IO; the
+                                    // wasm build stubs `query_agent_
+                                    // status` so we materialise an error
+                                    // state here (better than silently
+                                    // hanging).
+                                    let mut detail = DetailState {
+                                        agent_id: id.clone(),
+                                        ..DetailState::default()
+                                    };
+                                    let (_state_dir, runtime_dir) = wasm_paths();
+                                    let sock = runtime_dir.join(format!("{id}.sock"));
+                                    match super::query_agent_status(&sock) {
+                                        Ok(snap) => detail.snapshot = Some(snap),
+                                        Err(e) => detail.error = Some(e.message().to_string()),
+                                    }
+                                    self.screen = PickerScreen::Detail(detail);
+                                    true
+                                }
+                                PickerAction::FilterChanged
+                                | PickerAction::MoveUp
+                                | PickerAction::MoveDown => true,
+                                _ => true,
                             }
-                            PickerAction::OpenSession(name) => {
-                                switch_session(Some(&name));
-                                false
-                            }
-                            PickerAction::FilterChanged
-                            | PickerAction::MoveUp
-                            | PickerAction::MoveDown => true,
-                            // Later tiers wire the rest; for now, a redraw
-                            // is harmless and keeps the UI snappy.
-                            _ => true,
                         }
-                    } else {
-                        false
+                        PickerScreen::Detail(ref mut detail_state) => {
+                            let action = handle_detail_key(detail_state, input);
+                            match action {
+                                PickerAction::CollapseDetail => {
+                                    self.screen = PickerScreen::default();
+                                    true
+                                }
+                                PickerAction::OpenSession(name) => {
+                                    switch_session(Some(&name));
+                                    false
+                                }
+                                PickerAction::ConfirmKill(_id) => {
+                                    // T-105 wires the ConfirmKill screen;
+                                    // for now staying on Detail is the
+                                    // least-surprising behaviour.
+                                    true
+                                }
+                                _ => false,
+                            }
+                        }
+                        _ => false,
                     }
                 }
                 Event::Timer(_elapsed) => {
@@ -310,12 +367,29 @@ mod wasm_plugin {
         }
 
         fn render(&mut self, rows: usize, cols: usize) {
-            // T-102: render the list screen. Other screens land in later
-            // tasks — for now they fall through to a stub line so the
-            // compile-time match is total.
+            // T-102: render the list screen. T-103 overlays the detail
+            // expand-tree under the selected row when the picker is on the
+            // Detail screen.
             match &self.screen {
                 PickerScreen::List(list_state) => {
-                    render_list_screen(&self.cache, list_state, &self.focused_session, rows, cols);
+                    render_list_screen(
+                        &self.cache,
+                        list_state,
+                        &self.focused_session,
+                        None::<&super::DetailState>,
+                        rows,
+                        cols,
+                    );
+                }
+                PickerScreen::Detail(detail_state) => {
+                    render_list_screen(
+                        &self.cache,
+                        &self.last_list_state,
+                        &self.focused_session,
+                        Some(detail_state),
+                        rows,
+                        cols,
+                    );
                 }
                 _ => {
                     let text = Text::new("(screen not yet implemented)");
@@ -329,6 +403,7 @@ mod wasm_plugin {
         cache: &super::PickerCache,
         list_state: &super::ListState,
         focused: &Option<String>,
+        detail: Option<&super::DetailState>,
         rows: usize,
         cols: usize,
     ) {
@@ -356,12 +431,19 @@ mod wasm_plugin {
         let visible = footer_row - first_row_y;
         let now = now_ms();
         let filtered = fuzzy_filter_and_sort(cache, &list_state.filter);
+        // `y` tracks the next available render row; bumped by both agent
+        // rows and detail-tree rows so the expand-tree pushes later rows
+        // down — matches the zellij session-manager UX called out in R5.
+        let mut y = first_row_y;
         for (i, (id, _score)) in filtered
             .iter()
             .skip(list_state.scroll_offset)
             .take(visible)
             .enumerate()
         {
+            if y >= footer_row {
+                break;
+            }
             let is_resurrectable = cache.resurrectable.contains_key(id.as_str());
             let summary_opt = if is_resurrectable {
                 cache.resurrectable.get(id.as_str())
@@ -384,7 +466,24 @@ mod wasm_plugin {
             if is_selected {
                 text = text.color_range(HIGHLIGHT_LEVEL, ..);
             }
-            print_text_with_coordinates(text, 0, first_row_y + i, Some(cols), Some(1));
+            print_text_with_coordinates(text, 0, y, Some(cols), Some(1));
+            y += 1;
+
+            // Nested detail tree: draw directly beneath the agent row
+            // whose id matches the open detail screen.
+            if let Some(det) = detail {
+                if det.agent_id == *id {
+                    let home = std::env::var("HOME").unwrap_or_default();
+                    let rows = build_detail_rows(det, &home, now);
+                    for body in rows {
+                        if y >= footer_row {
+                            break;
+                        }
+                        print_text_with_coordinates(Text::new(&body), 0, y, Some(cols), Some(1));
+                        y += 1;
+                    }
+                }
+            }
         }
     }
 
