@@ -205,10 +205,45 @@ pub struct MuxPlaceholder;
 /// `UserEvent`s (R7 op 10) and reactions that fan out broadcast through
 /// this handle.
 ///
-/// TODO(T-4.5): replace with `Arc<EventBus>` (or an `EmitHandle`
-/// trait object) once the bus API is pinned.
+/// The placeholder implementation captures every emitted
+/// [`AgentEvent::UserEvent`] in an inner `Mutex<Vec<_>>` so tests (T-4.2)
+/// can assert on the payload without a real bus. Production callers
+/// drain the queue via [`EventBus::drain_user_events`]; the real bus
+/// will replace this surface entirely.
+///
+/// TODO(T-5.x): replace with `Arc<ark_core::EventBus>` (or an
+/// `EmitHandle` trait object) once the bus API is pinned. Capture-queue
+/// behavior goes away at that point; emit fans out via broadcast.
 #[derive(Debug, Default)]
-pub struct EventBus;
+pub struct EventBus {
+    /// In-memory capture of every `emit`-produced `UserEvent`. Drained by
+    /// tests; production callers will not observe this field once the
+    /// real bus lands.
+    captured: std::sync::Mutex<Vec<ark_types::event::AgentEvent>>,
+}
+
+impl EventBus {
+    /// Append a synthetic `UserEvent` to the capture queue.
+    ///
+    /// Called by the `emit` op ([`crate::ops::messaging::EmitOp`]); no-op
+    /// otherwise. Holds a `std::sync::Mutex`, not a `tokio::sync::Mutex`,
+    /// because the lock is only ever held across the `.push()` call —
+    /// never across an `.await`.
+    pub fn record_user_event(&self, event: ark_types::event::AgentEvent) {
+        if let Ok(mut q) = self.captured.lock() {
+            q.push(event);
+        }
+    }
+
+    /// Drain the capture queue, returning every recorded event in push
+    /// order and leaving the queue empty. Intended for tests.
+    pub fn drain_user_events(&self) -> Vec<ark_types::event::AgentEvent> {
+        match self.captured.lock() {
+            Ok(mut q) => std::mem::take(&mut *q),
+            Err(_) => Vec::new(),
+        }
+    }
+}
 
 /// Placeholder for the supervisor handle.
 ///
@@ -282,7 +317,7 @@ impl IntentContext {
     pub fn placeholder(scene_id: SceneId) -> Self {
         Self {
             mux: Arc::new(MuxPlaceholder),
-            bus: Arc::new(EventBus),
+            bus: Arc::new(EventBus::default()),
             supervisor: Arc::new(SupervisorHandle),
             scene_id,
             origin: ReactionOrigin,
