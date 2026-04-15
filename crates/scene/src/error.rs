@@ -24,6 +24,9 @@
 //! ext/metadata-invalid
 //! ext/version-mismatch
 //! ext/bad-config
+//! ext/cycle
+//! ext/cycle-depth-exceeded
+//! ext/reserved-namespace
 //! ```
 //!
 //! Cross-file errors (include-cycle, engine-conflict, etc.) attach the
@@ -139,6 +142,18 @@ pub enum ErrorCode {
     /// the field's declared type (R10 / T-10.5). Distinct from
     /// [`Self::PluginUnknownConfigKey`] which fires on unknown keys.
     ExtBadConfig,
+    /// Transitive `use` graph contains a cycle (R10 / R11 / T-10.6). The
+    /// resolver tracks visited extensions in a set; revisiting a name
+    /// already on the stack produces this code.
+    ExtCycle,
+    /// Transitive `use` chain exceeded the static depth bound
+    /// (R10 / T-10.6). Guard against pathological dependency ladders
+    /// without signalling a literal cycle. Limit = 16.
+    ExtCycleDepthExceeded,
+    /// Extension's rewritten namespace would land inside the reserved
+    /// `ark.core.*` prefix (R11 / T-10.7). Core ops are host-owned;
+    /// extensions MUST NOT shadow them.
+    ReservedNamespace,
 }
 
 impl ErrorCode {
@@ -179,6 +194,9 @@ impl ErrorCode {
             ErrorCode::WasmMetaInvalid => "ext/metadata-invalid",
             ErrorCode::ExtVersionMismatch => "ext/version-mismatch",
             ErrorCode::ExtBadConfig => "ext/bad-config",
+            ErrorCode::ExtCycle => "ext/cycle",
+            ErrorCode::ExtCycleDepthExceeded => "ext/cycle-depth-exceeded",
+            ErrorCode::ReservedNamespace => "ext/reserved-namespace",
         }
     }
 }
@@ -896,6 +914,64 @@ pub enum SceneError {
         /// (e.g. `"expected int, got string"`).
         message: String,
     },
+
+    /// Transitive `use` graph revisits an extension already on the
+    /// resolution stack (R10 / R11 / T-10.6).
+    ///
+    /// The `trail` is the ordered list of extension names from the
+    /// first-observed site through the hop that closed the loop, e.g.
+    /// `["picker", "layout", "picker"]`.
+    #[error("transitive `use` cycle detected: {}", trail.join(" → "))]
+    #[diagnostic(
+        code = "ext/cycle",
+        help("Break the cycle by removing one of the `use` declarations along the chain. Transitive `use` is one-way — each extension contributes intents/events once; there's no need for a child to re-`use` an ancestor.")
+    )]
+    ExtCycle {
+        /// Ordered name trail; first element = cycle start, last = the
+        /// hop that closed the loop (equal to the first).
+        trail: Vec<String>,
+    },
+
+    /// Transitive `use` chain reached the static depth limit of 16
+    /// (R10 / T-10.6) without forming a literal cycle — defends against
+    /// pathological dependency ladders.
+    #[error("transitive `use` depth limit exceeded ({depth} > {max}) via `{root}`")]
+    #[diagnostic(
+        code = "ext/cycle-depth-exceeded",
+        help("`use` chains are capped at depth 16. Flatten the dependency ladder by merging siblings, or refactor shared fragments into a base scene activated by `extends`.")
+    )]
+    ExtCycleDepthExceeded {
+        /// The top-level `use "<root>"` that kicked off the deepest
+        /// chain.
+        root: String,
+        /// The measured depth when the guard tripped.
+        depth: usize,
+        /// The static cap (always 16 for v0.3, surfaced verbatim so
+        /// the user reads the limit from the rendered output).
+        max: usize,
+    },
+
+    /// Extension author declared a name whose rewrite would land inside
+    /// the reserved `ark.core.*` namespace (R11 / T-10.7). Core ops are
+    /// host-owned; extensions cannot shadow them.
+    ///
+    /// Typical trigger: a naively-written extension called `ark-core`
+    /// would rewrite its unprefixed `intent "open_tab"` to
+    /// `ark.core.open_tab`, colliding with the real host op.
+    #[error(
+        "extension `{ext}` namespace `{attempted}` collides with the reserved `ark.core.*` prefix"
+    )]
+    #[diagnostic(
+        code = "ext/reserved-namespace",
+        help("`ark.core.*` is reserved for host-owned ops. Rename the extension (or the offending declaration) so the resulting namespace is anything other than `ark.core`.")
+    )]
+    ReservedNamespace {
+        /// Extension name whose declarations were walked.
+        ext: String,
+        /// The fully-qualified name that would have been written had the
+        /// rewrite been permitted.
+        attempted: String,
+    },
 }
 
 /// Canonical static help text for `scene/unknown-node` — the list
@@ -1007,6 +1083,9 @@ impl SceneError {
             SceneError::WasmMetaInvalid { .. } => ErrorCode::WasmMetaInvalid,
             SceneError::ExtVersionMismatch { .. } => ErrorCode::ExtVersionMismatch,
             SceneError::ExtBadConfig { .. } => ErrorCode::ExtBadConfig,
+            SceneError::ExtCycle { .. } => ErrorCode::ExtCycle,
+            SceneError::ExtCycleDepthExceeded { .. } => ErrorCode::ExtCycleDepthExceeded,
+            SceneError::ReservedNamespace { .. } => ErrorCode::ReservedNamespace,
         }
     }
 }

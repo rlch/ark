@@ -342,6 +342,175 @@ pub fn merge_repeated_uses(
 }
 
 // ---------------------------------------------------------------------------
+// Transitive resolution (T-10.6)
+// ---------------------------------------------------------------------------
+
+/// Static depth cap for transitive `use` chains (R10 / T-10.6).
+///
+/// The scene compiler aborts with [`SceneError::ExtCycleDepthExceeded`]
+/// when the walk reaches this depth without finding a cycle — a belt
+/// on top of the cycle-detection braces, catching pathological
+/// dependency ladders that wouldn't trigger [`SceneError::ExtCycle`]
+/// on their own.
+pub const MAX_TRANSITIVE_USE_DEPTH: usize = 16;
+
+/// A topologically-sorted set of transitively-resolved extensions.
+///
+/// The ordering invariant is "dependents come AFTER dependencies" —
+/// i.e. if extension `A`'s sidecar `use`s `B`, `B` appears earlier in
+/// `entries` than `A`. The scene compiler applies contributions in
+/// this order so that later entries can observe + override earlier
+/// ones, mirroring the R11 last-wins merge rule.
+#[derive(Debug)]
+pub struct TopologicallySorted<T> {
+    /// Resolved extensions in dependency-first order. Deduplicated by
+    /// name: each distinct extension appears exactly once.
+    pub entries: Vec<T>,
+}
+
+impl<T> TopologicallySorted<T> {
+    /// Construct an empty topo-sort result (used for scenes with no
+    /// `use` declarations).
+    pub fn empty() -> Self {
+        Self { entries: Vec::new() }
+    }
+
+    /// Borrow the ordered entries.
+    pub fn as_slice(&self) -> &[T] {
+        &self.entries
+    }
+
+    /// Consume into the owned `Vec`.
+    pub fn into_vec(self) -> Vec<T> {
+        self.entries
+    }
+}
+
+/// Resolve every `use "<name>"` root plus any extensions pulled in
+/// transitively through sidecar scene fragments.
+///
+/// Walks each `UseNode` in `roots`, resolving it via [`resolve_use`];
+/// then, if the resolved extension ships a sidecar `scene.kdl`, recurses
+/// into that sidecar's own `use` declarations. The walk is bounded by
+/// [`MAX_TRANSITIVE_USE_DEPTH`] and tracks the current path in a stack
+/// so cycles surface as [`SceneError::ExtCycle`] with the full trail.
+///
+/// # Ordering
+///
+/// Output is **dependency-first topological**: if `A`'s sidecar
+/// `use`s `B`, `B` appears earlier in the returned `entries`. Callers
+/// that need the original first-occurrence order of roots can recover
+/// it from the root list they passed in — the topo order is only
+/// canonical up to the DAG shape, not the textual root order.
+///
+/// # Errors
+///
+/// * [`SceneError::ExtCycle`] — transitive walk revisited an extension
+///   already on the resolution stack. The error's `trail` lists every
+///   hop from the first visit through the closing edge.
+/// * [`SceneError::ExtCycleDepthExceeded`] — recursion reached depth
+///   [`MAX_TRANSITIVE_USE_DEPTH`] without closing a cycle.
+/// * Any error surfaced by [`resolve_use`] for an individual edge
+///   (not-found, wasm-meta-invalid, version mismatch, …).
+#[allow(clippy::result_large_err)] // SceneError carries a rich diagnostic surface.
+pub fn resolve_uses_recursive(
+    roots: &[UseNode],
+    ctx: &UseResolveCtx,
+) -> Result<TopologicallySorted<ResolvedUse>, SceneError> {
+    // Canonical DAG walk:
+    //   * `visited` tracks every extension that has already been
+    //     fully resolved (to avoid re-work + to dedupe across fan-in).
+    //   * `stack` tracks the *current* DFS path — cycle is a revisit
+    //     of an extension that's still on the stack.
+    //   * `order` is the post-order output: dependents land AFTER
+    //     their dependencies, giving the required topological shape.
+    let mut visited: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    let mut stack: Vec<String> = Vec::new();
+    let mut order: Vec<ResolvedUse> = Vec::new();
+
+    // Dedupe roots preserving first-occurrence order so repeated
+    // `use "<same>"` roots walk only once (side-effect identity — see
+    // `merge_repeated_uses`).
+    let mut seen_root: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    for root in roots {
+        if !seen_root.insert(root.name.clone()) {
+            continue;
+        }
+        visit_use(
+            root,
+            ctx,
+            &root.name,
+            &mut visited,
+            &mut stack,
+            &mut order,
+            0,
+        )?;
+    }
+
+    Ok(TopologicallySorted { entries: order })
+}
+
+/// Recursive DFS body for [`resolve_uses_recursive`].
+///
+/// Invariant: `stack` is the current path of extension names from the
+/// outer-most root down to the call site, inclusive of neither the
+/// currently-being-resolved edge nor the root itself on the first
+/// call. See the inline comments below for the exact ordering.
+#[allow(clippy::result_large_err)]
+fn visit_use(
+    decl: &UseNode,
+    ctx: &UseResolveCtx,
+    root_name: &str,
+    visited: &mut std::collections::HashSet<String>,
+    stack: &mut Vec<String>,
+    order: &mut Vec<ResolvedUse>,
+    depth: usize,
+) -> Result<(), SceneError> {
+    if depth > MAX_TRANSITIVE_USE_DEPTH {
+        return Err(SceneError::ExtCycleDepthExceeded {
+            root: root_name.to_string(),
+            depth,
+            max: MAX_TRANSITIVE_USE_DEPTH,
+        });
+    }
+
+    // Cycle detection BEFORE resolution — cheaper, and produces a
+    // clean trail straight off the stack.
+    if let Some(first_idx) = stack.iter().position(|n| n == &decl.name) {
+        let mut trail: Vec<String> = stack.iter().skip(first_idx).cloned().collect();
+        trail.push(decl.name.clone());
+        return Err(SceneError::ExtCycle { trail });
+    }
+
+    // Fan-in dedupe: if we've already emitted this extension in a
+    // prior DFS branch, skip re-walking its sidecar — its post-order
+    // position is already committed.
+    if visited.contains(&decl.name) {
+        return Ok(());
+    }
+
+    stack.push(decl.name.clone());
+    let resolved = resolve_use(decl, ctx)?;
+
+    // Recurse into the sidecar's own `use` declarations FIRST so
+    // every dependency lands in `order` before its dependent (the
+    // topological invariant).
+    if let Some(sidecar) = &resolved.sidecar_scene {
+        for child in &sidecar.scene.uses {
+            visit_use(child, ctx, root_name, visited, stack, order, depth + 1)?;
+        }
+    }
+
+    stack.pop();
+    if visited.insert(decl.name.clone()) {
+        order.push(resolved);
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -711,6 +880,203 @@ extension {{
         assert_eq!(merged[1].resolved.name, "beta");
         assert_eq!(merged[0].occurrences, 2);
         assert_eq!(merged[1].occurrences, 2);
+    }
+
+    // -- Transitive resolution (T-10.6) --------------------------------
+
+    /// Build `<cwd>/.ark/extensions/<name>/` with an extension.kdl
+    /// whose body declares no intents/events but MAY ship a sidecar
+    /// scene.kdl. Helper used across the T-10.6 test block.
+    fn make_project_ext_with_sidecar(
+        cwd: &TempDir,
+        name: &str,
+        sidecar: Option<&str>,
+    ) {
+        let dir = cwd.path().join(".ark/extensions").join(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("extension.kdl"),
+            format!(
+                r#"
+extension {{
+    name "{name}"
+    version "0.1.0"
+    ark-range ""
+    zellij-range ""
+    config {{ }}
+}}
+"#
+            ),
+        )
+        .unwrap();
+        if let Some(s) = sidecar {
+            fs::write(dir.join("scene.kdl"), s).unwrap();
+        }
+    }
+
+    #[test]
+    fn transitive_resolves_two_level_chain_in_topo_order() {
+        let cwd = TempDir::new().unwrap();
+        // `root` → sidecar uses `child`; `child` has no further sidecar.
+        make_project_ext_with_sidecar(
+            &cwd,
+            "root",
+            Some(r#"scene "root-sidecar" { use "child" }"#),
+        );
+        make_project_ext_with_sidecar(&cwd, "child", None);
+
+        let ctx = UseResolveCtx::new(cwd.path(), Version::parse("0.1.0").unwrap());
+        let roots = vec![use_decl("root")];
+        let sorted =
+            resolve_uses_recursive(&roots, &ctx).expect("transitive resolves");
+        let names: Vec<&str> =
+            sorted.as_slice().iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["child", "root"]);
+    }
+
+    #[test]
+    fn transitive_cycle_detected_with_full_trail() {
+        let cwd = TempDir::new().unwrap();
+        // `a` → `b` → `a` (direct cycle).
+        make_project_ext_with_sidecar(
+            &cwd,
+            "a",
+            Some(r#"scene "a-side" { use "b" }"#),
+        );
+        make_project_ext_with_sidecar(
+            &cwd,
+            "b",
+            Some(r#"scene "b-side" { use "a" }"#),
+        );
+
+        let ctx = UseResolveCtx::new(cwd.path(), Version::parse("0.1.0").unwrap());
+        let err = resolve_uses_recursive(&[use_decl("a")], &ctx)
+            .expect_err("cycle must error");
+        assert_eq!(err.code_enum(), ErrorCode::ExtCycle);
+        match err {
+            SceneError::ExtCycle { trail } => {
+                // Trail = [a, b, a] — the first two are the path, the
+                // third is the closing revisit.
+                assert_eq!(trail, vec!["a", "b", "a"]);
+            }
+            other => panic!("expected ExtCycle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transitive_self_loop_detected() {
+        let cwd = TempDir::new().unwrap();
+        make_project_ext_with_sidecar(
+            &cwd,
+            "loop",
+            Some(r#"scene "s" { use "loop" }"#),
+        );
+        let ctx = UseResolveCtx::new(cwd.path(), Version::parse("0.1.0").unwrap());
+        let err = resolve_uses_recursive(&[use_decl("loop")], &ctx)
+            .expect_err("self-loop errors");
+        assert_eq!(err.code_enum(), ErrorCode::ExtCycle);
+    }
+
+    #[test]
+    fn transitive_fan_in_dedupes() {
+        // `root`'s sidecar uses both `a` and `b`; both `a` and `b`
+        // use `shared`. Expected topo: [shared, a, b, root] OR
+        // [shared, b, a, root] — we assert `shared` is first and
+        // `root` is last, and each extension appears exactly once.
+        let cwd = TempDir::new().unwrap();
+        make_project_ext_with_sidecar(
+            &cwd,
+            "root",
+            Some(r#"scene "s" { use "a"; use "b" }"#),
+        );
+        make_project_ext_with_sidecar(
+            &cwd,
+            "a",
+            Some(r#"scene "a-side" { use "shared" }"#),
+        );
+        make_project_ext_with_sidecar(
+            &cwd,
+            "b",
+            Some(r#"scene "b-side" { use "shared" }"#),
+        );
+        make_project_ext_with_sidecar(&cwd, "shared", None);
+
+        let ctx = UseResolveCtx::new(cwd.path(), Version::parse("0.1.0").unwrap());
+        let sorted =
+            resolve_uses_recursive(&[use_decl("root")], &ctx).expect("resolves");
+        let names: Vec<&str> =
+            sorted.as_slice().iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names.len(), 4, "fan-in dedupes: got {names:?}");
+        assert_eq!(names.first().copied(), Some("shared"));
+        assert_eq!(names.last().copied(), Some("root"));
+        // Each extension appears exactly once.
+        let mut sorted_names = names.clone();
+        sorted_names.sort();
+        sorted_names.dedup();
+        assert_eq!(sorted_names.len(), 4);
+    }
+
+    #[test]
+    fn transitive_depth_limit_enforced() {
+        // Build a straight chain `e0 → e1 → ... → e17` — longer than
+        // MAX_TRANSITIVE_USE_DEPTH (= 16). The depth-exceeded guard
+        // fires before cycle detection because there is no cycle.
+        let cwd = TempDir::new().unwrap();
+        for i in 0..18 {
+            let name = format!("e{i}");
+            let next = format!("e{}", i + 1);
+            let sidecar = if i < 17 {
+                Some(format!(r#"scene "s" {{ use "{next}" }}"#))
+            } else {
+                None
+            };
+            make_project_ext_with_sidecar(&cwd, &name, sidecar.as_deref());
+        }
+
+        let ctx = UseResolveCtx::new(cwd.path(), Version::parse("0.1.0").unwrap());
+        let err = resolve_uses_recursive(&[use_decl("e0")], &ctx)
+            .expect_err("depth exceeded");
+        assert_eq!(err.code_enum(), ErrorCode::ExtCycleDepthExceeded);
+        match err {
+            SceneError::ExtCycleDepthExceeded { root, depth, max } => {
+                assert_eq!(root, "e0");
+                assert!(depth > max);
+                assert_eq!(max, MAX_TRANSITIVE_USE_DEPTH);
+            }
+            other => panic!("expected ExtCycleDepthExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn transitive_empty_roots_is_empty_topo_sort() {
+        let cwd = TempDir::new().unwrap();
+        let ctx = UseResolveCtx::new(cwd.path(), Version::parse("0.1.0").unwrap());
+        let sorted = resolve_uses_recursive(&[], &ctx).expect("empty ok");
+        assert!(sorted.as_slice().is_empty());
+    }
+
+    #[test]
+    fn transitive_no_sidecar_resolves_only_root() {
+        // Root has no sidecar → only itself in the output.
+        let cwd =
+            make_project_extension("demo", sample_manifest_with_intents(), None);
+        let ctx = ctx_for(&cwd);
+        let sorted = resolve_uses_recursive(&[use_decl("demo")], &ctx).expect("ok");
+        let names: Vec<&str> =
+            sorted.as_slice().iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["demo"]);
+    }
+
+    #[test]
+    fn transitive_deduplicates_repeated_roots() {
+        // Repeated roots shouldn't walk twice — the sidecar would
+        // otherwise emit duplicate intents into the final table.
+        let cwd =
+            make_project_extension("demo", sample_manifest_with_intents(), None);
+        let ctx = ctx_for(&cwd);
+        let roots = vec![use_decl("demo"), use_decl("demo")];
+        let sorted = resolve_uses_recursive(&roots, &ctx).expect("ok");
+        assert_eq!(sorted.as_slice().len(), 1);
     }
 
     #[test]
