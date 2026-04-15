@@ -29,6 +29,8 @@ pub use ark_ext_metadata_types::{
     StringNode,
 };
 
+pub mod search_path;
+
 /// Serialize an [`ExtensionMetadata`] to KDL bytes.
 ///
 /// Produced bytes are what goes into the wasm `ark.metadata` custom
@@ -349,10 +351,13 @@ mod tests {
         }
     }
 
+    #[allow(unused_imports)]
     mod register_macro_fixture {
         //! Host module for the `register_extension!` expansion so the
         //! generated fn has its own namespace (the macro declares a
-        //! top-level fn inside the caller's scope).
+        //! top-level fn inside the caller's scope). `register_extension`
+        //! itself is used via macro-namespace lookup; the `use` below
+        //! is required for the lookup but reports spuriously as unused.
 
         use crate::{ConfigSchema, ExtensionMetadata, StringNode, register_extension};
 
