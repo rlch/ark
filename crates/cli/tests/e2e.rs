@@ -1,10 +1,18 @@
-//! T-127 — end-to-end scenarios (cavekit-testing R4).
+//! T-127 + T-128 — end-to-end scenarios (cavekit-testing R4).
 //!
 //! These tests drive the installed `ark` binary (and, where useful, the
 //! `mock-claude` shim from `ark-test-fixtures`) across realistic lifecycle
 //! scenarios. They are disk-heavy and occasionally spawn subprocesses, so
-//! they are gated behind `ARK_E2E=1` by default — `cargo test` normally
-//! skips them without failing. CI gating is wired by T-128.
+//! they are gated behind `ARK_E2E=1` — `cargo test` normally skips them
+//! without failing. The gate, tempdir bundle, and subprocess cleanup
+//! logic all live in [`e2e_support`] (T-128). Each scenario:
+//!
+//! 1. `if !e2e_support::require_e2e() { return; }` — skip when the
+//!    `ARK_E2E=1` env var is absent.
+//! 2. `let _env = e2e_support::E2eEnv::new();` — RAII guard that stamps
+//!    `ARK_STATE_DIR` / `ARK_RUNTIME_DIR` / `ARK_CONFIG_DIR` onto the
+//!    process and, on drop (including during a test panic), SIGTERMs
+//!    any tracked subprocesses then restores the prior env vars.
 //!
 //! ## Scenario coverage
 //!
@@ -26,58 +34,16 @@
 //!
 //! `spawn → kill` still has a smoke test against the `ark kill` idempotent
 //! "already dead" path so the command surface is at least exercised.
-//!
-//! ## Env isolation
-//!
-//! Each test allocates a fresh tempdir and points `ARK_STATE_DIR`,
-//! `ARK_CONFIG_DIR`, and `ARK_RUNTIME_DIR` inside it via [`TestEnv`]. No
-//! test mutates the real ark directories.
+
+mod e2e_support;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use ark_test_fixtures::paths as fixture_paths;
 use ark_types::{AgentId, AgentSpec, AgentStatus};
-use tempfile::TempDir;
 
-// ---- gating + discovery ---------------------------------------------------
-
-/// Skip unless `ARK_E2E=1`. Prints a stable `SKIP:` line the test harness
-/// picks up and returns `true` when the test body should short-circuit.
-fn should_skip() -> bool {
-    match std::env::var("ARK_E2E").ok().as_deref() {
-        Some("1") => false,
-        _ => {
-            eprintln!("SKIP: set ARK_E2E=1 to run e2e tests");
-            true
-        }
-    }
-}
-
-/// Absolute path to the compiled `ark` binary, injected by cargo.
-fn ark_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_ark"))
-}
-
-/// Best-effort path to the `mock-claude` binary, discovered as a sibling of
-/// the `ark` binary in the shared target dir. `cargo test --workspace`
-/// builds all workspace bins, so this is typically populated. Returns
-/// `None` when the sibling binary has not been produced — callers then
-/// treat the test as skipped.
-fn mock_claude_bin() -> Option<PathBuf> {
-    let ark = ark_bin();
-    let parent = ark.parent()?;
-    // `target/{debug|release}/deps/.../ark-<hash>` vs the direct
-    // `target/debug/ark` shape — climb one level when we land in `deps/`.
-    let candidates = [
-        parent.join("mock-claude"),
-        parent
-            .parent()
-            .map(|p| p.join("mock-claude"))
-            .unwrap_or_default(),
-    ];
-    candidates.into_iter().find(|p| p.is_file())
-}
+// ---- local helpers --------------------------------------------------------
 
 /// Skip the test if `zellij` is not on PATH. Many scenarios need a real
 /// zellij because `ark spawn` preflights it before doing anything else.
@@ -91,61 +57,6 @@ fn zellij_on_path() -> bool {
         .map(|s| s.success())
         .unwrap_or(false)
 }
-
-// ---- test harness ---------------------------------------------------------
-
-/// RAII tempdir + env-var bundle. All ark state for a single test lives
-/// under `TempDir::path()`; [`TestEnv::cmd`] stamps the standard ark env
-/// vars (`ARK_STATE_DIR`, `ARK_CONFIG_DIR`, `ARK_RUNTIME_DIR`) onto a
-/// freshly-constructed `Command`. Dropping the `TestEnv` deletes the
-/// tempdir (tempfile's default), so no external cleanup is needed.
-struct TestEnv {
-    tmp: TempDir,
-}
-
-impl TestEnv {
-    fn new() -> Self {
-        let tmp = tempfile::Builder::new()
-            .prefix("ark-e2e-")
-            .tempdir()
-            .expect("tempdir");
-        // Pre-create each ark dir so sub-processes don't race on
-        // first-use mkdir.
-        std::fs::create_dir_all(tmp.path().join("state")).unwrap();
-        std::fs::create_dir_all(tmp.path().join("config")).unwrap();
-        std::fs::create_dir_all(tmp.path().join("runtime")).unwrap();
-        std::fs::create_dir_all(tmp.path().join("runtime").join("agents")).unwrap();
-        Self { tmp }
-    }
-
-    fn state_dir(&self) -> PathBuf {
-        self.tmp.path().join("state")
-    }
-
-    fn config_dir(&self) -> PathBuf {
-        self.tmp.path().join("config")
-    }
-
-    fn runtime_dir(&self) -> PathBuf {
-        self.tmp.path().join("runtime")
-    }
-
-    /// Build a `Command` pointed at the installed `ark` binary with the
-    /// tempdir-backed env vars stamped on. Tests add subcommand args on
-    /// top of this.
-    fn ark(&self) -> Command {
-        let mut c = Command::new(ark_bin());
-        c.env("ARK_STATE_DIR", self.state_dir());
-        c.env("ARK_CONFIG_DIR", self.config_dir());
-        c.env("ARK_RUNTIME_DIR", self.runtime_dir());
-        // Guard against inheriting NO_COLOR=""/etc weirdness from the
-        // caller; e2e tests rely on plain, stable textual output.
-        c.env("NO_COLOR", "1");
-        c
-    }
-}
-
-// ---- helpers --------------------------------------------------------------
 
 /// Run `cmd`, capture output, and include both streams in any panic
 /// message. Callers still inspect `status`/`stdout`/`stderr` afterwards.
@@ -196,7 +107,7 @@ fn seed_archived_agent(state_dir: &Path, orchestrator: &str, name: &str) -> Agen
 /// stdout. Requires zellij because `ark spawn` preflights it.
 #[test]
 fn scenario_spawn_then_list() {
-    if should_skip() {
+    if !e2e_support::require_e2e() {
         return;
     }
     if !zellij_on_path() {
@@ -204,18 +115,19 @@ fn scenario_spawn_then_list() {
         return;
     }
 
-    let env = TestEnv::new();
+    let env = e2e_support::E2eEnv::new();
 
     // Drive `ark spawn` with a no-op command that exits quickly — the
     // supervisor is stubbed so we're really just exercising the CLI
     // side-effects (spec.json write, state dir creation).
+    let cwd = env.state_dir().to_path_buf();
     let out = capture(
         env.ark()
             .arg("spawn")
             .arg("--orchestrator")
             .arg("claude-code")
             .arg("--cwd")
-            .arg(env.tmp.path())
+            .arg(&cwd)
             .arg("--name")
             .arg("e2e1")
             .arg("--no-detach")
@@ -264,13 +176,13 @@ fn scenario_spawn_then_list() {
 /// idempotent branch (see `commands/kill.rs` §120).
 #[test]
 fn scenario_spawn_then_kill() {
-    if should_skip() {
+    if !e2e_support::require_e2e() {
         return;
     }
 
-    let env = TestEnv::new();
+    let env = e2e_support::E2eEnv::new();
     // Seed a synthetic agent so the id resolver has something to match.
-    let id = seed_archived_agent(&env.state_dir(), "claude-code", "e2e2");
+    let id = seed_archived_agent(env.state_dir(), "claude-code", "e2e2");
 
     let out = capture(env.ark().arg("kill").arg(id.as_str()));
     assert!(
@@ -294,13 +206,14 @@ fn scenario_spawn_then_kill() {
 /// events and asserts `Phase::Stalled` arrives in `status.json`.
 #[test]
 fn scenario_spawn_then_stall_deferred() {
-    if should_skip() {
+    if !e2e_support::require_e2e() {
         return;
     }
-    if mock_claude_bin().is_none() {
+    if e2e_support::mock_claude_bin().is_none() {
         eprintln!("SKIP: mock-claude binary not built; scenario deferred");
         return;
     }
+    let _env = e2e_support::E2eEnv::new();
     // Placeholder assertion: the stall fixture exists so we know what
     // the real test would feed once the supervisor ships.
     let script = PathBuf::from(fixture_paths::MOCK_CLAUDE_SCRIPTS).join("stall-script.json");
@@ -318,13 +231,14 @@ fn scenario_spawn_then_stall_deferred() {
 /// to `status.json`.
 #[test]
 fn scenario_spawn_then_done_deferred() {
-    if should_skip() {
+    if !e2e_support::require_e2e() {
         return;
     }
-    if mock_claude_bin().is_none() {
+    if e2e_support::mock_claude_bin().is_none() {
         eprintln!("SKIP: mock-claude binary not built; scenario deferred");
         return;
     }
+    let _env = e2e_support::E2eEnv::new();
     let script = PathBuf::from(fixture_paths::MOCK_CLAUDE_SCRIPTS).join("stop-only.json");
     assert!(
         script.is_file(),
@@ -343,12 +257,12 @@ fn scenario_spawn_then_done_deferred() {
 /// reach for `ark doctor`.
 #[test]
 fn scenario_crashed_supervisor_archive() {
-    if should_skip() {
+    if !e2e_support::require_e2e() {
         return;
     }
 
-    let env = TestEnv::new();
-    let id = seed_archived_agent(&env.state_dir(), "cavekit", "oomd");
+    let env = e2e_support::E2eEnv::new();
+    let id = seed_archived_agent(env.state_dir(), "cavekit", "oomd");
 
     // `ark list ID --json` emits the detail view as JSON, so we can
     // assert on `phase == "crashed"` programmatically.
@@ -375,27 +289,28 @@ fn scenario_crashed_supervisor_archive() {
 /// the same entry point the picker uses.
 #[test]
 fn scenario_picker_spawn_exec() {
-    if should_skip() {
+    if !e2e_support::require_e2e() {
         return;
     }
     if !zellij_on_path() {
         eprintln!("SKIP: zellij not on PATH (required by ark spawn preflight)");
         return;
     }
-    let Some(mock) = mock_claude_bin() else {
+    let Some(mock) = e2e_support::mock_claude_bin() else {
         eprintln!("SKIP: mock-claude binary not built");
         return;
     };
     let script = PathBuf::from(fixture_paths::MOCK_CLAUDE_SCRIPTS).join("stop-only.json");
 
-    let env = TestEnv::new();
+    let env = e2e_support::E2eEnv::new();
+    let cwd = env.state_dir().to_path_buf();
     let out = capture(
         env.ark()
             .arg("spawn")
             .arg("--orchestrator")
             .arg("claude-code")
             .arg("--cwd")
-            .arg(env.tmp.path())
+            .arg(&cwd)
             .arg("--name")
             .arg("picker-e2e")
             .arg("--no-detach")
@@ -440,11 +355,11 @@ fn scenario_picker_spawn_exec() {
 /// the filesystem effect rather than the exit code.
 #[test]
 fn scenario_doctor_fix_removes_stale_socket() {
-    if should_skip() {
+    if !e2e_support::require_e2e() {
         return;
     }
 
-    let env = TestEnv::new();
+    let env = e2e_support::E2eEnv::new();
     // Use a well-formed agent id so AgentId::parse inside the orphan
     // classifier accepts it.
     let id = AgentId::new("claude-code", "ghost");
