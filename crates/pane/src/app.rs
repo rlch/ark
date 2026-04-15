@@ -264,4 +264,46 @@ mod tests {
             None
         }));
     }
+
+    #[test]
+    fn no_color_env_any_nonempty_value_disables_color() {
+        // NO_COLOR spec: *any* non-empty value (including "0" or "false")
+        // disables color. Widgets must not parse the value.
+        for val in ["0", "false", "no", "true", " ", "anything"] {
+            let v = val.to_string();
+            assert!(
+                no_color_from_env(|k| if k == "NO_COLOR" {
+                    Some(v.clone())
+                } else {
+                    None
+                }),
+                "value {val:?} should disable color"
+            );
+        }
+    }
+
+    #[test]
+    fn is_ctrl_c_with_additional_modifiers_still_true() {
+        // CTRL+SHIFT+c or CTRL+ALT+c must still be recognized — predicate only
+        // requires CONTROL to be present, so extra modifiers don't break it.
+        let mods = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+        assert!(is_ctrl_c(&key(KeyCode::Char('c'), mods)));
+        let mods = KeyModifiers::CONTROL | KeyModifiers::ALT;
+        assert!(is_ctrl_c(&key(KeyCode::Char('C'), mods)));
+    }
+
+    #[test]
+    fn pane_event_custom_wraps_arbitrary_payload() {
+        // Ensures Box<dyn Any + Send> round-trips through PaneEvent::Custom —
+        // the pattern pane handlers use to dispatch typed custom messages.
+        let payload: Box<dyn std::any::Any + Send> = Box::new(42u32);
+        let ev = PaneEvent::Custom(payload);
+        match ev {
+            PaneEvent::Custom(p) => {
+                let n = p.downcast::<u32>().expect("downcast to u32");
+                assert_eq!(*n, 42);
+            }
+            _ => panic!("expected Custom variant"),
+        }
+    }
 }

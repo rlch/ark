@@ -618,4 +618,76 @@ u UU N... 100644 100644 100644 100644 aa bb cc merge_me.rs
         // staged header + 1 + unstaged header + 1 + untracked header + 1 = 6
         assert_eq!(lines.len(), 6);
     }
+
+    #[test]
+    fn header_line_detached_head_without_branch_shows_placeholder() {
+        // State with no branch set (e.g. detached HEAD that the parser
+        // couldn't resolve) must still produce a valid one-line header.
+        let s = GitState {
+            is_repo: true,
+            branch: None,
+            ahead: 0,
+            behind: 0,
+            ..Default::default()
+        };
+        let h = header_line(&s);
+        assert!(h.contains("(detached)"), "header: {h:?}");
+        assert!(h.contains("↑0"));
+        assert!(h.contains("↓0"));
+    }
+
+    #[test]
+    fn git_render_frame_handles_multiple_sizes() {
+        // SIGWINCH simulation: render the same state into TestBackends of
+        // different sizes. ratatui lays out against f.area(), so any layout
+        // panic here would crash the real pane on terminal resize.
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut s = GitState {
+            is_repo: true,
+            branch: Some("main".into()),
+            ahead: 1,
+            behind: 0,
+            ..Default::default()
+        };
+        // Populate each section so render walks all branches.
+        s.staged.push(FileChange {
+            status: 'M',
+            path: "a.rs".into(),
+        });
+        s.unstaged.push(FileChange {
+            status: 'M',
+            path: "b.rs".into(),
+        });
+        s.untracked.push("c.rs".into());
+
+        for (w, h) in [(40u16, 10u16), (80, 24), (120, 40)] {
+            let backend = TestBackend::new(w, h);
+            let mut term = Terminal::new(backend).unwrap();
+            term.draw(|f| render_frame(f, &s, std::path::Path::new("/tmp")))
+                .unwrap();
+            let buf = term.backend().buffer().clone();
+            assert_eq!(buf.area.width, w);
+            assert_eq!(buf.area.height, h);
+        }
+    }
+
+    #[test]
+    fn apply_status_preserves_scroll_when_within_bounds() {
+        // Contrasts with the existing "resets_scroll_when_list_shrinks" case.
+        // When the new list is long enough to keep the current offset valid,
+        // the offset must survive the refresh.
+        let mut state = GitState {
+            is_repo: true,
+            scroll_offset: 3,
+            ..Default::default()
+        };
+        let mut status = PorcelainStatus::default();
+        for i in 0..10 {
+            status.untracked.push(format!("f{i}"));
+        }
+        apply_status(&mut state, status);
+        assert_eq!(state.scroll_offset, 3);
+        assert_eq!(state.untracked.len(), 10);
+    }
 }

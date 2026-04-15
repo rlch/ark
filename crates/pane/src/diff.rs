@@ -563,4 +563,60 @@ mod tests {
         assert_eq!(flow, PaneFlow::Continue);
         assert_eq!(s.scroll_offset, before_offset);
     }
+
+    #[test]
+    fn handle_event_pure_custom_event_is_noop() {
+        // Custom events are reserved for future file-watch dispatch (T-040).
+        // Until wired, they must not change state or quit the loop.
+        let mut s = DiffState::new_repo(false);
+        let before_offset = s.scroll_offset;
+        let before_dirty = s.dirty;
+        let payload: Box<dyn std::any::Any + Send> = Box::new(());
+        let flow = handle_event_pure(&mut s, PaneEvent::Custom(payload), 100, &PathBuf::from("."));
+        assert_eq!(flow, PaneFlow::Continue);
+        assert_eq!(s.scroll_offset, before_offset);
+        assert_eq!(s.dirty, before_dirty);
+    }
+
+    #[test]
+    fn clamp_scroll_when_lines_exactly_fit_viewport_is_zero() {
+        // When rendered line count equals viewport height there is nothing
+        // off-screen, so the max offset collapses to zero.
+        assert_eq!(clamp_scroll(0, 20, 20), 0);
+        assert_eq!(clamp_scroll(5, 20, 20), 0);
+        assert_eq!(clamp_scroll(u16::MAX, 20, 20), 0);
+    }
+
+    #[test]
+    fn diff_render_resize_produces_output_at_multiple_sizes() {
+        // SIGWINCH simulation: the real pane loop re-draws via `terminal.draw`
+        // on any Resize event. Exercising render_frame against different-sized
+        // TestBackends ensures layout code handles small and large viewport
+        // dimensions without panicking — any panic here would also crash the
+        // real pane on SIGWINCH.
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let s = DiffState::new_repo(false);
+        let cwd = PathBuf::from("/tmp/fake");
+
+        // Tiny size — header (3) + body min 1 + footer (1) barely fits.
+        let backend_small = TestBackend::new(20, 8);
+        let mut term = Terminal::new(backend_small).unwrap();
+        term.draw(|f| render_frame(f, &s, &cwd)).unwrap();
+        let buf_small = term.backend().buffer().clone();
+        assert_eq!(buf_small.area.width, 20);
+        assert_eq!(buf_small.area.height, 8);
+
+        // "Resize" up to 80x24 — same state, different buffer dimensions.
+        let backend_large = TestBackend::new(80, 24);
+        let mut term = Terminal::new(backend_large).unwrap();
+        term.draw(|f| render_frame(f, &s, &cwd)).unwrap();
+        let buf_large = term.backend().buffer().clone();
+        assert_eq!(buf_large.area.width, 80);
+        assert_eq!(buf_large.area.height, 24);
+
+        // Content should include the title marker in both renders.
+        let text_large: String = buf_large.content().iter().map(|c| c.symbol()).collect();
+        assert!(text_large.contains("git diff"));
+    }
 }

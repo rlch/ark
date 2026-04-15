@@ -714,4 +714,54 @@ mod tests {
             assert_eq!(done_fail.fg, Some(Color::Red));
         }
     }
+
+    #[test]
+    fn color_for_kind_covers_stall_permission_task_done_and_unknown() {
+        // Expand coverage to every explicit arm of color_for_kind + the
+        // catch-all "Gray" default used for unclassified kinds. Guarded so
+        // setting NO_COLOR at the process level doesn't break the test.
+        if no_color() {
+            return;
+        }
+        assert_eq!(color_for_kind("stall", "").fg, Some(Color::Yellow));
+        assert_eq!(
+            color_for_kind("permission_asked", "").fg,
+            Some(Color::Yellow)
+        );
+        assert_eq!(
+            color_for_kind("permission_resolved", "").fg,
+            Some(Color::Yellow)
+        );
+        assert_eq!(color_for_kind("task_done", "").fg, Some(Color::Green));
+        // Unknown / uncategorized kind falls through to Gray.
+        assert_eq!(color_for_kind("some_future_kind", "").fg, Some(Color::Gray));
+        assert_eq!(color_for_kind("message", "x").fg, Some(Color::Gray));
+    }
+
+    #[test]
+    fn log_state_new_preserves_agent_id_and_filter() {
+        // `LogState::new` is the widget's arg-parsing landing zone:
+        // `ark pane log --id <ID> --filter <KIND>` maps `ID` and `KIND` here.
+        let s = LogState::new("cavekit:auth", Some("tool_use".to_string()));
+        assert_eq!(s.agent_id, "cavekit:auth");
+        assert_eq!(s.filter.as_deref(), Some("tool_use"));
+        assert!(s.follow, "follow must default to true per R3");
+        assert!(!s.awaiting_gg);
+        assert_eq!(s.scroll_offset, 0);
+        assert!(s.rows.is_empty());
+
+        // None filter is permitted.
+        let s2 = LogState::new("x:y", None);
+        assert!(s2.filter.is_none());
+    }
+
+    #[test]
+    fn filter_matches_whitespace_padded_needle() {
+        // The implementation trims needle whitespace — verify callers can
+        // pass a `--filter " tool "` value without surprise.
+        assert!(filter_matches(Some("  tool  "), "tool_use"));
+        assert!(filter_matches(Some("\tdone\n"), "done"));
+        // All-whitespace needle behaves like an empty filter (matches all).
+        assert!(filter_matches(Some("   "), "anything"));
+    }
 }
