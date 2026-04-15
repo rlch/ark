@@ -1,4 +1,5 @@
 /target
+/target-alt
 **/*.rs.bk
 *.swp
 .DS_Store
