@@ -129,6 +129,7 @@ dependencies = [
  "ark-orchestrators-cavekit",
  "ark-orchestrators-claude-code",
  "ark-pane",
+ "ark-test-fixtures",
  "ark-types",
  "chrono",
  "clap 4.6.0",

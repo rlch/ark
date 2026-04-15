@@ -39,3 +39,4 @@ ulid = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 ulid = { workspace = true }
+ark-test-fixtures = { path = "../test-fixtures" }
