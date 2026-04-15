@@ -842,6 +842,126 @@ mod tests {
         );
     }
 
+    // -------- T-124 wire-shape mirror tests (cavekit-testing R5) ------
+    //
+    // These pin the exact NDJSON envelope emitted by the ark-cli mirror
+    // (crates/cli/src/commands/kill.rs) to what the supervisor's
+    // `Request` + command-arg structs deserialize. If ark-cli and the
+    // supervisor drift, these tests break. We only check bytes + typed
+    // deserialization — no live socket, no subprocess.
+
+    /// Exact byte shape produced by `ark kill <id>` (cavekit-cli R4,
+    /// T-089). Verifies (a) the wire bytes are well-formed JSON, (b) they
+    /// parse into the supervisor's `Request` envelope, and (c) the
+    /// `args` substructure deserializes into `KillArgs` with the
+    /// expected flag.
+    #[test]
+    fn ark_cli_kill_bytes_match_supervisor_envelope() {
+        // Mirror of `build_request(false, _)` in ark-cli kill.rs.
+        let mirror_bytes = br#"{"cmd":"Kill","args":{"remove_worktree":false}}"#;
+
+        let v: JsonValue = serde_json::from_slice(mirror_bytes).unwrap();
+        assert_eq!(v["cmd"], JsonValue::String("Kill".into()));
+
+        let req: Request = serde_json::from_slice(mirror_bytes).unwrap();
+        assert_eq!(req.cmd, "Kill");
+        let args: KillArgs = req.args_as().unwrap();
+        assert!(!args.remove_worktree);
+
+        // Force variant (`ark kill --force`).
+        let force_bytes = br#"{"cmd":"ForceKill"}"#;
+        let req: Request = serde_json::from_slice(force_bytes).unwrap();
+        assert_eq!(req.cmd, "ForceKill");
+        // Missing args must default to an empty object for ergonomics.
+        assert!(req.args.is_null() || req.args.is_object());
+    }
+
+    /// Every command variant documented in the module header must parse
+    /// from a plausible NDJSON line without panicking. This is the
+    /// "each variant round-trips" gate from T-124.
+    #[test]
+    fn every_command_variant_parses_as_request() {
+        let lines: &[&[u8]] = &[
+            br#"{"cmd":"Ping"}"#,
+            br#"{"cmd":"Status","args":{}}"#,
+            br#"{"cmd":"Kill","args":{"remove_worktree":true}}"#,
+            br#"{"cmd":"Kill","args":{"remove_worktree":false}}"#,
+            br#"{"cmd":"ForceKill"}"#,
+            br#"{"cmd":"Rename","args":{"new_name":"renamed-label"}}"#,
+            br#"{"cmd":"Forget","args":{}}"#,
+        ];
+        for line in lines {
+            let req: Request = serde_json::from_slice(line).unwrap_or_else(|e| {
+                panic!(
+                    "variant should parse: {} (err: {e})",
+                    std::str::from_utf8(line).unwrap_or("?")
+                )
+            });
+            assert!(!req.cmd.is_empty());
+        }
+    }
+
+    /// KillArgs is the one arg-struct with a default + optional field.
+    /// Confirm both the "explicit true", "explicit false", and "missing
+    /// -> default false" paths work without a panic.
+    #[test]
+    fn kill_args_serde_roundtrip_and_defaults() {
+        // Explicit both values.
+        for flag in [true, false] {
+            let a = KillArgs {
+                remove_worktree: flag,
+            };
+            let s = serde_json::to_string(&a).unwrap();
+            let back: KillArgs = serde_json::from_str(&s).unwrap();
+            assert_eq!(back.remove_worktree, flag);
+        }
+
+        // Missing field -> default false (via #[serde(default)]).
+        let back: KillArgs = serde_json::from_str("{}").unwrap();
+        assert!(!back.remove_worktree);
+    }
+
+    /// RenameArgs has a required `new_name` field. Missing it must
+    /// return an error (not a default empty string).
+    #[test]
+    fn rename_args_requires_new_name() {
+        let ok: RenameArgs = serde_json::from_str(r#"{"new_name":"foo"}"#).unwrap();
+        assert_eq!(ok.new_name, "foo");
+
+        let err = serde_json::from_str::<RenameArgs>("{}")
+            .expect_err("missing new_name must fail to deserialize");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("new_name") || msg.contains("missing"),
+            "err should mention new_name/missing: {msg}"
+        );
+    }
+
+    /// Malformed request.args (wrong type) must yield an `ok: false`
+    /// response with an error string — not a panic, not silent success.
+    /// Guards the `req.args_as::<KillArgs>()` error path in dispatch.
+    #[tokio::test]
+    async fn kill_with_non_object_args_returns_error_not_panic() {
+        let tmp = short_tempdir();
+        let layout = layout_at(tmp.path());
+        let id = AgentId::new("cavekit", "badargs");
+        let (ctx, _cancel) = make_ctx(id, layout);
+        let rec = Arc::new(SignalRecorder::default());
+        let h = SupervisorCommandHandler::new_with_sender(ctx, rec.sender());
+
+        // args is a string, not an object -> fails to deserialize into KillArgs.
+        let resp = h
+            .handle(serde_json::json!({ "cmd": "Kill", "args": "not-an-object" }))
+            .await;
+        assert_eq!(resp["ok"], JsonValue::Bool(false));
+        assert!(
+            resp["error"].is_string(),
+            "error field must carry a string: {resp}"
+        );
+        // Signal must NOT have been sent on a malformed Kill.
+        assert!(rec.calls().is_empty(), "no signal on malformed args");
+    }
+
     #[tokio::test]
     async fn audit_records_malformed_requests() {
         let tmp = short_tempdir();

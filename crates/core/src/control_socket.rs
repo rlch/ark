@@ -618,4 +618,179 @@ mod tests {
 
         drop(listener);
     }
+
+    // ---- T-124 additions (cavekit-testing R5) ----
+
+    /// Response<T> must survive a full NDJSON round-trip (serialize →
+    /// bytes → deserialize) with both the ok and err shapes intact.
+    /// This pins the wire contract other crates rely on (ark-cli mirrors
+    /// this shape byte-for-byte in its `kill.rs`).
+    #[test]
+    fn response_roundtrip_ok_and_err_variants() {
+        // Success round-trip.
+        let resp_ok = Response::ok("pong".to_string());
+        let bytes = serde_json::to_vec(&resp_ok).unwrap();
+        let back: Response<String> = serde_json::from_slice(&bytes).unwrap();
+        assert!(back.ok);
+        assert_eq!(back.data.as_deref(), Some("pong"));
+        assert!(back.error.is_none());
+
+        // Error round-trip.
+        let resp_err: Response<String> = Response::err("boom");
+        let bytes = serde_json::to_vec(&resp_err).unwrap();
+        let back: Response<String> = serde_json::from_slice(&bytes).unwrap();
+        assert!(!back.ok);
+        assert!(back.data.is_none());
+        assert_eq!(back.error.as_deref(), Some("boom"));
+
+        // Structured payload round-trip (covers the actual wire shape used
+        // by Kill / Rename responses).
+        #[derive(Debug, Serialize, Deserialize, PartialEq)]
+        struct Killed {
+            signaled: String,
+            remove_worktree: bool,
+        }
+        let payload = Killed {
+            signaled: "SIGTERM".into(),
+            remove_worktree: true,
+        };
+        let resp = Response::ok(payload);
+        let s = serde_json::to_string(&resp).unwrap();
+        let back: Response<Killed> = serde_json::from_str(&s).unwrap();
+        assert!(back.ok);
+        assert_eq!(
+            back.data,
+            Some(Killed {
+                signaled: "SIGTERM".into(),
+                remove_worktree: true,
+            })
+        );
+    }
+
+    /// `handle_single_request` must write exactly one newline-terminated
+    /// JSON object. This pins the NDJSON "newline at end" contract that
+    /// every line-reader in the codebase (supervisor, cli, tests) relies
+    /// on.
+    #[tokio::test]
+    async fn handle_single_request_trailing_newline_is_enforced() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("nl.sock");
+        let listener = ControlListener::bind(&path).await.unwrap();
+
+        let server = tokio::spawn(async move {
+            let stream = listener.accept().await.unwrap();
+            handle_single_request::<Ping, &str, _, _>(stream, |_| async move { Response::ok("k") })
+                .await
+                .unwrap();
+            drop(listener);
+        });
+
+        let client = connect_client(&path).await;
+        let (r, w) = client.split();
+        let mut reader = BufReader::new(r);
+        let mut w = w;
+        w.write_all(b"{\"cmd\":\"Ping\"}\n").await.unwrap();
+        w.flush().await.unwrap();
+
+        // Read until EOF so we see EVERY byte the server wrote.
+        let mut raw = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut raw)
+            .await
+            .unwrap();
+        assert!(!raw.is_empty(), "server must write a response");
+        assert_eq!(
+            raw.last().copied(),
+            Some(b'\n'),
+            "response must end in newline, got {raw:?}"
+        );
+        // Exactly one newline (no double-newline, no missing).
+        let nl_count = raw.iter().filter(|&&b| b == b'\n').count();
+        assert_eq!(nl_count, 1, "exactly one trailing newline; got {nl_count}");
+
+        server.await.unwrap();
+    }
+
+    /// `gc_stale_socket` must be safely repeatable — the first call
+    /// unlinks, subsequent calls are no-ops (path no longer exists).
+    /// Guards against "unlink twice on retry" racing with caller loops.
+    #[tokio::test]
+    async fn gc_stale_socket_repeated_refused_unlinks_exactly_once() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("refused.sock");
+        std::fs::write(&path, b"").unwrap();
+        assert!(path.exists());
+
+        let first = gc_stale_socket(&path, Duration::from_millis(50))
+            .await
+            .unwrap();
+        assert!(!first, "stale file → dead");
+        assert!(!path.exists(), "first call must unlink");
+
+        // Second call: path is gone, helper must return Ok(false) cleanly
+        // (this is the "missing path" fast-path, exercised twice more to
+        // lock in idempotence).
+        for _ in 0..2 {
+            let again = gc_stale_socket(&path, Duration::from_millis(50))
+                .await
+                .unwrap();
+            assert!(!again, "missing path stays reported as dead");
+            assert!(!path.exists());
+        }
+    }
+
+    /// Mixed directory: one live socket + one stale bare-file entry.
+    /// Iterating gc over each entry must preserve the live socket and
+    /// unlink only the stale one — modelled as a tiny loop so the test
+    /// exercises the per-path API the caller would actually drive.
+    #[tokio::test]
+    async fn gc_stale_socket_mixed_dir_preserves_live_unlinks_stale() {
+        let tmp = TempDir::new().unwrap();
+        let live_path = tmp.path().join("alive.sock");
+        let stale_path = tmp.path().join("dead.sock");
+        let ghost_path = tmp.path().join("ghost.sock"); // never existed
+
+        let listener = ControlListener::bind(&live_path).await.unwrap();
+        std::fs::write(&stale_path, b"").unwrap();
+
+        let mut outcomes = Vec::new();
+        for p in [&live_path, &stale_path, &ghost_path] {
+            outcomes.push((
+                p.clone(),
+                gc_stale_socket(p, Duration::from_millis(200))
+                    .await
+                    .unwrap(),
+            ));
+        }
+
+        assert_eq!(outcomes[0].1, true, "live socket must report alive");
+        assert_eq!(outcomes[1].1, false, "bare file must be unlinked");
+        assert_eq!(outcomes[2].1, false, "missing path → dead");
+
+        assert!(live_path.exists(), "live socket must be preserved");
+        assert!(!stale_path.exists(), "stale file must be unlinked");
+        assert!(!ghost_path.exists(), "ghost never existed");
+
+        drop(listener);
+    }
+
+    /// Empty directory: nothing to collect, helper must not create
+    /// entries as a side-effect.
+    #[tokio::test]
+    async fn gc_stale_socket_empty_dir_no_side_effects() {
+        let tmp = TempDir::new().unwrap();
+        let missing = tmp.path().join("never-created.sock");
+        let before: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name()))
+            .collect();
+        let alive = gc_stale_socket(&missing, Duration::from_millis(50))
+            .await
+            .unwrap();
+        assert!(!alive);
+        let after: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name()))
+            .collect();
+        assert_eq!(before, after, "gc on missing path must not create entries");
+    }
 }
