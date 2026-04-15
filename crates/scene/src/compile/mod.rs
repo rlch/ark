@@ -15,5 +15,7 @@
 //! arrives alongside `writer` in T-3.4.
 
 pub mod layout;
+pub mod writer;
 
 pub use layout::{CompileContext, compile_layout};
+pub use writer::{scene_layout_path, write_scene_layout};
