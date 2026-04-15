@@ -17,9 +17,12 @@ Build site: context/plans/build-site.md (134 tasks, 7 tiers).
 | 3 | 22 | 22 | ✅ COMPLETE |
 | 4 | 10 | 10 | ✅ COMPLETE (post-gate) |
 | 5 | 16 | 16 | ✅ COMPLETE (post-gate, 16 findings fixed across 5 cycles) |
-| 6 | 0 | 26 | pending |
+| 6 | 26 | 26 | ✅ COMPLETE (pre-gate) |
 
-**Overall: 94/134 tasks done (70%) · 197 ark-cli tests + workspace green**
+**Overall: 134/134 tasks done (100% pre-gate) · 269+ ark-cli tests + workspace green**
+
+Tier 6 landed 2026-04-15 across 16 commits (testing T-110–T-125 + e2e T-126–T-128 + CI T-129/T-132 + distribution T-130/T-131/T-133/T-134/T-135).
+Codex tier-6 gate pending — TIER_6_START_REF = 314cfbf.
 
 Tier 4 landed 2026-04-15 across commits 3e681da → 1a03779 (build) + 10 codex gate cycles 3e681da → 0fc47dd. Build order: T-084 scaffold, T-086 (pre-existing), T-085 exit-codes, T-085-fdn CliError expansion (foundation), T-092 pane routing, T-093 env-vars, T-089 kill, T-090 config, T-088 list, T-091 doctor, T-087 spawn. Codex gate fixed 30 findings (F-500–F-529) across 10 cycles. Cycle 10 returned zero P1s — gate closed. TIER_4_START_REF = 538fa42.
 
@@ -52,7 +55,8 @@ Deferrals from T-087 spawn (noted in commit bodies, picked up in Tier 5/6): supe
 | cli | 10 | TIER-4 COMPLETE (pre-gate) — T-084 scaffold, T-085 exit-codes, T-086 id-resolver, T-087 spawn (partial, supervisor-launch stubbed), T-088 list, T-089 kill, T-090 config, T-091 doctor, T-092 pane routing, T-093 env-vars | (pending) |
 | plugin-status | 5 | TIER-5 COMPLETE (pre-gate) — T-094 scaffold, T-095 ingest+cache, T-096 chip render, T-097 fs fallback, T-098 distribution | (pending) |
 | plugin-picker | 11 | TIER-5 COMPLETE (pre-gate) — T-099 scaffold, T-100 state model, T-101 bootstrap, T-102 list, T-103 detail, T-104 new-agent, T-105 kill/rename/forget, T-106 resurrect, T-107 switch_session, T-108 keymap+help, T-109 distribution | (pending) |
-| testing | 0 | TIER-6 pending | (pending) |
+| testing | 16 | TIER-6 COMPLETE — fixtures (T-110–T-113), contract suites (T-114/T-115/T-116), unit coverage per crate (T-117–T-125), mock-claude (T-126), e2e (T-127/T-128) | (pending) |
+| distribution | 6 | TIER-6 COMPLETE — CI workflow (T-129), build.rs wasm orchestration (T-130), release profile + wasm-opt (T-131), CI size watch (T-132), cargo-dist (T-133), homebrew/binstall (T-134), standalone wasm assets (T-135). Wasm sizes: status 873KB→748KB w/ wasm-opt; picker 997KB→861KB. | (pending) |
 
 ## Tooling Notes
 
