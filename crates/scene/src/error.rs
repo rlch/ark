@@ -67,6 +67,23 @@ pub enum ErrorCode {
     EmptyOrUnknown,
     /// `include` DAG forms a cycle (R11).
     IncludeCycle,
+    /// `extends "<name>"` could not be resolved through the
+    /// scene-search-path (T-9.1 / R11).
+    ExtendsNotFound,
+    /// Scene declares more than one `extends` clause — the grammar allows
+    /// only one parent per scene (T-9.1 / R11).
+    MultipleExtends,
+    /// `extends` graph forms a cycle across the composed scenes
+    /// (T-9.1 / R11). Distinct from [`IncludeCycle`] to keep diagnostic
+    /// codes aligned with the user's vocabulary.
+    ExtendsCycle,
+    /// Duplicate `plugin "<name>"` block across merged scenes without
+    /// `override=true` on the later occurrence (R11 plugin-merge rule,
+    /// T-9.4).
+    DuplicatePlugin,
+    /// Duplicate `tab name="<X>"` across merged layout fragments — the
+    /// R11 merge rule explicitly forbids it (T-9.4).
+    DuplicateTab,
     /// Scene has both inline `engine { }` and `use "engine-*"` (R17).
     EngineConflict,
     /// CEL expression failed to parse at compile time (R8 / T-2.1).
@@ -138,6 +155,11 @@ impl ErrorCode {
             ErrorCode::AmbiguousFileShape => "scene/ambiguous-file-shape",
             ErrorCode::EmptyOrUnknown => "scene/empty-or-unknown",
             ErrorCode::IncludeCycle => "scene/include-cycle",
+            ErrorCode::ExtendsNotFound => "scene/extends-not-found",
+            ErrorCode::MultipleExtends => "scene/multiple-extends",
+            ErrorCode::ExtendsCycle => "scene/extends-cycle",
+            ErrorCode::DuplicatePlugin => "scene/duplicate-plugin",
+            ErrorCode::DuplicateTab => "scene/duplicate-tab",
             ErrorCode::EngineConflict => "scene/engine-conflict",
             ErrorCode::CelParse => "cel/parse",
             ErrorCode::CelEvaluate => "cel/evaluate",
@@ -398,6 +420,94 @@ pub enum SceneError {
         /// miette prints the full trail with file/line/caret context.
         #[related]
         trail: Vec<IncludeCycleStep>,
+    },
+
+    /// `extends "<name>"` could not be resolved through the scene
+    /// search path (T-9.1 / R11). The `searched` vector records every
+    /// candidate path that was probed so the rendered diagnostic tells
+    /// the user exactly where ark looked.
+    #[error("extends target `{name}` not found on the scene search path")]
+    #[diagnostic(
+        code = "scene/extends-not-found",
+        help("Scene-search-path rungs (in order): `./.ark/scenes/<name>.kdl`, `${{XDG_CONFIG_HOME}}/<appname>/scenes/<name>.kdl`, built-in shipped scenes. Either create the parent scene file or adjust the `extends` argument.")
+    )]
+    ExtendsNotFound {
+        /// Parent scene name that failed to resolve.
+        name: String,
+        /// Ordered list of file paths the resolver probed — written
+        /// verbatim into the diagnostic's rendered message so the user
+        /// can see the exact search path that came up empty.
+        searched: Vec<String>,
+    },
+
+    /// Scene file carries more than one `extends` clause (T-9.1 / R11).
+    /// Only one parent per scene is allowed; later clauses are
+    /// reported with the first-seen as a related-label hint.
+    #[error("scene declares multiple `extends` clauses — only one parent per scene is allowed")]
+    #[diagnostic(
+        code = "scene/multiple-extends",
+        help("R11: one `extends` per scene. Remove the extra clause(s), or refactor the shared base into an `include`-splice fragment.")
+    )]
+    MultipleExtends {
+        /// File containing the offending clauses.
+        #[source_code]
+        src: NamedSource<String>,
+
+        /// Span of the FIRST `extends` clause.
+        #[label("first `extends` here")]
+        first: SourceSpan,
+
+        /// Span of the duplicate (later) `extends` clause.
+        #[label("duplicate `extends` here")]
+        second: SourceSpan,
+    },
+
+    /// `extends` graph forms a cycle (T-9.1 / R11). Parent chain
+    /// revisits a previously-seen scene name. The `trail` records
+    /// every hop in source order so the rendered diagnostic shows the
+    /// full loop.
+    #[error("extends cycle detected through scene `{starting_scene}`")]
+    #[diagnostic(
+        code = "scene/extends-cycle",
+        help("Break the cycle: one of the parents along the chain already extends a scene on the way here. Remove an `extends` clause or refactor a shared base fragment into an `include`.")
+    )]
+    ExtendsCycle {
+        /// Scene name where the cycle was first detected.
+        starting_scene: String,
+        /// Trail of scene names from the starting entry through the
+        /// hop that closed the loop — e.g. `["child", "parent", "child"]`.
+        trail: Vec<String>,
+    },
+
+    /// Duplicate `plugin "<name>"` across merged scenes without
+    /// `override=true` on the later block (R11 / T-9.4).
+    ///
+    /// Fires during the composition merge step, not during parse. The
+    /// first block supplies the canonical declaration; the second
+    /// block must either (a) drop the duplicate or (b) set
+    /// `override=true` to replace the earlier contribution.
+    #[error("duplicate `plugin \"{name}\"` declaration across merged scenes")]
+    #[diagnostic(
+        code = "scene/duplicate-plugin",
+        help("R11: a later `plugin \"<name>\"` block must set `override=true` to replace an earlier declaration. Otherwise remove the duplicate or rename one of the plugins.")
+    )]
+    DuplicatePlugin {
+        /// Plugin name duplicated across fragments.
+        name: String,
+    },
+
+    /// Duplicate `tab name="<X>"` across merged layout fragments
+    /// (R11 / T-9.4). Layout merge has no `override=` escape hatch
+    /// in v1 — tab templates via explicit merge attribute are
+    /// deferred to v0.3+ (R11 note).
+    #[error("duplicate `tab \"{name}\"` across merged layouts")]
+    #[diagnostic(
+        code = "scene/duplicate-tab",
+        help("R11: layout `tab` names must be unique across composed scenes. Rename one of the tabs, or factor the shared tab into a base scene inherited via `extends`.")
+    )]
+    DuplicateTab {
+        /// Tab name duplicated across fragments.
+        name: String,
     },
 
     /// Scene file contains both an inline `engine { }` block AND a
@@ -873,6 +983,11 @@ impl SceneError {
             SceneError::AmbiguousFileShape { .. } => ErrorCode::AmbiguousFileShape,
             SceneError::EmptyOrUnknown { .. } => ErrorCode::EmptyOrUnknown,
             SceneError::IncludeCycle { .. } => ErrorCode::IncludeCycle,
+            SceneError::ExtendsNotFound { .. } => ErrorCode::ExtendsNotFound,
+            SceneError::MultipleExtends { .. } => ErrorCode::MultipleExtends,
+            SceneError::ExtendsCycle { .. } => ErrorCode::ExtendsCycle,
+            SceneError::DuplicatePlugin { .. } => ErrorCode::DuplicatePlugin,
+            SceneError::DuplicateTab { .. } => ErrorCode::DuplicateTab,
             SceneError::EngineConflict { .. } => ErrorCode::EngineConflict,
             SceneError::CelParse { .. } => ErrorCode::CelParse,
             SceneError::CelEvaluate { .. } => ErrorCode::CelEvaluate,

@@ -13,6 +13,7 @@ pub mod cycle;
 pub mod context;
 pub mod engine;
 pub mod error;
+pub mod extends;
 pub mod hook_compat;
 pub mod id;
 pub mod intent;
