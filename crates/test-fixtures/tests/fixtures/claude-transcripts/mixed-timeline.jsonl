@@ -1,0 +1,18 @@
+{"type":"user","message":{"role":"user","content":"Refactor the transcript parser to handle rotation markers."},"uuid":"mix-001","timestamp":"2026-04-15T11:00:00Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Let me start by reading the current implementation."}]},"uuid":"mix-002","timestamp":"2026-04-15T11:00:02Z"}
+{"type":"tool_use","name":"Read","input":{"file_path":"/Users/rjm/ark/crates/engines/claude-code/src/transcript.rs"},"id":"toolu_mix01"}
+{"type":"tool_result","tool_use_id":"toolu_mix01","content":"[file contents omitted]"}
+{"type":"thinking","thinking":"The parser currently skips unknown block shapes. I should add a `summary` branch."}
+{"type":"tool_use","name":"Grep","input":{"pattern":"block_kind","path":"/Users/rjm/ark/crates/engines/claude-code/src"},"id":"toolu_mix02"}
+{"type":"tool_result","tool_use_id":"toolu_mix02","content":"match found on line 143"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I'll add a summary handler and a corresponding test."},{"type":"tool_use","name":"Edit","input":{"file_path":"/Users/rjm/ark/crates/engines/claude-code/src/transcript.rs","old_string":"Some(\"tool_result\") | Some(\"thinking\") => {","new_string":"Some(\"summary\") => {\n            tracing::debug!(\"transcript: skipped rotation marker\");\n            Vec::new()\n        }\n        Some(\"tool_result\") | Some(\"thinking\") => {"},"id":"toolu_mix03"}]},"uuid":"mix-003","timestamp":"2026-04-15T11:00:30Z"}
+{"type":"tool_result","tool_use_id":"toolu_mix03","content":"File edited successfully"}
+{"type":"tool_use","name":"Write","input":{"file_path":"/Users/rjm/ark/crates/engines/claude-code/tests/transcript_summary.rs","content":"// regression test"},"id":"toolu_mix04"}
+{"type":"tool_result","tool_use_id":"toolu_mix04","content":"File created"}
+{"type":"tool_use","name":"Bash","input":{"command":"cargo test -p ark-engine-claude-code","description":"Verify new test passes"},"id":"toolu_mix05"}
+{"type":"tool_result","tool_use_id":"toolu_mix05","content":"test result: ok. 14 passed; 0 failed"}
+{"type":"user","message":{"role":"user","content":"Great — commit the change."},"uuid":"mix-004","timestamp":"2026-04-15T11:05:00Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"git add -p && git commit -m 'handle summary rotation marker'","description":"Stage and commit"},"id":"toolu_mix06"}]},"uuid":"mix-005","timestamp":"2026-04-15T11:05:03Z"}
+{"type":"tool_result","tool_use_id":"toolu_mix06","content":"[main abc1234] handle summary rotation marker"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Committed. Anything else?"}]},"uuid":"mix-006","timestamp":"2026-04-15T11:05:10Z"}
+{"type":"user","message":{"role":"user","content":"That's it — thanks."},"uuid":"mix-007","timestamp":"2026-04-15T11:06:00Z"}

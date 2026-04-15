@@ -1,0 +1,3 @@
+{"type":"tool_use","name":"Edit","input":{"file_path":"/Users/rjm/project/src/lib.rs","old_string":"pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}","new_string":"pub fn add(a: i32, b: i32) -> i32 {\n    // Saturating add prevents overflow panics.\n    a.saturating_add(b)\n}"},"id":"toolu_FileEdit01"}
+{"type":"tool_use","name":"Write","input":{"file_path":"/Users/rjm/project/src/new_module.rs","content":"//! New module scaffolding.\n\npub fn placeholder() {}\n"},"id":"toolu_FileWrite02"}
+{"type":"tool_use","name":"MultiEdit","input":{"file_path":"/Users/rjm/project/Cargo.toml","edits":[{"old_string":"version = \"0.1.0\"","new_string":"version = \"0.2.0\""},{"old_string":"edition = \"2021\"","new_string":"edition = \"2024\""}]},"id":"toolu_MultiEdit03"}

@@ -1,0 +1,4 @@
+{"type":"user","message":{"role":"user","content":"Can you add a new test for the parse_line function?"},"uuid":"msg-001","timestamp":"2026-04-15T10:00:00Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Sure — I'll add a unit test covering the malformed JSON branch."}]},"uuid":"msg-002","timestamp":"2026-04-15T10:00:02Z"}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Also cover the empty-line case."}]},"uuid":"msg-003","timestamp":"2026-04-15T10:00:15Z"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Done. Added two assertions in parse_malformed_returns_empty."}]},"uuid":"msg-004","timestamp":"2026-04-15T10:00:20Z"}

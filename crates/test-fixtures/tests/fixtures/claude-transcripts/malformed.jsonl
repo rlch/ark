@@ -1,0 +1,5 @@
+{"type":"user","message":{"role":"user","content":"Valid line before corruption."},"uuid":"mal-001"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Still valid here."}]},"uuid":"mal-002"}
+{"type":"tool_use","name":"Bash","input":{"command":"echo hi","description": MALFORMED NO QUOTES HERE},"id":"toolu_mal01"}
+{"type":"user","message":{"role":"user","content":"Valid line after corruption — parser should resume."},"uuid":"mal-003"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Recovered cleanly."}]},"uuid":"mal-004"}

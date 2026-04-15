@@ -1,0 +1,4 @@
+{"type":"tool_use","name":"Bash","input":{"command":"cargo test --workspace","description":"Run workspace tests"},"id":"toolu_01BashRunCargoTest"}
+{"type":"tool_use","name":"Read","input":{"file_path":"/Users/rjm/project/src/main.rs"},"id":"toolu_02ReadMainRs"}
+{"type":"tool_use","name":"Edit","input":{"file_path":"/Users/rjm/project/src/main.rs","old_string":"println!(\"hi\")","new_string":"println!(\"hello\")"},"id":"toolu_03EditMainRs"}
+{"type":"tool_use","name":"Grep","input":{"pattern":"fn main","path":"/Users/rjm/project/src"},"id":"toolu_04GrepMain"}
