@@ -1,9 +1,13 @@
 ---
 created: "2026-04-14T00:00:00Z"
-last_edited: "2026-04-14T00:00:00Z"
+last_edited: "2026-04-16"
 ---
 
 # Spec: Zellij Plugin — Status Bar
+
+> **v0.1 (shipped inline, current content):** zellij wasm plugin loaded by the built-in default scene as `plugin "status" { source "shipped:status"; mount "status-bar" }`. The R1–R5 acceptance criteria below describe this runtime.
+>
+> **v0.3 (ported to ark-native extension, per plan T-10.10):** `ark-status` is repackaged as a first-class ark extension with `ExtensionMetadata` declared via `register_extension!` macro + sidecar scene fragment. The default scene migrates silently from `plugin "status" { source "shipped:status" }` to `use "status"` form. Inline compat retained indefinitely (Rust-editions precedent). Runtime behavior unchanged. The R1–R5 requirements below remain the behavioral contract the ported extension must match.
 
 ## Scope
 `ark-status.wasm` — a zellij plugin rendering a status bar row with at-a-glance progress per agent. Consumes events via `zellij pipe` from every active supervisor. No shared state with ark's host binary except via pipe.

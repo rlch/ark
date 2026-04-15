@@ -1,9 +1,13 @@
 ---
 created: "2026-04-14T00:00:00Z"
-last_edited: "2026-04-14T00:00:00Z"
+last_edited: "2026-04-16"
 ---
 
 # Spec: Engine — Claude Code
+
+> **STATUS (2026-04-16): LEGACY, retires at v0.3.** Per `cavekit-scene.md` R17, ark becomes a first-class Agent Client Protocol (ACP) client; engines become ACP agents with a trivial launch spec (`command` + `args` + `env`). Claude Code speaks ACP natively via `claude --acp`, so the hook-injection + transcript-tailing apparatus documented here (R1–R7) is obsolete once ACP is live. **v0.1 and v0.2 still run this code path** while the scene system is being stood up; v0.3 retires it via `build-site-scene.md` T-ACP.7. The post-R17 replacement is a four-line `engines.claude` entry in `config.toml` + the ACP client in `crates/acp-client/`.
+>
+> R1–R7 below are preserved for the v0.1/v0.2 engine runtime and as the behavioral contract the ACP replacement must match (permission auto-approve, done-detection, phase transitions). Do NOT add new requirements to this spec; all new coding-agent integration work belongs in `cavekit-scene.md` R17.
 
 ## Scope
 The `ClaudeCodeEngine` implementation. Installs Claude Code hooks into a worktree's `.claude/settings.local.json` pointing at the `ark-hook` sidecar, tails the session transcript JSONL for richer message-level signal, and enforces a permission auto-approve policy via the `PermissionRequest` hook. Emits AgentEvents to the shared event bus.

@@ -40,21 +40,26 @@ The ephemeral per-agent supervisor process. Forked from the `ark spawn` CLI call
   2. Acquires exclusive file lock `$STATE/locks/{id}.lock`
   3. **Binds control socket** at `${XDG_RUNTIME_DIR:-/tmp}/ark-$UID/agents/{id}.sock` (creates parent dir 0700 if absent). Listener installed on tokio runtime; serves protocol per cavekit-hook-ipc.md R4 + R5. See R7 below for lifecycle.
   4. Sets up logging (tracing → `supervisor.log`)
-  5. Loads config (figment-layered per cavekit-config)
-  6. Instantiates Engine, Orchestrator, Mux via a factory keyed on `spec.engine` and `spec.orchestrator`
-  7. Calls `mux.ensure_session(spec.session).await?`
-  8. Calls `engine.preflight(spec).await?`
-  9. Spawns consumer tasks (state_writer, status_pipe, hook_dispatcher)
-  10. Calls `engine.install_observability(cwd, tx.clone()).await?` → stores EngineHandle
-  11. Emits `Started { spec }`
-  12. Signals readiness to parent CLI (parent `ark spawn` returns at this point; agent-id printed to its stdout)
-  13. Calls `orchestrator.run(spec, world).await` — long-running
-  14. On return: awaits all consumer tasks to drain the final events
-  15. `engine.teardown(handle).await`
-  16. `state.finalize(&outcome)` — writes final status.json, moves agent dir to archive if configured
-  17. **Unlinks control socket** (Drop guard fires; SIGTERM/SIGINT handler covers signal paths — see R7)
-  18. Releases lock, exits with outcome-derived exit code
-**Dependencies:** R2, cavekit-architecture
+  5. Loads config (figment-layered per cavekit-config — `config.toml` at `$XDG_CONFIG_HOME/ark/`)
+  6. **Resolves scene path** via `resolve_scene_path()` (plan T-8.0 precedence: `--scene` flag → `ARK_SCENE` env → `./.ark/scene.kdl` → `$XDG_CONFIG_HOME/<appname>/scenes/default.kdl` → built-in default)
+  7. **Compiles scene** per `cavekit-scene.md` pipeline: parse → resolve extensions → merge fragments → validate (CEL compile, template check, intent registry) → render layout KDL → build subscriber set + lifecycle manifest + intent registry. Compile error = abort spawn with miette diagnostic; parent CLI surfaces exit-code + stderr.
+  8. **Writes rendered zellij layout** to `${XDG_RUNTIME_DIR}/ark/layouts/{id}-scene.kdl`; injects `plugin "ark-bus" { source "shipped:ark-bus"; mount "hidden" }` if scene has any keybinds / zellij-event subscribers / `subscribes` forwarding per scene R5/R6.
+  9. **Engine resolution** via `AgentSpec` chain (scene R17: `--engine` flag → scene `engine { }` → scene `use "engine-*"` → `config.toml` `engines.<name>` → hardcoded `claude --acp`). v0.1/v0.2: resolved engine instantiated via legacy factory (ClaudeCodeEngine). v0.3+: engine launch spec handed to ACP client.
+  10. Calls `mux.ensure_session(spec.session).await?`
+  11. Calls `engine.preflight(spec).await?` (v0.1/v0.2 legacy path) OR **spawns ACP client** (v0.3+): fork engine process, drive `initialize` handshake, register capability flags, start tracking `turn_inflight: bool` per session (scene R14 reload gate).
+  12. Spawns consumer tasks: state_writer, status_pipe, **scene reaction dispatcher** (replaces legacy `hook_dispatcher` per plan T-5.7; legacy TOML `[[hooks]]` compiles to synthetic scene fragment), plus per-extension `ExtensionSupervisor` children (scene R16: stdin-close → 2s → SIGTERM → SIGKILL on shutdown; `UserEvent:ark.ext.crashed` on crash, no auto-restart v1).
+  13. **Registers always-on plugins** from scene lifecycle manifest via `launch-or-focus-plugin`; registers summon + event-mount plugins as dormant subscribers.
+  14. Calls `engine.install_observability(cwd, tx.clone()).await?` (legacy) → stores EngineHandle. v0.3+: ACP client's `session/update` stream feeds `UserEvent:ark.acp.<kind>` events onto the bus.
+  15. Emits `Started { spec }`
+  16. Signals readiness to parent CLI (parent `ark spawn` returns at this point; agent-id printed to its stdout)
+  17. Calls `orchestrator.run(spec, world).await` — long-running
+  18. On return: awaits all consumer tasks to drain the final events (scene reaction in-flight drain per scene R14)
+  19. `engine.teardown(handle).await` (legacy) OR graceful ACP shutdown sequence: `session/cancel` any live turns → await final `stopReason` → engine `shutdown` request.
+  20. Shutdown all extension subprocesses per extension-protocol supervision tree.
+  21. `state.finalize(&outcome)` — writes final status.json, moves agent dir to archive if configured
+  22. **Unlinks control socket** (Drop guard fires; SIGTERM/SIGINT handler covers signal paths — see R7)
+  23. Releases lock, exits with outcome-derived exit code
+**Dependencies:** R2, cavekit-architecture, cavekit-scene R10/R14/R16/R17
 
 ### R4: Kill semantics
 **Description:** Handle SIGTERM and `ark kill` gracefully.

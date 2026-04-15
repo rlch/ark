@@ -1,12 +1,18 @@
 ---
 created: "2026-04-14T00:00:00Z"
-last_edited: "2026-04-14T00:00:00Z"
+last_edited: "2026-04-16"
 ---
 
 # Spec: Zellij Plugin — Agent Picker
 
+> **v0.1 (shipped inline, current content):** zellij wasm plugin loaded by the built-in default scene as `plugin "picker" { source "shipped:picker"; mount "floating" }` with a default keybind (e.g., `Alt p`). The R1–R7 acceptance criteria below describe this runtime.
+>
+> **v0.3 (ported to ark-native extension, per plan T-10.10):** `ark-picker` becomes an ark extension with `ExtensionMetadata` + sidecar scene fragment. Default scene migrates to `use "picker"` form. Inline compat retained indefinitely.
+>
+> **v0.3 adds: ACP permission-modal surface.** The picker becomes the fallback renderer in the scene R17 5-tier permission-dispatch precedence (security-deny → auto-deny → auto-confirm → auto-allow → picker). On receiving a control-socket-forwarded `UserEvent:ark.acp.permission_requested` (only when no scene rule matches OR `auto-confirm` fires), picker shows a modal with `{tool, params, options}`; user selection routes back via `ark-hook permit --request-id <id> --outcome <…>` per cavekit-hook-ipc R1. Late responses (after ACP timeout) dropped silently by supervisor.
+
 ## Scope
-`ark-picker.wasm` — interactive zellij plugin modeled on zellij's built-in session-manager. Fuzzy-searchable list of active agents, detail expansion, kill/rename, new-agent form. Triggers session switch via zellij-tile actions. Sends administrative commands to ark host via control socket (see cavekit-hook-ipc).
+`ark-picker.wasm` — interactive zellij plugin modeled on zellij's built-in session-manager. Fuzzy-searchable list of active agents, detail expansion, kill/rename, new-agent form, **ACP permission modals (v0.3+)**. Triggers session switch via zellij-tile actions. Sends administrative commands + `ark-hook permit` to ark host via control socket (see cavekit-hook-ipc).
 
 ## Reference
 Mirrors zellij's `default-plugins/session-manager/` in Zellij repo. Uses SingleScreenMode pattern (filter + results in one screen). Uses `zellij-tile` primitives + `fuzzy-matcher` (SkimMatcherV2). No ratatui.

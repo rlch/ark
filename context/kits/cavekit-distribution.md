@@ -1,6 +1,6 @@
 ---
 created: "2026-04-14T00:00:00Z"
-last_edited: "2026-04-14T00:00:00Z"
+last_edited: "2026-04-16"
 ---
 
 # Spec: Distribution
@@ -62,6 +62,25 @@ Building, packaging, and shipping ark. Cargo workspace layout, `cargo-dist` rele
   - For picker fuzzy matching: use `nucleo-matcher` (leaf deps: `memchr` only), NOT `fuzzy-matcher` or full `nucleo` crate
 - [ ] A standalone release asset also uploads the raw `.wasm` files (for users who want to install manually)
 **Dependencies:** cavekit-plugin-status, cavekit-plugin-picker
+
+### R4b: Bundled zellij
+**Description:** Ark ships its own zellij binary to control the exact version users get — scene compilation depends on specific zellij KDL features (e.g., suppressed-pane API, `MessagePlugin` action, merge semantics) that shift between releases.
+**Acceptance Criteria:**
+- [ ] Prebuilt zellij binary bundled into each cargo-dist artifact at `share/ark/bin/zellij`. Version pin tracked in `Cargo.toml` at workspace level.
+- [ ] Ark always launches the bundled binary by absolute path (no PATH lookup); this prevents accidental downgrade if user has an older zellij on PATH.
+- [ ] `ARK_USE_SYSTEM_ZELLIJ=1` env var overrides to use system `zellij` from PATH — for dev iteration only, not a supported end-user workflow. When set, emit a debug log at spawn naming the resolved binary.
+- [ ] `ark doctor` reports bundled-zellij version + checks for version skew against user's `~/.config/zellij/config.kdl` (warns if user config uses a feature newer than bundled zellij; zellij merges additively, so generally compatible).
+- [ ] Homebrew formula depends on `zellij` *as well* (some users prefer the tap, and system zellij remains useful for `ark spawn --no-scene` fallback paths); the bundled copy takes precedence at runtime.
+**Dependencies:** R1, R2, cavekit-mux-zellij
+
+### R4c: ACP crate pin
+**Description:** Ark pins a specific version of the `agent-client-protocol` Rust crate; an ark release's ACP compatibility is whatever range that pin declares.
+**Acceptance Criteria:**
+- [ ] Workspace dependency `agent-client-protocol = "=X.Y.Z"` (equality pin, not range) so every build uses the identical ACP implementation.
+- [ ] Release notes for each ark version cite the bundled ACP crate version + supported `protocolVersion` range declared at `initialize`.
+- [ ] `ark doctor` prints the bundled ACP version in its diagnostic header.
+- [ ] Unstable ACP methods (from `meta.unstable.json`: `session/fork`, `nes/*`, `elicitation/*`, `document/did*`, etc.) are NOT shipped as v1 surface; gated behind capability negotiation per scene R17.
+**Dependencies:** cavekit-scene R17
 
 ### R4: Homebrew and package managers
 **Description:** Primary install paths.

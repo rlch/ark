@@ -13,19 +13,29 @@ Two inter-process surfaces:
 ## Requirements — ark-hook sidecar
 
 ### R1: `ark-hook` binary
-**Description:** Small binary invoked by Claude Code hooks.
+**Description:** Small binary invoked by Claude Code hooks AND by the ark-bus plugin bridge (scene R5/R6 keybind + event dispatch).
 **Acceptance Criteria:**
-- [ ] Signature: `ark-hook --id <AgentId> --event <EVENT_NAME>`
-- [ ] Reads a single JSON document from stdin (Claude Code's hook payload)
-- [ ] Parses `{session_id, cwd, hook_event_name, tool_name?, tool_input?, ...}`
-- [ ] Translates into one or more AgentEvent variants (e.g., `PostToolUse → ToolUse + FileEdited`)
-- [ ] Writes the parsed events as JSON lines to `$STATE/agents/{id}/hooks/{event}.jsonl` (per-event jsonl file for simplicity and debuggability)
-- [ ] Also forwards the events via `zellij pipe --name ark-status -- <json>` for the status plugin
-- [ ] Also forwards to `ark-picker` pipe target
-- [ ] For `PermissionRequest` with auto-approve policy: writes `{"hookSpecificOutput": {"decision": {"behavior": "allow"}}}` to stdout
-- [ ] Exit code 0 on success (Claude allows), exit code 2 only for explicit deny decisions
-- [ ] Running time budget < 200ms (Claude blocks its main loop on hook scripts)
-**Dependencies:** cavekit-types-state-events, cavekit-engine-claude-code
+- [ ] **Hook-event subcommand (legacy, Claude-Code engine):** `ark-hook --id <AgentId> --event <EVENT_NAME>`
+  - Reads a single JSON document from stdin (Claude Code's hook payload)
+  - Parses `{session_id, cwd, hook_event_name, tool_name?, tool_input?, ...}`
+  - Translates into one or more AgentEvent variants (e.g., `PostToolUse → ToolUse + FileEdited`)
+  - Writes the parsed events as JSON lines to `$STATE/agents/{id}/hooks/{event}.jsonl`
+  - Also forwards the events via `zellij pipe --name ark-status -- <json>` for the status plugin + `ark-picker` pipe target
+  - For `PermissionRequest` with auto-approve policy: writes `{"hookSpecificOutput": {"decision": {"behavior": "allow"}}}` to stdout
+  - Exit code 0 on success (Claude allows), exit code 2 only for explicit deny decisions
+  - Running time budget < 200ms (Claude blocks its main loop on hook scripts)
+- [ ] **Scene dispatch subcommand:** `ark-hook intent --id <AgentId> --json '<{intent, args}>'`
+  - Connects to the agent's control socket (`${XDG_RUNTIME_DIR}/ark-$UID/agents/{id}.sock`).
+  - Sends `Intent { name, args }` command per R5.
+  - Reads response, exits 0 on `{ok: true}`, 1 otherwise; stderr carries error text for zellij hidden-pane-log surfacing.
+  - Running time budget < 50ms (keybind UX).
+- [ ] **Event-forward subcommand:** `ark-hook emit --id <AgentId> --json '<{event, payload, source}>'`
+  - Connects to control socket, sends `Emit { event, payload, source }` per R5.
+  - Used by ark-bus for forwarding `CommandPaneOpened`/`CommandPaneExited`/`PaneClosed`/`FileSystemUpdate` zellij events onto ark's event bus.
+- [ ] **ACP permit subcommand:** `ark-hook permit --id <AgentId> --request-id <str> --outcome <"allow"|"reject_once"|"reject_always"> [--option-id <str>]`
+  - Connects to control socket, sends `Permit { … }` per R5. Used by picker plugin modals.
+- [ ] `--id` resolution: when omitted, `ark-hook` reads `ARK_AGENT_ID` from env (set by supervisor in all spawned child processes including zellij).
+**Dependencies:** cavekit-types-state-events, cavekit-engine-claude-code, cavekit-scene R5/R6/R7/R17
 
 ### R2: State file writes
 **Description:** Durable record of hook-derived events.
@@ -83,6 +93,11 @@ Two inter-process surfaces:
   - `Rename { new_name }` — rewrites `spec.json.name` (session name is frozen)
   - `Forget { }` — sets `status.json.hide = true` so picker omits this agent
   - `Ping` — `{"ok": true, "data": "pong"}`
+  - `ReloadScene { }` — triggers `reload_scene` op on the supervisor (per scene R14); same gates (turn-inflight queue, re-entry guard) apply. Response carries `{queued: bool, reason?: str}`.
+  - **Scene dispatch commands** (added for the ark-bus plugin bridge per scene R5/R6 + plan T-6.2/T-6.3):
+    - `Intent { name: str, args: map }` — dispatches a named intent through the supervisor's scene intent registry. Used by `ark-hook intent` subcommand (ark-bus spawns a hidden command pane running this).
+    - `Emit { event: str, payload: map, source: str }` — broadcasts a `UserEvent` onto the supervisor's event bus. `source` MUST be one of the canonical values per scene R4 attribution convention (`core` / `ext:<n>` / `plugin:<n>` / `hook:<n>` / `scene`). Used by `ark-hook emit` subcommand for event forwarding from ark-bus.
+    - `Permit { request_id: str, outcome: "allow"|"reject_once"|"reject_always", option_id?: str }` — responds to an outstanding ACP `session/request_permission` (scene R17 permission dispatch). Used by picker plugin modals + scene reactions invoking `acp/permit`.
 - [ ] **Out of socket protocol** (handled differently):
   - `Spawn` — picker `exec`s `ark spawn <args>` subprocess (no socket; agent-id doesn't exist yet)
   - `Resurrect` — picker reads crashed agent's `spec.json`, then `exec`s `ark spawn` with same params (semantically equivalent to Spawn)

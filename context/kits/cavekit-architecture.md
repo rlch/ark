@@ -75,15 +75,17 @@ An orchestrator may use one engine and spawn additional sibling panes (e.g., Cav
 **Dependencies:** cavekit-supervisor
 
 ### R6: v1 scope lock
-**Description:** Components shipped in v1.
+**Description:** Components shipped across the v1 milestone sequence (v0.1 → v1.0 per `plans/build-site-scene.md`).
 **Acceptance Criteria:**
-- [ ] Engines: `ClaudeCodeEngine` only
-- [ ] Orchestrators: `CavekitOrchestrator`, `ClaudeCodeOrchestrator`
-- [ ] Zellij integration: `ZellijMux` (concrete type, no mux trait)
-- [ ] v1 compiles with one binary (`ark`), two wasm plugins (`ark-status.wasm`, `ark-picker.wasm`), one hook sidecar (`ark-hook`)
-- [ ] Third-party extension (subprocess NDJSON protocol) explicitly deferred to v2
-- [ ] `--engine` CLI flag accepted but only `claude-code` valid in v1
-**Dependencies:** none
+- [ ] **Engines (v0.1–v0.2, LEGACY):** `ClaudeCodeEngine` via hook-injection + transcript-tailing (see `cavekit-engine-claude-code.md`).
+- [ ] **Engines (v0.3+):** engine abstraction collapses to an ACP launch spec (see `cavekit-scene.md` R17). Shipped specs: `claude`, `codex`, `gemini-cli`. Non-ACP engines (e.g., aider) arrive via adapter extensions (subprocess extension speaking both extension-protocol to ark and ACP to the wrapped tool).
+- [ ] Orchestrators: `CavekitOrchestrator`, `ClaudeCodeOrchestrator`.
+- [ ] Zellij integration: `ZellijMux` (concrete type, no mux trait).
+- [ ] v1 compiles with one binary (`ark`), two wasm plugins (`ark-status.wasm`, `ark-picker.wasm` — shipped inline at v0.1, ported to ark-native extensions at v0.3), one hook sidecar (`ark-hook`, extended with `intent` / `emit` subcommands per scene R5/R6).
+- [ ] **Extension system (v0.3):** ark-native extension protocol (JSON-RPC 2.0, three delivery modes — compiled-in, subprocess, wasm-component) per `cavekit-scene.md` R10 + R16. The "v2 subprocess NDJSON protocol" language in earlier drafts is obsolete; extensions ship in v0.3.
+- [ ] **ACP client (v0.3):** ark bundles the `agent-client-protocol` crate as a first-class client; engines are ACP agents. See `cavekit-scene.md` R17.
+- [ ] `--engine` CLI flag: v0.1–v0.2 accepts only `claude-code`; v0.3+ accepts any configured ACP engine name.
+**Dependencies:** cavekit-scene R10, R16, R17
 
 ## Reference implementation sketches
 
