@@ -533,6 +533,58 @@ mod tests {
         )));
     }
 
+    // ---- T-7.4 integration: dispatch via intent registry --------------
+
+    /// End-to-end: a `Lifecycle::EventMount` plugin's synthesised
+    /// reaction dispatches the `mount_plugin` op through the real
+    /// intent registry without panicking — the op sequence compiles,
+    /// the registry resolves `ark.core.mount_plugin`, and the stub
+    /// returns `Ok(None)`. Subsequent matches hit the same op which is
+    /// idempotent at the mux layer; the reaction dispatcher treats
+    /// multi-fires as separate `launch-or-focus` attempts.
+    #[tokio::test]
+    async fn event_mount_synthesised_reaction_dispatches_mount_op_end_to_end() {
+        use crate::id::SceneId;
+        use crate::intent::{IntentContext, IntentRegistry};
+        use crate::ops::dispatch::dispatch_sequence;
+        use crate::ops::register_core_ops;
+
+        let doc = parse(
+            r#"scene "s" {
+    plugin "diff" {
+        source "shipped:diff"
+        mount "floating"
+        on "UserEvent:tool.file_edited"
+    }
+}
+"#,
+        );
+        let mut registry = ReactionRegistry::new();
+        synthesise_plugin_reactions(&doc.scene.plugins, &mut registry).unwrap();
+
+        let entries = registry.by_user_event_name("tool.file_edited");
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+
+        let intents = IntentRegistry::new();
+        register_core_ops(&intents).await;
+        let ctx = IntentContext::placeholder(SceneId::from_bytes(
+            std::path::PathBuf::from("/tmp/s.kdl"),
+            b"scene",
+        ));
+
+        // First dispatch: stub returns Ok; no panic.
+        dispatch_sequence(&entry.ops, &intents, &ctx)
+            .await
+            .expect("first mount succeeds");
+
+        // Second dispatch: same selector, same ops — idempotent
+        // focus-on-already-mounted via launch-or-focus-plugin.
+        dispatch_sequence(&entry.ops, &intents, &ctx)
+            .await
+            .expect("second mount (focus) succeeds");
+    }
+
     // ---- Provenance tag is set on every synthesised entry --------------
 
     #[test]
