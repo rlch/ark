@@ -50,6 +50,13 @@ shlex = { workspace = true }
 # same struct on both sides of the wire (R10).
 wasmparser = { workspace = true }
 ark-ext-metadata-types = { path = "../ark-ext-metadata-types" }
+# T-10.4 (scene::use_resolution): the search-path resolver lives in
+# `ark-ext-metadata` (T-10.3). The scene compiler invokes it from
+# `resolve_use` so callers can hand a `UseNode` straight to the
+# resolver without re-implementing the precedence ladder. The dep is
+# acyclic: `ark-ext-metadata` depends only on `-types`, which scene
+# already pulls in.
+ark-ext-metadata = { path = "../ark-ext-metadata" }
 # T-10.4 (scene::use_resolution): semver-range checks on
 # `ExtensionMetadata::ark_range` / `zellij_range` against the host's
 # version. Cargo-style range syntax via `semver::VersionReq`.
