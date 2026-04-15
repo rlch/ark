@@ -63,8 +63,10 @@
 use async_trait::async_trait;
 use facet::Facet;
 
+pub mod supervision;
 pub mod transport;
 
+pub use supervision::{CrashReport, ExtSupervisor, SupervisorHandle};
 pub use transport::{ExtensionClient, InProcClient, NdjsonClient, NdjsonServer, RequestOptions};
 
 /// Opaque JSON text carried as a UTF-8 string.
@@ -124,6 +126,24 @@ pub enum ExtensionError {
     /// across the RPC boundary.
     #[error("internal error: {0}")]
     Internal(String),
+
+    /// Subprocess extension exited unexpectedly. Carries the last lines
+    /// of stderr captured by the supervisor's log-tail buffer per R16
+    /// (`ext/crashed` UserEvent payload). Consumers (the supervisor
+    /// crate) translate this into `AgentEvent::UserEvent
+    /// ark.ext.crashed { name, exit_code, stderr_tail }`.
+    #[error("extension {name} crashed (exit {exit_code:?}): {stderr_tail}")]
+    Crashed {
+        /// Extension instance name (matches `ExtensionMetadata::name`).
+        name: String,
+        /// Process exit code if available, `None` for signal-terminated
+        /// children whose status code couldn't be retrieved.
+        exit_code: Option<i32>,
+        /// Last buffered lines of the child's stderr — joined with
+        /// `\n`. Capped at the supervisor's log-tail length (default
+        /// 100 lines).
+        stderr_tail: String,
+    },
 }
 
 impl ExtensionError {
@@ -133,6 +153,286 @@ impl ExtensionError {
     /// JSON-RPC `-32601`.
     pub fn method_not_found(method: impl Into<String>) -> Self {
         ExtensionError::MethodNotFound(method.into())
+    }
+
+    /// Construct a [`ExtensionError::UnsupportedVersion`] variant using a
+    /// human-readable mismatch description. Maps to error code
+    /// `ext-proto/unsupported-version` (R12 + R16).
+    pub fn unsupported_version(message: impl Into<String>) -> Self {
+        ExtensionError::UnsupportedVersion(message.into())
+    }
+
+    /// Construct a [`ExtensionError::CapabilityDenied`] variant for the
+    /// reverse-request gating path (R16: `host/*` + `workspace/*` calls
+    /// require the extension to have declared the capability and to
+    /// present a valid session token). Maps to wire error code
+    /// `ext-proto/capability-denied` (R12).
+    pub fn capability_denied(capability: impl Into<String>) -> Self {
+        ExtensionError::CapabilityDenied(capability.into())
+    }
+
+    /// Stable wire error code per R12 — used by the JSON-RPC transport
+    /// when serialising an `ExtensionError` into a `ResponseError`. The
+    /// `code()` strings match the `ext-proto/*` family enumerated in R12
+    /// so consumers can match on them without parsing the `Display`
+    /// message.
+    pub fn code(&self) -> &'static str {
+        match self {
+            ExtensionError::MethodNotFound(_) => "ext-proto/method-not-found",
+            ExtensionError::CapabilityDenied(_) => "ext-proto/capability-denied",
+            ExtensionError::UnsupportedVersion(_) => "ext-proto/unsupported-version",
+            ExtensionError::InvalidParams(_) => "ext-proto/invalid-params",
+            ExtensionError::Internal(_) => "ext-proto/internal",
+            ExtensionError::Crashed { .. } => "ext/crashed",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Protocol version + capabilities (R10 + R16)
+// ---------------------------------------------------------------------------
+
+/// Parsed `MAJOR.MINOR` protocol version (R16 wire format — semver, no
+/// patch). Constructed via [`ProtocolVersion::parse`] from the
+/// [`InitializeRequest::protocol_version`] / [`InitializeResponse::protocol_version`]
+/// strings; ark's compatibility check uses [`ProtocolVersion::is_compatible`]
+/// which mirrors the R16 3-tier out-of-range policy (different MAJOR =
+/// hard fail; MINOR mismatch = best-effort).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProtocolVersion {
+    /// MAJOR component — backwards-incompatible epoch.
+    pub major: u32,
+    /// MINOR component — additive feature surface.
+    pub minor: u32,
+}
+
+impl ProtocolVersion {
+    /// Construct from raw components. Provided for tests and for
+    /// emitting the `cargo`-time compile-in version constant.
+    pub const fn new(major: u32, minor: u32) -> Self {
+        Self { major, minor }
+    }
+
+    /// Parse the wire `MAJOR.MINOR` form. Trailing patch components or
+    /// pre-release suffixes are rejected per R16 ("semver, no patch").
+    /// Empty string + non-numeric components surface as
+    /// [`ExtensionError::InvalidParams`] so transports can distinguish
+    /// a malformed version from a known-but-incompatible one.
+    pub fn parse(text: &str) -> Result<Self, ExtensionError> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Err(ExtensionError::InvalidParams(
+                "protocol version is empty".into(),
+            ));
+        }
+        let mut parts = trimmed.split('.');
+        let major_text = parts
+            .next()
+            .ok_or_else(|| ExtensionError::InvalidParams("missing MAJOR".into()))?;
+        let minor_text = parts
+            .next()
+            .ok_or_else(|| ExtensionError::InvalidParams("missing MINOR".into()))?;
+        if parts.next().is_some() {
+            return Err(ExtensionError::InvalidParams(format!(
+                "expected MAJOR.MINOR (no patch component), got {trimmed:?}"
+            )));
+        }
+        let major: u32 = major_text
+            .parse()
+            .map_err(|_| ExtensionError::InvalidParams(format!("bad MAJOR: {major_text:?}")))?;
+        let minor: u32 = minor_text
+            .parse()
+            .map_err(|_| ExtensionError::InvalidParams(format!("bad MINOR: {minor_text:?}")))?;
+        Ok(Self { major, minor })
+    }
+
+    /// Render back to `MAJOR.MINOR`.
+    pub fn to_wire(self) -> String {
+        format!("{}.{}", self.major, self.minor)
+    }
+
+    /// R16 compatibility predicate: same MAJOR = compatible. MINOR
+    /// mismatch is a soft signal (caller may log a "best-effort mode"
+    /// warning per the 3-tier policy) but does not fail the handshake.
+    pub fn is_compatible(self, other: ProtocolVersion) -> bool {
+        self.major == other.major
+    }
+}
+
+/// Compile-time host-side protocol version this build of `ark-ext-proto`
+/// supports. Used by [`ExtensionClient::handshake`] as the
+/// `client_version` default.
+pub const CURRENT_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(1, 0);
+
+/// Object-of-objects capability bag per R10 — `{ ui: {…}, intents: {…},
+/// events: {…}, host: {…}, agent: {…} }`. The wire shape is opaque
+/// JSON ([`OpaqueJson`]) because every category's body schema lives in
+/// the consumer crate (`ark-ext-metadata-types`); this struct is the
+/// in-memory mirror used by the host-side capability gate (T-9.5.8).
+///
+/// New top-level categories can be added without breaking existing
+/// extensions (R16 rule #8 — adding capability flag is a MINOR bump);
+/// extensions opt-in by listing their category in their declared
+/// capabilities. Anything not on the bag is denied by default (R16
+/// gating).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Capabilities {
+    /// Set of dotted capability identifiers granted to the extension.
+    /// Examples: `"ui.keybind"`, `"ui.pane"`, `"ui.status"`,
+    /// `"intents.provide"`, `"intents.dispatch"`, `"events.subscribe"`,
+    /// `"events.emit"`, `"host.fs.read"`, `"host.fs.write"`,
+    /// `"host.proc.spawn"`, `"host.net.fetch"`, `"workspace.applyEdit"`.
+    /// The dotted form mirrors the JSON-RPC method namespace so the
+    /// gate can map a method directly to a capability identifier.
+    pub granted: std::collections::BTreeSet<String>,
+}
+
+impl Capabilities {
+    /// Empty capability set — denies everything. Use as the default
+    /// when an extension fails to declare any capability category.
+    pub fn empty() -> Self {
+        Self {
+            granted: std::collections::BTreeSet::new(),
+        }
+    }
+
+    /// Construct from any iterator of capability identifier strings.
+    /// Convenience for tests and host-side adapters that build the bag
+    /// from `ExtensionMetadata`.
+    pub fn from_iter<I, S>(iter: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            granted: iter.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    /// Predicate used by the reverse-request gate (T-9.5.8). The
+    /// `capability` argument follows the dotted form documented on
+    /// [`Capabilities::granted`].
+    pub fn allows(&self, capability: &str) -> bool {
+        self.granted.contains(capability)
+    }
+
+    /// Render to the object-of-objects [`OpaqueJson`] wire format
+    /// (R10 — `{ ui: { keybind: true }, host: { fs: { read: true } } }`).
+    /// Identifiers are split on `.` and folded into nested objects.
+    pub fn to_wire(&self) -> OpaqueJson {
+        let mut root = serde_json::Map::new();
+        for cap in &self.granted {
+            let parts: Vec<&str> = cap.split('.').collect();
+            insert_nested(&mut root, &parts);
+        }
+        serde_json::Value::Object(root).to_string()
+    }
+
+    /// Inverse of [`Capabilities::to_wire`] — flattens nested
+    /// `{ ui: { keybind: true } }` objects back into dotted
+    /// identifiers. Non-true leaves are ignored (`{ ui: { pane: false } }`
+    /// leaves `ui.pane` un-granted). Garbage shapes return
+    /// [`ExtensionError::InvalidParams`].
+    pub fn from_wire(json: &str) -> Result<Self, ExtensionError> {
+        let value: serde_json::Value = serde_json::from_str(json).map_err(|e| {
+            ExtensionError::InvalidParams(format!("capability JSON parse: {e}"))
+        })?;
+        let mut granted = std::collections::BTreeSet::new();
+        match value {
+            serde_json::Value::Null => {}
+            serde_json::Value::Object(map) => {
+                collect_nested(&map, "", &mut granted);
+            }
+            other => {
+                return Err(ExtensionError::InvalidParams(format!(
+                    "capability root must be object or null, got {other}"
+                )));
+            }
+        }
+        Ok(Self { granted })
+    }
+}
+
+fn insert_nested(parent: &mut serde_json::Map<String, serde_json::Value>, parts: &[&str]) {
+    if parts.is_empty() {
+        return;
+    }
+    if parts.len() == 1 {
+        parent.insert(parts[0].to_string(), serde_json::Value::Bool(true));
+        return;
+    }
+    let head = parts[0].to_string();
+    let entry = parent
+        .entry(head)
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if let serde_json::Value::Object(child) = entry {
+        insert_nested(child, &parts[1..]);
+    }
+}
+
+fn collect_nested(
+    map: &serde_json::Map<String, serde_json::Value>,
+    prefix: &str,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    for (key, value) in map {
+        let path = if prefix.is_empty() {
+            key.clone()
+        } else {
+            format!("{prefix}.{key}")
+        };
+        match value {
+            serde_json::Value::Bool(true) => {
+                out.insert(path);
+            }
+            serde_json::Value::Object(child) => {
+                collect_nested(child, &path, out);
+            }
+            // Bool(false) or other leaf shapes don't grant the cap;
+            // foreign capability bodies (e.g. `{ host: { fs: { read:
+            // { paths: [...] } } } }`) collapse into a single grant
+            // for `host.fs.read` once they hit a non-object node.
+            _ => {
+                out.insert(path);
+            }
+        }
+    }
+}
+
+/// Per-session token issued at `initialize`. Carried as a freshly
+/// generated 128-bit hex string. Reverse-requests from the extension
+/// MUST present this token; ark drops requests with an absent or
+/// mismatched token (R16 "session token issued at initialize; valid
+/// only for session lifetime").
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SessionToken(String);
+
+impl SessionToken {
+    /// Mint a fresh token. Uses two `u64`s drawn from the ambient
+    /// system clock + process id to avoid pulling in a `rand` dep
+    /// — the token is not a security primitive against an attacker on
+    /// the same machine, only a foot-gun guard against extensions that
+    /// accidentally call host RPCs after the session has ended.
+    pub fn mint() -> Self {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        let nanos = now.as_nanos() as u64;
+        let pid = std::process::id() as u64;
+        let mix = nanos.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(pid);
+        Self(format!("{:016x}{:016x}", nanos, mix))
+    }
+
+    /// Construct from a known string. Used by the extension side when
+    /// echoing the token back from `initialize`.
+    pub fn from_string(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    /// Borrow the underlying token string.
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -224,6 +524,15 @@ pub struct InitializeResponse {
     /// `{ name, version }` descriptor for diagnostics. Free-form JSON so
     /// new fields don't force a protocol bump (R16 rule #3).
     pub extension_info: OpaqueJson,
+    /// Session token issued by the host on a successful handshake (R16
+    /// "session token issued at initialize"). Empty string when the
+    /// extension itself populates this field — the host
+    /// ([`ExtensionClient::handshake`]) overwrites with a freshly-minted
+    /// [`SessionToken`] before returning to the caller. Subsequent
+    /// reverse-requests from the extension MUST present this token; the
+    /// token is valid only for the lifetime of the session.
+    #[serde(default)]
+    pub session_token: String,
 }
 
 /// Void notification confirming the extension has completed any post-

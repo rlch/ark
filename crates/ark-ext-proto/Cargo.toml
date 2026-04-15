@@ -44,6 +44,11 @@ tokio = { workspace = true }
 # tokio-util elsewhere in the workspace — declaring it here keeps this
 # crate's deps explicit.
 futures = { workspace = true }
+# T-9.5.7: `nix` issues SIGTERM / SIGKILL during the
+# `ExtSupervisor::shutdown` ladder. Tokio's `Child::kill` only sends
+# SIGKILL — we need SIGTERM as the middle escalation step. Posix-only
+# signals are guarded behind `#[cfg(unix)]` in `supervision.rs`.
+nix = { workspace = true }
 
 [[bin]]
 # T-9.5.2 (cavekit-scene R16): canonical extension-protocol.kdl emitter.

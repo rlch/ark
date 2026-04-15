@@ -53,6 +53,12 @@ protocol {
                     plural #false
                     required #true
                 }
+                field "session_token" {
+                    description "Session token issued by the host on a successful handshake (R16 \"session token issued at initialize\"). Empty string when the extension itself populates this field — the host ([`ExtensionClient::handshake`]) overwrites with a freshly-minted [`SessionToken`] before returning to the caller. Subsequent reverse-requests from the extension MUST present this token; the token is valid only for the lifetime of the session."
+                    type "string"
+                    plural #false
+                    required #true
+                }
             }
         }
         method "initialized" {
@@ -1024,6 +1030,12 @@ protocol {
                 }
                 field "extension_info" {
                     description "`{ name, version }` descriptor for diagnostics. Free-form JSON so new fields don't force a protocol bump (R16 rule #3)."
+                    type "string"
+                    plural #false
+                    required #true
+                }
+                field "session_token" {
+                    description "Session token issued by the host on a successful handshake (R16 \"session token issued at initialize\"). Empty string when the extension itself populates this field — the host ([`ExtensionClient::handshake`]) overwrites with a freshly-minted [`SessionToken`] before returning to the caller. Subsequent reverse-requests from the extension MUST present this token; the token is valid only for the lifetime of the session."
                     type "string"
                     plural #false
                     required #true

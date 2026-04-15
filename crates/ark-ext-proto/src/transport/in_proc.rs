@@ -403,6 +403,7 @@ mod tests {
                 protocol_version: "0.1".into(),
                 extension_capabilities: "null".into(),
                 extension_info: "null".into(),
+                session_token: String::new(),
             })
         }
     }
