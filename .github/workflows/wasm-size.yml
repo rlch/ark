@@ -1,0 +1,156 @@
+# wasm-size: delta-watch the wasm plugin size between main and this PR.
+#
+# Covers build-site T-132 (cavekit-distribution R3 + cavekit-plugin R1/R5):
+#   "CI wasm size delta-watch: record baseline on main, PR job fails if
+#    ark-status.wasm or ark-picker.wasm grew >25%; absolute size in release
+#    notes."
+#
+# Design notes / tradeoffs:
+#   * Strategy: this workflow runs **on pull_request only** and builds the PR's
+#     wasm plugins in a single job, then pulls the baseline CSV from the most
+#     recent successful run of ci.yml on `main` via
+#     `dawidd6/action-download-artifact`. That action exists precisely for this
+#     cross-workflow download case and handles "no previous run yet" cleanly
+#     with `if_no_artifact_found: warn`.
+#   * We deliberately do **not** re-checkout main and re-build it here. A full
+#     main build would double the job runtime for zero additional signal — the
+#     wasm-build job in ci.yml already records the baseline on every push to
+#     main (see .github/workflows/ci.yml `wasm-build`, which uploads a
+#     `wasm-sizes` artifact).
+#   * If the baseline artifact is missing (e.g. first run, or an infra hiccup
+#     ate the last main build), we skip the gate with a warning rather than
+#     blocking the PR — a size gate that can't be compared is worse than no
+#     gate because it produces noise that trains reviewers to ignore it.
+#   * Threshold is hard-coded to 25% to match cavekit-distribution.md R3. Any
+#     change lives here, not in the script.
+#   * PR comment posting uses the built-in GITHUB_TOKEN with the minimum
+#     `pull-requests: write` permission. If the token is unavailable (forked
+#     PR contributors on public repos hit this), the script short-circuits and
+#     the sizes remain in the job log — still visible, just not inlined.
+
+name: wasm-size
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  actions: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  GROWTH_THRESHOLD_PCT: "25"
+
+jobs:
+  wasm-size-check:
+    name: wasm size delta-watch (vs main)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable + wasm32-wasip1)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: wasm
+
+      # Build the PR's wasm plugins exactly the same way ci.yml's wasm-build
+      # job does. Keep the two invocations in sync — any divergence silently
+      # breaks the size comparison.
+      - name: Build PR wasm plugins (release, wasm32-wasip1)
+        run: |
+          cargo build --locked --release --target wasm32-wasip1 \
+            -p ark-plugin-status -p ark-plugin-picker
+
+      - name: Record PR plugin sizes
+        run: |
+          out=target/wasm32-wasip1/release
+          mkdir -p wasm-sizes-pr
+          {
+            echo "plugin,bytes"
+            for p in ark_plugin_status ark_plugin_picker; do
+              path="$out/${p}.wasm"
+              if [ -f "$path" ]; then
+                size=$(wc -c < "$path" | tr -d ' ')
+                echo "${p},${size}"
+              else
+                echo "${p},MISSING"
+              fi
+            done
+          } | tee wasm-sizes-pr/sizes.csv
+
+      # Pull the baseline CSV from the most recent successful run of ci.yml
+      # on `main`. `if_no_artifact_found: warn` means the step succeeds even
+      # when no baseline exists yet; we then skip the comparison below.
+      - name: Download main wasm-sizes baseline
+        id: baseline
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: ci.yml
+          branch: main
+          event: push
+          name: wasm-sizes
+          path: wasm-sizes-main
+          if_no_artifact_found: warn
+          workflow_conclusion: success
+
+      - name: Compare PR vs main (fail >${{ env.GROWTH_THRESHOLD_PCT }}%)
+        id: compare
+        run: |
+          set -euo pipefail
+          base=wasm-sizes-main/sizes.csv
+          curr=wasm-sizes-pr/sizes.csv
+
+          echo "## wasm plugin sizes" > size-report.md
+          echo >> size-report.md
+
+          if [ ! -f "$base" ]; then
+            echo "No baseline artifact found on main — skipping delta gate." \
+              | tee -a size-report.md
+            echo "Current PR sizes:" | tee -a size-report.md
+            echo '```' >> size-report.md
+            cat "$curr" | tee -a size-report.md
+            echo '```' >> size-report.md
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo '```' >> size-report.md
+          # Capture script output for both the job log and the PR comment so
+          # the absolute sizes stay visible regardless of where reviewers look.
+          set +e
+          scripts/wasm-size-check.sh "$base" "$curr" "$GROWTH_THRESHOLD_PCT" \
+            | tee -a size-report.md
+          status=${PIPESTATUS[0]}
+          set -e
+          echo '```' >> size-report.md
+
+          echo "skipped=false" >> "$GITHUB_OUTPUT"
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          exit "$status"
+
+      # Best-effort PR comment with absolute sizes + delta table. Failures
+      # here are non-fatal — if GitHub won't let us write (forked PR, etc.),
+      # the sizes are still in the job log.
+      - name: Post size report as PR comment
+        if: always() && github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        continue-on-error: true
+        with:
+          header: wasm-size
+          path: size-report.md
+
+      - name: Upload PR size artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-sizes-pr
+          path: wasm-sizes-pr/sizes.csv
+          if-no-files-found: error
