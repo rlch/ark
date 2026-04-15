@@ -1,0 +1,15 @@
+---
+source: crates/scene/tests/diagnostics.rs
+expression: rendered
+---
+scene/unknown-node
+
+  × unknown node `tab` at scene root
+   ╭─[tab_at_scene_root.kdl:2:5]
+ 1 │ scene "demo" {
+ 2 │     tab "logs"
+   ·     ─┬─
+   ·      ╰── not a recognised scene-root node
+ 3 │ }
+   ╰────
+  help: Scene-root admits: extends, include, use, layout, plugin, on, keybind, engine, clear-reactions, clear-keybind, disable-plugin.

@@ -230,12 +230,12 @@ impl<'a> Ctx<'a> {
         // the entire haystack. Typos near `scene` (`sceen`, `scen`)
         // surface as hints; further-away names stay unsuggested.
         let suggestion = suggest_similar(name, &["scene"]).into_iter().next();
-        self.errors.push(SceneError::UnknownNode {
-            node: name.to_string(),
+        self.errors.push(SceneError::unknown_node(
+            name.to_string(),
             suggestion,
-            src: self.named_source(),
-            at: node.name().span(),
-        });
+            self.named_source(),
+            node.name().span(),
+        ));
     }
 
     /// Check a single node at the scene-root level against R1 + R2.
@@ -248,12 +248,12 @@ impl<'a> Ctx<'a> {
             let suggestion = suggest_similar(name, SCENE_ROOT_NODES)
                 .into_iter()
                 .next();
-            self.errors.push(SceneError::UnknownNode {
-                node: name.to_string(),
+            self.errors.push(SceneError::unknown_node(
+                name.to_string(),
                 suggestion,
-                src: self.named_source(),
-                at: node.name().span(),
-            });
+                self.named_source(),
+                node.name().span(),
+            ));
             return;
         }
 

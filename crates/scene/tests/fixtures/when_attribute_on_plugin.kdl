@@ -1,0 +1,6 @@
+scene "demo" {
+    plugin "status" when="true" {
+        source "shipped:status"
+        mount "status-bar"
+    }
+}

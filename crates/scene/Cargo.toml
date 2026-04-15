@@ -20,6 +20,7 @@ strsim = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+insta = { workspace = true }
 
 # T-1.5: `gen-scene-schema` emits `share/scene.kdl-schema` by walking the
 # facet SHAPE of `ast::SceneDoc`. CI regenerates and diffs the output

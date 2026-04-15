@@ -1,0 +1,15 @@
+---
+source: crates/scene/tests/diagnostics.rs
+expression: rendered
+---
+scene/unknown-node
+
+  × unknown node `keybnd` at scene root
+   ╭─[scene_root_typo_keybind.kdl:2:5]
+ 1 │ scene "demo" {
+ 2 │     keybnd "Alt p" intent="picker.show"
+   ·     ───┬──
+   ·        ╰── not a recognised scene-root node
+ 3 │ }
+   ╰────
+  help: did you mean `keybind`? Scene-root admits: extends, include, use, layout, plugin, on, keybind, engine, clear-reactions, clear-keybind, disable-plugin.

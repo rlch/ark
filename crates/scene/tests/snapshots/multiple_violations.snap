@@ -1,0 +1,15 @@
+---
+source: crates/scene/tests/diagnostics.rs
+expression: rendered
+---
+scene/unknown-node
+
+  × unknown node `tab` at scene root
+   ╭─[multiple_violations.kdl:2:5]
+ 1 │ scene "demo" {
+ 2 │     tab "logs"
+   ·     ─┬─
+   ·      ╰── not a recognised scene-root node
+ 3 │     on "AgentReady" when="true" intent="picker.show" {
+   ╰────
+  help: Scene-root admits: extends, include, use, layout, plugin, on, keybind, engine, clear-reactions, clear-keybind, disable-plugin.

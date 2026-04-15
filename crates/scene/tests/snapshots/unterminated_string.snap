@@ -1,0 +1,13 @@
+---
+source: crates/scene/tests/diagnostics.rs
+expression: rendered
+---
+scene/parse
+
+  × scene file is not valid KDL
+   ╭─[unterminated_string.kdl:1:7]
+ 1 │ scene "unterminated
+   ·       ──────┬──────
+   ·             ╰── here
+   ╰────
+  help: KDL 2.0 syntax error — see the caret below. Run `ark scene fmt` on a known-good reference to compare shapes.

@@ -74,6 +74,12 @@ blake3 = "1"
 # resolver (T-2.x) to suggest installed extension names. 0.11 is the
 # current stable line; drops no-std support we don't need.
 strsim = "0.11"
+# T-1.4 (scene): snapshot testing for miette-rendered diagnostics.
+# One .kdl fixture per diagnostic scenario; insta snapshots pin the
+# exact rendered error text (ANSI-stripped via miette's unicode-nocolor
+# theme, so no separate ansi-strip dep is needed). Review snapshots
+# with `cargo insta review` (or `INSTA_UPDATE=1 cargo test`).
+insta = "1"
 
 # T-131: wasm release-profile + size-reduction stack (cavekit-distribution
 # R3). Aggressive size-optimization settings applied to the shared

@@ -1,0 +1,7 @@
+scene "demo" {
+    plugin "status" {
+        source "shipped:status"
+        mount "status-bar"
+        keybind "Alt s" intent="x"
+    }
+}

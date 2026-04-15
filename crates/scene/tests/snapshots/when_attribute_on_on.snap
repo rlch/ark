@@ -1,0 +1,15 @@
+---
+source: crates/scene/tests/diagnostics.rs
+expression: rendered
+---
+scene/misplaced-node
+
+  × when= not allowed inside on
+   ╭─[when_attribute_on_on.kdl:2:21]
+ 1 │ scene "demo" {
+ 2 │     on "AgentReady" when="true" {
+   ·                     ──┬─
+   ·                       ╰── when= cannot live inside on
+ 3 │     }
+   ╰────
+  help: R2 scope table: `on`, `keybind`, `plugin`, `use`, `extends`, `include` are scene-root only; `tab`/`pane` belong inside `layout`; `when=` attrs are legal on `tab`/`pane` only.

@@ -157,20 +157,28 @@ pub enum SceneError {
     },
 
     /// Unknown top-level node (R1 "did you mean …?" path). Suggestion is
-    /// computed by the caller (facet has a built-in typo suggester;
-    /// when that fires it populates `suggestion`).
+    /// computed by the caller via [`crate::suggest::suggest_similar`]
+    /// (T-1.3); when populated, it surfaces in the rendered help text
+    /// as a "did you mean …?" hint prepended to the static
+    /// scene-root-admits list.
     #[error("unknown node `{node}` at scene root")]
-    #[diagnostic(
-        code = "scene/unknown-node",
-        help("Scene-root admits: extends, include, use, layout, plugin, on, keybind, engine, clear-reactions, clear-keybind, disable-plugin.")
-    )]
+    #[diagnostic(code = "scene/unknown-node")]
     UnknownNode {
         /// Name of the offending node.
         node: String,
 
-        /// Optional "did you mean X?" hint if the compile pipeline
-        /// could derive one (not shown if `None`).
+        /// Optional "did you mean X?" hint. Wired up by the scope
+        /// pass using [`crate::suggest::suggest_similar`]. The help
+        /// field below folds it into the rendered output.
         suggestion: Option<String>,
+
+        /// Pre-rendered help text. Built by the caller (typically
+        /// via [`SceneError::unknown_node`]) so miette's
+        /// `#[help]` attribute can splice a "did you mean …?" line
+        /// in front of the static scene-root-admits list when
+        /// `suggestion` is present.
+        #[help]
+        help: String,
 
         /// File containing the unknown node.
         #[source_code]
@@ -340,7 +348,38 @@ pub enum SceneError {
     },
 }
 
+/// Canonical static help text for `scene/unknown-node` — the list
+/// of R1-admitted scene-root node names. Used both as the help
+/// field value when no suggestion is available and as the suffix
+/// when one is.
+pub const UNKNOWN_NODE_ADMITS_HELP: &str = "Scene-root admits: extends, include, use, layout, plugin, on, keybind, engine, clear-reactions, clear-keybind, disable-plugin.";
+
 impl SceneError {
+    /// Build an `UnknownNode` with the help text already rendered so
+    /// the optional `suggestion` surfaces in miette's output.
+    ///
+    /// When `suggestion` is `Some("x")`, the help reads
+    /// `did you mean \`x\`? Scene-root admits: …`; when `None`,
+    /// only the admits list is shown.
+    pub fn unknown_node(
+        node: String,
+        suggestion: Option<String>,
+        src: NamedSource<String>,
+        at: SourceSpan,
+    ) -> Self {
+        let help = match &suggestion {
+            Some(s) => format!("did you mean `{s}`? {UNKNOWN_NODE_ADMITS_HELP}"),
+            None => UNKNOWN_NODE_ADMITS_HELP.to_string(),
+        };
+        SceneError::UnknownNode {
+            node,
+            suggestion,
+            help,
+            src,
+            at,
+        }
+    }
+
     /// Return the canonical `scene/*` error-code enum for this variant.
     /// Useful for tests and dispatch tables that prefer symbolic
     /// matching over `miette::Diagnostic::code`'s boxed `Display`.
@@ -467,16 +506,49 @@ mod tests {
 
     #[test]
     fn unknown_node_error() {
-        let err = SceneError::UnknownNode {
-            node: "reaction".to_string(),
-            suggestion: Some("on".to_string()),
-            src: src("scene.kdl", "reaction \"AgentReady\" { }"),
-            at: (0, 8).into(),
-        };
+        let err = SceneError::unknown_node(
+            "reaction".to_string(),
+            Some("on".to_string()),
+            src("scene.kdl", "reaction \"AgentReady\" { }"),
+            (0, 8).into(),
+        );
         assert_code(&err, "scene/unknown-node");
         assert_has_label(&err);
         assert_has_help(&err);
         assert_eq!(err.code_enum(), ErrorCode::UnknownNode);
+    }
+
+    /// T-1.3 wiring test: when a suggestion is present, the
+    /// rendered help text includes a "did you mean …?" hint.
+    #[test]
+    fn unknown_node_help_surfaces_suggestion() {
+        let err = SceneError::unknown_node(
+            "keybnd".to_string(),
+            Some("keybind".to_string()),
+            src("scene.kdl", "keybnd \"Alt p\""),
+            (0, 6).into(),
+        );
+        let help = err.help().map(|h| h.to_string()).unwrap_or_default();
+        assert!(
+            help.contains("did you mean `keybind`?"),
+            "expected suggestion in help, got: {help:?}"
+        );
+        assert!(help.contains("Scene-root admits:"));
+    }
+
+    /// Absent suggestion → only the static admits list renders; no
+    /// stray "did you mean" preamble.
+    #[test]
+    fn unknown_node_without_suggestion_has_no_preamble() {
+        let err = SceneError::unknown_node(
+            "xyzzy".to_string(),
+            None,
+            src("scene.kdl", "xyzzy"),
+            (0, 5).into(),
+        );
+        let help = err.help().map(|h| h.to_string()).unwrap_or_default();
+        assert!(!help.contains("did you mean"), "got: {help:?}");
+        assert!(help.contains("Scene-root admits:"));
     }
 
     #[test]
