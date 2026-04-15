@@ -7,6 +7,12 @@
 //! lifecycle glue so later tasks can fill in behaviour without touching build
 //! configuration.
 //!
+//! T-100 layers the R2 state model on top of the scaffold: see the
+//! [`state`] submodule for the [`PickerScreen`] enum, per-screen substate
+//! structs, and [`PickerCache`] (active + resurrectable). All of those
+//! types are pure Rust — the wasm plugin impl below stays untouched so
+//! host-side tests exercise the state machine directly.
+//!
 //! Satisfies `context/kits/cavekit-plugin-picker.md` R1 acceptance criteria:
 //!
 //! - Crate `ark-plugin-picker` with `crate-type = ["cdylib"]` (see Cargo.toml).
@@ -38,6 +44,14 @@
 //! symbols. Host-side tests exercise the plain-Rust state via
 //! [`Picker::new`].
 
+pub mod state;
+
+pub use state::{
+    AgentSummary, ConfirmKillState, DetailState, ErrorState, FormField, ListState, NewAgentState,
+    Orchestrator, PickerCache, PickerScreen, apply_scroll, filter_matches, move_selection_down,
+    move_selection_up,
+};
+
 /// Registered plugin name used by supervisors when targeting `zellij pipe
 /// --name`, matching R1's "load() registers pipe target: ark-picker" bullet.
 ///
@@ -47,16 +61,25 @@ pub const PLUGIN_NAME: &str = "ark-picker";
 
 /// Root plugin state.
 ///
-/// Minimal on purpose — T-100 replaces this with the `PickerScreen` enum and
-/// the agents/resurrectable caches described in R2. Keeping it as a unit-ish
-/// struct today means the wasm `ZellijPlugin` impl and host-side tests
-/// compile against a stable type while the real state model is designed.
+/// T-100 fills in the R2 state model: a [`PickerScreen`] discriminator, the
+/// active + resurrectable [`PickerCache`], and the focused-session hint
+/// supplied by `SessionUpdate` events. Later tasks only need to mutate
+/// these fields — no further re-shaping of `Picker` should be required
+/// before T-106.
 #[derive(Debug, Default)]
 pub struct Picker {
-    // T-100 introduces real fields (PickerScreen, agents cache, filter
-    // string, selected index, resurrectable cache, focused session, etc.).
-    // No placeholder fields here: adding them now would bake in layout
-    // choices that T-100's state-model work should make.
+    /// Current UI screen + its substate. Defaults to
+    /// `PickerScreen::List(ListState::default())` via
+    /// [`PickerScreen::default`].
+    pub screen: PickerScreen,
+    /// Cached active and resurrectable agents, keyed by agent id. T-101
+    /// populates this via state-dir + socket-dir scan; T-103 refreshes
+    /// entries from supervisor pipe events.
+    pub cache: PickerCache,
+    /// The session zellij reports as focused. Used by the list screen to
+    /// highlight / pin the current agent (R3/R4). `None` until the first
+    /// `SessionUpdate` lands.
+    pub focused_session: Option<String>,
 }
 
 impl Picker {
