@@ -13,6 +13,7 @@ pub mod id;
 pub mod intent;
 pub mod ops;
 pub mod parse;
+pub mod reactions;
 pub mod scope;
 pub mod suggest;
 pub mod template;
