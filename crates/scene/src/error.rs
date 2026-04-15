@@ -63,6 +63,18 @@ pub enum ErrorCode {
     IncludeCycle,
     /// Scene has both inline `engine { }` and `use "engine-*"` (R17).
     EngineConflict,
+    /// CEL expression failed to parse at compile time (R8 / T-2.1).
+    CelParse,
+    /// CEL expression parsed but failed during evaluation (R8 / T-2.1).
+    CelEvaluate,
+    /// CEL expression exceeded the static `max_expression_length` guard (R8 / T-2.6).
+    CelExpressionTooLong,
+    /// CEL AST exceeded the static `max_ast_depth` guard (R8 / T-2.6).
+    CelAstTooDeep,
+    /// Minijinja template failed to parse/compile at scene-check time (R9 / T-2.4).
+    TemplateCompile,
+    /// Minijinja template failed to render with a strict context (R9 / T-2.4).
+    TemplateRender,
 }
 
 impl ErrorCode {
@@ -80,6 +92,12 @@ impl ErrorCode {
             ErrorCode::EmptyOrUnknown => "scene/empty-or-unknown",
             ErrorCode::IncludeCycle => "scene/include-cycle",
             ErrorCode::EngineConflict => "scene/engine-conflict",
+            ErrorCode::CelParse => "cel/parse",
+            ErrorCode::CelEvaluate => "cel/evaluate",
+            ErrorCode::CelExpressionTooLong => "cel/expression-too-long",
+            ErrorCode::CelAstTooDeep => "cel/ast-too-deep",
+            ErrorCode::TemplateCompile => "scene/template-compile",
+            ErrorCode::TemplateRender => "scene/template-render",
         }
     }
 }
@@ -346,6 +364,103 @@ pub enum SceneError {
         #[label("extension engine declared here")]
         use_at: SourceSpan,
     },
+
+    /// CEL expression (a `when=` predicate, `if=` guard, or similar)
+    /// failed to parse at compile time (R8 / T-2.1).
+    ///
+    /// Emitted by [`crate::cel::compile`] when `cel-interpreter`
+    /// rejects the source. The `message` carries the CEL parser's
+    /// rendered output verbatim — it includes line/column context for
+    /// the offending token.
+    #[error("CEL expression failed to parse: {message}")]
+    #[diagnostic(
+        code = "cel/parse",
+        help("Consult the CEL spec (https://github.com/google/cel-spec) — common causes are unmatched parens, missing `==`, or reserved identifiers.")
+    )]
+    CelParse {
+        /// Raw parser output (multi-line, includes `^` caret).
+        message: String,
+
+        /// Original source text for renderer context.
+        #[source_code]
+        src: NamedSource<String>,
+
+        /// Span covering the full expression within its surrounding
+        /// scene file. Best-effort — callers without a span should
+        /// pass `(0, expr.len())`.
+        #[label("while compiling this CEL expression")]
+        at: SourceSpan,
+    },
+
+    /// CEL expression compiled but evaluation failed at runtime
+    /// (R8 / T-2.1).
+    ///
+    /// Emitted by [`crate::cel::eval`] when `cel-interpreter`
+    /// returns an `ExecutionError` (undeclared reference, type
+    /// mismatch, etc.).
+    #[error("CEL evaluation failed: {message}")]
+    #[diagnostic(
+        code = "cel/evaluate",
+        help("Check that every identifier used in the expression is bound by the surrounding context (event.*, payload.*, agent.*, session.*).")
+    )]
+    CelEvaluate {
+        /// `ExecutionError`'s rendered string.
+        message: String,
+    },
+
+    /// CEL expression exceeded the static `max_expression_length`
+    /// budget (R8 / T-2.6). Prevents a pathologically large source
+    /// string from reaching the parser.
+    #[error("CEL expression is too long: {len} bytes (max {max})")]
+    #[diagnostic(
+        code = "cel/expression-too-long",
+        help("Scene CEL expressions are capped at 4096 bytes. Split large predicates into smaller reactions or named extensions.")
+    )]
+    CelExpressionTooLong {
+        /// Actual byte length of the offending source.
+        len: usize,
+        /// Static cap, `max_expression_length`.
+        max: usize,
+    },
+
+    /// CEL AST exceeded the static `max_ast_depth` budget (R8 / T-2.6).
+    /// Defence against pathological nesting that would bog down the
+    /// evaluator without tripping the length cap.
+    #[error("CEL expression AST is too deep: depth {depth} (max {max})")]
+    #[diagnostic(
+        code = "cel/ast-too-deep",
+        help("Scene CEL AST depth is capped at 64. Flatten nested conditionals or lift sub-expressions into separate reactions.")
+    )]
+    CelAstTooDeep {
+        /// Measured maximum depth.
+        depth: usize,
+        /// Static cap, `max_ast_depth`.
+        max: usize,
+    },
+
+    /// Minijinja template failed to parse/compile at scene-check time
+    /// (R9 / T-2.4).
+    #[error("template failed to compile: {message}")]
+    #[diagnostic(
+        code = "scene/template-compile",
+        help("Consult the minijinja docs for syntax (https://docs.rs/minijinja). Common causes: unmatched `{{% %}}`, typo in block name.")
+    )]
+    TemplateCompile {
+        /// Rendered minijinja error.
+        message: String,
+    },
+
+    /// Minijinja template failed to render (strict-undefined or
+    /// general runtime error) (R9 / T-2.4).
+    #[error("template failed to render: {message}")]
+    #[diagnostic(
+        code = "scene/template-render",
+        help("Check that every `{{{{ var }}}}` resolves to a value in the current scope. Compile-time templates use the five-var LayoutVars surface; runtime templates use (event, payload, agent, session).")
+    )]
+    TemplateRender {
+        /// Rendered minijinja error.
+        message: String,
+    },
 }
 
 /// Canonical static help text for `scene/unknown-node` — the list
@@ -396,6 +511,12 @@ impl SceneError {
             SceneError::EmptyOrUnknown { .. } => ErrorCode::EmptyOrUnknown,
             SceneError::IncludeCycle { .. } => ErrorCode::IncludeCycle,
             SceneError::EngineConflict { .. } => ErrorCode::EngineConflict,
+            SceneError::CelParse { .. } => ErrorCode::CelParse,
+            SceneError::CelEvaluate { .. } => ErrorCode::CelEvaluate,
+            SceneError::CelExpressionTooLong { .. } => ErrorCode::CelExpressionTooLong,
+            SceneError::CelAstTooDeep { .. } => ErrorCode::CelAstTooDeep,
+            SceneError::TemplateCompile { .. } => ErrorCode::TemplateCompile,
+            SceneError::TemplateRender { .. } => ErrorCode::TemplateRender,
         }
     }
 }
@@ -683,5 +804,14 @@ mod tests {
         assert_eq!(ErrorCode::EmptyOrUnknown.as_str(), "scene/empty-or-unknown");
         assert_eq!(ErrorCode::IncludeCycle.as_str(), "scene/include-cycle");
         assert_eq!(ErrorCode::EngineConflict.as_str(), "scene/engine-conflict");
+        assert_eq!(ErrorCode::CelParse.as_str(), "cel/parse");
+        assert_eq!(ErrorCode::CelEvaluate.as_str(), "cel/evaluate");
+        assert_eq!(
+            ErrorCode::CelExpressionTooLong.as_str(),
+            "cel/expression-too-long"
+        );
+        assert_eq!(ErrorCode::CelAstTooDeep.as_str(), "cel/ast-too-deep");
+        assert_eq!(ErrorCode::TemplateCompile.as_str(), "scene/template-compile");
+        assert_eq!(ErrorCode::TemplateRender.as_str(), "scene/template-render");
     }
 }
