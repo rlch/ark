@@ -17,12 +17,11 @@ Build site: context/plans/build-site.md (134 tasks, 7 tiers).
 | 3 | 22 | 22 | ✅ COMPLETE |
 | 4 | 10 | 10 | ✅ COMPLETE (post-gate) |
 | 5 | 16 | 16 | ✅ COMPLETE (post-gate, 16 findings fixed across 5 cycles) |
-| 6 | 26 | 26 | ✅ COMPLETE (pre-gate) |
+| 6 | 26 | 26 | ✅ COMPLETE (post-gate, 15 findings fixed across 8 cycles) |
 
-**Overall: 134/134 tasks done (100% pre-gate) · 269+ ark-cli tests + workspace green**
+**Overall: 134/134 tasks done (100%) · 279 ark-cli tests + workspace green · ALL TIERS COMPLETE**
 
-Tier 6 landed 2026-04-15 across 16 commits (testing T-110–T-125 + e2e T-126–T-128 + CI T-129/T-132 + distribution T-130/T-131/T-133/T-134/T-135).
-Codex tier-6 gate pending — TIER_6_START_REF = 314cfbf.
+Tier 6 landed 2026-04-15 across 16 build commits + 8 codex gate cycles. Build order: testing fixtures (T-110–T-113), contract suites (T-114/T-115/T-116), per-crate unit coverage (T-117–T-125), mock-claude (T-126), e2e scenarios (T-127/T-128), CI workflow (T-129), build orchestration (T-130), wasm release profile (T-131), CI size delta (T-132), cargo-dist (T-133), homebrew/binstall (T-134), standalone wasm assets (T-135). Gate fixed F-700 through F-714 (workflow_dispatch tag handling, flaky test, status plugin permission split, build.rs incremental, --no-detach state cleanup, doctor exit-code, dead-code warnings, manifest mtimes, brew tap owner). TIER_6_START_REF = 314cfbf → final HEAD = fef98dd.
 
 Tier 4 landed 2026-04-15 across commits 3e681da → 1a03779 (build) + 10 codex gate cycles 3e681da → 0fc47dd. Build order: T-084 scaffold, T-086 (pre-existing), T-085 exit-codes, T-085-fdn CliError expansion (foundation), T-092 pane routing, T-093 env-vars, T-089 kill, T-090 config, T-088 list, T-091 doctor, T-087 spawn. Codex gate fixed 30 findings (F-500–F-529) across 10 cycles. Cycle 10 returned zero P1s — gate closed. TIER_4_START_REF = 538fa42.
 
