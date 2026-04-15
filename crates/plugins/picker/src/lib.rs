@@ -47,6 +47,7 @@
 pub mod bootstrap;
 pub mod render_confirm;
 pub mod render_detail;
+pub mod render_help;
 pub mod render_list;
 pub mod render_new_agent;
 pub mod resurrect;
@@ -65,6 +66,7 @@ pub use render_detail::{
     DETAIL_CONT, DETAIL_INDENT, DETAIL_TREE, DetailError, build_detail_rows, format_humantime,
     handle_detail_key, home_rel, parse_status_response, query_agent_status,
 };
+pub use render_help::{HELP_BINDINGS, HELP_FOOTER, HELP_TITLE, render_help_screen};
 pub use render_list::{
     KeyInput, PickerAction, build_footer, build_header, format_age, format_progress, format_row,
     fuzzy_filter_and_sort, fuzzy_haystack, handle_list_key, handle_resurrect_prompt_key,
@@ -192,6 +194,9 @@ mod wasm_plugin {
         let ctrl = key.has_modifiers(&[KeyModifier::Ctrl]);
         let shift = key.has_modifiers(&[KeyModifier::Shift]);
         match key.bare_key {
+            // R9: Shift+Delete → bulk-kill Done/Failed agents. Must run
+            // before the bare `Delete` arm so the modifier wins.
+            BareKey::Delete if shift => KeyInput::ShiftDel,
             BareKey::Up => KeyInput::Up,
             BareKey::Down => KeyInput::Down,
             BareKey::Enter => KeyInput::Enter,
@@ -202,8 +207,16 @@ mod wasm_plugin {
             BareKey::Char('f') if ctrl => KeyInput::CtrlF,
             BareKey::Char('r') if ctrl => KeyInput::CtrlR,
             BareKey::Char('d') if ctrl => KeyInput::CtrlD,
-            BareKey::Char('k') if key.has_no_modifiers() => KeyInput::Up,
-            BareKey::Char('j') if key.has_no_modifiers() => KeyInput::Down,
+            BareKey::Char('c') if ctrl => KeyInput::CtrlC,
+            // R9: vim-style bare navigation keys land as their own
+            // variants so host tests can differentiate the two
+            // dispatch paths.
+            BareKey::Char('k') if key.has_no_modifiers() => KeyInput::K,
+            BareKey::Char('j') if key.has_no_modifiers() => KeyInput::J,
+            BareKey::Char('h') if key.has_no_modifiers() => KeyInput::H,
+            BareKey::Char('l') if key.has_no_modifiers() => KeyInput::L,
+            BareKey::Char('/') if key.has_no_modifiers() => KeyInput::Slash,
+            BareKey::Char('?') if key.has_no_modifiers() => KeyInput::Question,
             BareKey::Tab if shift => KeyInput::ShiftTab,
             BareKey::Tab => KeyInput::Tab,
             BareKey::Left => KeyInput::Left,
@@ -486,6 +499,39 @@ mod wasm_plugin {
                                     );
                                     true
                                 }
+                                PickerAction::OpenHelp => {
+                                    // T-108 / R9 / W5: `?` opens the
+                                    // help overlay. Snapshot the list
+                                    // state so the overlay can lift
+                                    // without the filter/selection
+                                    // getting reset when we return.
+                                    self.last_list_state = list_state.clone();
+                                    self.screen = PickerScreen::Help;
+                                    true
+                                }
+                                PickerAction::KillAllDoneFailed => {
+                                    // T-108 / R9: Shift+Del — terminate
+                                    // every Done/Failed/Killed/Timeout
+                                    // agent currently in the cache.
+                                    // Failures per-agent are absorbed;
+                                    // the 2 s timer will reconcile the
+                                    // final view.
+                                    let ids: Vec<String> = self
+                                        .cache
+                                        .active
+                                        .iter()
+                                        .filter(|(_, s)| is_terminal_phase(&s.phase))
+                                        .map(|(id, _)| id.clone())
+                                        .collect();
+                                    for id in ids {
+                                        let sock = agent_sock(&id);
+                                        // Force-kill; keep_worktree=true
+                                        // (don't destroy artifacts in a
+                                        // bulk op).
+                                        let _ = kill_cmd(&sock, true, true);
+                                    }
+                                    true
+                                }
                                 PickerAction::FilterChanged
                                 | PickerAction::MoveUp
                                 | PickerAction::MoveDown => true,
@@ -659,6 +705,21 @@ mod wasm_plugin {
                                 _ => false,
                             }
                         }
+                        PickerScreen::Help => {
+                            // T-108 / W5: `?` toggles back to List; Esc
+                            // / Ctrl+C also close the overlay. Any
+                            // other key is a no-op (overlay stays up).
+                            match input {
+                                KeyInput::Question
+                                | KeyInput::Char('?')
+                                | KeyInput::Esc
+                                | KeyInput::CtrlC => {
+                                    self.screen = PickerScreen::List(self.last_list_state.clone());
+                                    true
+                                }
+                                _ => false,
+                            }
+                        }
                         PickerScreen::Error(_) => {
                             // R7 "agent no longer alive — refresh? [y/n]".
                             // `y` fires a refresh and returns to List; `n`
@@ -684,7 +745,6 @@ mod wasm_plugin {
                                 _ => false,
                             }
                         }
-                        _ => false,
                     }
                 }
                 Event::Timer(_elapsed) => {
@@ -769,11 +829,26 @@ mod wasm_plugin {
                     let text = Text::new(&format!("Error: {}", err.message));
                     print_text_with_coordinates(text, 0, 0, Some(cols), Some(1));
                 }
-                _ => {
-                    let text = Text::new("(screen not yet implemented)");
-                    print_text_with_coordinates(text, 0, 0, Some(cols), Some(1));
+                PickerScreen::Help => {
+                    render_help_overlay(rows, cols);
                 }
             }
+        }
+    }
+
+    /// T-108 / W5: paint the help overlay using
+    /// [`super::render_help_screen`]. Falls through to no-op when the
+    /// caller passes a zero-height viewport.
+    fn render_help_overlay(rows: usize, cols: usize) {
+        if rows == 0 || cols == 0 {
+            return;
+        }
+        let body = super::render_help_screen(cols);
+        for (y, line) in body.iter().enumerate() {
+            if y >= rows {
+                break;
+            }
+            print_text_with_coordinates(Text::new(line), 0, y, Some(cols), Some(1));
         }
     }
 

@@ -73,6 +73,10 @@ pub struct ListState {
     /// Number of rows scrolled past the top of the viewport. Adjusted by
     /// [`apply_scroll`] based on `visible_rows` from render.
     pub scroll_offset: usize,
+    /// When true, printable keys append to [`Self::filter`] instead of
+    /// being interpreted as bare-letter hotkeys (`r`, `j`, `k`, `h`, `l`,
+    /// `N`, `?`). Toggled on by `/` and off by `Esc` — R9.
+    pub filter_active: bool,
 }
 
 /// State for the expanded-detail screen.

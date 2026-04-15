@@ -58,6 +58,13 @@ pub enum PickerAction {
     NewAgent,
     /// `?`: open the help overlay.
     OpenHelp,
+    /// `?` / `Esc` on the help overlay: return to the list screen.
+    CloseHelp,
+    /// `Shift+Del`: bulk-terminate every agent in the cache whose phase is
+    /// Done / Failed / Killed / Timeout. The wasm dispatcher iterates the
+    /// cache and fires `Kill` over each socket, absorbing per-agent
+    /// failures. R9.
+    KillAllDoneFailed,
     /// Filter text changed (append/backspace). UI redraws; no side effect.
     FilterChanged,
     /// Selection moved up.
@@ -160,6 +167,26 @@ pub enum KeyInput {
     /// `Right` arrow — on the new-agent form it cycles the focused radio
     /// / dropdown forward.
     Right,
+    /// Vim `j` — move selection down. Distinct from [`Self::Down`] so
+    /// tests can assert the two paths independently even though the
+    /// action they emit is the same.
+    J,
+    /// Vim `k` — move selection up.
+    K,
+    /// Vim `l` — expand the selected row / enter Detail (R9).
+    L,
+    /// Vim `h` — collapse Detail back to List (R9).
+    H,
+    /// `Shift+Delete` — bulk-kill every Done/Failed/Killed/Timeout agent
+    /// in view (R9).
+    ShiftDel,
+    /// `/` — enter filter-capture mode (printable chars append to filter
+    /// verbatim; `Esc` exits filter mode).
+    Slash,
+    /// `?` — open/close the help overlay (R9).
+    Question,
+    /// `Ctrl+C` — close the picker. Mirrors `Esc` when not in filter mode.
+    CtrlC,
     /// Any key we don't care about.
     Other,
 }
@@ -458,16 +485,69 @@ pub fn handle_list_key(state: &mut ListState, cache: &PickerCache, key: KeyInput
         let filtered = fuzzy_filter_and_sort(cache, &state.filter);
         filtered.len()
     };
+    // R9: when filter-capture mode is active, Esc only exits filter mode,
+    // Backspace pops from the filter, and printable chars append verbatim
+    // (no bare-letter hotkey interpretation).
+    if state.filter_active {
+        match key {
+            KeyInput::Esc => {
+                state.filter_active = false;
+                return PickerAction::FilterChanged;
+            }
+            KeyInput::Backspace => {
+                if state.filter.pop().is_some() {
+                    state.selected = 0;
+                    return PickerAction::FilterChanged;
+                }
+                return PickerAction::None;
+            }
+            KeyInput::Char(c) if !c.is_control() => {
+                return append_to_filter(state, c);
+            }
+            KeyInput::Up | KeyInput::K => {
+                crate::state::move_selection_up(state, total);
+                return PickerAction::MoveUp;
+            }
+            KeyInput::Down | KeyInput::J => {
+                crate::state::move_selection_down(state, total);
+                return PickerAction::MoveDown;
+            }
+            KeyInput::Enter => {
+                // Enter in filter mode commits the filter (exit capture)
+                // and falls through to the normal Enter handler below.
+                state.filter_active = false;
+            }
+            _ => {
+                // All other keys (Ctrl+*, Shift+Del, arrows-with-modifiers,
+                // etc.) fall through to the normal handler — operators can
+                // still dispatch Ctrl+N / Del etc. while typing a filter.
+            }
+        }
+    }
     match key {
-        KeyInput::Esc => PickerAction::Close,
-        KeyInput::Up => {
+        KeyInput::Esc | KeyInput::CtrlC => PickerAction::Close,
+        KeyInput::Up | KeyInput::K => {
             crate::state::move_selection_up(state, total);
             PickerAction::MoveUp
         }
-        KeyInput::Down => {
+        KeyInput::Down | KeyInput::J => {
             crate::state::move_selection_down(state, total);
             PickerAction::MoveDown
         }
+        KeyInput::L | KeyInput::Right => match selected_agent(cache, state) {
+            // R9: `l` / → expands into the detail screen for the selected
+            // agent. Crashed rows have no supervisor socket to query, so
+            // expansion is only meaningful for live entries.
+            Some((id, false)) => PickerAction::ExpandDetail(id.to_string()),
+            _ => PickerAction::None,
+        },
+        KeyInput::H | KeyInput::Left => PickerAction::CollapseDetail,
+        KeyInput::Slash => {
+            state.filter_active = true;
+            PickerAction::FilterChanged
+        }
+        KeyInput::Question => PickerAction::OpenHelp,
+        KeyInput::ShiftDel => PickerAction::KillAllDoneFailed,
         KeyInput::Enter => match selected_agent(cache, state) {
             // R8 / T-107: Enter on an active (alive) agent switches
             // directly to its zellij session. The wasm dispatcher passes
@@ -524,31 +604,45 @@ pub fn handle_list_key(state: &mut ListState, cache: &PickerCache, key: KeyInput
             _ => PickerAction::None,
         },
         KeyInput::Char(c) => {
-            // R9 bindings: `?` → help, `r` → resurrect (on selected
-            // crashed agent), `N` → new (also covered by CtrlN).
+            // R9 bindings (not in filter mode): bare-letter hotkeys take
+            // precedence over filter append. Users enter filter mode
+            // explicitly with `/`.
             match c {
                 '?' => PickerAction::OpenHelp,
+                '/' => {
+                    state.filter_active = true;
+                    PickerAction::FilterChanged
+                }
                 'N' => PickerAction::NewAgent,
+                'j' => {
+                    crate::state::move_selection_down(state, total);
+                    PickerAction::MoveDown
+                }
+                'k' => {
+                    crate::state::move_selection_up(state, total);
+                    PickerAction::MoveUp
+                }
+                'l' => match selected_agent(cache, state) {
+                    Some((id, false)) => PickerAction::ExpandDetail(id.to_string()),
+                    _ => PickerAction::None,
+                },
+                'h' => PickerAction::CollapseDetail,
                 'r' => match selected_agent(cache, state) {
                     Some((id, true)) => PickerAction::Resurrect(id.to_string()),
-                    // `r` on a non-crashed agent falls through to the
-                    // filter — users might be typing a name that
-                    // contains `r`.
-                    _ => append_to_filter(state, 'r'),
+                    // `r` on a non-crashed agent is a no-op in non-filter
+                    // mode — press `/` first to type a name containing `r`.
+                    _ => PickerAction::None,
                 },
-                c if c.is_control() => PickerAction::None,
-                c => append_to_filter(state, c),
+                // Any other char is ignored in navigation mode. Press
+                // `/` to enter filter capture.
+                _ => PickerAction::None,
             }
         }
-        // Tab/Left are meaningful on the detail / new-agent screens but
-        // ignored on the list screen itself. Same for ShiftTab/Right/CtrlF
-        // (new-agent form only).
-        KeyInput::Tab
-        | KeyInput::ShiftTab
-        | KeyInput::Left
-        | KeyInput::Right
-        | KeyInput::CtrlF
-        | KeyInput::Other => PickerAction::None,
+        // Tab/ShiftTab/CtrlF are meaningful on the detail / new-agent
+        // screens but ignored on the list screen itself.
+        KeyInput::Tab | KeyInput::ShiftTab | KeyInput::CtrlF | KeyInput::Other => {
+            PickerAction::None
+        }
     }
 }
 
@@ -952,8 +1046,11 @@ mod tests {
     }
 
     #[test]
-    fn key_char_appends_to_filter() {
-        let mut st = ListState::default();
+    fn key_char_appends_to_filter_when_filter_active() {
+        let mut st = ListState {
+            filter_active: true,
+            ..Default::default()
+        };
         let c = cache_of(&[("a", "alpha")], &[]);
         handle_list_key(&mut st, &c, KeyInput::Char('a'));
         assert_eq!(st.filter, "a");
@@ -963,8 +1060,7 @@ mod tests {
     fn key_backspace_pops_filter() {
         let mut st = ListState {
             filter: "abc".into(),
-            selected: 0,
-            scroll_offset: 0,
+            ..Default::default()
         };
         let c = cache_of(&[("a", "alpha")], &[]);
         handle_list_key(&mut st, &c, KeyInput::Backspace);
@@ -1010,11 +1106,146 @@ mod tests {
     }
 
     #[test]
-    fn key_lowercase_r_on_active_falls_through_to_filter() {
+    fn key_lowercase_r_on_active_is_noop_in_nav_mode() {
         let mut st = ListState::default();
+        let c = cache_of(&[("a", "alpha")], &[]);
+        let action = handle_list_key(&mut st, &c, KeyInput::Char('r'));
+        assert_eq!(action, PickerAction::None);
+        assert_eq!(st.filter, "");
+    }
+
+    #[test]
+    fn key_lowercase_r_in_filter_mode_appends_to_filter() {
+        let mut st = ListState {
+            filter_active: true,
+            ..Default::default()
+        };
         let c = cache_of(&[("a", "alpha")], &[]);
         handle_list_key(&mut st, &c, KeyInput::Char('r'));
         assert_eq!(st.filter, "r");
+    }
+
+    // --- T-108: extended R9 keybinding map ---------------------------------
+
+    #[test]
+    fn key_j_moves_selection_down() {
+        let mut st = ListState::default();
+        let c = cache_of(&[("a", "alpha"), ("b", "bravo")], &[]);
+        let action = handle_list_key(&mut st, &c, KeyInput::J);
+        assert_eq!(action, PickerAction::MoveDown);
+        assert_eq!(st.selected, 1);
+    }
+
+    #[test]
+    fn key_k_moves_selection_up() {
+        let mut st = ListState {
+            selected: 1,
+            ..Default::default()
+        };
+        let c = cache_of(&[("a", "alpha"), ("b", "bravo")], &[]);
+        let action = handle_list_key(&mut st, &c, KeyInput::K);
+        assert_eq!(action, PickerAction::MoveUp);
+        assert_eq!(st.selected, 0);
+    }
+
+    #[test]
+    fn key_l_on_active_expands_detail() {
+        let mut st = ListState::default();
+        let c = cache_of(&[("a", "alpha")], &[]);
+        let action = handle_list_key(&mut st, &c, KeyInput::L);
+        assert_eq!(action, PickerAction::ExpandDetail("a".to_string()));
+    }
+
+    #[test]
+    fn key_h_collapses_detail() {
+        let mut st = ListState::default();
+        let c = cache_of(&[("a", "alpha")], &[]);
+        let action = handle_list_key(&mut st, &c, KeyInput::H);
+        assert_eq!(action, PickerAction::CollapseDetail);
+    }
+
+    #[test]
+    fn key_slash_activates_filter_mode() {
+        let mut st = ListState::default();
+        let c = cache_of(&[("a", "alpha")], &[]);
+        let action = handle_list_key(&mut st, &c, KeyInput::Slash);
+        assert_eq!(action, PickerAction::FilterChanged);
+        assert!(st.filter_active);
+    }
+
+    #[test]
+    fn key_char_slash_also_activates_filter_mode() {
+        let mut st = ListState::default();
+        let c = cache_of(&[("a", "alpha")], &[]);
+        handle_list_key(&mut st, &c, KeyInput::Char('/'));
+        assert!(st.filter_active);
+    }
+
+    #[test]
+    fn filter_mode_then_type_then_esc_exits_filter() {
+        let mut st = ListState::default();
+        let c = cache_of(&[("a", "alpha")], &[]);
+        handle_list_key(&mut st, &c, KeyInput::Slash);
+        handle_list_key(&mut st, &c, KeyInput::Char('f'));
+        handle_list_key(&mut st, &c, KeyInput::Char('o'));
+        assert_eq!(st.filter, "fo");
+        let action = handle_list_key(&mut st, &c, KeyInput::Esc);
+        assert_eq!(action, PickerAction::FilterChanged);
+        assert!(!st.filter_active);
+        // Filter contents preserved after exiting capture mode.
+        assert_eq!(st.filter, "fo");
+    }
+
+    #[test]
+    fn key_question_opens_help() {
+        let mut st = ListState::default();
+        let c = cache_of(&[], &[]);
+        assert_eq!(
+            handle_list_key(&mut st, &c, KeyInput::Question),
+            PickerAction::OpenHelp
+        );
+    }
+
+    #[test]
+    fn key_shift_del_kills_all_done_failed() {
+        let mut st = ListState::default();
+        let c = cache_of(&[("a", "alpha")], &[]);
+        assert_eq!(
+            handle_list_key(&mut st, &c, KeyInput::ShiftDel),
+            PickerAction::KillAllDoneFailed
+        );
+    }
+
+    #[test]
+    fn key_ctrl_c_closes() {
+        let mut st = ListState::default();
+        let c = cache_of(&[], &[]);
+        assert_eq!(
+            handle_list_key(&mut st, &c, KeyInput::CtrlC),
+            PickerAction::Close
+        );
+    }
+
+    #[test]
+    fn esc_in_nav_mode_closes() {
+        let mut st = ListState::default();
+        let c = cache_of(&[], &[]);
+        assert_eq!(
+            handle_list_key(&mut st, &c, KeyInput::Esc),
+            PickerAction::Close
+        );
+    }
+
+    #[test]
+    fn esc_in_filter_mode_only_exits_filter() {
+        let mut st = ListState {
+            filter_active: true,
+            ..Default::default()
+        };
+        let c = cache_of(&[], &[]);
+        let action = handle_list_key(&mut st, &c, KeyInput::Esc);
+        assert_eq!(action, PickerAction::FilterChanged);
+        assert!(!st.filter_active);
     }
 
     // --- header / footer ---------------------------------------------------

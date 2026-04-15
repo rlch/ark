@@ -331,13 +331,22 @@ pub fn handle_new_agent_key(state: &mut NewAgentState, key: KeyInput) -> PickerA
             apply_char(state, c);
             PickerAction::None
         }
-        // Up/Down/Delete/CtrlN/CtrlR/CtrlD not bound on this screen.
+        // Up/Down/Delete/CtrlN/CtrlR/CtrlD/ShiftDel/J/K/L/H/Slash/Question/CtrlC
+        // not bound on this screen.
         KeyInput::Up
         | KeyInput::Down
         | KeyInput::Delete
         | KeyInput::CtrlN
         | KeyInput::CtrlR
         | KeyInput::CtrlD
+        | KeyInput::CtrlC
+        | KeyInput::ShiftDel
+        | KeyInput::J
+        | KeyInput::K
+        | KeyInput::L
+        | KeyInput::H
+        | KeyInput::Slash
+        | KeyInput::Question
         | KeyInput::Other => PickerAction::None,
     }
 }
