@@ -1,18 +1,19 @@
-//! Build script for `ark-cli` — wasm plugin embedding (T-098).
+//! Build script for `ark-cli` — wasm plugin embedding (T-098, T-109).
 //!
-//! Embeds the `ark-plugin-status` wasm artifact into the `ark` binary
-//! so `ark doctor --fix` can write the plugin to the user's zellij
-//! plugins dir without requiring a separate install step. See
-//! `context/kits/cavekit-plugin-status.md` R5 and
+//! Embeds the `ark-plugin-status` and `ark-plugin-picker` wasm
+//! artifacts into the `ark` binary so `ark doctor --fix` can write
+//! the plugins to the user's zellij plugins dir without requiring a
+//! separate install step. See `context/kits/cavekit-plugin-status.md`
+//! R5, `context/kits/cavekit-plugin-picker.md` R1, and
 //! `context/kits/cavekit-distribution.md` R3.
 //!
 //! # Two code paths
 //!
 //! 1. **Real artifact** — if a prebuilt wasm exists at
-//!    `target/wasm32-wasip1/release/ark_plugin_status.wasm` (relative
-//!    to the workspace root) we copy it into `$OUT_DIR/wasm/`.
-//!    Distribution / release builds produce it via a dedicated
-//!    `cargo build --target wasm32-wasip1 --release -p ark-plugin-status`
+//!    `target/wasm32-wasip1/release/<plugin>.wasm` (relative to the
+//!    workspace root) we copy it into `$OUT_DIR/wasm/`. Distribution
+//!    / release builds produce it via a dedicated
+//!    `cargo build --target wasm32-wasip1 --release -p <plugin>`
 //!    step before invoking the top-level `cargo build`. That outer
 //!    orchestration is owned by T-130.
 //!
@@ -21,7 +22,7 @@
 //!    the wasm32-wasip1 target installed) we write a zero-byte
 //!    placeholder so `include_bytes!` still compiles, and emit a
 //!    `cargo:warning` pointing at the artifact path. The embedded
-//!    module exposes `STATUS_WASM_AVAILABLE` so `doctor` skips the
+//!    module exposes `<PLUGIN>_WASM_AVAILABLE` so `doctor` skips the
 //!    check cleanly when the binary ships without a real plugin.
 //!
 //! ## Why we don't invoke `cargo` from build.rs
@@ -30,26 +31,27 @@
 //! build.rs that is itself driven by a `cargo build --workspace`
 //! introduces lock-file / target-dir contention (the inner and outer
 //! cargo fight over `target/` and `Cargo.lock`), and on some hosts
-//! deadlocks on the jobserver. T-098 keeps the build.rs side purely
-//! about discovering an already-built artifact; orchestrating the
-//! wasm build itself is T-130's responsibility.
+//! deadlocks on the jobserver. T-098/T-109 keep the build.rs side
+//! purely about discovering an already-built artifact; orchestrating
+//! the wasm build itself is T-130's responsibility.
 
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn main() {
-    // Re-run when the plugin source changes so developers iterating
-    // on the plugin crate pick up new bytes on the next `cargo build`
+    // Re-run when either plugin source changes so developers iterating
+    // on a plugin crate pick up new bytes on the next `cargo build`
     // of the CLI.
     println!("cargo:rerun-if-changed=../plugins/status/src");
     println!("cargo:rerun-if-changed=../plugins/status/Cargo.toml");
+    println!("cargo:rerun-if-changed=../plugins/picker/src");
+    println!("cargo:rerun-if-changed=../plugins/picker/Cargo.toml");
     println!("cargo:rerun-if-changed=build.rs");
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR set by cargo"));
     let wasm_out_dir = out_dir.join("wasm");
     fs::create_dir_all(&wasm_out_dir).expect("create $OUT_DIR/wasm");
-    let dest = wasm_out_dir.join("ark-plugin-status.wasm");
 
     // Locate the workspace target/ directory. CARGO_MANIFEST_DIR points
     // at `crates/cli`; walk up two levels for the workspace root.
@@ -59,17 +61,46 @@ fn main() {
         .parent()
         .and_then(|p| p.parent())
         .expect("workspace root");
+
+    embed_plugin(
+        workspace_root,
+        &wasm_out_dir,
+        "ark_plugin_status.wasm",
+        "ark-plugin-status.wasm",
+        "ark-plugin-status",
+    );
+    embed_plugin(
+        workspace_root,
+        &wasm_out_dir,
+        "ark_plugin_picker.wasm",
+        "ark-plugin-picker.wasm",
+        "ark-plugin-picker",
+    );
+}
+
+/// Copy the artifact from `target/wasm32-wasip1/release/<src_name>`
+/// into `$OUT_DIR/wasm/<dest_name>`, or fall back to a zero-byte
+/// placeholder. `display_name` is used for cargo:warning messages.
+fn embed_plugin(
+    workspace_root: &Path,
+    wasm_out_dir: &Path,
+    src_name: &str,
+    dest_name: &str,
+    display_name: &str,
+) {
+    let dest = wasm_out_dir.join(dest_name);
     let artifact = workspace_root
         .join("target")
         .join("wasm32-wasip1")
         .join("release")
-        .join("ark_plugin_status.wasm");
+        .join(src_name);
 
     if artifact.is_file() {
         match fs::copy(&artifact, &dest) {
             Ok(bytes) => {
                 println!(
-                    "cargo:warning=embedded ark-plugin-status.wasm ({} bytes) from {}",
+                    "cargo:warning=embedded {} ({} bytes) from {}",
+                    display_name,
                     bytes,
                     artifact.display()
                 );
@@ -86,17 +117,19 @@ fn main() {
         }
     } else {
         println!(
-            "cargo:warning=ark-plugin-status wasm not found at {}; embedding empty placeholder. \
-             Run `cargo build --target wasm32-wasip1 --release -p ark-plugin-status` before \
-             the release build to ship a real plugin (see cavekit-distribution.md R3).",
-            artifact.display()
+            "cargo:warning={} wasm not found at {}; embedding empty placeholder. \
+             Run `cargo build --target wasm32-wasip1 --release -p {}` before the \
+             release build to ship a real plugin (see cavekit-distribution.md R3).",
+            display_name,
+            artifact.display(),
+            display_name,
         );
         write_placeholder(&dest);
     }
 }
 
 fn write_placeholder(dest: &std::path::Path) {
-    // Empty file — `STATUS_WASM_AVAILABLE` becomes false and doctor
+    // Empty file — `<PLUGIN>_WASM_AVAILABLE` becomes false and doctor
     // skips the check when the build shipped without a real plugin.
     fs::write(dest, b"").expect("write placeholder wasm");
 }
