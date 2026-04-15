@@ -664,3 +664,55 @@ Four findings raised by codex against the picker + status-chip plugin work. All 
 `cargo build --workspace` zero new warnings (the two pre-existing `embedded ark-plugin-*` cargo-warnings are build-script byte-count notices, not code warnings). `cargo fmt --all` clean. `cargo build --target wasm32-wasip1 --release -p ark-plugin-picker` still compiles cleanly (libc dependency only pulls in on `cfg(unix)` targets; wasm32-wasip1 is `target_os="wasi"` and sees the `None` fallback).
 
 **Gate status after Tier 5 cycle 4:** OPEN pending next codex pass.
+
+## Tier 5 Gate — Cycle 5 (2026-04-15) — FINAL
+
+Cycle 5 is the closing pass. Codex's final review raised three P2 findings and zero P1s — the convergence signal that ends the Tier 5 gate. All three fixed in a single commit; ark-cli lib tests bumped by four and the cli_help integration suite bumped by one.
+
+### F-613 — P2 main.rs pre-parse NO_COLOR check inconsistent with subcommand path (FIXED)
+
+**Source:** codex
+**Tier:** 5
+**Severity:** P2
+**Status:** fixed
+**Location:** crates/cli/src/main.rs (`main`), crates/cli/tests/cli_help.rs (new regression test)
+
+**Description:** The F-512 pre-parse path in `main.rs` computed `no_color_for_help = env::var_os("NO_COLOR").is_some()`. That's true even when `NO_COLOR=""` (empty) — the spec at <https://no-color.org> explicitly says only a non-empty value disables color, and the rest of the CLI (via `Ctx::from_env()` → `detect_no_color()` → `no_color_from_env`) already honoured that rule. The asymmetry meant `NO_COLOR="" ark --help` produced colorless output while `NO_COLOR="" ark list` produced colored output — same process, same env, two different answers.
+
+**Resolution:** Replaced the raw `env::var_os(...).is_some()` call with `detect_no_color()`, re-using the helper that was already re-exported from `ark_cli::detect_no_color` (lib.rs:33) via the `ctx` module. One-line fix at the call site plus a two-line import addition; no lib or ctx changes needed because the public surface was already correct. Added a new integration test `help_with_empty_no_color_does_not_strip_color` in `tests/cli_help.rs` that shells out to the `ark` binary twice under `env_clear()` + `CLICOLOR_FORCE=1 TERM=xterm-256color` — once with `NO_COLOR` unset, once with `NO_COLOR=""` — and asserts the two stdouts are byte-identical. Prior to the fix the empty-NO_COLOR run stripped ANSI escapes; after the fix the outputs match.
+
+### F-614 — P2 is_shell_c_wrapper missed combined short-option clusters (FIXED)
+
+**Source:** codex
+**Tier:** 5
+**Severity:** P2
+**Status:** fixed
+**Location:** crates/cli/src/commands/config.rs (`is_shell_c_wrapper`, new helper `is_c_short_cluster`)
+
+**Description:** The F-524 detector for shell-c wrappers only matched a standalone `-c` token via `parts.iter().rposition(|p| p == "-c")`. That missed the common `EDITOR='bash -lc "nvim \"$1\""'` shape (login shell + inline script), `EDITOR='sh -ec "…"'` (strict-mode script), and similar `-uc`, `-xc`, `-vc` clusters. POSIX shells all parse `-lc` as the combined `-l -c`, so the final argv entry is still the inline script and still needs the `ark-edit` dummy-$0 insertion from `build_editor_argv_tail`. Users of `bash -lc` / `sh -ec` EDITOR wrappers hit the same "editor opens nothing" bug F-515 fixed for the plain `-c` case.
+
+**Resolution:** Introduced a small `is_c_short_cluster(s)` helper that validates single-dash short-option clusters of shape `-[a-z]*c` — starts with exactly one dash, contains only lowercase ASCII letters, and ends in literal `c`. `is_shell_c_wrapper` now calls `parts.iter().rposition(|p| is_c_short_cluster(p))` instead of the exact-equality check. Upper-case letters, digits in the cluster, long-option `--c`, and non-terminal `c` (e.g. `-cx`) are all rejected so non-shell-c flags still fall through. Four new tests added next to the existing F-524 battery: `editor_argv_tail_bash_lc_combined_short_cluster_is_wrapper`, `editor_argv_tail_sh_ec_combined_short_cluster_is_wrapper`, `editor_argv_tail_zsh_uc_combined_short_cluster_is_wrapper`, and `is_c_short_cluster_rejects_non_terminal_c_and_long_options` (exhaustive guard for the helper). The pre-existing bare-`-c`, `--noprofile`, non-shell-binary, and "extra arg after script" tests continue to pass — the relaxation is strictly additive.
+
+### F-615 — P2 build.rs ignored CARGO_TARGET_DIR (FIXED)
+
+**Source:** codex
+**Tier:** 5
+**Severity:** P2
+**Status:** fixed
+**Location:** crates/cli/build.rs (`main`, new `wasm_target_dir` helper, `embed_plugin` signature)
+
+**Description:** `build.rs` hardcoded the wasm artifact lookup at `<workspace>/target/wasm32-wasip1/release/`. When the operator sets `CARGO_TARGET_DIR=/tmp/ark-out` or passes `cargo build --target-dir /tmp/ark-out`, cargo moves every build artifact (including the wasm plugins) under the new directory — but the build-script still looked at the old hardcoded path, found nothing, and emitted a zero-byte placeholder. Downstream `ark doctor --fix` then refused to install plugins even though they were freshly built on disk. The same bug affected anyone using a `.cargo/config.toml` with a `[build] target-dir = "…"` stanza. Cargo documents `CARGO_TARGET_DIR` as part of the build-script env contract, so this was purely a missed lookup.
+
+**Resolution:** Added `wasm_target_dir(workspace_root) -> PathBuf` that returns `CARGO_TARGET_DIR` (as a `PathBuf`) when set and non-empty, else falls back to `<workspace>/target/`. `main` now computes `let target_dir = wasm_target_dir(workspace_root);` once, reuses it to build the `wasm_release_dir` for the `cargo:rerun-if-changed` declarations, and passes it into each `embed_plugin` call. `embed_plugin`'s first parameter was renamed `workspace_root → target_dir` and its `target_dir.join("target")...` prefix stripped — it now joins directly under the resolved target dir. Added `cargo:rerun-if-env-changed=CARGO_TARGET_DIR` so flipping the env var re-triggers build.rs without needing a `cargo clean`. Verified locally that `CARGO_TARGET_DIR=target cargo build -p ark-cli` still re-embeds both plugins with real byte counts (`embedded ark-plugin-status (1263482 bytes)` and `embedded ark-plugin-picker (1439293 bytes)`), matching pre-fix output. No new tests (build-script behaviour is validated by the existing `cargo:warning=embedded …` line in CI logs + zero-warnings gate in cycle 5).
+
+## Test Delta — Tier 5 Cycle 5 (FINAL)
+
+- ark-cli: 265 baseline → 269 (+4: F-614 added three wrapper-shape coverage tests for `-lc`, `-ec`, `-uc` plus one exhaustive helper guard).
+- ark-cli cli_help integration: 2 baseline → 3 (+1: F-613 added the `help_with_empty_no_color_does_not_strip_color` spawn-assertion).
+- ark-plugin-picker: 215 unchanged (no picker changes).
+- ark-plugin-status: 47 unchanged (no status-plugin changes).
+- Workspace: `cargo test --workspace -- --test-threads=1` fully green.
+
+`cargo build --workspace` zero new warnings (the two pre-existing `embedded ark-plugin-*` cargo-warnings are build-script byte-count notices, not code warnings). `cargo fmt --all` clean.
+
+**Gate status after Tier 5 cycle 5:** CLOSED. Cycle 5 raised zero P1s (three P2s, all fixed); this is the final Tier 5 convergence signal. The impl-review-findings.md ledger now spans F-500 through F-615 across five cycles, all findings fixed, workspace tests fully green on single-threaded runs.

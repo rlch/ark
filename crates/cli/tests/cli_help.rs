@@ -36,6 +36,47 @@ fn help_succeeds_with_empty_env() {
     );
 }
 
+/// F-613: per <https://no-color.org> only a NON-EMPTY `NO_COLOR`
+/// disables color. The help path previously used
+/// `env::var_os("NO_COLOR").is_some()`, which incorrectly stripped
+/// color when `NO_COLOR=""` — an inconsistency with the subcommand
+/// `Ctx::from_env()` path which uses `detect_no_color()`. This test
+/// asserts the help output emits ANSI escapes (or at least does not
+/// differ from the unset-env case) when NO_COLOR is empty.
+#[cfg(unix)]
+#[test]
+fn help_with_empty_no_color_does_not_strip_color() {
+    // Reference: help output with NO_COLOR unset and color forced on.
+    let colored = Command::new(ark_bin())
+        .arg("--help")
+        .env_clear()
+        .env("CLICOLOR_FORCE", "1")
+        .env("TERM", "xterm-256color")
+        .output()
+        .expect("spawn ark --help (reference)");
+    assert!(colored.status.success());
+    let colored_stdout = String::from_utf8_lossy(&colored.stdout).into_owned();
+
+    // With NO_COLOR set to the empty string, the empty value must NOT
+    // disable color, so the help output should match the reference
+    // byte-for-byte.
+    let empty_no_color = Command::new(ark_bin())
+        .arg("--help")
+        .env_clear()
+        .env("CLICOLOR_FORCE", "1")
+        .env("TERM", "xterm-256color")
+        .env("NO_COLOR", "")
+        .output()
+        .expect("spawn ark --help (NO_COLOR empty)");
+    assert!(empty_no_color.status.success());
+    let empty_stdout = String::from_utf8_lossy(&empty_no_color.stdout).into_owned();
+
+    assert_eq!(
+        colored_stdout, empty_stdout,
+        "empty NO_COLOR must be treated as unset; help output differed"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn version_succeeds_with_empty_env() {

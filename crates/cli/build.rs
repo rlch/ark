@@ -48,6 +48,9 @@ fn main() {
     println!("cargo:rerun-if-changed=../plugins/picker/src");
     println!("cargo:rerun-if-changed=../plugins/picker/Cargo.toml");
     println!("cargo:rerun-if-changed=build.rs");
+    // F-615: CARGO_TARGET_DIR / `--target-dir` may move the wasm
+    // artifact out of `<workspace>/target/`. Re-run when it changes.
+    println!("cargo:rerun-if-env-changed=CARGO_TARGET_DIR");
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR set by cargo"));
     let wasm_out_dir = out_dir.join("wasm");
@@ -62,6 +65,13 @@ fn main() {
         .and_then(|p| p.parent())
         .expect("workspace root");
 
+    // F-615: `cargo` sets CARGO_TARGET_DIR in the build-script env
+    // whenever the operator passes `--target-dir` or sets it via
+    // `.cargo/config.toml` / the env directly. Honor it so the wasm
+    // artifact is found in the actual target directory instead of
+    // the hardcoded `<workspace>/target/`.
+    let target_dir = wasm_target_dir(workspace_root);
+
     // F-608: also watch the wasm release directory so a freshly-appeared
     // artifact re-triggers build.rs even when no plugin source changed.
     // Without this, a CLI built before the wasm target was compiled would
@@ -71,10 +81,7 @@ fn main() {
     // keep the stale placeholder. cargo tracks the mtime of the path we
     // name even if it doesn't exist yet — when the file appears cargo
     // will re-invoke us and `embed_plugin` picks up the real bytes.
-    let wasm_release_dir = workspace_root
-        .join("target")
-        .join("wasm32-wasip1")
-        .join("release");
+    let wasm_release_dir = target_dir.join("wasm32-wasip1").join("release");
     println!("cargo:rerun-if-changed={}", wasm_release_dir.display());
     println!(
         "cargo:rerun-if-changed={}",
@@ -86,14 +93,14 @@ fn main() {
     );
 
     embed_plugin(
-        workspace_root,
+        &target_dir,
         &wasm_out_dir,
         "ark_plugin_status.wasm",
         "ark-plugin-status.wasm",
         "ark-plugin-status",
     );
     embed_plugin(
-        workspace_root,
+        &target_dir,
         &wasm_out_dir,
         "ark_plugin_picker.wasm",
         "ark-plugin-picker.wasm",
@@ -101,19 +108,34 @@ fn main() {
     );
 }
 
-/// Copy the artifact from `target/wasm32-wasip1/release/<src_name>`
+/// F-615: resolve the base directory containing `wasm32-wasip1/release/`.
+/// When `CARGO_TARGET_DIR` is set we use it verbatim; otherwise we fall
+/// back to the legacy `<workspace>/target/` location.
+fn wasm_target_dir(workspace_root: &Path) -> PathBuf {
+    if let Some(env_dir) = env::var_os("CARGO_TARGET_DIR") {
+        let p = PathBuf::from(env_dir);
+        if !p.as_os_str().is_empty() {
+            return p;
+        }
+    }
+    workspace_root.join("target")
+}
+
+/// Copy the artifact from `<target>/wasm32-wasip1/release/<src_name>`
 /// into `$OUT_DIR/wasm/<dest_name>`, or fall back to a zero-byte
 /// placeholder. `display_name` is used for cargo:warning messages.
+///
+/// F-615: `target_dir` is the resolved `CARGO_TARGET_DIR` (or the
+/// legacy `<workspace>/target/` fallback), not the workspace root.
 fn embed_plugin(
-    workspace_root: &Path,
+    target_dir: &Path,
     wasm_out_dir: &Path,
     src_name: &str,
     dest_name: &str,
     display_name: &str,
 ) {
     let dest = wasm_out_dir.join(dest_name);
-    let artifact = workspace_root
-        .join("target")
+    let artifact = target_dir
         .join("wasm32-wasip1")
         .join("release")
         .join(src_name);

@@ -17,7 +17,7 @@
 //! flag on help rendering via a pre-parse; the authoritative ctx
 //! used by subcommands is built after parse succeeds.
 
-use ark_cli::{Cli, Ctx};
+use ark_cli::{Cli, Ctx, detect_no_color};
 use clap::FromArgMatches;
 use tracing_subscriber::EnvFilter;
 
@@ -28,7 +28,11 @@ fn main() {
     // the process env directly here (cheap, no dir resolution) to
     // drive help coloring; full ctx (state/config/runtime dirs) is
     // resolved only AFTER a subcommand has successfully parsed.
-    let no_color_for_help = std::env::var_os("NO_COLOR").is_some();
+    //
+    // F-613: use the shared `detect_no_color` helper so the help path
+    // honors the NO_COLOR spec (empty string does NOT disable color),
+    // matching the `Ctx::from_env()` path used by subcommands.
+    let no_color_for_help = detect_no_color();
     let cmd = Cli::command_with_no_color_aware(no_color_for_help);
     let matches = cmd.get_matches();
     let cli = match Cli::from_arg_matches(&matches) {

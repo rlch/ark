@@ -253,9 +253,15 @@ fn build_editor_argv_tail(parts: &[String], path: &std::path::Path) -> Vec<std::
     }
 }
 
-/// F-524: does `parts` look like a POSIX shell wrapper whose final
-/// element is the inline script passed via `-c`? See
-/// [`build_editor_argv_tail`] for the full rule set.
+/// F-524 / F-614: does `parts` look like a POSIX shell wrapper whose
+/// final element is the inline script passed via `-c`?
+///
+/// Accepts both the bare `-c` form (`sh -c "…"`) and combined
+/// short-option clusters ending in `c` (`bash -lc "…"`, `sh -ec "…"`,
+/// `sh -uc "…"`, etc.) — shells treat `-lc` as `-l -c` and still
+/// invoke `-c` semantics with the final argv entry as the script.
+///
+/// See [`build_editor_argv_tail`] for the full rule set.
 fn is_shell_c_wrapper(parts: &[String]) -> bool {
     if parts.len() < 3 {
         return false;
@@ -270,14 +276,36 @@ fn is_shell_c_wrapper(parts: &[String]) -> bool {
     if !is_shell_bin {
         return false;
     }
-    // Find the LAST occurrence of `-c`.
-    let last_c = match parts.iter().rposition(|p| p == "-c") {
+    // Find the LAST occurrence of any `-c`-bearing short-option cluster:
+    // starts with a single `-`, contains only lowercase ASCII letters
+    // after the dash, and ends in literal `c`. Matches `-c`, `-lc`,
+    // `-ec`, `-uc`, etc.
+    let last_c = match parts.iter().rposition(|p| is_c_short_cluster(p)) {
         Some(i) => i,
         None => return false,
     };
-    // Need exactly one more token after `-c`, and it must be the
-    // final element (the inline script).
+    // Need exactly one more token after the `-c` cluster, and it must
+    // be the final element (the inline script).
     last_c + 1 == parts.len() - 1
+}
+
+/// Returns `true` iff `s` is a combined short-option cluster that ends
+/// in `c` — shape `-[a-z]*c`, e.g. `-c`, `-lc`, `-ec`, `-uc`. Double-
+/// dash long options (`--foo`) and anything containing uppercase /
+/// non-ascii are rejected so this stays tight.
+fn is_c_short_cluster(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.len() < 2 || bytes[0] != b'-' {
+        return false;
+    }
+    // Reject `--…` long options.
+    if bytes.len() >= 2 && bytes[1] == b'-' {
+        return false;
+    }
+    if *bytes.last().unwrap() != b'c' {
+        return false;
+    }
+    bytes[1..].iter().all(|b| b.is_ascii_lowercase())
 }
 
 /// `ark config edit` — spawn `$EDITOR` on the user config file.
@@ -840,6 +868,57 @@ mod tests {
         assert_eq!(tail.len(), 2);
         assert_eq!(tail[0], std::ffi::OsString::from("ark-edit"));
         assert_eq!(tail[1], std::ffi::OsString::from("/tmp/x.toml"));
+    }
+
+    #[test]
+    fn editor_argv_tail_bash_lc_combined_short_cluster_is_wrapper() {
+        // F-614: `bash -lc "nvim \"$1\""` is an extremely common EDITOR
+        // shape (login-shell invocation + inline script). The shell
+        // parses `-lc` as `-l -c`, so it still needs the $0 dummy.
+        let parts: Vec<String> = vec!["bash".into(), "-lc".into(), "nvim \"$1\"".into()];
+        let tail = build_editor_argv_tail(&parts, std::path::Path::new("/tmp/lc.toml"));
+        assert_eq!(tail.len(), 2);
+        assert_eq!(tail[0], std::ffi::OsString::from("ark-edit"));
+        assert_eq!(tail[1], std::ffi::OsString::from("/tmp/lc.toml"));
+    }
+
+    #[test]
+    fn editor_argv_tail_sh_ec_combined_short_cluster_is_wrapper() {
+        // F-614: `sh -ec "vim \"$1\""` is `-e -c` combined; equally
+        // common for strict-mode inline scripts.
+        let parts: Vec<String> = vec!["sh".into(), "-ec".into(), "vim \"$1\"".into()];
+        let tail = build_editor_argv_tail(&parts, std::path::Path::new("/tmp/ec.toml"));
+        assert_eq!(tail.len(), 2);
+        assert_eq!(tail[0], std::ffi::OsString::from("ark-edit"));
+        assert_eq!(tail[1], std::ffi::OsString::from("/tmp/ec.toml"));
+    }
+
+    #[test]
+    fn editor_argv_tail_zsh_uc_combined_short_cluster_is_wrapper() {
+        // F-614: cover a third cluster shape (`-uc` = unset + -c) to
+        // prove the detector is not tied to any specific letter set.
+        let parts: Vec<String> = vec!["zsh".into(), "-uc".into(), "vi \"$1\"".into()];
+        let tail = build_editor_argv_tail(&parts, std::path::Path::new("/tmp/uc.toml"));
+        assert_eq!(tail.len(), 2);
+        assert_eq!(tail[0], std::ffi::OsString::from("ark-edit"));
+        assert_eq!(tail[1], std::ffi::OsString::from("/tmp/uc.toml"));
+    }
+
+    #[test]
+    fn is_c_short_cluster_rejects_non_terminal_c_and_long_options() {
+        // F-614 guard: only `-[a-z]*c` clusters should be accepted.
+        // `-cx` (c not last), `--c` (long option), `-C` (uppercase),
+        // `-2c` (digit) must all fall through.
+        assert!(!is_c_short_cluster("-cx"));
+        assert!(!is_c_short_cluster("--c"));
+        assert!(!is_c_short_cluster("-C"));
+        assert!(!is_c_short_cluster("-2c"));
+        assert!(!is_c_short_cluster("c"));
+        assert!(!is_c_short_cluster("-"));
+        assert!(is_c_short_cluster("-c"));
+        assert!(is_c_short_cluster("-lc"));
+        assert!(is_c_short_cluster("-ec"));
+        assert!(is_c_short_cluster("-uc"));
     }
 
     #[test]
