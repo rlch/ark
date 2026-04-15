@@ -14,6 +14,24 @@ crate-type = ["cdylib"]
 # zellij-tile 0.44 matches the zellij 0.44.x runtime targeted by cavekit-mux-zellij.
 # Pinned locally (also mirrored in ark-plugin-status) — no other workspace crate
 # uses it, so it stays out of [workspace.dependencies].
+#
+# T-131 default-features audit (cavekit-distribution.md R3):
+#   - zellij-tile 0.44: `default = []` — nothing to strip.
+#   - serde: `default = ["std"]` — std + derive are both required.
+#   - nucleo-matcher: `default = ["unicode-normalization",
+#     "unicode-casefold", "unicode-segmentation"]`. Defaults retained
+#     because `Config::DEFAULT` in render_list.rs relies on case-folded
+#     fuzzy matching; dropping `unicode-casefold` would silently change
+#     scoring behavior and break the picker's T-125 fuzzy-match tests.
+#   - shlex: `default = ["std"]`. We call `shlex::split`, which is
+#     alloc-only, but `default-features = false` currently produces a
+#     no_std crate that still exposes `split`; left on to avoid
+#     surprising downstream consumers (shlex std feature is ~0 bytes
+#     on wasm since the only thing it unlocks is `std::io::BufRead`
+#     plumbing we don't use).
+#   - libc: `default = ["std"]`. We only call the raw FFI `geteuid()`,
+#     so `default-features = false` drops the `std`-gated helpers and
+#     shaves a small amount of dead code.
 zellij-tile = "0.44"
 # nucleo-matcher (NOT fuzzy-matcher) is mandated by cavekit-plugin-picker R1:
 # faster, lighter wasm footprint, only transitively pulls in `memchr`. The
@@ -31,8 +49,11 @@ shlex = { workspace = true }
 # it in directly adds no resolved versions. Only used on unix; the
 # wasm32-wasip1 target's unix cfg is satisfied but `geteuid()` is still
 # gated behind `cfg(unix)` for the non-wasm non-unix host test fallback.
+#
+# T-131: `default-features = false` drops libc's `std` feature since we
+# only touch the raw `geteuid()` FFI symbol.
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc = { version = "0.2", default-features = false }
 
 # NOTE: serde_json, humantime, and chrono are intentionally NOT listed here.
 # cavekit-plugin-picker R1 and cavekit-distribution.md R3 ban them from the

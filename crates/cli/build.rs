@@ -44,6 +44,21 @@
 //! ark-plugin-picker` manually before `cargo build -p ark-cli`. CI
 //! and `cargo-dist` release pipelines (T-133) pre-build the wasm
 //! outside build.rs.
+//!
+//! ## T-131 — wasm size-reduction stack
+//!
+//! `[profile.release]` in the workspace `Cargo.toml` applies the
+//! size-optimization stack mandated by `cavekit-distribution.md` R3:
+//! `opt-level = "z"`, `lto = "fat"`, `codegen-units = 1`, `strip = true`,
+//! `panic = "abort"`. The default-features audit for plugin deps lives
+//! in `crates/plugins/{status,picker}/Cargo.toml`.
+//!
+//! After the wasm artifact is discovered, `embed_plugin` optionally
+//! runs `wasm-opt -Oz --enable-bulk-memory` as a postprocess shrink
+//! pass when the `binaryen` `wasm-opt` binary is on `PATH`. This is
+//! pure icing on top of the `rustc` size stack — if `wasm-opt` is
+//! absent we print a `cargo:warning` and embed the unoptimized
+//! artifact as-is.
 
 use std::env;
 use std::fs;
@@ -347,6 +362,9 @@ fn embed_plugin(
                     bytes,
                     artifact.display()
                 );
+                // T-131: optional wasm-opt postprocess on the embedded copy.
+                // Leaves the source artifact in `target/` untouched.
+                maybe_wasm_opt(&dest, display_name, bytes);
             }
             Err(e) => {
                 // Fall back to placeholder so the build still succeeds.
@@ -375,4 +393,80 @@ fn write_placeholder(dest: &std::path::Path) {
     // Empty file — `<PLUGIN>_WASM_AVAILABLE` becomes false and doctor
     // skips the check when the build shipped without a real plugin.
     fs::write(dest, b"").expect("write placeholder wasm");
+}
+
+/// T-131: best-effort `wasm-opt -Oz --enable-bulk-memory` postprocess.
+/// Runs only if `wasm-opt` is on `PATH`; otherwise emits a
+/// `cargo:warning` and leaves the embedded artifact unmodified.
+/// Failures never fail the build — we just embed the unoptimized bytes.
+///
+/// `before_bytes` is the size of `dest` as copied, used for the
+/// shrink-report `cargo:warning`.
+fn maybe_wasm_opt(dest: &Path, display_name: &str, before_bytes: u64) {
+    // `Command::new("wasm-opt")` relies on PATH lookup. Probe with
+    // `--version` first so we can emit a friendly skip message instead
+    // of a cryptic spawn error when the binary is missing.
+    let probe = Command::new("wasm-opt").arg("--version").output();
+    match probe {
+        Ok(p) if p.status.success() => {}
+        _ => {
+            println!(
+                "cargo:warning=wasm-opt not found on PATH, skipping post-build optimization for \
+                 {display_name} (install binaryen to shrink further)"
+            );
+            return;
+        }
+    }
+
+    // wasm-opt rewrites in-place when input == output, but it's safer
+    // to write to a sibling tempfile and rename on success so a failed
+    // run can't leave a half-written wasm in place.
+    let tmp = dest.with_extension("wasm.opt.tmp");
+    let status = Command::new("wasm-opt")
+        .arg("-Oz")
+        .arg("--enable-bulk-memory")
+        .arg(dest)
+        .arg("-o")
+        .arg(&tmp)
+        .status();
+
+    match status {
+        Ok(s) if s.success() => {
+            if let Err(e) = fs::rename(&tmp, dest) {
+                println!(
+                    "cargo:warning=wasm-opt succeeded but rename {} → {} failed: {e}; keeping \
+                     unoptimized bytes",
+                    tmp.display(),
+                    dest.display()
+                );
+                let _ = fs::remove_file(&tmp);
+                return;
+            }
+            let after = fs::metadata(dest).map(|m| m.len()).unwrap_or(before_bytes);
+            let saved = before_bytes.saturating_sub(after);
+            let pct = if before_bytes > 0 {
+                (saved as f64 / before_bytes as f64) * 100.0
+            } else {
+                0.0
+            };
+            println!(
+                "cargo:warning=wasm-opt -Oz shrank {display_name}: {before_bytes} → {after} \
+                 bytes (-{saved}, -{pct:.1}%)"
+            );
+        }
+        Ok(s) => {
+            println!(
+                "cargo:warning=wasm-opt exited {s} on {}; keeping unoptimized bytes",
+                dest.display()
+            );
+            let _ = fs::remove_file(&tmp);
+        }
+        Err(e) => {
+            println!(
+                "cargo:warning=failed to spawn wasm-opt for {}: {e}; keeping unoptimized bytes",
+                dest.display()
+            );
+            let _ = fs::remove_file(&tmp);
+        }
+    }
 }

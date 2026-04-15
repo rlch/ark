@@ -13,6 +13,14 @@ crate-type = ["cdylib"]
 [dependencies]
 # zellij-tile 0.44 matches the zellij 0.44.x runtime targeted by cavekit-mux-zellij.
 # Pinned locally (not in [workspace.dependencies]) because no other crate uses it.
+#
+# T-131 default-features audit (cavekit-distribution.md R3):
+#   - zellij-tile 0.44: no default features (`default = []`) — nothing to strip.
+#   - serde: `default = ["std"]`. We need `std` (wasi has std) and `derive`,
+#     so keeping defaults is equivalent to `default-features = false,
+#     features = ["std", "derive"]`. Left on for readability.
+#   - serde_json: `default = ["std"]`. Same reasoning — std is required
+#     for the `to_string` / `from_slice` paths used by the status plugin.
 zellij-tile = "0.44"
 serde = { workspace = true }
 serde_json = { workspace = true }

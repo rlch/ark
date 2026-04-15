@@ -53,8 +53,31 @@ sha2 = "0.10"
 fd-lock = "4"
 shlex = "1"
 
+# T-131: wasm release-profile + size-reduction stack (cavekit-distribution
+# R3). Aggressive size-optimization settings applied to the shared
+# `[profile.release]` so both the `ark-cli` release binary and the
+# `wasm32-wasip1` plugin artifacts (ark-plugin-status / ark-plugin-picker)
+# shrink for cargo-dist + future browser distribution.
+#
+# Stack:
+#   - opt-level = "z"    size-first LLVM opts (drops ~20-30% vs "3")
+#   - lto = "fat"        whole-program LTO across all crates (bigger win
+#                        than "thin" on wasm where every intrinsic drop
+#                        helps)
+#   - codegen-units = 1  single CGU so LTO sees the whole program
+#   - strip = true       strip symbols (wasm name section + debug info)
+#   - panic = "abort"    no landing pads / unwinding tables — plugins
+#                        don't unwind anyway, and the CLI release just
+#                        aborts on panic which is fine for a user tool.
+#                        Tests still run on debug profile where
+#                        `std::panic::catch_unwind` works normally.
+#
+# `wasm-opt -Oz --enable-bulk-memory` is applied as a postprocess step
+# by `crates/cli/build.rs` (opt-in via ARK_BUILD_WASM=1) and by
+# `just wasm-opt` when wasm-opt is on PATH — see build.rs module doc.
 [profile.release]
-opt-level = 3
-lto = "thin"
+opt-level = "z"
+lto = "fat"
 codegen-units = 1
 strip = true
+panic = "abort"
