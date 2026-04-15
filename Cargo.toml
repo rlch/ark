@@ -98,8 +98,17 @@ panic = "abort"
 [workspace.metadata.dist]
 cargo-dist-version = "0.21.0"
 ci = ["github"]
+# T-134: `homebrew` installer + `tap = "rlch/homebrew-ark"` makes
+# cargo-dist push a generated formula to the `rlch/homebrew-ark` tap repo
+# on every `v*` release — yielding `brew install rlch/ark/ark` once the
+# tap repo + `HOMEBREW_TAP_TOKEN` are wired. See README "Installation"
+# section for the one-time bootstrap steps the maintainer must perform.
 installers = ["shell", "homebrew"]
 tap = "rlch/homebrew-ark"
+# Name the formula `ark` (not `ark-cli`) so the install command reads
+# `brew install rlch/ark/ark`. cargo-dist uses this as the formula
+# filename + the `class` name inside the generated `.rb`.
+formula = "ark"
 targets = [
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
@@ -111,3 +120,7 @@ pr-run-mode = "plan"
 # `checksum = "sha256"` is explicit so the contract doesn't silently
 # change if cargo-dist's default ever shifts.
 checksum = "sha256"
+# `install-path = "CARGO_HOME"` keeps the shell installer's dropped
+# binary next to `cargo install`-dropped ones (~/.cargo/bin by default),
+# avoiding PATH surprises vs the default `~/.local/bin` target.
+install-path = "CARGO_HOME"

@@ -6,6 +6,26 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+description = "Zellij-native agent orchestration — spawns AI coding agents into dedicated zellij sessions with live diff, git status, and progress panes."
+readme = "../../README.md"
+homepage = "https://github.com/rlch/ark"
+documentation = "https://github.com/rlch/ark"
+keywords = ["zellij", "ai", "agent", "orchestration", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+
+# T-134: cargo-binstall metadata (cavekit-distribution R4).
+# Points binstall at the GitHub Release tarballs produced by
+# `.github/workflows/release.yml` (T-133). Contract:
+#   - url:    `<repo>/releases/download/v<version>/ark-<version>-<target>.tar.xz`
+#   - format: .tar.xz (`txz`)
+#   - bin path inside the tarball: `ark-<version>-<target>/ark`
+# Keep these in sync with the `Stage artifacts` step of release.yml
+# (tarball name + staging dir layout). The {bin} template expands to
+# each `[[bin]]` declared below (currently `ark`).
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/ark-{ version }-{ target }.tar.xz"
+pkg-fmt = "txz"
+bin-dir = "ark-{ version }-{ target }/{ bin }"
 
 [lib]
 name = "ark_cli"
