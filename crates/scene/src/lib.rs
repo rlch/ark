@@ -12,3 +12,4 @@ pub mod intent;
 pub mod parse;
 pub mod scope;
 pub mod suggest;
+pub mod template;
