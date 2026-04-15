@@ -255,3 +255,213 @@ mod tests {
         assert_eq!(acc.reactions[0].selector, "Stall");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Integration tests: drive `apply_clears` through the real composition
+// pipeline (`load_composition` + `merge_fragments`). These verify the
+// "apply clears between parent merge and root additions" ordering
+// holds end-to-end, not just the in-isolation mutation API above.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod composition_tests {
+    use crate::extends::SceneSearchCtx;
+    use crate::merge::{load_composition, merge_fragments};
+    use crate::parse::parse_scene;
+    use std::fs;
+    use tempfile::TempDir;
+
+    /// Parent contributes two reactions; child clears one of them.
+    /// After merge, only the unmatched parent reaction survives.
+    #[test]
+    fn child_clear_reactions_drops_inherited_match() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let scenes_dir = root.join(".ark/scenes");
+        fs::create_dir_all(&scenes_dir).unwrap();
+        fs::write(
+            scenes_dir.join("base.kdl"),
+            r#"
+scene "base" {
+    on "AgentReady" {
+        exec
+    }
+    on "Stall" {
+        emit
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let child_path = root.join("child.kdl");
+        let src = r#"
+scene "child" {
+    extends "base"
+    clear-reactions selector="AgentReady"
+}
+"#;
+        fs::write(&child_path, src).unwrap();
+        let doc = parse_scene(src, &child_path).unwrap();
+        let frags =
+            load_composition(doc, child_path, &SceneSearchCtx::new(&root)).unwrap();
+        let merged = merge_fragments(frags).expect("merge");
+        assert_eq!(merged.reactions.len(), 1);
+        assert_eq!(merged.reactions[0].selector, "Stall");
+    }
+
+    /// Parent contributes a keybind; child clears it then adds its own
+    /// on the same chord. After merge the child's keybind wins (there
+    /// is only one) — exercises clear-then-re-add.
+    #[test]
+    fn child_clear_keybind_then_re_add() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let scenes_dir = root.join(".ark/scenes");
+        fs::create_dir_all(&scenes_dir).unwrap();
+        fs::write(
+            scenes_dir.join("base.kdl"),
+            r#"
+scene "base" {
+    keybind "Alt p" intent="base.picker"
+}
+"#,
+        )
+        .unwrap();
+
+        let child_path = root.join("child.kdl");
+        let src = r#"
+scene "child" {
+    extends "base"
+    clear-keybind "Alt p"
+    keybind "Alt p" intent="child.picker"
+}
+"#;
+        fs::write(&child_path, src).unwrap();
+        let doc = parse_scene(src, &child_path).unwrap();
+        let frags =
+            load_composition(doc, child_path, &SceneSearchCtx::new(&root)).unwrap();
+        let merged = merge_fragments(frags).expect("merge");
+        assert_eq!(merged.keybinds.len(), 1);
+        assert_eq!(
+            merged.keybinds[0].intent.as_deref(),
+            Some("child.picker")
+        );
+    }
+
+    /// Parent contributes a plugin; child disables it. After merge the
+    /// plugin is absent.
+    #[test]
+    fn child_disable_plugin_drops_inherited() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let scenes_dir = root.join(".ark/scenes");
+        fs::create_dir_all(&scenes_dir).unwrap();
+        fs::write(
+            scenes_dir.join("base.kdl"),
+            r#"
+scene "base" {
+    plugin "picker" {
+        source "shipped:picker"
+        mount "floating"
+    }
+    plugin "status" {
+        source "shipped:status"
+        mount "status-bar"
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let child_path = root.join("child.kdl");
+        let src = r#"
+scene "child" {
+    extends "base"
+    disable-plugin "picker"
+}
+"#;
+        fs::write(&child_path, src).unwrap();
+        let doc = parse_scene(src, &child_path).unwrap();
+        let frags =
+            load_composition(doc, child_path, &SceneSearchCtx::new(&root)).unwrap();
+        let merged = merge_fragments(frags).expect("merge");
+        assert_eq!(merged.plugins.len(), 1);
+        assert_eq!(merged.plugins[0].name, "status");
+    }
+
+    /// Grandparent-scoped clear cannot see a descendant's contribution
+    /// — parent has no knowledge of child, so a parent's clear
+    /// directive targeting a selector only the child adds is a silent
+    /// noop (R11 spec). Here: base clears `child.only` before child
+    /// declares it; the child's contribution is applied AFTER parent
+    /// merge, so the final set contains it.
+    #[test]
+    fn parent_clear_cannot_drop_descendant_contribution() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let scenes_dir = root.join(".ark/scenes");
+        fs::create_dir_all(&scenes_dir).unwrap();
+        fs::write(
+            scenes_dir.join("base.kdl"),
+            r#"
+scene "base" {
+    clear-reactions selector="UserEvent:child.only"
+}
+"#,
+        )
+        .unwrap();
+
+        let child_path = root.join("child.kdl");
+        let src = r#"
+scene "child" {
+    extends "base"
+    on "UserEvent:child.only" {
+        emit
+    }
+}
+"#;
+        fs::write(&child_path, src).unwrap();
+        let doc = parse_scene(src, &child_path).unwrap();
+        let frags =
+            load_composition(doc, child_path, &SceneSearchCtx::new(&root)).unwrap();
+        let merged = merge_fragments(frags).expect("merge");
+        assert_eq!(merged.reactions.len(), 1);
+        assert_eq!(merged.reactions[0].selector, "UserEvent:child.only");
+    }
+
+    /// Clear for a non-existent target is a silent noop — no error,
+    /// merge continues unchanged.
+    #[test]
+    fn root_clear_non_existent_target_is_silent() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let scenes_dir = root.join(".ark/scenes");
+        fs::create_dir_all(&scenes_dir).unwrap();
+        fs::write(
+            scenes_dir.join("base.kdl"),
+            r#"
+scene "base" {
+    on "AgentReady" { exec }
+}
+"#,
+        )
+        .unwrap();
+
+        let child_path = root.join("child.kdl");
+        let src = r#"
+scene "child" {
+    extends "base"
+    clear-reactions selector="NoSuchEvent"
+    clear-keybind "F99"
+    disable-plugin "ghost"
+}
+"#;
+        fs::write(&child_path, src).unwrap();
+        let doc = parse_scene(src, &child_path).unwrap();
+        let frags =
+            load_composition(doc, child_path, &SceneSearchCtx::new(&root)).unwrap();
+        let merged = merge_fragments(frags).expect("merge, noop clears");
+        assert_eq!(merged.reactions.len(), 1);
+    }
+}
