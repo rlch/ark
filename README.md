@@ -52,6 +52,22 @@ See [github.com/rlch/ark/releases](https://github.com/rlch/ark/releases)
 for tarballs (`ark-<version>-<target>.tar.xz`) and their SHA256 sums.
 Extract and drop `ark` + `ark-hook` into your `PATH`.
 
+Each release also publishes the standalone wasm plugins as separate
+assets for users who only want the plugin binaries (e.g. to load them
+into a zellij config without installing `ark` itself):
+
+- `ark-status-v<version>.wasm` + `ark-status-v<version>.wasm.sha256`
+- `ark-picker-v<version>.wasm` + `ark-picker-v<version>.wasm.sha256`
+
+Fetch them directly with:
+
+```sh
+V=<version>
+curl -LO "https://github.com/rlch/ark/releases/download/v${V}/ark-status-v${V}.wasm"
+curl -LO "https://github.com/rlch/ark/releases/download/v${V}/ark-status-v${V}.wasm.sha256"
+sha256sum -c "ark-status-v${V}.wasm.sha256"
+```
+
 ### First-run setup
 
 After installing, run:

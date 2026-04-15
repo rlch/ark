@@ -148,12 +148,95 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
+  # wasm-release: build the standalone `ark-plugin-status` +
+  # `ark-plugin-picker` wasm modules and publish them as release assets
+  # alongside the per-target tarballs (cavekit-distribution R3 / T-135).
+  #
+  # Runs ONCE per release (wasm is platform-independent) on ubuntu. Applies
+  # the same `wasm-opt -Oz --enable-bulk-memory` post-process as the build
+  # script (T-131) when binaryen is available on the runner, then renames
+  # each wasm to `ark-{plugin}-v{version}.wasm` and emits a `.sha256`
+  # sidecar so consumers can verify downloads.
+  # ---------------------------------------------------------------------------
+  wasm-release:
+    name: Build standalone wasm assets
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref="${GITHUB_REF:-}"
+          if [[ "$ref" == refs/tags/v* ]]; then
+            version="${ref#refs/tags/v}"
+          else
+            # workflow_dispatch path
+            version="${{ github.event.inputs.tag }}"
+            version="${version#v}"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-wasm
+
+      - name: Build status plugin
+        run: cargo build --target wasm32-wasip1 --release -p ark-plugin-status
+
+      - name: Build picker plugin
+        run: cargo build --target wasm32-wasip1 --release -p ark-plugin-picker
+
+      - name: Optional wasm-opt post-process
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y binaryen || echo "binaryen not available, skipping"
+          if command -v wasm-opt >/dev/null; then
+            for plugin in ark_plugin_status ark_plugin_picker; do
+              wasm-opt -Oz --enable-bulk-memory \
+                "target/wasm32-wasip1/release/${plugin}.wasm" \
+                -o "target/wasm32-wasip1/release/${plugin}.wasm.opt"
+              mv "target/wasm32-wasip1/release/${plugin}.wasm.opt" \
+                 "target/wasm32-wasip1/release/${plugin}.wasm"
+            done
+          fi
+
+      - name: Rename and checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          V="${{ steps.ver.outputs.version }}"
+          cp target/wasm32-wasip1/release/ark_plugin_status.wasm "ark-status-v${V}.wasm"
+          cp target/wasm32-wasip1/release/ark_plugin_picker.wasm "ark-picker-v${V}.wasm"
+          sha256sum "ark-status-v${V}.wasm" > "ark-status-v${V}.wasm.sha256"
+          sha256sum "ark-picker-v${V}.wasm" > "ark-picker-v${V}.wasm.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wasm-assets
+          path: |
+            ark-status-*.wasm
+            ark-picker-*.wasm
+            ark-status-*.wasm.sha256
+            ark-picker-*.wasm.sha256
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
   # release: collect every target's tarball + checksum and publish a single
   # GitHub Release against the pushed tag.
   # ---------------------------------------------------------------------------
   release:
     name: publish github release
-    needs: build
+    needs:
+      - build
+      - wasm-release
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -170,8 +253,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release
-          find dist -type f \( -name "*.tar.xz" -o -name "*.sha256" \) \
-            -exec cp {} release/ \;
+          find dist -type f \( \
+            -name "*.tar.xz" \
+            -o -name "*.wasm" \
+            -o -name "*.sha256" \
+          \) -exec cp {} release/ \;
           ls -la release
 
       - name: Publish release
@@ -182,4 +268,5 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             release/*.tar.xz
+            release/*.wasm
             release/*.sha256
