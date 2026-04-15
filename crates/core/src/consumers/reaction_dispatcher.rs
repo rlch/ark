@@ -98,9 +98,96 @@ pub async fn reaction_dispatcher(
 }
 
 /// Evaluate every candidate reaction for the given event and dispatch
-/// matching ops. Isolated from the task loop so tests can drive it
-/// synchronously.
+/// matching ops.
+///
+/// Entrypoint used by the broadcast-consumer task. The event is the
+/// top-of-chain trigger; cascade depth starts at the `IntentContext`'s
+/// current depth (typically 0 for broadcast events). Any `emit` ops
+/// that fire enqueue synthetic events on the bus capture queue; after
+/// the top reactions run, this function drains the queue and
+/// re-dispatches each child with `cascade_child` — bounded by
+/// `max_cascade_depth` per R4 (default 4). Exceeding the bound is an
+/// error log under target=`scene::reactions` and the child is dropped.
 pub async fn dispatch_event(event: &AgentEvent, ctx: &ReactionDispatcherCtx) {
+    // The T-5.4 cascade implementation is constrained by the
+    // placeholder `EventBus` (T-4.1): the bus is a single shared
+    // capture queue the `emit` op writes to. To walk an emit chain
+    // without losing observability (tests + future audit log want to
+    // see what fired), we snapshot the capture queue before each
+    // reaction fires, run the reaction, then diff after. The diff is
+    // the set of events emitted by this particular reaction; those
+    // events cascade one level deeper.
+    //
+    // When the real broadcast bus lands (tracked by the placeholder
+    // module TODO), this dispatcher flips to subscribing directly —
+    // no diffing needed.
+    //
+    // Seed the cascade loop with the top-level event at the context's
+    // current depth.
+    let mut queue: std::collections::VecDeque<(AgentEvent, u32)> =
+        std::collections::VecDeque::new();
+    queue.push_back((event.clone(), ctx.intent_ctx.cascade_depth));
+
+    while let Some((ev, depth)) = queue.pop_front() {
+        // Snapshot the queue BEFORE dispatch so we can diff emitted
+        // events off the tail.
+        let before = ctx.intent_ctx.bus.drain_user_events();
+        for e in &before {
+            ctx.intent_ctx.bus.record_user_event(e.clone());
+        }
+        let before_len = before.len();
+
+        // Build a per-event context with the right depth.
+        let mut event_ctx = ctx.clone();
+        event_ctx.intent_ctx.cascade_depth = depth;
+        dispatch_event_once(&ev, &event_ctx).await;
+
+        // After dispatch: the bus has `before_len + N` entries. The
+        // tail N are what this reaction emitted.
+        let all_now = ctx.intent_ctx.bus.drain_user_events();
+        let (prior_events, emitted): (Vec<_>, Vec<_>) =
+            all_now.into_iter().enumerate().partition(|(i, _)| *i < before_len);
+        let prior_events: Vec<AgentEvent> = prior_events.into_iter().map(|(_, e)| e).collect();
+        let emitted: Vec<AgentEvent> = emitted.into_iter().map(|(_, e)| e).collect();
+
+        // Always re-push prior events — they predate this reaction
+        // and have nothing to do with cascade-depth enforcement.
+        for e in &prior_events {
+            ctx.intent_ctx.bus.record_user_event(e.clone());
+        }
+
+        if emitted.is_empty() {
+            continue;
+        }
+        let child_depth = depth.saturating_add(1);
+        if child_depth > event_ctx.intent_ctx.max_cascade_depth {
+            tracing::error!(
+                target = "scene::reactions",
+                child_depth,
+                max_depth = event_ctx.intent_ctx.max_cascade_depth,
+                dropped = emitted.len(),
+                "cascade depth exceeded; dropping emitted events"
+            );
+            // Do NOT re-push — events that breach the cascade bound
+            // are dropped entirely, per R4 ("exceeding = error log +
+            // drop").
+            continue;
+        }
+
+        // Re-push emitted events for observation, then enqueue them
+        // for the next cascade hop.
+        for e in &emitted {
+            ctx.intent_ctx.bus.record_user_event(e.clone());
+        }
+        for child in emitted {
+            queue.push_back((child, child_depth));
+        }
+    }
+}
+
+/// Single-pass dispatch helper. Does NOT drain emits — the caller
+/// (`dispatch_event`) runs the cascade loop above.
+async fn dispatch_event_once(event: &AgentEvent, ctx: &ReactionDispatcherCtx) {
     let kind = EventKind::of(event);
 
     // Assemble candidate reactions. Primary index always; secondary
@@ -482,6 +569,145 @@ mod tests {
         };
         dispatch_event(&ev, &ctx).await;
         assert_eq!(ctx.intent_ctx.bus.drain_user_events().len(), 3);
+    }
+
+    // -- cascade depth ---------------------------------------------------
+
+    /// A chain of reactions: Log → emit user.a → (on UserEvent:user.a) emit
+    /// user.b. With default depth (4), depth 0 → Log, depth 1 → user.a,
+    /// depth 2 → user.b. All three fires should land in the bus.
+    #[tokio::test]
+    async fn cascade_under_bound_runs_every_reaction() {
+        let mut registry = ReactionRegistry::new();
+        registry.insert(
+            EventKind::Log,
+            None,
+            ReactionEntry {
+                selector: "Log".into(),
+                predicate: None,
+                ops: vec![emit_op("user.a")],
+                origin: Default::default(),
+            },
+        );
+        registry.insert(
+            EventKind::UserEvent,
+            Some("user.a".into()),
+            ReactionEntry {
+                selector: "UserEvent:user.a".into(),
+                predicate: None,
+                ops: vec![emit_op("user.b")],
+                origin: Default::default(),
+            },
+        );
+        let ctx = fresh_ctx(registry).await;
+        dispatch_event(
+            &AgentEvent::Log {
+                id: agent_id(),
+                level: LogLevel::Info,
+                line: "go".into(),
+            },
+            &ctx,
+        )
+        .await;
+        let drained = ctx.intent_ctx.bus.drain_user_events();
+        let names: Vec<String> = drained
+            .iter()
+            .map(|e| match e {
+                AgentEvent::UserEvent { name, .. } => name.clone(),
+                _ => "?".into(),
+            })
+            .collect();
+        assert!(names.contains(&"user.a".to_string()));
+        assert!(names.contains(&"user.b".to_string()));
+    }
+
+    /// Chain longer than the bound: a log that kicks off a chain `a → b
+    /// → c → d → e` with `max_cascade_depth = 2` should fire `a` (depth
+    /// 1) and `b` (depth 2), but drop emits produced by `b` (which
+    /// would be `c` at depth 3).
+    #[tokio::test]
+    async fn cascade_exceeds_bound_drops_tail_with_error_log() {
+        let mut registry = ReactionRegistry::new();
+        registry.insert(
+            EventKind::Log,
+            None,
+            ReactionEntry {
+                selector: "Log".into(),
+                predicate: None,
+                ops: vec![emit_op("user.a")],
+                origin: Default::default(),
+            },
+        );
+        for (from, to) in [("user.a", "user.b"), ("user.b", "user.c"), ("user.c", "user.d")] {
+            registry.insert(
+                EventKind::UserEvent,
+                Some(from.into()),
+                ReactionEntry {
+                    selector: format!("UserEvent:{from}"),
+                    predicate: None,
+                    ops: vec![emit_op(to)],
+                    origin: Default::default(),
+                },
+            );
+        }
+        // Build a ctx with a tight cap so the test is compact.
+        let mut ctx = fresh_ctx(registry).await;
+        ctx.intent_ctx.max_cascade_depth = 2;
+        dispatch_event(
+            &AgentEvent::Log {
+                id: agent_id(),
+                level: LogLevel::Info,
+                line: "go".into(),
+            },
+            &ctx,
+        )
+        .await;
+        let drained = ctx.intent_ctx.bus.drain_user_events();
+        let names: Vec<String> = drained
+            .iter()
+            .map(|e| match e {
+                AgentEvent::UserEvent { name, .. } => name.clone(),
+                _ => "?".into(),
+            })
+            .collect();
+        // Depth 1 reaction emits user.a; depth 2 reaction emits user.b.
+        // Depth 3 would emit user.c — that emit is produced by the
+        // user.b reaction BUT the cascade dispatcher drops the tail
+        // BEFORE re-dispatching to the user.b handler's children. So
+        // we see user.a and user.b in the bus; user.c and user.d do
+        // not make it.
+        assert!(names.contains(&"user.a".to_string()));
+        assert!(names.contains(&"user.b".to_string()));
+        assert!(!names.contains(&"user.c".to_string()));
+        assert!(!names.contains(&"user.d".to_string()));
+    }
+
+    /// Context's `cascade_child` helper respects the bound.
+    #[test]
+    fn intent_cascade_child_enforces_bound() {
+        let ctx = intent_ctx();
+        let d0 = ctx.cascade_depth;
+        assert_eq!(d0, 0);
+        let d1 = ctx.cascade_child().expect("1").cascade_depth;
+        assert_eq!(d1, 1);
+        let mut walk = ctx;
+        for _ in 0..walk.max_cascade_depth {
+            walk = walk.cascade_child().expect("within bound");
+        }
+        // One more hop exceeds the bound.
+        assert!(walk.cascade_child().is_none());
+    }
+
+    /// `scene_max_cascade_depth` falls through to the default when
+    /// the scene doesn't set the attribute, and honours it when set.
+    #[test]
+    fn scene_max_cascade_depth_reads_ast() {
+        use ark_scene::ast::SceneDoc;
+        use ark_scene::reactions::scene_max_cascade_depth;
+        let doc: SceneDoc = facet_kdl::from_str(r#"scene "x""#).unwrap();
+        assert_eq!(scene_max_cascade_depth(&doc), 4);
+        let doc: SceneDoc = facet_kdl::from_str(r#"scene "x" max-cascade-depth=7"#).unwrap();
+        assert_eq!(scene_max_cascade_depth(&doc), 7);
     }
 
     // -- cancellation shuts the consumer down cleanly --------------------

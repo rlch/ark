@@ -377,6 +377,19 @@ impl ReactionRegistry {
 // populate_registry
 // ---------------------------------------------------------------------------
 
+/// Resolve the scene's cascade-depth bound.
+///
+/// Per R4, the bound is configurable via
+/// `scene "<name>" max-cascade-depth=<N>`. When the attribute is
+/// absent, the [`crate::intent::DEFAULT_MAX_CASCADE_DEPTH`] (4) kicks
+/// in. Surfaced here so the runtime wiring layer can read the cap
+/// once without rewalking the AST.
+pub fn scene_max_cascade_depth(doc: &SceneDoc) -> u32 {
+    doc.scene
+        .max_cascade_depth
+        .unwrap_or(crate::intent::DEFAULT_MAX_CASCADE_DEPTH)
+}
+
 /// Walk every `on { }` and `keybind { }` node in a scene document and
 /// populate a [`ReactionRegistry`].
 ///

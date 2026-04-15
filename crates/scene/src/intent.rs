@@ -307,6 +307,25 @@ pub struct IntentContext {
     /// Where the reaction came from (user scene vs. extension). See
     /// [`ReactionOrigin`] for the real-type migration.
     pub origin: ReactionOrigin,
+
+    /// Cascade depth of the current emit chain (T-5.4).
+    ///
+    /// `0` at the top-level dispatch (triggered by a broadcast
+    /// `AgentEvent`); every reaction's `emit` op increments this when
+    /// building the context for the child dispatch. The registry-
+    /// wrapping dispatcher compares this against
+    /// [`IntentContext::max_cascade_depth`] and refuses to re-dispatch
+    /// when the next hop would exceed the bound.
+    pub cascade_depth: u32,
+
+    /// Per-scene cascade-depth bound (R4 `max-cascade-depth=<N>`;
+    /// default 4 when the scene attribute is absent).
+    ///
+    /// Stored on every context so child emits that construct a new
+    /// context inherit the same cap. This is a value, not a handle —
+    /// it's a scene-file-wide config and doesn't change across
+    /// dispatches within one scene instance.
+    pub max_cascade_depth: u32,
 }
 
 impl IntentContext {
@@ -321,9 +340,36 @@ impl IntentContext {
             supervisor: Arc::new(SupervisorHandle),
             scene_id,
             origin: ReactionOrigin,
+            cascade_depth: 0,
+            max_cascade_depth: DEFAULT_MAX_CASCADE_DEPTH,
         }
     }
+
+    /// Produce a child context for a cascaded dispatch — the one
+    /// created when an `emit` op's synthetic `UserEvent` feeds back
+    /// into the reaction dispatcher. Increments [`cascade_depth`] by
+    /// one; all other fields (including [`max_cascade_depth`]) are
+    /// preserved.
+    ///
+    /// Returns `None` when the increment would exceed
+    /// [`max_cascade_depth`] — the caller (the reactions dispatcher,
+    /// T-5.3) logs an error and drops the cascade at that point.
+    pub fn cascade_child(&self) -> Option<Self> {
+        let next_depth = self.cascade_depth.saturating_add(1);
+        if next_depth > self.max_cascade_depth {
+            return None;
+        }
+        Some(Self {
+            cascade_depth: next_depth,
+            ..self.clone()
+        })
+    }
 }
+
+/// Default cascade-depth bound per R4 acceptance criterion.
+///
+/// Scenes override via `scene "<name>" max-cascade-depth=<N>`.
+pub const DEFAULT_MAX_CASCADE_DEPTH: u32 = 4;
 
 // ---------------------------------------------------------------------------
 // Intent trait + object-safe wrapper

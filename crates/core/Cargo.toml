@@ -38,3 +38,5 @@ tempfile = { workspace = true }
 # T-5.3 tests: reaction_dispatcher tests build `CompiledOp`s from raw
 # KDL fragments.
 kdl = { workspace = true }
+# T-5.4 tests: scene_max_cascade_depth parses a scene KDL fragment.
+facet-kdl = { workspace = true }
