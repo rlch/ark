@@ -27,6 +27,16 @@ pub struct AgentSpec {
     pub env: BTreeMap<String, String>,
     /// Optional zellij layout KDL stem. `None` means the orchestrator decides.
     pub layout: Option<String>,
+    /// Optional path to a scene file (`.kdl`) that this spawn was driven
+    /// by. T-3.5 three-tier fallback: when the supervisor resolves a
+    /// scene (either from an explicit `--scene NAME` or from the
+    /// convention-over-config `{config_dir}/scenes/default.kdl`), the
+    /// full path lands here so the supervisor's compile pipeline + the
+    /// `ark scene graph` / hot-reload watchers (R14) can tie events
+    /// back to the source file. `None` means the spawn is running
+    /// in legacy `--layout <stem>` mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scene_path: Option<PathBuf>,
     /// Zellij session name, derived from id but persisted for self-contained reads.
     pub session: String,
     /// Creation timestamp.
@@ -57,6 +67,7 @@ impl AgentSpec {
             cmd,
             env: BTreeMap::new(),
             layout: None,
+            scene_path: None,
             session,
             created_at: Utc::now(),
             runner_config: serde_json::Value::Null,
@@ -151,7 +162,43 @@ mod tests {
         );
         assert!(spec.env.is_empty());
         assert!(spec.layout.is_none());
+        assert!(spec.scene_path.is_none());
         assert_eq!(spec.runner_config, serde_json::Value::Null);
+    }
+
+    /// T-3.5: serialising a spec with `scene_path` present survives
+    /// the JSON roundtrip; and a legacy spec.json lacking `scene_path`
+    /// still parses (via `#[serde(default)]`).
+    #[test]
+    fn serde_roundtrip_with_and_without_scene_path() {
+        let mut spec = AgentSpec::new(
+            AgentId::new("cavekit", "sceneful"),
+            "sceneful",
+            "cavekit",
+            "claude-code",
+            PathBuf::from("/tmp/wt"),
+            vec!["claude".into()],
+        );
+        spec.scene_path = Some(PathBuf::from("/tmp/scenes/demo.kdl"));
+
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(json.contains("scene_path"), "scene_path should serialize: {json}");
+        let back: AgentSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, spec);
+
+        // Legacy JSON without scene_path still deserialises.
+        let legacy_json = serde_json::to_string(&{
+            let mut s = spec.clone();
+            s.scene_path = None;
+            s
+        })
+        .unwrap();
+        assert!(
+            !legacy_json.contains("scene_path"),
+            "None should be skipped: {legacy_json}"
+        );
+        let back: AgentSpec = serde_json::from_str(&legacy_json).unwrap();
+        assert!(back.scene_path.is_none());
     }
 
     #[test]

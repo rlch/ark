@@ -70,6 +70,7 @@ ark-pane = { path = "../pane" }
 ark-config = { path = "../config" }
 ark-core = { path = "../core" }
 ark-supervisor = { path = "../supervisor" }
+ark-scene = { path = "../scene" }
 ark-orchestrators-cavekit = { path = "../orchestrators/cavekit" }
 ark-orchestrators-claude-code = { path = "../orchestrators/claude-code" }
 ark-mux-zellij = { path = "../mux/zellij" }

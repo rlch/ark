@@ -73,6 +73,9 @@ use std::process::Command;
 use ark_mux_zellij::{
     LayoutResolver, LayoutSource, LayoutVars, default_layout_for_orchestrator, render_layout,
 };
+use ark_scene::compile::{CompileContext, compile_scene_file};
+use ark_scene::context::{AgentSnapshot, SessionSnapshot};
+use ark_scene::id::SceneId;
 use ark_types::{AgentId, AgentSpec};
 use clap::Args;
 
@@ -154,6 +157,22 @@ pub struct SpawnArgs {
     /// KDL layout stem (e.g. `builder`) or absolute path.
     #[arg(long)]
     pub layout: Option<String>,
+
+    /// Scene name (looked up under `${CONFIG}/scenes/<name>.kdl`).
+    ///
+    /// T-3.5 three-tier fallback (most-specific wins):
+    ///   1. `--scene NAME` explicit → `${CONFIG}/scenes/NAME.kdl`.
+    ///   2. No `--scene`, but `${CONFIG}/scenes/default.kdl` exists →
+    ///      that file is used automatically.
+    ///   3. Otherwise → legacy `--layout <stem>` path with no scene
+    ///      compilation (current behaviour for users who never adopted
+    ///      scenes).
+    ///
+    /// Mutually compatible with `--layout` in the fallback sense: the
+    /// flag lands in `SpawnArgs.layout` unconditionally, but is only
+    /// consulted when no scene (explicit or default) resolves.
+    #[arg(long, value_name = "NAME")]
+    pub scene: Option<String>,
 
     /// Environment variables to pass through (KEY=VAL, repeatable).
     #[arg(long = "env", value_name = "KEY=VAL")]
@@ -593,6 +612,85 @@ pub fn require_zellij_on_path() -> Result<(), CliError> {
     }
 }
 
+/// T-3.5: three-tier decision for "how does this spawn acquire a
+/// zellij layout?".
+///
+/// Reported back to the caller as a discriminated enum so tests can
+/// assert the resolution path independently of the rendered output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LayoutResolution {
+    /// Tier 1 — `--scene NAME` explicit.
+    SceneExplicit { path: PathBuf },
+    /// Tier 2 — no flag, `${config_dir}/scenes/default.kdl` exists.
+    SceneDefault { path: PathBuf },
+    /// Tier 3 — legacy path: the current `--layout <stem>` resolver.
+    Legacy,
+}
+
+/// T-3.5: resolve which scene-file, if any, drives this spawn.
+///
+/// Pure (no I/O except an `exists()` probe on the default-scene
+/// candidate), so tests can drive it directly by poking files into
+/// a tempdir.
+///
+/// Precedence:
+///   1. `explicit_scene = Some(name)` → `${config_dir}/scenes/<name>.kdl`.
+///      Returns [`LayoutResolution::SceneExplicit`] even if the file
+///      does not exist; the caller is responsible for surfacing the
+///      I/O error when it attempts to read the path.
+///   2. `explicit_scene = None` and `${config_dir}/scenes/default.kdl`
+///      exists → [`LayoutResolution::SceneDefault`].
+///   3. Otherwise → [`LayoutResolution::Legacy`].
+pub fn resolve_layout_source(config_dir: &Path, explicit_scene: Option<&str>) -> LayoutResolution {
+    if let Some(name) = explicit_scene {
+        let path = config_dir.join("scenes").join(format!("{name}.kdl"));
+        return LayoutResolution::SceneExplicit { path };
+    }
+    let default_path = config_dir.join("scenes").join("default.kdl");
+    if default_path.is_file() {
+        return LayoutResolution::SceneDefault { path: default_path };
+    }
+    LayoutResolution::Legacy
+}
+
+/// T-3.5: compile a scene file and emit the rendered zellij layout.
+///
+/// Thin wrapper over [`compile_scene_file`] that builds the
+/// spawn-time [`CompileContext`] from the current `AgentSpec`, then
+/// forwards the call. Returns the absolute path to the rendered
+/// zellij layout plus the `SceneId` that identifies the source
+/// scene (stored onward in `AgentSpec.scene_path`).
+pub fn compile_and_write_scene(
+    ctx: &Ctx,
+    scene_file: &Path,
+    spec: &AgentSpec,
+) -> Result<(PathBuf, SceneId), CliError> {
+    let compile_ctx = CompileContext::new(
+        AgentSnapshot {
+            id: spec.id.to_string(),
+            name: spec.name.clone(),
+            orchestrator: spec.orchestrator.clone(),
+            engine: spec.engine.clone(),
+            cwd: spec.cwd.display().to_string(),
+            cmd: spec.cmd.first().cloned().unwrap_or_default(),
+            args: if spec.cmd.len() > 1 {
+                spec.cmd[1..].to_vec()
+            } else {
+                Vec::new()
+            },
+        },
+        SessionSnapshot {
+            name: spec.session.clone(),
+        },
+    );
+
+    compile_scene_file(scene_file, &ctx.runtime_dir, &compile_ctx).map_err(|e| {
+        CliError::Generic {
+            reason: format!("compile scene `{}`: {e}", scene_file.display()),
+        }
+    })
+}
+
 /// F-525: Resolve + render + persist the KDL layout template.
 ///
 /// A zellij "layout" is not a static KDL file — it's a minijinja template
@@ -856,23 +954,48 @@ pub fn run(args: SpawnArgs, ctx: &Ctx) -> Result<(), CliError> {
     let session = unique_session_name(&spec.id);
     spec.session = session.clone();
 
+    // T-3.5: three-tier layout resolution (scene explicit → scene
+    // default → legacy). Populates `spec.scene_path` when a scene
+    // drove the spawn so downstream subsystems (supervisor, hot-
+    // reload watcher) can attribute events back to the source file.
+    let resolution = resolve_layout_source(&ctx.config_dir, args.scene.as_deref());
+    let scene_file: Option<PathBuf> = match &resolution {
+        LayoutResolution::SceneExplicit { path } | LayoutResolution::SceneDefault { path } => {
+            Some(path.clone())
+        }
+        LayoutResolution::Legacy => None,
+    };
+    if let Some(path) = &scene_file {
+        spec.scene_path = Some(path.clone());
+    }
+
     let spec_path = write_spec_json(&ctx.state_dir, &spec)?;
     tracing::debug!(path = %spec_path.display(), "wrote spec.json");
 
-    // F-525: render the KDL layout template with per-spawn variable
-    // substitution and persist it to `{state}/agents/{id}/layout.kdl`.
-    // The rendered path — not the raw stem — is what we pass to
-    // `zellij --layout`. If the render fails we clean up the agent dir
-    // we just created (matching F-503 / F-523's "no orphan state on
-    // spawn failure" invariant).
-    let layout_path = match render_and_write_layout(ctx, &spec) {
-        Ok(p) => p,
-        Err(e) => {
-            cleanup_agent_state(&ctx.state_dir, &spec.id);
-            return Err(e);
-        }
+    // Render the layout: either via the scene compile pipeline
+    // (T-3.5 new) or the legacy layout-template path (F-525). Both
+    // return an absolute `.kdl` path that goes to `zellij --layout`.
+    // TODO(T-14.1): legacy path currently still hands the raw stem
+    // through `render_and_write_layout`; when T-14.1 lands, the
+    // legacy path will auto-wrap into a minimal scene so both tiers
+    // share the compile pipeline.
+    let layout_path = match scene_file.as_deref() {
+        Some(path) => match compile_and_write_scene(ctx, path, &spec) {
+            Ok((rendered, _scene_id)) => rendered,
+            Err(e) => {
+                cleanup_agent_state(&ctx.state_dir, &spec.id);
+                return Err(e);
+            }
+        },
+        None => match render_and_write_layout(ctx, &spec) {
+            Ok(p) => p,
+            Err(e) => {
+                cleanup_agent_state(&ctx.state_dir, &spec.id);
+                return Err(e);
+            }
+        },
     };
-    tracing::debug!(path = %layout_path.display(), "wrote rendered layout");
+    tracing::debug!(path = %layout_path.display(), scene_path = ?spec.scene_path, "wrote rendered layout");
 
     // W-3: fork the supervisor BEFORE launching zellij so the control
     // socket exists by the time zellij plugins boot. Pipe-inheritance
@@ -1831,6 +1954,7 @@ mod tests {
             cwd: state.path().to_path_buf(),
             name: Some("preflighttest".into()),
             layout: None,
+            scene: None,
             env: Vec::new(),
             detach: true,
             no_detach: false,
@@ -2360,5 +2484,147 @@ mod tests {
             got.is_none(),
             "still-alive child must be treated as ok, got {got:?}"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // T-3.5 --scene flag + three-tier fallback
+    // ---------------------------------------------------------------
+
+    /// `--scene NAME` surfaces in `SpawnArgs.scene`.
+    #[test]
+    fn clap_parses_scene_flag() {
+        let h = Host::try_parse_from(["spawn", "--scene", "demo", "--", "claude"]).expect("parse");
+        assert_eq!(h.args.scene.as_deref(), Some("demo"));
+    }
+
+    /// Absent `--scene` leaves `SpawnArgs.scene` at `None`.
+    #[test]
+    fn clap_scene_flag_defaults_to_none() {
+        let h = Host::try_parse_from(["spawn", "--", "claude"]).expect("parse");
+        assert_eq!(h.args.scene, None);
+    }
+
+    /// Tier 1: explicit `--scene NAME` resolves to
+    /// `{config_dir}/scenes/NAME.kdl` regardless of whether the file
+    /// exists (resolver is pure; caller surfaces I/O errors later).
+    #[test]
+    fn resolve_tier_1_explicit_scene() {
+        let dir = TempDir::new().unwrap();
+        let got = resolve_layout_source(dir.path(), Some("demo"));
+        match got {
+            LayoutResolution::SceneExplicit { path } => {
+                assert_eq!(path, dir.path().join("scenes").join("demo.kdl"));
+            }
+            other => panic!("expected SceneExplicit, got {other:?}"),
+        }
+    }
+
+    /// Tier 2: no flag + `{config_dir}/scenes/default.kdl` exists →
+    /// SceneDefault.
+    #[test]
+    fn resolve_tier_2_default_scene_when_present() {
+        let dir = TempDir::new().unwrap();
+        let scenes = dir.path().join("scenes");
+        std::fs::create_dir_all(&scenes).unwrap();
+        let default_path = scenes.join("default.kdl");
+        std::fs::write(&default_path, "scene \"x\" { }").unwrap();
+
+        let got = resolve_layout_source(dir.path(), None);
+        match got {
+            LayoutResolution::SceneDefault { path } => {
+                assert_eq!(path, default_path);
+            }
+            other => panic!("expected SceneDefault, got {other:?}"),
+        }
+    }
+
+    /// Tier 3: no flag + no default.kdl → Legacy.
+    #[test]
+    fn resolve_tier_3_legacy_when_no_scene() {
+        let dir = TempDir::new().unwrap();
+        let got = resolve_layout_source(dir.path(), None);
+        assert!(matches!(got, LayoutResolution::Legacy), "{got:?}");
+    }
+
+    /// Tier 1 wins over Tier 2: explicit `--scene NAME` shadows the
+    /// default-scene presence.
+    #[test]
+    fn resolve_explicit_scene_wins_over_default() {
+        let dir = TempDir::new().unwrap();
+        let scenes = dir.path().join("scenes");
+        std::fs::create_dir_all(&scenes).unwrap();
+        std::fs::write(scenes.join("default.kdl"), "scene \"d\" {}").unwrap();
+
+        let got = resolve_layout_source(dir.path(), Some("custom"));
+        match got {
+            LayoutResolution::SceneExplicit { path } => {
+                assert_eq!(path, scenes.join("custom.kdl"));
+            }
+            other => panic!("expected SceneExplicit, got {other:?}"),
+        }
+    }
+
+    /// Tier 2 reports a missing default.kdl as Legacy (not as a
+    /// spurious SceneDefault pointing at a non-existent file).
+    #[test]
+    fn resolve_default_scene_missing_falls_back_to_legacy() {
+        let dir = TempDir::new().unwrap();
+        let scenes = dir.path().join("scenes");
+        std::fs::create_dir_all(&scenes).unwrap();
+        // No default.kdl written.
+        let got = resolve_layout_source(dir.path(), None);
+        assert!(matches!(got, LayoutResolution::Legacy), "{got:?}");
+    }
+
+    /// End-to-end: compile a scene file and write it to a runtime dir,
+    /// asserting the rendered path exists + parses as KDL.
+    #[test]
+    fn compile_and_write_scene_round_trips() {
+        let dir = TempDir::new().unwrap();
+        let scenes = dir.path().join("scenes");
+        std::fs::create_dir_all(&scenes).unwrap();
+        let scene_file = scenes.join("demo.kdl");
+        std::fs::write(
+            &scene_file,
+            r#"scene "demo" {
+    layout {
+        tab "work" {
+            pane name="editor"
+        }
+    }
+}"#,
+        )
+        .unwrap();
+
+        let runtime = dir.path().join("rt");
+        std::fs::create_dir_all(&runtime).unwrap();
+
+        let ctx = Ctx {
+            no_color: false,
+            log_level: "off".into(),
+            state_dir: dir.path().join("state"),
+            config_dir: dir.path().to_path_buf(),
+            runtime_dir: runtime.clone(),
+        };
+
+        let spec = build_spec(
+            "cavekit",
+            "claude-code",
+            "auth",
+            PathBuf::from("/tmp/worktree"),
+            vec!["claude".into()],
+            Default::default(),
+            None,
+            Vec::new(),
+        );
+
+        let (rendered_path, _scene_id) =
+            compile_and_write_scene(&ctx, &scene_file, &spec).expect("compile");
+        assert!(rendered_path.exists());
+        assert!(rendered_path.starts_with(runtime.join("layouts")));
+        let contents = std::fs::read_to_string(&rendered_path).unwrap();
+        assert!(contents.contains("layout"), "{contents}");
+        assert!(contents.contains("work"), "{contents}");
+        assert!(contents.contains("editor"), "{contents}");
     }
 }
