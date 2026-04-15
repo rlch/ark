@@ -63,6 +63,10 @@
 use async_trait::async_trait;
 use facet::Facet;
 
+pub mod transport;
+
+pub use transport::{ExtensionClient, InProcClient, NdjsonClient, NdjsonServer, RequestOptions};
+
 /// Opaque JSON text carried as a UTF-8 string.
 ///
 /// Fields typed `OpaqueJson` hold a serialized JSON document that ark's
@@ -141,8 +145,18 @@ pub type ExtResult<T> = Result<T, ExtensionError>;
 
 /// Log severity for [`ArkExtension::log_write`] calls, aligned with LSP
 /// `window/logMessage` message types and the `tracing` crate's `Level`.
-#[derive(Facet, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    Facet,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 #[repr(u8)]
+#[serde(rename_all = "lowercase")]
 pub enum LogLevel {
     /// Hard errors — the extension could not complete the requested work.
     Error = 1,
@@ -163,7 +177,16 @@ pub enum LogLevel {
 /// Callers treat this as an opaque string (R16 async semantics are MCP-style:
 /// long-running ops return a task handle; poll `task/get` or subscribe to
 /// `$/progress`).
-#[derive(Facet, Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(
+    Facet,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct TaskId {
     /// Extension-minted identifier. Must be unique within the extension
     /// session. Ark treats this as opaque.
@@ -175,7 +198,7 @@ pub struct TaskId {
 // ---------------------------------------------------------------------------
 
 /// Handshake payload sent by ark to the extension during `initialize`.
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InitializeRequest {
     /// Ark's supported extension-protocol version range, encoded as
     /// `MAJOR.MINOR` (no patch) per R16 version-negotiation wire format.
@@ -191,7 +214,7 @@ pub struct InitializeRequest {
 }
 
 /// Handshake response returned by the extension.
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InitializeResponse {
     /// Extension's supported protocol-version range (`MAJOR.MINOR`).
     pub protocol_version: String,
@@ -205,29 +228,29 @@ pub struct InitializeResponse {
 
 /// Void notification confirming the extension has completed any post-
 /// initialize setup (equivalent to LSP's `initialized` notification).
-#[derive(Facet, Debug, Clone, Default)]
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct InitializedRequest {}
 
 /// Void response for [`ArkExtension::initialized`].
-#[derive(Facet, Debug, Clone, Default)]
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct InitializedResponse {}
 
 /// Shutdown request — graceful teardown. Per R16 subprocess supervision,
 /// ark follows `shutdown` → stdin-close → `SIGTERM` → `SIGKILL`.
-#[derive(Facet, Debug, Clone, Default)]
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ShutdownRequest {}
 
 /// Void response for [`ArkExtension::shutdown`].
-#[derive(Facet, Debug, Clone, Default)]
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ShutdownResponse {}
 
 /// Liveness probe.
-#[derive(Facet, Debug, Clone, Default)]
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct PingRequest {}
 
 /// Liveness response — body is empty but the response struct stays
 /// extensible.
-#[derive(Facet, Debug, Clone, Default)]
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct PingResponse {}
 
 // ---------------------------------------------------------------------------
@@ -237,7 +260,7 @@ pub struct PingResponse {}
 /// `$/cancel` notification — carries the JSON-RPC request id the caller
 /// wants to cancel. Late responses arriving after cancel are silently
 /// dropped per MCP cancellation semantics (R16).
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CancelRequest {
     /// JSON-RPC id of the in-flight request to cancel. Carried as a string
     /// to cover both numeric and string ids uniformly.
@@ -245,13 +268,13 @@ pub struct CancelRequest {
 }
 
 /// Void response for [`ArkExtension::cancel`].
-#[derive(Facet, Debug, Clone, Default)]
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct CancelResponse {}
 
 /// `$/progress` notification — extension emits periodic updates for a
 /// running task. The `token` correlates to a prior [`TaskCreateResponse`]
 /// or a caller-supplied value.
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProgressRequest {
     /// Progress correlation token. Ark joins progress entries by token
     /// when rendering them in the status line.
@@ -262,12 +285,12 @@ pub struct ProgressRequest {
 }
 
 /// Void response for [`ArkExtension::progress`].
-#[derive(Facet, Debug, Clone, Default)]
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ProgressResponse {}
 
 /// `task/create` request — the extension starts a long-running op and
 /// returns a handle that the client can later query or cancel.
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TaskCreateRequest {
     /// Short human-readable label — used as `ark status` line text and
     /// debug trace prefix.
@@ -278,7 +301,7 @@ pub struct TaskCreateRequest {
 }
 
 /// Response for [`ArkExtension::task_create`].
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TaskCreateResponse {
     /// Opaque task handle. Passed to [`TaskGetRequest::task`] and
     /// [`TaskCancelRequest::task`].
@@ -286,14 +309,14 @@ pub struct TaskCreateResponse {
 }
 
 /// `task/get` request — poll the state of a previously created task.
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TaskGetRequest {
     /// Handle returned by [`TaskCreateResponse::task`].
     pub task: TaskId,
 }
 
 /// Response for [`ArkExtension::task_get`].
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TaskGetResponse {
     /// `"pending" | "running" | "succeeded" | "failed" | "cancelled"` —
     /// carried as a plain string so new states can be added without a
@@ -305,14 +328,14 @@ pub struct TaskGetResponse {
 }
 
 /// `task/cancel` request — cooperative cancel on a running task.
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TaskCancelRequest {
     /// Handle of the task to cancel.
     pub task: TaskId,
 }
 
 /// Void response for [`ArkExtension::task_cancel`].
-#[derive(Facet, Debug, Clone, Default)]
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct TaskCancelResponse {}
 
 // ---------------------------------------------------------------------------
@@ -321,7 +344,7 @@ pub struct TaskCancelResponse {}
 
 /// `event/subscribe` — tell ark the extension wants incoming
 /// [`EventNotifyRequest`] callbacks for events matching `selector`.
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EventSubscribeRequest {
     /// Event selector expression per R4 (namespaced name or glob pattern,
     /// e.g. `"ark.core.session.started"` or `"mycorp.*"`).
@@ -329,7 +352,7 @@ pub struct EventSubscribeRequest {
 }
 
 /// Response for [`ArkExtension::event_subscribe`].
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EventSubscribeResponse {
     /// Opaque subscription id — passed back to
     /// [`EventUnsubscribeRequest::subscription`] to revoke.
@@ -337,20 +360,20 @@ pub struct EventSubscribeResponse {
 }
 
 /// `event/unsubscribe` — revoke a prior subscription.
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EventUnsubscribeRequest {
     /// Subscription id from [`EventSubscribeResponse::subscription`].
     pub subscription: String,
 }
 
 /// Void response for [`ArkExtension::event_unsubscribe`].
-#[derive(Facet, Debug, Clone, Default)]
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct EventUnsubscribeResponse {}
 
 /// `event/emit` — extension publishes an event onto ark's bus. Namespace
 /// prefix MUST be the extension's own `<ext-name>.<event>` (R11) — ark
 /// rejects `ark.core.*` writes with `ext/reserved-namespace`.
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EventEmitRequest {
     /// Fully-qualified event name. Unprefixed names get auto-prefixed by
     /// ark's emit path when dispatched from an extension sidecar (R11).
@@ -362,11 +385,11 @@ pub struct EventEmitRequest {
 }
 
 /// Void response for [`ArkExtension::event_emit`].
-#[derive(Facet, Debug, Clone, Default)]
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct EventEmitResponse {}
 
 /// `event/notify` — host→ext delivery for a subscribed event.
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EventNotifyRequest {
     /// Subscription id the event is delivered under.
     pub subscription: String,
@@ -378,7 +401,7 @@ pub struct EventNotifyRequest {
 }
 
 /// Void response for [`ArkExtension::event_notify`].
-#[derive(Facet, Debug, Clone, Default)]
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct EventNotifyResponse {}
 
 // ---------------------------------------------------------------------------
@@ -389,7 +412,7 @@ pub struct EventNotifyResponse {}
 /// `<ext-name>.<intent>` (R10). Re-registering an intent already registered
 /// by this extension replaces it; colliding with another extension's intent
 /// returns [`ExtensionError::InvalidParams`].
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct IntentRegisterRequest {
     /// Fully-qualified intent name.
     pub name: String,
@@ -399,25 +422,25 @@ pub struct IntentRegisterRequest {
 }
 
 /// Void response for [`ArkExtension::intent_register`].
-#[derive(Facet, Debug, Clone, Default)]
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct IntentRegisterResponse {}
 
 /// `intent/unregister` — drop a prior intent registration.
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct IntentUnregisterRequest {
     /// Intent name.
     pub name: String,
 }
 
 /// Void response for [`ArkExtension::intent_unregister`].
-#[derive(Facet, Debug, Clone, Default)]
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct IntentUnregisterResponse {}
 
 /// `intent/dispatch` — ark asks the extension to execute one of its
 /// previously-registered intents. Return value is free-form JSON the
 /// extension defines in its manifest (`IntentDecl::args_schema` governs
 /// `args`; return schema is intent-specific and opaque at this layer).
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct IntentDispatchRequest {
     /// Intent to dispatch.
     pub name: String,
@@ -426,7 +449,7 @@ pub struct IntentDispatchRequest {
 }
 
 /// Response for [`ArkExtension::intent_dispatch`].
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct IntentDispatchResponse {
     /// Intent return value. `null` for void intents.
     pub value: OpaqueJson,
@@ -439,7 +462,7 @@ pub struct IntentDispatchResponse {
 /// `ui/keybind/register` — extension advertises a command ID with metadata
 /// (R16: this does NOT bind raw keys — the user's scene binds keys to the
 /// command ID).
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UiKeybindRegisterRequest {
     /// Fully-qualified command id. User scene references as
     /// `keybind "<chord>" intent="<ext-name>.<command>"`.
@@ -456,24 +479,24 @@ pub struct UiKeybindRegisterRequest {
 }
 
 /// Void response for [`ArkExtension::ui_keybind_register`].
-#[derive(Facet, Debug, Clone, Default)]
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct UiKeybindRegisterResponse {}
 
 /// `ui/keybind/unregister` — drop a prior command registration. R16 makes
 /// runtime-registered UI state ephemeral: extensions MUST unregister in
 /// `shutdown`, and ark drops them on crash.
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UiKeybindUnregisterRequest {
     /// Command id to drop.
     pub command: String,
 }
 
 /// Void response for [`ArkExtension::ui_keybind_unregister`].
-#[derive(Facet, Debug, Clone, Default)]
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct UiKeybindUnregisterResponse {}
 
 /// `ui/status/push` notification — extension updates the status line.
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UiStatusPushRequest {
     /// Status text (plain text; no ANSI). Empty string clears the slot.
     pub text: String,
@@ -482,7 +505,7 @@ pub struct UiStatusPushRequest {
 }
 
 /// Void response for [`ArkExtension::ui_status_push`].
-#[derive(Facet, Debug, Clone, Default)]
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct UiStatusPushResponse {}
 
 // ---------------------------------------------------------------------------
@@ -491,7 +514,7 @@ pub struct UiStatusPushResponse {}
 
 /// `ui/pane/request` — extension asks ark to fill a user-declared pane slot
 /// or open an ephemeral overlay (R16 two-tier pane model).
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UiPaneRequestRequest {
     /// Slot name declared by the user's scene via
     /// `layout { pane-slot name="<id>" … }`. If `None`, ark treats this as
@@ -503,7 +526,7 @@ pub struct UiPaneRequestRequest {
 }
 
 /// Response for [`ArkExtension::ui_pane_request`].
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UiPaneRequestResponse {
     /// Opaque pane handle — passed to [`UiPaneCloseRequest::pane`].
     pub pane: String,
@@ -511,14 +534,14 @@ pub struct UiPaneRequestResponse {
 
 /// `ui/pane/close` — extension asks ark to close a pane it previously
 /// requested.
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UiPaneCloseRequest {
     /// Pane handle returned by [`UiPaneRequestResponse::pane`].
     pub pane: String,
 }
 
 /// Void response for [`ArkExtension::ui_pane_close`].
-#[derive(Facet, Debug, Clone, Default)]
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct UiPaneCloseResponse {}
 
 // ---------------------------------------------------------------------------
@@ -527,14 +550,14 @@ pub struct UiPaneCloseResponse {}
 
 /// `workspace/applyEdit` — extension asks ark to apply a set of text edits
 /// to the user's workspace (mirrors LSP `workspace/applyEdit`).
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WorkspaceApplyEditRequest {
     /// Edit descriptor — JSON-compatible with LSP `WorkspaceEdit`.
     pub edit: OpaqueJson,
 }
 
 /// Response for [`ArkExtension::workspace_apply_edit`].
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WorkspaceApplyEditResponse {
     /// `true` if applied, `false` if the user rejected or the edit was
     /// invalid.
@@ -543,7 +566,7 @@ pub struct WorkspaceApplyEditResponse {
 
 /// `workspace/configuration` — extension reads a configuration value from
 /// ark's merged config (scene + `config.toml` + env).
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WorkspaceConfigurationRequest {
     /// Dotted section path, e.g. `"myext.timeouts.fetch"`. Scoped to the
     /// extension's namespace: requests outside `<ext-name>.*` return
@@ -552,7 +575,7 @@ pub struct WorkspaceConfigurationRequest {
 }
 
 /// Response for [`ArkExtension::workspace_configuration`].
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WorkspaceConfigurationResponse {
     /// Config value. `null` if the section is unset.
     pub value: OpaqueJson,
@@ -560,7 +583,7 @@ pub struct WorkspaceConfigurationResponse {
 
 /// `workspace/showDocument` — extension asks ark to open a file / URL for
 /// the user.
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WorkspaceShowDocumentRequest {
     /// Target URI — `file://` or `https://`.
     pub uri: String,
@@ -570,7 +593,7 @@ pub struct WorkspaceShowDocumentRequest {
 }
 
 /// Response for [`ArkExtension::workspace_show_document`].
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WorkspaceShowDocumentResponse {
     /// `true` if the document was shown.
     pub success: bool,
@@ -578,7 +601,7 @@ pub struct WorkspaceShowDocumentResponse {
 
 /// `workspace/showMessage` notification — extension emits a user-visible
 /// toast/log line.
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WorkspaceShowMessageRequest {
     /// Message text.
     pub message: String,
@@ -587,12 +610,12 @@ pub struct WorkspaceShowMessageRequest {
 }
 
 /// Void response for [`ArkExtension::workspace_show_message`].
-#[derive(Facet, Debug, Clone, Default)]
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct WorkspaceShowMessageResponse {}
 
 /// `workspace/showMessageRequest` — like `showMessage` but awaits a user
 /// choice from a list of actions.
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WorkspaceShowMessageRequestRequest {
     /// Message text.
     pub message: String,
@@ -604,7 +627,7 @@ pub struct WorkspaceShowMessageRequestRequest {
 }
 
 /// Response for [`ArkExtension::workspace_show_message_request`].
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WorkspaceShowMessageRequestResponse {
     /// Selected action label, or `None` if dismissed.
     pub selected: Option<String>,
@@ -616,11 +639,11 @@ pub struct WorkspaceShowMessageRequestResponse {
 
 /// `scene/getRoot` — extension queries the currently-loaded scene path
 /// plus CWD (R16 "scene intent channel").
-#[derive(Facet, Debug, Clone, Default)]
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SceneGetRootRequest {}
 
 /// Response for [`ArkExtension::scene_get_root`].
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SceneGetRootResponse {
     /// Absolute path to the scene file ark is running.
     pub scene_path: String,
@@ -636,7 +659,7 @@ pub struct SceneGetRootResponse {
 /// `host/fs/read` — wasm-component extension reads a file via the host.
 /// Subprocess extensions MUST use OS syscalls directly; calling this from
 /// a subprocess returns [`ExtensionError::CapabilityDenied`] per R16.
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HostFsReadRequest {
     /// Absolute file path. Subject to capability-scope rules (writes to
     /// outside scene root are blocked; see R17 permission dispatch).
@@ -644,7 +667,7 @@ pub struct HostFsReadRequest {
 }
 
 /// Response for [`ArkExtension::host_fs_read`].
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HostFsReadResponse {
     /// File contents as a UTF-8 string. Non-UTF-8 files surface as
     /// [`ExtensionError::InvalidParams`] — use a future `host/fs/readBytes`
@@ -653,7 +676,7 @@ pub struct HostFsReadResponse {
 }
 
 /// `host/fs/write` — wasm-component extension writes a file via the host.
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HostFsWriteRequest {
     /// Absolute file path.
     pub path: String,
@@ -662,11 +685,11 @@ pub struct HostFsWriteRequest {
 }
 
 /// Void response for [`ArkExtension::host_fs_write`].
-#[derive(Facet, Debug, Clone, Default)]
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct HostFsWriteResponse {}
 
 /// `host/proc/spawn` — wasm-component extension spawns a subprocess.
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HostProcSpawnRequest {
     /// Executable name or path.
     pub command: String,
@@ -677,7 +700,7 @@ pub struct HostProcSpawnRequest {
 }
 
 /// Response for [`ArkExtension::host_proc_spawn`].
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HostProcSpawnResponse {
     /// Process exit code.
     pub exit_code: i32,
@@ -688,7 +711,7 @@ pub struct HostProcSpawnResponse {
 }
 
 /// `host/net/fetch` — wasm-component extension performs an HTTP request.
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HostNetFetchRequest {
     /// Fully-qualified URL.
     pub url: String,
@@ -699,7 +722,7 @@ pub struct HostNetFetchRequest {
 }
 
 /// Response for [`ArkExtension::host_net_fetch`].
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HostNetFetchResponse {
     /// HTTP status code.
     pub status: u16,
@@ -712,7 +735,7 @@ pub struct HostNetFetchResponse {
 // ---------------------------------------------------------------------------
 
 /// `log/write` notification — extension writes a structured log line.
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LogWriteRequest {
     /// Log severity.
     pub level: LogLevel,
@@ -721,19 +744,19 @@ pub struct LogWriteRequest {
 }
 
 /// Void response for [`ArkExtension::log_write`].
-#[derive(Facet, Debug, Clone, Default)]
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct LogWriteResponse {}
 
 /// `log/setLevel` — ark asks the extension to filter its own outgoing
 /// log/write calls to a minimum severity.
-#[derive(Facet, Debug, Clone)]
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LogSetLevelRequest {
     /// Minimum level to emit.
     pub level: LogLevel,
 }
 
 /// Void response for [`ArkExtension::log_set_level`].
-#[derive(Facet, Debug, Clone, Default)]
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct LogSetLevelResponse {}
 
 // ---------------------------------------------------------------------------

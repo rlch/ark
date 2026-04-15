@@ -29,6 +29,21 @@ facet = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
+# T-9.5.3 (cavekit-scene R16): JSON-RPC 2.0 wire encoding for the NDJSON
+# transport. Envelopes (`Request` / `Response` / `Notification`) serialize
+# through `serde_json`, and typed request/response payloads round-trip as
+# `serde_json::Value` so in-flight cancellation + id-correlation stays at
+# the JSON layer without per-method wire code.
+serde_json = { workspace = true }
+# T-9.5.3: async runtime for NDJSON read/write loops + `oneshot` channels
+# for id-correlated response routing. `process` feature is needed so the
+# subprocess helper can spawn `tokio::process::Command` with piped stdio.
+tokio = { workspace = true }
+# T-9.5.3: `futures::future::select` drives the timeout-vs-response race
+# inside `NdjsonClient::call`. Already pulled in transitively by
+# tokio-util elsewhere in the workspace — declaring it here keeps this
+# crate's deps explicit.
+futures = { workspace = true }
 
 [[bin]]
 # T-9.5.2 (cavekit-scene R16): canonical extension-protocol.kdl emitter.
