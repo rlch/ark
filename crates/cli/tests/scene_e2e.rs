@@ -470,6 +470,54 @@ fn scene_keybind_dispatches() {
     );
 }
 
+/// T-8.4 pre-flight: the keybind-dispatch e2e assumes the scene
+/// compile pipeline auto-mounts `plugin "ark-bus" { mount "hidden" }`
+/// whenever a scene declares ANY `keybind` node (T-6.7). This unit-style
+/// assertion runs without `ARK_E2E=1` so a regression in
+/// `crates/scene/src/compile/inject_bus.rs` (e.g. injection trigger
+/// stops covering the keybind-only case) trips the next `cargo test
+/// -p ark-cli` rather than waiting for someone to opt into the
+/// (currently `#[ignore]`d) e2e.
+///
+/// This is the cheapest possible smoke around T-8.4's dispatch chain:
+/// if ark-bus isn't injected, the `zellij action message-plugin
+/// ark-bus` step in `scene_keybind_dispatches` would fail with
+/// "plugin not found" before the supervisor gets a chance to dispatch.
+#[test]
+fn scene_with_keybind_auto_injects_ark_bus_plugin() {
+    let scene_kdl = r#"scene "keybind-only" {
+    layout { }
+    keybind "Alt q" intent="ark.core.close_tab" name="builder"
+}
+"#;
+    let mut doc: ark_scene::ast::SceneDoc =
+        facet_kdl::from_str(scene_kdl).expect("scene parses");
+    assert!(
+        doc.scene
+            .plugins
+            .iter()
+            .all(|p| p.name != ark_scene::compile::ARK_BUS_PLUGIN_NAME),
+        "scene must NOT declare ark-bus before the injection pass"
+    );
+    let injected = ark_scene::compile::maybe_inject_ark_bus(&mut doc.scene);
+    assert!(
+        injected,
+        "T-6.7: keybind-bearing scene must trigger ark-bus injection"
+    );
+    let bus = doc
+        .scene
+        .plugins
+        .iter()
+        .find(|p| p.name == ark_scene::compile::ARK_BUS_PLUGIN_NAME)
+        .expect("ark-bus plugin must be present after injection");
+    assert_eq!(
+        bus.mount.as_ref().map(|m| m.target.as_str()),
+        Some(ark_scene::compile::ARK_BUS_MOUNT_TARGET),
+        "ark-bus must mount via the suppressed-pane API ({})",
+        ark_scene::compile::ARK_BUS_MOUNT_TARGET
+    );
+}
+
 /// Poll `zellij list-sessions` until exactly one ark-prefixed session is
 /// reported, returning its name. Strips ANSI escape sequences zellij
 /// emits even with `--no-decoration` set on some platforms.

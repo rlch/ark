@@ -93,3 +93,9 @@ portable-pty = "0.8"
 tempfile = { workspace = true }
 ulid = { workspace = true }
 ark-test-fixtures = { path = "../test-fixtures" }
+# T-8.4: scene_e2e's pre-flight unit asserts the ark-bus
+# auto-injection pass against a parsed `SceneDoc`; both are reached
+# via the public `ark_scene` surface, but the test calls
+# `facet_kdl::from_str` directly on a string fixture so it stays
+# decoupled from `ark_scene::parse`'s NamedSource error wrapping.
+facet-kdl = { workspace = true }
