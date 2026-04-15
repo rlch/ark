@@ -484,4 +484,58 @@ mod tests {
         assert_eq!(p.iteration, Some(9));
         assert!(p.status.is_none());
     }
+
+    /// T-121: bullet-format `- iter: N` (or `- iteration:`) outside a
+    /// frontmatter block is still extracted — the parser strips a leading
+    /// `-` on every line, not only within `---` fences.
+    #[test]
+    fn parse_ralph_fields_bullet_format_outside_frontmatter() {
+        let md = "# Ralph loop state\n\
+                  \n\
+                  - iteration: 3\n\
+                  - status: reviewing\n\
+                  some prose follows\n";
+        let p = parse_ralph_fields(md);
+        assert_eq!(p.iteration, Some(3));
+        assert_eq!(p.status.as_deref(), Some("reviewing"));
+    }
+
+    /// T-121: single-quoted values are unwrapped just like double-quoted ones.
+    #[test]
+    fn parse_ralph_fields_single_quoted_values() {
+        let md = "status: 'building'\nstarted_at: '2026-04-15T00:00:00Z'\n";
+        let p = parse_ralph_fields(md);
+        assert_eq!(p.status.as_deref(), Some("building"));
+        assert_eq!(p.started_at.as_deref(), Some("2026-04-15T00:00:00Z"));
+    }
+
+    /// T-121: non-numeric iteration values (garbage or negative) are dropped,
+    /// leaving `iteration = None` rather than crashing.
+    #[test]
+    fn parse_ralph_fields_invalid_iteration_is_none() {
+        let md = "iteration: not-a-number\nmax_iterations: -5\nstatus: x\n";
+        let p = parse_ralph_fields(md);
+        assert!(p.iteration.is_none());
+        assert!(p.max_iterations.is_none());
+        assert_eq!(p.status.as_deref(), Some("x"));
+    }
+
+    /// T-121: an empty file yields an all-`None` `RalphFields` — no panic,
+    /// no partial extraction of sentinel values.
+    #[test]
+    fn parse_ralph_fields_empty_is_all_none() {
+        let p = parse_ralph_fields("");
+        assert_eq!(p, RalphFields::default());
+    }
+
+    /// T-121: missing `max_iterations` is tolerated — the other fields still
+    /// come out, and `max_iterations` stays `None`.
+    #[test]
+    fn parse_ralph_fields_tolerates_missing_max() {
+        let md = "iteration: 7\nstatus: running\n";
+        let p = parse_ralph_fields(md);
+        assert_eq!(p.iteration, Some(7));
+        assert!(p.max_iterations.is_none());
+        assert_eq!(p.status.as_deref(), Some("running"));
+    }
 }

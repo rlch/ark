@@ -869,4 +869,71 @@ mod tests {
         assert_eq!(parse_severity("P9"), None);
         assert_eq!(parse_severity(""), None);
     }
+
+    /// T-121: a classic `F-001 P1 src/foo.rs:42` row parses to the exact
+    /// expected shape — this is the canonical happy-path example.
+    #[test]
+    fn parse_findings_f001_p1_row_example() {
+        let md = "| F-001: race in tick loop (source: codex) | P1 | src/foo.rs:42 | NEW | — |\n";
+        let f = parse_findings(md);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].id, "F-001");
+        assert_eq!(f[0].severity, Severity::P1);
+        assert_eq!(f[0].path, PathBuf::from("src/foo.rs"));
+        assert_eq!(f[0].line, Some(42));
+        assert_eq!(f[0].body, "race in tick loop");
+    }
+
+    /// T-121: a continuation/multiline description line that does NOT start
+    /// with a pipe is silently ignored. The parser is line-oriented and a
+    /// real markdown table cannot wrap, so agents should put the full
+    /// description on a single row — leftover wrap lines must not crash or
+    /// pollute output.
+    #[test]
+    fn parse_findings_multiline_continuation_ignored() {
+        let md = "| F-010: primary line (source: codex) | P2 | a.rs:5 | NEW | — |\n\
+                  continuation text without pipes on its own line\n\
+                  | F-011: next one (source: codex) | P3 | b.rs:6 | NEW | — |\n";
+        let f = parse_findings(md);
+        assert_eq!(f.len(), 2);
+        assert_eq!(f[0].id, "F-010");
+        assert_eq!(f[0].body, "primary line");
+        assert_eq!(f[1].id, "F-011");
+    }
+
+    /// T-121: a truncated row with only two cells is silently skipped.
+    #[test]
+    fn parse_findings_truncated_row_skipped() {
+        let md = "| F-099: truncated | P1 |\n\
+                  | F-100: ok (source: codex) | P1 | ok.rs:1 | NEW | — |\n";
+        let f = parse_findings(md);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].id, "F-100");
+    }
+
+    /// T-121: source attribution is stripped regardless of the inner vendor
+    /// label (the reviewer may swap "codex" for another provider one day).
+    #[test]
+    fn parse_findings_strips_any_source_attribution() {
+        let md = "| F-200: hello (source: claude) | P2 | a.rs:1 | NEW | — |\n";
+        let f = parse_findings(md);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].body, "hello");
+    }
+
+    /// T-121: all four severity bands (P0 / P1 / P2 / P3) are recognised in
+    /// a single table, verifying the full severity-column contract.
+    #[test]
+    fn parse_findings_all_severity_bands() {
+        let md = "| F-300: a (source: codex) | P0 | a.rs:1 | NEW | — |\n\
+                  | F-301: b (source: codex) | P1 | b.rs:2 | NEW | — |\n\
+                  | F-302: c (source: codex) | P2 | c.rs:3 | NEW | — |\n\
+                  | F-303: d (source: codex) | P3 | d.rs:4 | NEW | — |\n";
+        let f = parse_findings(md);
+        assert_eq!(f.len(), 4);
+        assert_eq!(f[0].severity, Severity::P0);
+        assert_eq!(f[1].severity, Severity::P1);
+        assert_eq!(f[2].severity, Severity::P2);
+        assert_eq!(f[3].severity, Severity::P3);
+    }
 }

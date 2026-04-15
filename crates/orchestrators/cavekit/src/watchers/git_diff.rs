@@ -619,4 +619,52 @@ mod tests {
         let rows = parse_numstat(out);
         assert_eq!(rows, vec![(PathBuf::from("ok.rs"), 5, 0)]);
     }
+
+    /// T-121: canonical numstat row `10\t5\tsrc/foo.rs` → (adds=10, dels=5,
+    /// path=src/foo.rs). This is the documented kit example.
+    #[test]
+    fn parse_numstat_kit_example_row() {
+        let out = "10\t5\tsrc/foo.rs\n";
+        let rows = parse_numstat(out);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0], (PathBuf::from("src/foo.rs"), 10, 5));
+    }
+
+    /// T-121: a numstat output whose only content is a binary-marker row
+    /// (`-\t-\t<path>`) yields zero parsed rows — binaries are dropped
+    /// because they carry no numeric additions/deletions signal.
+    #[test]
+    fn parse_numstat_only_binary_yields_empty() {
+        let out = "-\t-\tassets/logo.png\n";
+        let rows = parse_numstat(out);
+        assert!(
+            rows.is_empty(),
+            "binary-only numstat should parse to zero rows"
+        );
+    }
+
+    /// T-121: malformed lines (missing tabs, non-numeric counts) are skipped
+    /// silently; valid rows surrounding them still parse.
+    #[test]
+    fn parse_numstat_skips_malformed_rows() {
+        let out = "no-tabs-at-all\n\
+                   abc\tdef\tfoo.rs\n\
+                   3\t1\tok.rs\n\
+                   \t\tempty_fields.rs\n\
+                   7\t2\t\n\
+                   42\t0\tother.rs\n";
+        let rows = parse_numstat(out);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], (PathBuf::from("ok.rs"), 3, 1));
+        assert_eq!(rows[1], (PathBuf::from("other.rs"), 42, 0));
+    }
+
+    /// T-121: zero-line edits (adds=0 and dels=0) still emit a row — a
+    /// mode-only change (e.g. chmod-style) has that shape and is not binary.
+    #[test]
+    fn parse_numstat_zero_counts_are_kept() {
+        let out = "0\t0\tmode_only_change.sh\n";
+        let rows = parse_numstat(out);
+        assert_eq!(rows, vec![(PathBuf::from("mode_only_change.sh"), 0, 0)]);
+    }
 }

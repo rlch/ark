@@ -831,6 +831,90 @@ mod tests {
         assert!(parse_rows(md).is_empty());
     }
 
+    /// T-121: a 5-row table with only valid statuses → 5 rows parsed.
+    #[test]
+    fn parse_rows_valid_five_row_table() {
+        let md = "| Task | Status | Notes |\n\
+                  | --- | --- | --- |\n\
+                  | T-001 | DONE | a |\n\
+                  | T-002 | PARTIAL | b |\n\
+                  | T-003 | BLOCKED | c |\n\
+                  | T-004 | IN PROGRESS | d |\n\
+                  | T-005 | PENDING | e |\n";
+        let rows = parse_rows(md);
+        assert_eq!(rows.len(), 5);
+        let statuses: Vec<_> = rows.iter().map(|(_, s, _)| s.as_str()).collect();
+        assert!(statuses.contains(&"DONE"));
+        assert!(statuses.contains(&"PARTIAL"));
+        assert!(statuses.contains(&"BLOCKED"));
+        assert!(statuses.contains(&"IN PROGRESS"));
+        assert!(statuses.contains(&"PENDING"));
+    }
+
+    /// T-121: extra unknown columns past the notes column are silently ignored
+    /// (the parser only looks at the first three cells).
+    #[test]
+    fn parse_rows_ignores_extra_unknown_columns() {
+        let md = "| T-010 | DONE | notes here | owner | tier | when |\n";
+        let rows = parse_rows(md);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "T-010");
+        assert_eq!(rows[0].1, "DONE");
+        assert_eq!(rows[0].2.as_deref(), Some("notes here"));
+    }
+
+    /// T-121: row with only task_id + status (notes column missing entirely)
+    /// yields `notes = None` but still parses.
+    #[test]
+    fn parse_rows_notes_column_missing_yields_none() {
+        let md = "| T-020 | DONE |\n";
+        let rows = parse_rows(md);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "T-020");
+        assert_eq!(rows[0].1, "DONE");
+        assert!(rows[0].2.is_none(), "notes absent → None");
+    }
+
+    /// T-121: an empty notes cell (present but blank) also yields `None`.
+    #[test]
+    fn parse_rows_empty_notes_cell_is_none() {
+        let md = "| T-030 | DONE |  |\n";
+        let rows = parse_rows(md);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].2.is_none());
+    }
+
+    /// T-121: malformed rows (missing trailing pipe, too few cells, non-task
+    /// leading cell) are skipped without affecting neighbouring valid rows.
+    #[test]
+    fn parse_rows_malformed_rows_skipped() {
+        let md = "no pipes at all\n\
+                  | only one cell\n\
+                  | T-001 | DONE | ok |\n\
+                  | not-a-task | DONE | nope |\n\
+                  | T-002 | DONE | ok2 |\n";
+        let rows = parse_rows(md);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, "T-001");
+        assert_eq!(rows[1].0, "T-002");
+    }
+
+    /// T-121: `normalize_status` canonicalises case and rejects unknowns.
+    #[test]
+    fn normalize_status_canonicalises_all_variants() {
+        assert_eq!(normalize_status("done").as_deref(), Some("DONE"));
+        assert_eq!(normalize_status("DONE").as_deref(), Some("DONE"));
+        assert_eq!(normalize_status("Partial").as_deref(), Some("PARTIAL"));
+        assert_eq!(normalize_status("blocked").as_deref(), Some("BLOCKED"));
+        assert_eq!(
+            normalize_status("in progress").as_deref(),
+            Some("IN PROGRESS")
+        );
+        assert_eq!(normalize_status("PENDING").as_deref(), Some("PENDING"));
+        assert_eq!(normalize_status("REVIEWED"), None);
+        assert_eq!(normalize_status(""), None);
+    }
+
     #[test]
     fn truncate_is_char_boundary_safe() {
         let s = "hello world";
