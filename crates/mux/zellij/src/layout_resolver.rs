@@ -29,6 +29,23 @@ pub const SHIPPED_LAYOUTS: &[(&str, &str)] = &[
     ("log", include_str!("../layouts/log.kdl")),
 ];
 
+/// Scenes shipped embedded in the binary, keyed by stem name (matches
+/// `--scene NAME` lookup). T-8.5 ports `builder.kdl` as the first
+/// shipped scene; T-14.2 ports the remaining stems (`classic`,
+/// `focused`, `log`, `review`, `triple-column`) in bulk. Until then,
+/// only `builder` is available via the scene compile pipeline; the
+/// rest still resolve through `SHIPPED_LAYOUTS` (legacy path) per
+/// the T-14.1 auto-wrap fallback.
+///
+/// The scene KDL wraps the legacy layout in `scene "<stem>" { layout
+/// { … } }` per `cavekit-scene.md` R15 file shape. The minijinja
+/// template variables (`{{ name }}`, `{{ cwd }}`, `{{ agent_cmd }}`,
+/// `{{ agent_args }}`) ride along unchanged — the scene compiler
+/// preserves them and the spawn-time renderer
+/// (`ark_mux_zellij::layout_template::render`) resolves them.
+pub const SHIPPED_SCENES: &[(&str, &str)] =
+    &[("builder", include_str!("../scenes/builder.kdl"))];
+
 /// Result of resolving a layout identifier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LayoutSource {
@@ -527,5 +544,59 @@ mod tests {
         for v in r.validate_user_layouts() {
             assert!(v.result.is_ok(), "{:?} failed: {:?}", v.path, v.result);
         }
+    }
+
+    /// T-8.5: the shipped scene table includes `builder` and the body
+    /// is wrapped in a `scene "<stem>" { … }` envelope per
+    /// cavekit-scene.md R15. Stem names match `SHIPPED_LAYOUTS` so
+    /// `--scene NAME` and `--layout NAME` resolve the same intent.
+    #[test]
+    fn shipped_scenes_includes_builder_with_scene_envelope() {
+        let entry = SHIPPED_SCENES
+            .iter()
+            .find(|(stem, _)| *stem == "builder")
+            .expect("builder scene must be present in SHIPPED_SCENES");
+        let (_, contents) = entry;
+        assert!(
+            contents.contains("scene \"builder\""),
+            "builder.kdl must wrap its body in `scene \"builder\" {{ … }}`"
+        );
+        assert!(
+            contents.contains("layout {"),
+            "builder scene must contain the legacy layout body"
+        );
+    }
+
+    /// T-8.5: the shipped builder scene's inner layout body is byte-equivalent
+    /// (modulo whitespace) to the legacy `SHIPPED_LAYOUTS` builder. This is
+    /// the "zero behaviour change" guard the task brief calls for — once
+    /// T-14.x removes the legacy file, this test goes away.
+    #[test]
+    fn shipped_builder_scene_layout_matches_legacy() {
+        let legacy = SHIPPED_LAYOUTS
+            .iter()
+            .find(|(s, _)| *s == "builder")
+            .expect("legacy builder layout exists")
+            .1;
+        let scene = SHIPPED_SCENES
+            .iter()
+            .find(|(s, _)| *s == "builder")
+            .expect("scene builder exists")
+            .1;
+        // Strip whitespace to absorb the indentation shift introduced
+        // by wrapping in `scene { … }`.
+        let strip = |s: &str| {
+            s.chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>()
+        };
+        let stripped_legacy = strip(legacy);
+        let stripped_scene = strip(scene);
+        assert!(
+            stripped_scene.contains(&stripped_legacy),
+            "builder scene must include the entire legacy layout body verbatim;\n\
+             scene (stripped): {stripped_scene}\n\
+             legacy (stripped): {stripped_legacy}"
+        );
     }
 }

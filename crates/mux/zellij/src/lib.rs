@@ -26,7 +26,7 @@ pub mod pty;
 pub use executor::{CommandExecutor, CommandOutput, RealExecutor, StubExecutor};
 pub use layout_resolver::{
     LayoutListEntry, LayoutResolveError, LayoutResolver, LayoutSource, LayoutValidation,
-    SHIPPED_LAYOUTS, default_layout_for_orchestrator, effective_layout,
+    SHIPPED_LAYOUTS, SHIPPED_SCENES, default_layout_for_orchestrator, effective_layout,
 };
 pub use layout_template::{LayoutTemplateError, LayoutVars, render as render_layout};
 pub use layout_writer::{

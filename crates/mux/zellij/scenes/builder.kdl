@@ -1,0 +1,42 @@
+// T-8.5: scene-shaped port of `crates/mux/zellij/layouts/builder.kdl`.
+//
+// Wraps the legacy zellij layout in a `scene "builder" { … }` envelope
+// per `cavekit-scene.md` R15 (file shape). Zero behaviour change versus
+// the legacy `layouts/builder.kdl`: the inner `layout { }` body is
+// byte-identical except for the indentation shift required by sitting
+// inside a `scene { }` block. T-14.2 ports the remaining shipped
+// layouts (`classic`, `focused`, `log`, `review`, `triple-column`) in
+// bulk; the legacy `layouts/builder.kdl` file stays in place per
+// `cavekit-layouts.md` R5 ("keep old shapes for N versions"). T-8.1's
+// scene compile pipeline (and the eventual T-14.1 auto-wrap) consume
+// this scene through the same path that produces a rendered zellij
+// layout `${XDG_RUNTIME_DIR}/ark/layouts/{scene-hash}-scene.kdl` for
+// `zellij --layout`.
+//
+// Template variables (`{{ name }}`, `{{ cwd }}`, `{{ agent_cmd }}`,
+// `{{ agent_args }}`) are minijinja placeholders rendered at spawn
+// time by `ark_mux_zellij::layout_template::render`; they pass through
+// the scene compile unchanged.
+scene "builder" {
+    layout {
+        tab name="{{ name }}" cwd="{{ cwd }}" {
+            pane split_direction="horizontal" {
+                pane size="60%" name="agent" {
+                    command "{{ agent_cmd }}"
+                    {% for a in agent_args %}args "{{ a }}"
+                    {% endfor %}
+                }
+                pane split_direction="vertical" {
+                    pane name="diff" {
+                        command "ark"
+                        args "pane" "diff" "--cwd" "{{ cwd }}"
+                    }
+                    pane name="git" {
+                        command "ark"
+                        args "pane" "git" "--cwd" "{{ cwd }}"
+                    }
+                }
+            }
+        }
+    }
+}
