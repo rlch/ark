@@ -81,3 +81,33 @@ lto = "fat"
 codegen-units = 1
 strip = true
 panic = "abort"
+
+# T-133: cargo-dist release pipeline (cavekit-distribution R2).
+# Tag-driven GitHub Releases. The matching `.github/workflows/release.yml`
+# fires on `v*` tag pushes and builds the four target tarballs below. The
+# metadata lives here so that `cargo dist init` (when run locally in the
+# future) will agree with the workflow instead of overwriting it.
+#
+# Targets: aarch64 + x86_64 on macOS + Linux. No Windows — per R2 and
+# cavekit-distribution R4 "No Windows package manager — Windows not a v1
+# target". Shell installer lets `cargo binstall` + curl|sh flows work; the
+# homebrew installer primes T-134's tap (homebrew-ark).
+#
+# `pr-run-mode = "plan"` keeps PRs cheap — only the plan step runs; full
+# build matrix only triggers on tag push (see release.yml).
+[workspace.metadata.dist]
+cargo-dist-version = "0.21.0"
+ci = ["github"]
+installers = ["shell", "homebrew"]
+tap = "rlch/homebrew-ark"
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-gnu",
+]
+pr-run-mode = "plan"
+# SHA256 checksums are cargo-dist's default for published artifacts;
+# `checksum = "sha256"` is explicit so the contract doesn't silently
+# change if cargo-dist's default ever shifts.
+checksum = "sha256"

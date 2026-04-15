@@ -1,0 +1,185 @@
+# Release workflow for Ark.
+#
+# Covers build-site T-133 (cavekit-distribution R2):
+#   - Tag-driven: push a `vX.Y.Z` tag → this workflow runs.
+#   - Matrix: aarch64 + x86_64 on macOS + Linux (no Windows — per
+#     cavekit-distribution R4).
+#   - Artifacts per target: tarball containing `ark` + `ark-hook`, plus a
+#     SHA256 checksum file. `ark` embeds the wasm plugins at build time via
+#     `crates/cli/build.rs` (ARK_BUILD_WASM=1) per R3.
+#   - A GitHub Release is created automatically on the tag and all target
+#     tarballs + checksums are uploaded to it.
+#
+# Design notes:
+#   * The `[workspace.metadata.dist]` block in root Cargo.toml describes the
+#     same contract in cargo-dist's own schema. When cargo-dist is run
+#     locally in the future (`cargo dist init`), it should regenerate this
+#     workflow to match. Until then this hand-written workflow carries the
+#     contract; keep the two in sync.
+#   * aarch64-linux is cross-compiled from ubuntu using the standard
+#     gcc-aarch64-linux-gnu toolchain — no docker / qemu needed, which
+#     keeps the job fast and matches cargo-dist's default runner choice.
+#   * SHA256 is computed with `shasum -a 256` on macOS and `sha256sum` on
+#     linux. Both runners agree on the file format: `<hex>  <filename>`.
+#   * No secrets required beyond the default GITHUB_TOKEN — the release job
+#     uploads to the same repo, which `contents: write` covers.
+#   * `pr-run-mode = "plan"` in Cargo.toml means PRs skip this workflow
+#     entirely (it only triggers on tag push, below). CI coverage for PRs
+#     lives in ci.yml.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (must exist as v*)"
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Needed so `crates/cli/build.rs` embeds the wasm plugins into the `ark`
+  # binary (cavekit-distribution R3). Without this the release artifact
+  # would be missing the embedded plugin bytes.
+  ARK_BUILD_WASM: "1"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # build: cross-compile `ark` + `ark-hook` for each release target. Produces
+  # a tarball + SHA256 checksum per target as a workflow artifact.
+  # ---------------------------------------------------------------------------
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            archive_ext: tar.xz
+            shasum: shasum -a 256
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            archive_ext: tar.xz
+            shasum: shasum -a 256
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04
+            archive_ext: tar.xz
+            shasum: sha256sum
+            linker: aarch64-linux-gnu-gcc
+            apt_packages: gcc-aarch64-linux-gnu
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+            archive_ext: tar.xz
+            shasum: sha256sum
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install wasm32-wasip1 target (for embedded plugins)
+        run: rustup target add wasm32-wasip1
+
+      - name: Install cross-compile toolchain (linux-aarch64)
+        if: matrix.apt_packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.apt_packages }}
+
+      - name: Configure cross-compile linker (linux-aarch64)
+        if: matrix.linker
+        run: |
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=${{ matrix.linker }}" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build wasm plugins (release profile)
+        run: |
+          cargo build --target wasm32-wasip1 --release \
+            -p ark-plugin-status \
+            -p ark-plugin-picker
+
+      - name: Build release binaries
+        run: |
+          cargo build --target ${{ matrix.target }} --release \
+            -p ark-cli \
+            -p ark-hook
+
+      - name: Stage artifacts
+        id: stage
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          if [ -z "$version" ] || [ "$version" = "${GITHUB_REF_NAME}" ]; then
+            # workflow_dispatch path: ref_name is the branch, not a tag.
+            version="${{ github.event.inputs.tag }}"
+            version="${version#v}"
+          fi
+          name="ark-${version}-${{ matrix.target }}"
+          dir="dist/${name}"
+          mkdir -p "${dir}"
+          cp "target/${{ matrix.target }}/release/ark" "${dir}/ark"
+          cp "target/${{ matrix.target }}/release/ark-hook" "${dir}/ark-hook"
+          cp README.md "${dir}/" 2>/dev/null || true
+          cp LICENSE "${dir}/" 2>/dev/null || true
+          tar -C dist -cJf "dist/${name}.tar.xz" "${name}"
+          ( cd dist && ${{ matrix.shasum }} "${name}.tar.xz" > "${name}.tar.xz.sha256" )
+          echo "archive=dist/${name}.tar.xz" >> "$GITHUB_OUTPUT"
+          echo "checksum=dist/${name}.tar.xz.sha256" >> "$GITHUB_OUTPUT"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.stage.outputs.name }}
+          path: |
+            ${{ steps.stage.outputs.archive }}
+            ${{ steps.stage.outputs.checksum }}
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # release: collect every target's tarball + checksum and publish a single
+  # GitHub Release against the pushed tag.
+  # ---------------------------------------------------------------------------
+  release:
+    name: publish github release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Flatten artifact layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          find dist -type f \( -name "*.tar.xz" -o -name "*.sha256" \) \
+            -exec cp {} release/ \;
+          ls -la release
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            release/*.tar.xz
+            release/*.sha256
