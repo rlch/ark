@@ -20,6 +20,7 @@ pub mod id;
 pub mod include;
 pub mod intent;
 pub mod merge;
+pub mod namespace;
 pub mod ops;
 pub mod parse;
 pub mod path;
