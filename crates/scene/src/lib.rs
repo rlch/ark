@@ -6,10 +6,12 @@
 
 pub mod ast;
 pub mod cel;
+pub mod compile;
 pub mod context;
 pub mod error;
 pub mod id;
 pub mod intent;
+pub mod ops;
 pub mod parse;
 pub mod scope;
 pub mod suggest;
