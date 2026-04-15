@@ -14,10 +14,15 @@
 //! The on-disk writer (`${XDG_RUNTIME_DIR}/ark/layouts/{id}-scene.kdl`)
 //! arrives alongside `writer` in T-3.4.
 
+pub mod inject_bus;
 pub mod keybinds;
 pub mod layout;
 pub mod writer;
 
+pub use inject_bus::{
+    ARK_BUS_EVENT_PREFIX, ARK_BUS_MOUNT_TARGET, ARK_BUS_PLUGIN_NAME, ARK_BUS_SOURCE,
+    maybe_inject_ark_bus,
+};
 pub use keybinds::{
     DEFAULT_MODE as KEYBIND_DEFAULT_MODE, PIPE_MESSAGE_NAME as KEYBIND_PIPE_MESSAGE_NAME,
     TARGET_PLUGIN as KEYBIND_TARGET_PLUGIN, compile_keybinds,
@@ -59,11 +64,20 @@ pub fn compile_scene_file(
         at: (0, 0).into(),
     })?;
 
-    let doc: SceneDoc = facet_kdl::from_str(src).map_err(|e| SceneError::Parse {
+    let mut doc: SceneDoc = facet_kdl::from_str(src).map_err(|e| SceneError::Parse {
         src: NamedSource::new(scene_file.display().to_string(), src.to_string()),
         at: (0, src.len().min(1)).into(),
         message: e.to_string(),
     })?;
+
+    // T-6.7: auto-inject `plugin "ark-bus" { … }` when the scene
+    // declares any keybind, any zellij-side `on` selector, or any
+    // plugin's `subscribes` selector targets a zellij-side UserEvent.
+    // Skip when the scene already declares ark-bus explicitly. This
+    // mutation runs **after parse** + **before compile** so downstream
+    // passes see the same plugin set whether the author declared
+    // ark-bus or relied on the injection.
+    let _injected = maybe_inject_ark_bus(&mut doc.scene);
 
     let layout = doc.scene.layout.as_ref().ok_or_else(|| SceneError::Grammar {
         message: format!(
