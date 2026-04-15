@@ -18,6 +18,8 @@
 //! scene/empty-or-unknown
 //! scene/include-cycle
 //! scene/engine-conflict
+//! op/unresolved-ref
+//! op/failed
 //! ```
 //!
 //! Cross-file errors (include-cycle, engine-conflict, etc.) attach the
@@ -75,6 +77,11 @@ pub enum ErrorCode {
     TemplateCompile,
     /// Minijinja template failed to render with a strict context (R9 / T-2.4).
     TemplateRender,
+    /// Op attribute references a tab / plugin / ext that the scene
+    /// doesn't declare (R7 / R12 / T-4.3).
+    OpUnresolvedRef,
+    /// Op dispatched at runtime returned an error (R7 / R12 / T-4.5).
+    OpFailed,
 }
 
 impl ErrorCode {
@@ -98,6 +105,8 @@ impl ErrorCode {
             ErrorCode::CelAstTooDeep => "cel/ast-too-deep",
             ErrorCode::TemplateCompile => "scene/template-compile",
             ErrorCode::TemplateRender => "scene/template-render",
+            ErrorCode::OpUnresolvedRef => "op/unresolved-ref",
+            ErrorCode::OpFailed => "op/failed",
         }
     }
 }
@@ -461,6 +470,79 @@ pub enum SceneError {
         /// Rendered minijinja error.
         message: String,
     },
+
+    /// An op argument references a named resource (tab, plugin) that
+    /// the scene doesn't declare (T-4.3 cross-reference pass).
+    ///
+    /// Covers:
+    ///
+    /// * `split_pane into="<tab>"` pointing at a tab missing from the
+    ///   `layout { tab name="<tab>" }` set.
+    /// * `pipe plugin="<name>"` referencing a plugin without a matching
+    ///   `plugin "<name>" { }` block (nor an auto-mount from an
+    ///   extension's sidecar).
+    /// * `mount_plugin name="<name>"` / `unmount_plugin name="<name>"`
+    ///   referencing an unknown plugin.
+    ///
+    /// The `help` field is pre-rendered so miette can splice a
+    /// "did you mean `X`?" hint in front of a list of available refs
+    /// when [`crate::suggest::suggest_similar`] finds a close match.
+    #[error("op `{op}` references unknown {kind} `{name}`")]
+    #[diagnostic(code = "op/unresolved-ref")]
+    OpUnresolvedRef {
+        /// Op that carried the unresolved reference
+        /// (e.g. `"ark.core.split_pane"`).
+        op: String,
+
+        /// Category of the missing reference (`"tab"`, `"plugin"`).
+        /// Human-readable noun surfaced in the diagnostic message.
+        kind: String,
+
+        /// The unknown name as it appeared in source (e.g. `"work"`).
+        name: String,
+
+        /// Optional "did you mean X?" suggestion from
+        /// [`crate::suggest::suggest_similar`].
+        suggestion: Option<String>,
+
+        /// Pre-rendered help text. Built by [`SceneError::op_unresolved_ref`]
+        /// so the typo hint + available-refs list fall through to
+        /// miette's renderer in one pass.
+        #[help]
+        help: String,
+
+        /// File carrying the offending op node.
+        #[source_code]
+        src: NamedSource<String>,
+
+        /// Span of the offending attribute (the `into="X"` / `plugin="X"` /
+        /// `name="X"` value).
+        #[label("no such {kind} declared in this scene")]
+        at: SourceSpan,
+    },
+
+    /// Op dispatch failed at runtime (T-4.5 fail-fast surface). Mirrors
+    /// `IntentError::Failed` on the scene compile side so the
+    /// reactions dispatcher can surface a uniform miette diagnostic
+    /// per R12's `op/failed` code.
+    ///
+    /// Emitted by [`crate::ops::dispatch::dispatch_sequence`] when an
+    /// op in a reaction returns an error. The dispatcher logs the
+    /// error via `tracing::error!(target = "scene::ops", ...)` and
+    /// returns this variant; the caller (reactions dispatcher)
+    /// swallows it so the event loop stays alive.
+    #[error("op `{op}` failed at dispatch: {message}")]
+    #[diagnostic(
+        code = "op/failed",
+        help("The op ran to completion but returned an error. See the per-op error (`tracing::error!` line tagged `scene::ops`) for the underlying cause.")
+    )]
+    OpFailed {
+        /// Op name that failed (e.g. `"ark.core.exec"`).
+        op: String,
+
+        /// Human-readable failure summary.
+        message: String,
+    },
 }
 
 /// Canonical static help text for `scene/unknown-node` — the list
@@ -470,6 +552,44 @@ pub enum SceneError {
 pub const UNKNOWN_NODE_ADMITS_HELP: &str = "Scene-root admits: extends, include, use, layout, plugin, on, keybind, engine, clear-reactions, clear-keybind, disable-plugin.";
 
 impl SceneError {
+    /// Build an `OpUnresolvedRef` with the help text already rendered
+    /// so an optional "did you mean …?" hint + an "available <kind>s:"
+    /// list surface in the miette output.
+    ///
+    /// `available` is the caller-supplied universe of declared names
+    /// (tabs, plugins). When non-empty, it renders as `Available tabs:
+    /// foo, bar, baz.` so the user can spot the correct name without
+    /// scrolling back through the scene.
+    pub fn op_unresolved_ref(
+        op: impl Into<String>,
+        kind: impl Into<String>,
+        name: impl Into<String>,
+        suggestion: Option<String>,
+        available: &[&str],
+        src: NamedSource<String>,
+        at: SourceSpan,
+    ) -> Self {
+        let kind = kind.into();
+        let available_line = if available.is_empty() {
+            format!("No {kind}s are declared in this scene.")
+        } else {
+            format!("Available {kind}s: {}.", available.join(", "))
+        };
+        let help = match &suggestion {
+            Some(s) => format!("did you mean `{s}`? {available_line}"),
+            None => available_line,
+        };
+        SceneError::OpUnresolvedRef {
+            op: op.into(),
+            kind,
+            name: name.into(),
+            suggestion,
+            help,
+            src,
+            at,
+        }
+    }
+
     /// Build an `UnknownNode` with the help text already rendered so
     /// the optional `suggestion` surfaces in miette's output.
     ///
@@ -517,6 +637,8 @@ impl SceneError {
             SceneError::CelAstTooDeep { .. } => ErrorCode::CelAstTooDeep,
             SceneError::TemplateCompile { .. } => ErrorCode::TemplateCompile,
             SceneError::TemplateRender { .. } => ErrorCode::TemplateRender,
+            SceneError::OpUnresolvedRef { .. } => ErrorCode::OpUnresolvedRef,
+            SceneError::OpFailed { .. } => ErrorCode::OpFailed,
         }
     }
 }
@@ -813,5 +935,7 @@ mod tests {
         assert_eq!(ErrorCode::CelAstTooDeep.as_str(), "cel/ast-too-deep");
         assert_eq!(ErrorCode::TemplateCompile.as_str(), "scene/template-compile");
         assert_eq!(ErrorCode::TemplateRender.as_str(), "scene/template-render");
+        assert_eq!(ErrorCode::OpUnresolvedRef.as_str(), "op/unresolved-ref");
+        assert_eq!(ErrorCode::OpFailed.as_str(), "op/failed");
     }
 }

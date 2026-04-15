@@ -278,3 +278,44 @@ fn leaf_root_with_body() {
 fn multiple_violations() {
     assert_fixture_snapshot("multiple_violations");
 }
+
+// ---------------------------------------------------------------------------
+// R7 + R12 — op cross-reference diagnostics (T-4.3)
+// ---------------------------------------------------------------------------
+
+/// Render the first `SceneError::OpUnresolvedRef` produced by running
+/// the op cross-ref validator on a fixture. Separate helper because
+/// the scope pass already passes for these fixtures — the op-refs
+/// pass is a later compile-pipeline stage.
+fn assert_op_ref_fixture_snapshot(stem: &str) {
+    use ark_scene::ops::validate::validate_op_refs;
+    let (src, path) = load_fixture(stem);
+    let doc: kdl::KdlDocument = src.parse().expect("fixture parses as KDL");
+    let errs = validate_op_refs(&src, &path, &doc)
+        .expect_err("fixture must produce an unresolved-ref diagnostic");
+    let rendered = render(&errs[0]);
+    insta::with_settings!({
+        snapshot_path => "snapshots",
+        prepend_module_to_snapshot => false,
+    }, {
+        insta::assert_snapshot!(stem, rendered);
+    });
+}
+
+/// `split_pane into="wokr"` → unresolved tab ref, suggests `work`.
+#[test]
+fn op_split_pane_missing_tab() {
+    assert_op_ref_fixture_snapshot("op_split_pane_missing_tab");
+}
+
+/// `pipe plugin="ststus"` → unresolved plugin ref, suggests `status`.
+#[test]
+fn op_pipe_missing_plugin() {
+    assert_op_ref_fixture_snapshot("op_pipe_missing_plugin");
+}
+
+/// `mount_plugin name="pickre"` → unresolved plugin ref, suggests `picker`.
+#[test]
+fn op_mount_plugin_missing() {
+    assert_op_ref_fixture_snapshot("op_mount_plugin_missing");
+}
