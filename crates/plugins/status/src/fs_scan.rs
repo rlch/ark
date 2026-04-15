@@ -16,16 +16,26 @@ use crate::StatusSummary;
 
 /// Resolve the state directory root that contains `agents/` subdirs.
 ///
-/// Per XDG base-dir spec: prefer `$XDG_STATE_HOME` if set, otherwise
-/// `$HOME/.local/state`. In both cases we append `ark/` so callers land on
-/// the ark-owned subtree directly. When neither env var is set (the env
-/// injector returns `None`) we return `PathBuf::new()` — callers detect the
-/// empty path and skip scanning, matching "best effort" semantics.
+/// Precedence mirrors `ark-types::EnvPaths::resolve` (F-605):
+///   1. `$ARK_STATE_DIR` — explicit ark override, used verbatim (no `ark/`
+///      suffix appended; caller is assumed to have chosen an isolated
+///      path, typical in tests and custom deployments).
+///   2. `$XDG_STATE_HOME/ark` — per the XDG base-dir spec.
+///   3. `$HOME/.local/state/ark` — platform fallback.
+///   4. Empty `PathBuf` — signals "skip scan" to callers when no env var
+///      resolves (best-effort semantics per R4).
+///
+/// The ark-types crate is NOT imported here — the plugin is WASM-only at
+/// runtime and the env parsing is trivially duplicable. The host-side env
+/// injector (picker bootstrap, supervisor) is the source of truth; this
+/// function just consumes the injected closure.
 ///
 /// `env` is injected rather than read via `std::env::var` so host tests can
-/// assert both the XDG-set and fallback branches without mutating the
-/// process environment.
+/// assert every branch without mutating the process environment.
 pub fn resolve_state_dir(env: impl Fn(&str) -> Option<String>) -> PathBuf {
+    if let Some(ark) = env("ARK_STATE_DIR").filter(|s| !s.is_empty()) {
+        return PathBuf::from(ark);
+    }
     if let Some(xdg) = env("XDG_STATE_HOME").filter(|s| !s.is_empty()) {
         return PathBuf::from(xdg).join("ark");
     }
@@ -254,6 +264,31 @@ mod tests {
     fn resolve_state_dir_returns_empty_when_no_env() {
         let env = |_: &str| None;
         assert_eq!(resolve_state_dir(env), PathBuf::new());
+    }
+
+    #[test]
+    fn resolve_state_dir_prefers_ark_state_dir_over_xdg_and_home() {
+        // F-605: ARK_STATE_DIR wins outright; used verbatim (no `ark`
+        // suffix appended — caller chose an explicit path).
+        let env = |k: &str| match k {
+            "ARK_STATE_DIR" => Some("/explicit/state".to_string()),
+            "XDG_STATE_HOME" => Some("/xdg/state".to_string()),
+            "HOME" => Some("/home/user".to_string()),
+            _ => None,
+        };
+        assert_eq!(resolve_state_dir(env), PathBuf::from("/explicit/state"));
+    }
+
+    #[test]
+    fn resolve_state_dir_treats_empty_ark_state_dir_as_unset() {
+        // Empty string should behave like unset (shells occasionally
+        // export empty values). Falls through to XDG_STATE_HOME.
+        let env = |k: &str| match k {
+            "ARK_STATE_DIR" => Some(String::new()),
+            "XDG_STATE_HOME" => Some("/xdg/state".to_string()),
+            _ => None,
+        };
+        assert_eq!(resolve_state_dir(env), PathBuf::from("/xdg/state/ark"));
     }
 
     #[test]

@@ -39,20 +39,38 @@ pub const REACHABILITY_TIMEOUT_MS: u64 = 50;
 
 /// Resolve the `(state_dir, runtime_dir)` pair the picker scans.
 ///
-/// Semantics:
-/// - `state_dir`: prefer `$XDG_STATE_HOME/ark`, else `$HOME/.local/state/ark`,
-///   else empty (callers treat empty as "skip scan").
-/// - `runtime_dir`: prefer `$XDG_RUNTIME_DIR/ark-$UID/agents`, else
-///   `/tmp/ark-$UID/agents`. `$UID` is resolved via the injected env
-///   closure's `"UID"` key; if missing, the literal `$UID` placeholder is
-///   dropped (the directory becomes `ark/agents`) so tests stay portable
-///   across platforms that don't surface UID in env.
+/// Precedence mirrors `ark-types::EnvPaths::resolve` (F-604). ark-types is
+/// NOT imported here — the picker is WASM-only at runtime and pulling the
+/// crate in would break that constraint; the host-side env injector
+/// (see call sites in `Picker::refresh_cache`) is the source of truth,
+/// this function just consumes the injected closure.
+///
+/// State side:
+///   1. `$ARK_STATE_DIR` — verbatim (no `ark/` suffix; caller chose an
+///      isolated path).
+///   2. `$XDG_STATE_HOME/ark` — XDG fallback.
+///   3. `$HOME/.local/state/ark` — platform fallback.
+///   4. Empty `PathBuf` — caller skips the state scan.
+///
+/// Runtime side:
+///   1. `$ARK_RUNTIME_DIR/agents` — verbatim (no `ark-$UID` segment);
+///      matches `EnvPaths::resolve_runtime` semantics.
+///   2. `$XDG_RUNTIME_DIR/ark-$UID/agents` — XDG fallback, needs a UID.
+///   3. `/tmp/ark-$UID/agents` — platform fallback, needs a UID.
+///   4. When neither `$ARK_RUNTIME_DIR`, `$XDG_RUNTIME_DIR` nor `UID` is
+///      surfaced by the env closure, we cannot construct a safe
+///      per-user-isolated path (`/tmp/ark/agents` would be shared across
+///      users on a multi-tenant host). Rather than pick a questionable
+///      default, the runtime side returns `PathBuf::new()` and the
+///      caller skips the socket scan — pipe-only liveness still works.
 ///
 /// `env` is injected rather than read via `std::env::var` so host tests can
-/// assert every branch without mutating process env. This mirrors the
-/// status plugin's [`ark_plugin_status::resolve_state_dir`].
+/// assert every branch without mutating process env.
 pub fn resolve_xdg_paths(env: impl Fn(&str) -> Option<String>) -> (PathBuf, PathBuf) {
-    let state_dir = if let Some(xdg) = env("XDG_STATE_HOME").filter(|s| !s.is_empty()) {
+    // --- state_dir ---
+    let state_dir = if let Some(ark) = env("ARK_STATE_DIR").filter(|s| !s.is_empty()) {
+        PathBuf::from(ark)
+    } else if let Some(xdg) = env("XDG_STATE_HOME").filter(|s| !s.is_empty()) {
         PathBuf::from(xdg).join("ark")
     } else if let Some(home) = env("HOME").filter(|s| !s.is_empty()) {
         PathBuf::from(home).join(".local").join("state").join("ark")
@@ -60,16 +78,25 @@ pub fn resolve_xdg_paths(env: impl Fn(&str) -> Option<String>) -> (PathBuf, Path
         PathBuf::new()
     };
 
-    // Runtime root: $XDG_RUNTIME_DIR if set, else /tmp. Then append
-    // `ark-$UID/agents` regardless.
+    // --- runtime_dir ---
+    // 1. $ARK_RUNTIME_DIR — verbatim. Caller already isolated the path.
+    if let Some(ark_rt) = env("ARK_RUNTIME_DIR").filter(|s| !s.is_empty()) {
+        return (state_dir, PathBuf::from(ark_rt).join("agents"));
+    }
+
+    // For the XDG / /tmp branches we need a UID to disambiguate between
+    // users on a shared host. Without one, return an empty PathBuf and
+    // let the caller skip the socket scan (pipe liveness still works).
+    let Some(uid) = env("UID").filter(|s| !s.is_empty()) else {
+        return (state_dir, PathBuf::new());
+    };
+    let uid_suffix = format!("ark-{uid}");
+
+    // 2. $XDG_RUNTIME_DIR/ark-$UID/agents, else 3. /tmp/ark-$UID/agents.
     let runtime_root = env("XDG_RUNTIME_DIR")
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/tmp"));
-    let uid_suffix = match env("UID").filter(|s| !s.is_empty()) {
-        Some(uid) => format!("ark-{uid}"),
-        None => "ark".to_string(),
-    };
     let runtime_dir = runtime_root.join(uid_suffix).join("agents");
 
     (state_dir, runtime_dir)
@@ -861,15 +888,16 @@ mod tests {
     }
 
     #[test]
-    fn resolve_xdg_paths_falls_back_without_env() {
+    fn resolve_xdg_paths_falls_back_to_tmp_with_uid() {
         let env = |k: &str| match k {
             "HOME" => Some("/home/u".to_string()),
+            "UID" => Some("1000".into()),
             _ => None,
         };
         let (state, rt) = resolve_xdg_paths(env);
         assert_eq!(state, PathBuf::from("/home/u/.local/state/ark"));
-        // No XDG_RUNTIME_DIR and no UID → /tmp/ark/agents
-        assert_eq!(rt, PathBuf::from("/tmp/ark/agents"));
+        // No XDG_RUNTIME_DIR, UID present → /tmp/ark-1000/agents
+        assert_eq!(rt, PathBuf::from("/tmp/ark-1000/agents"));
     }
 
     #[test]
@@ -877,9 +905,88 @@ mod tests {
         let env = |k: &str| match k {
             "XDG_STATE_HOME" => Some(String::new()),
             "HOME" => Some("/h".into()),
+            "UID" => Some("42".into()),
             _ => None,
         };
         let (state, _rt) = resolve_xdg_paths(env);
         assert_eq!(state, PathBuf::from("/h/.local/state/ark"));
+    }
+
+    // ---- F-604: honor ARK_STATE_DIR + ARK_RUNTIME_DIR ----------------------
+
+    #[test]
+    fn resolve_xdg_paths_honors_ark_state_dir_over_xdg_and_home() {
+        // ARK_STATE_DIR wins outright and is used verbatim (no `ark/`
+        // suffix) — mirrors ark-types::EnvPaths::resolve.
+        let env = |k: &str| match k {
+            "ARK_STATE_DIR" => Some("/explicit/state".to_string()),
+            "XDG_STATE_HOME" => Some("/xdg/state".to_string()),
+            "HOME" => Some("/home/u".to_string()),
+            "UID" => Some("1000".into()),
+            _ => None,
+        };
+        let (state, _rt) = resolve_xdg_paths(env);
+        assert_eq!(state, PathBuf::from("/explicit/state"));
+    }
+
+    #[test]
+    fn resolve_xdg_paths_honors_ark_runtime_dir_over_xdg() {
+        // ARK_RUNTIME_DIR wins outright: used verbatim + /agents appended
+        // (no ark-$UID segment — caller chose an isolated path).
+        let env = |k: &str| match k {
+            "ARK_RUNTIME_DIR" => Some("/explicit/rt".to_string()),
+            "XDG_RUNTIME_DIR" => Some("/run".to_string()),
+            "UID" => Some("1000".into()),
+            _ => None,
+        };
+        let (_state, rt) = resolve_xdg_paths(env);
+        assert_eq!(rt, PathBuf::from("/explicit/rt/agents"));
+    }
+
+    #[test]
+    fn resolve_xdg_paths_ark_runtime_dir_overrides_missing_uid() {
+        // With ARK_RUNTIME_DIR set, UID absence is fine — no
+        // disambiguation needed because the caller already picked an
+        // explicit path.
+        let env = |k: &str| match k {
+            "ARK_RUNTIME_DIR" => Some("/explicit/rt".to_string()),
+            _ => None,
+        };
+        let (_state, rt) = resolve_xdg_paths(env);
+        assert_eq!(rt, PathBuf::from("/explicit/rt/agents"));
+    }
+
+    #[test]
+    fn resolve_xdg_paths_returns_empty_runtime_when_uid_missing() {
+        // F-604 documented rationale: without ARK_RUNTIME_DIR and without
+        // a UID, we cannot build a per-user-isolated path safely
+        // (`/tmp/ark/agents` would collide across users on a shared
+        // host). Return an empty PathBuf so the caller skips the socket
+        // scan; pipe liveness is still functional.
+        let env = |k: &str| match k {
+            "HOME" => Some("/home/u".to_string()),
+            "XDG_RUNTIME_DIR" => Some("/run".to_string()),
+            _ => None,
+        };
+        let (state, rt) = resolve_xdg_paths(env);
+        assert_eq!(state, PathBuf::from("/home/u/.local/state/ark"));
+        assert_eq!(rt, PathBuf::new());
+    }
+
+    #[test]
+    fn resolve_xdg_paths_treats_empty_ark_vars_as_unset() {
+        // Empty env strings (rare, but some shells export them) must
+        // fall through to the next precedence tier.
+        let env = |k: &str| match k {
+            "ARK_STATE_DIR" => Some(String::new()),
+            "ARK_RUNTIME_DIR" => Some(String::new()),
+            "XDG_STATE_HOME" => Some("/xdg/state".to_string()),
+            "XDG_RUNTIME_DIR" => Some("/run".to_string()),
+            "UID" => Some("7".into()),
+            _ => None,
+        };
+        let (state, rt) = resolve_xdg_paths(env);
+        assert_eq!(state, PathBuf::from("/xdg/state/ark"));
+        assert_eq!(rt, PathBuf::from("/run/ark-7/agents"));
     }
 }

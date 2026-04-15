@@ -209,7 +209,16 @@ pub(crate) fn ingest_pipe_payload(
     Ok(())
 }
 
-/// Drop cache entries whose `updated_at` is older than `now_ms - ttl_ms`.
+/// Drop cache entries for **terminal** agents whose `updated_at` is older
+/// than `now_ms - ttl_ms`.
+///
+/// Per cavekit-plugin-status R2 the 60-minute TTL only applies to agents
+/// that are known to be gone (`done`, `failed`, `killed`, `timeout`,
+/// `crashed`). Non-terminal agents (`running`, `idle`, `prompting`,
+/// `stalled`, `reviewing`, …) stay in the cache indefinitely until a newer
+/// pipe/fs update replaces them — evicting a running agent because no
+/// pipe message arrived for an hour would make its chip vanish while the
+/// agent is still alive.
 ///
 /// Returns the number of entries removed so the 1 Hz timer handler can
 /// decide whether to request a redraw. Using saturating arithmetic keeps the
@@ -222,8 +231,19 @@ pub(crate) fn evict_stale(
 ) -> usize {
     let cutoff = now_ms.saturating_sub(ttl_ms);
     let before = cache.len();
-    cache.retain(|_, summary| summary.updated_at >= cutoff);
+    cache.retain(|_, summary| {
+        // Retain if phase is non-terminal OR the entry is still young.
+        !is_terminal_phase(&summary.phase) || summary.updated_at >= cutoff
+    });
     before - cache.len()
+}
+
+/// Wire-level phase strings considered terminal (agent known to be gone).
+/// Matches `ark-types::Phase`'s terminal set (`Done`, `Failed`, `Crashed`,
+/// `Killed`, `Timeout`). Kept local so the plugin does not depend on
+/// ark-types — the wire format is the contract, not the enum.
+fn is_terminal_phase(phase: &str) -> bool {
+    matches!(phase, "done" | "failed" | "crashed" | "killed" | "timeout")
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -462,11 +482,15 @@ mod tests {
     use super::*;
 
     fn summary(agent_id: &str, updated_at: u64) -> StatusSummary {
+        summary_with_phase(agent_id, updated_at, "running")
+    }
+
+    fn summary_with_phase(agent_id: &str, updated_at: u64, phase: &str) -> StatusSummary {
         StatusSummary {
             agent_id: agent_id.to_string(),
             name: "auth".to_string(),
             orchestrator: "cavekit".to_string(),
-            phase: "running".to_string(),
+            phase: phase.to_string(),
             updated_at,
             last_event: String::new(),
         }
@@ -533,10 +557,15 @@ mod tests {
     }
 
     #[test]
-    fn evict_stale_removes_entries_older_than_ttl() {
+    fn evict_stale_removes_terminal_entries_older_than_ttl() {
         let mut cache = BTreeMap::new();
-        cache.insert("old".into(), summary("old", 0));
-        cache.insert("fresh".into(), summary("fresh", EVICTION_TTL_MS));
+        // Terminal + stale → evict.
+        cache.insert("old".into(), summary_with_phase("old", 0, "done"));
+        // Terminal but fresh → keep.
+        cache.insert(
+            "fresh".into(),
+            summary_with_phase("fresh", EVICTION_TTL_MS, "done"),
+        );
 
         // now = 2 * TTL → "old" is past the cutoff, "fresh" is exactly at it.
         let removed = evict_stale(&mut cache, EVICTION_TTL_MS * 2, EVICTION_TTL_MS);
@@ -560,12 +589,15 @@ mod tests {
     }
 
     #[test]
-    fn evict_stale_returns_removed_count() {
+    fn evict_stale_returns_removed_count_for_terminal_entries() {
         let mut cache = BTreeMap::new();
-        cache.insert("a".into(), summary("a", 0));
-        cache.insert("b".into(), summary("b", 0));
-        cache.insert("c".into(), summary("c", 0));
-        cache.insert("d".into(), summary("d", EVICTION_TTL_MS * 10));
+        cache.insert("a".into(), summary_with_phase("a", 0, "done"));
+        cache.insert("b".into(), summary_with_phase("b", 0, "failed"));
+        cache.insert("c".into(), summary_with_phase("c", 0, "crashed"));
+        cache.insert(
+            "d".into(),
+            summary_with_phase("d", EVICTION_TTL_MS * 10, "done"),
+        );
 
         let removed = evict_stale(&mut cache, EVICTION_TTL_MS * 5, EVICTION_TTL_MS);
 
@@ -584,5 +616,70 @@ mod tests {
 
         assert_eq!(removed, 0);
         assert_eq!(cache.len(), 1);
+    }
+
+    // ---- F-603: non-terminal entries must survive the TTL pass -------------
+
+    #[test]
+    fn evict_stale_retains_non_terminal_stale_entry() {
+        // A running agent whose supervisor stopped emitting pipe updates
+        // for well over an hour must NOT be evicted — the chip should
+        // remain visible until a newer snapshot replaces it.
+        let mut cache = BTreeMap::new();
+        for phase in ["running", "idle", "prompting", "stalled", "reviewing"] {
+            cache.insert(phase.to_string(), summary_with_phase(phase, 0, phase));
+        }
+
+        let removed = evict_stale(&mut cache, EVICTION_TTL_MS * 100, EVICTION_TTL_MS);
+
+        assert_eq!(removed, 0, "non-terminal entries must not be evicted");
+        assert_eq!(cache.len(), 5);
+    }
+
+    #[test]
+    fn evict_stale_evicts_terminal_stale_entry() {
+        // Each terminal phase should be eligible for eviction once stale.
+        for phase in ["done", "failed", "crashed", "killed", "timeout"] {
+            let mut cache = BTreeMap::new();
+            cache.insert("x".into(), summary_with_phase("x", 0, phase));
+            let removed = evict_stale(&mut cache, EVICTION_TTL_MS * 2, EVICTION_TTL_MS);
+            assert_eq!(
+                removed, 1,
+                "terminal phase {phase} must be evicted when stale"
+            );
+            assert!(cache.is_empty());
+        }
+    }
+
+    #[test]
+    fn evict_stale_mixed_entries_only_terminal_evicted() {
+        // Mixed cache: one stale terminal, one stale non-terminal, one
+        // fresh terminal, one fresh non-terminal. Only the stale terminal
+        // should disappear.
+        let mut cache = BTreeMap::new();
+        cache.insert(
+            "stale-done".into(),
+            summary_with_phase("stale-done", 0, "done"),
+        );
+        cache.insert(
+            "stale-running".into(),
+            summary_with_phase("stale-running", 0, "running"),
+        );
+        cache.insert(
+            "fresh-done".into(),
+            summary_with_phase("fresh-done", EVICTION_TTL_MS * 5, "done"),
+        );
+        cache.insert(
+            "fresh-running".into(),
+            summary_with_phase("fresh-running", EVICTION_TTL_MS * 5, "running"),
+        );
+
+        let removed = evict_stale(&mut cache, EVICTION_TTL_MS * 2, EVICTION_TTL_MS);
+
+        assert_eq!(removed, 1);
+        assert!(!cache.contains_key("stale-done"));
+        assert!(cache.contains_key("stale-running"));
+        assert!(cache.contains_key("fresh-done"));
+        assert!(cache.contains_key("fresh-running"));
     }
 }

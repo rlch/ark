@@ -500,3 +500,53 @@ Three findings flagged by codex trace back to F-522's change that gave each zell
 Workspace-wide `cargo test --workspace -- --test-threads=1` fully green. `cargo build --workspace` zero new warnings. `cargo fmt --all` clean.
 
 **Gate status after Tier 5 cycle 1:** OPEN pending next codex pass.
+
+## Tier 5 — Cycle 2
+
+Three findings from the next codex pass all clustered around env-var precedence and the eviction semantics. The common theme: ark-types' `EnvPaths::resolve` documents a clear `ARK_*_DIR → XDG_*_HOME → HOME/UID-derived` chain that several plugins quietly diverged from, and the status plugin's 60-minute TTL was being applied indiscriminately to every cache entry rather than just terminal agents.
+
+### F-603 — P1 evict_stale only drops terminal agents after 60min (FIXED)
+
+**Source:** codex
+**Tier:** 5
+**Severity:** P1
+**Status:** fixed
+**Location:** crates/plugins/status/src/lib.rs (`evict_stale`)
+
+**Description:** `evict_stale` called `cache.retain(|_, s| s.updated_at >= cutoff)`, evicting every entry older than the 60-minute TTL regardless of phase. cavekit-plugin-status R2 limits that TTL to agents that are known to be gone (`done`, `failed`, `killed`, `timeout`, `crashed`) — the intent is "forget completed runs after an hour", not "forget any agent whose supervisor went quiet for an hour". With the broad retain, a long-running agent that paused pipe emits (e.g. a long Reviewing pause, or transient timer/pipe stalls) would silently vanish from the status bar while still very much alive.
+
+**Resolution:** Introduced a local `is_terminal_phase(&str) -> bool` helper that mirrors `ark-types::Phase`'s terminal set (`done|failed|crashed|killed|timeout`) as wire strings. ark-types was NOT imported — the plugin is wasm-only at runtime and the wire format is the contract, not the enum. The retain predicate is now `!is_terminal_phase(phase) || updated_at >= cutoff`: non-terminal phases bypass the TTL entirely and only explicit newer updates (pipe or fs) can replace them. The existing `evict_stale_*` tests were renamed and re-pointed at terminal-phase fixtures (since the old data used `phase: "running"` which now bypasses eviction — the tests were covering the wrong invariant). Three new tests per the F-603 spec: `evict_stale_retains_non_terminal_stale_entry` (sweeps all five non-terminal phases — running/idle/prompting/stalled/reviewing — at TTL×100 age, asserts zero removals), `evict_stale_evicts_terminal_stale_entry` (table-drives all five terminal phases — done/failed/crashed/killed/timeout — asserting each is evicted when stale), and `evict_stale_mixed_entries_only_terminal_evicted` (four-way mix: stale-done/stale-running/fresh-done/fresh-running, asserts only stale-done disappears). The startup-safety test (`evict_stale_is_safe_at_process_startup`) still uses `running` because its invariant — "nothing evicts when `now_ms < ttl_ms`" — holds independent of the phase.
+
+### F-604 — P2 picker bootstrap honors ARK_STATE_DIR + ARK_RUNTIME_DIR (FIXED)
+
+**Source:** codex
+**Tier:** 5
+**Severity:** P2
+**Status:** fixed
+**Location:** crates/plugins/picker/src/bootstrap.rs (`resolve_xdg_paths`)
+
+**Description:** `resolve_xdg_paths` only checked `XDG_STATE_HOME` / `XDG_RUNTIME_DIR`, ignoring the `ARK_STATE_DIR` / `ARK_RUNTIME_DIR` overrides that `ark-types::EnvPaths::resolve` documents as the top-precedence escape hatch. The picker therefore could not be pointed at a custom state/runtime tree without simultaneously setting the XDG vars — out of sync with the rest of ark (supervisor, CLI, status fs fallback). The runtime side also silently fell back to `/tmp/ark/agents` when UID was missing, which is not per-user-isolated and would collide across users on a shared host.
+
+**Resolution:** Rewrote `resolve_xdg_paths` to mirror `EnvPaths::resolve`'s precedence verbatim for both sides. State side: `ARK_STATE_DIR` (verbatim, no `ark/` suffix) → `XDG_STATE_HOME/ark` → `HOME/.local/state/ark` → empty. Runtime side: `ARK_RUNTIME_DIR/agents` (verbatim, no `ark-$UID` segment — matches EnvPaths::resolve_runtime semantics where the caller has already chosen isolation) → `XDG_RUNTIME_DIR/ark-$UID/agents` → `/tmp/ark-$UID/agents` → empty when no UID is surfaced. The empty-runtime return path is the documented rationale fix for the UID-missing case: rather than build `/tmp/ark/agents` (shared across users), we return an empty PathBuf and let `scan_socket_dir` / `gc_stale_sockets` skip the scan (both already treat `read_dir` failure as "no sockets"). ark-types is NOT imported — the plugin is wasm-only at runtime and the env parsing is trivially duplicable; host-side the supervisor / CLI already use `EnvPaths` via `ark-types`. Replaced `resolve_xdg_paths_falls_back_without_env` (which asserted the dropped `/tmp/ark/agents` behavior) with `resolve_xdg_paths_falls_back_to_tmp_with_uid`. Five new tests: `resolve_xdg_paths_honors_ark_state_dir_over_xdg_and_home`, `resolve_xdg_paths_honors_ark_runtime_dir_over_xdg`, `resolve_xdg_paths_ark_runtime_dir_overrides_missing_uid` (proves ARK_RUNTIME_DIR bypasses the UID requirement), `resolve_xdg_paths_returns_empty_runtime_when_uid_missing` (documents the intentional skip), `resolve_xdg_paths_treats_empty_ark_vars_as_unset` (shell-exports-empty behaviour).
+
+### F-605 — P2 status fs_scan honors ARK_STATE_DIR (FIXED)
+
+**Source:** codex
+**Tier:** 5
+**Severity:** P2
+**Status:** fixed
+**Location:** crates/plugins/status/src/fs_scan.rs (`resolve_state_dir`)
+
+**Description:** Symmetric to F-604 on the status plugin side. `resolve_state_dir` only consulted `XDG_STATE_HOME` / `HOME`, so the fs fallback scan missed any state tree rooted under `ARK_STATE_DIR`. When an operator pinned ark to a custom state directory (e.g. for isolation in tests or for a non-default deployment), the status bar's fs-fallback path was blind to it — only the pipe path would populate chips, which defeats the R4 fallback.
+
+**Resolution:** Added `ARK_STATE_DIR` as the first precedence step in `resolve_state_dir`, used verbatim (no `ark/` suffix), matching `EnvPaths::resolve_with`'s state-side behaviour and F-604's semantics. Fallback chain now: `ARK_STATE_DIR` → `XDG_STATE_HOME/ark` → `HOME/.local/state/ark` → empty. ark-types is NOT imported here for the same reason as F-604 (wasm-only runtime). Two new tests: `resolve_state_dir_prefers_ark_state_dir_over_xdg_and_home` asserts verbatim use and precedence, `resolve_state_dir_treats_empty_ark_state_dir_as_unset` covers the shell-exports-empty edge case.
+
+## Test Delta — Tier 5 Cycle 2
+
+- ark-plugin-status: 40 baseline → 45 (+5: three new F-603 evict_stale tests in lib.rs, two new F-605 resolve_state_dir tests in fs_scan.rs). Existing `evict_stale_*` terminal-phase tests were re-pointed at terminal-phase fixtures in place (no count change from renames).
+- ark-plugin-picker: 198 baseline → 203 (+5: F-604 adds five new `resolve_xdg_paths_*` tests; one existing test `resolve_xdg_paths_falls_back_without_env` renamed to `resolve_xdg_paths_falls_back_to_tmp_with_uid` and its UID was added so the existing `/tmp/ark-$UID/agents` branch is still exercised).
+- Workspace totals: 45 + 203 and every other crate unchanged; `cargo test --workspace -- --test-threads=1` fully green.
+
+`cargo build --workspace` zero new warnings (the two pre-existing `embedded ark-plugin-*` cargo-warnings are just build-script byte-count notices, not code warnings). `cargo fmt --all` clean.
+
+**Gate status after Tier 5 cycle 2:** OPEN pending next codex pass.
