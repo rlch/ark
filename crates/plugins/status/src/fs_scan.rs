@@ -363,6 +363,32 @@ mod tests {
     }
 
     #[test]
+    fn scan_state_dir_three_agents_with_distinct_phases_yields_three_summaries() {
+        // T-125 / cavekit-plugin-status R4 "state-dir scan" contract:
+        // a tempdir pre-populated with 3 `agents/*/status.json` files
+        // must yield exactly 3 parsed summaries, one per phase, each
+        // with the expected agent_id and phase preserved.
+        let tmp = TempDir::new("three-distinct");
+        write_status(tmp.path(), "a-run", 1_000, "running");
+        write_status(tmp.path(), "b-idle", 2_000, "idle");
+        write_status(tmp.path(), "c-done", 3_000, "done");
+
+        let mut results = scan_state_dir(tmp.path());
+        results.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+
+        assert_eq!(results.len(), 3, "one summary per status.json");
+        let by_id: std::collections::HashMap<&str, &StatusSummary> =
+            results.iter().map(|s| (s.agent_id.as_str(), s)).collect();
+        assert_eq!(by_id["a-run"].phase, "running");
+        assert_eq!(by_id["b-idle"].phase, "idle");
+        assert_eq!(by_id["c-done"].phase, "done");
+        // Timestamps must round-trip verbatim.
+        assert_eq!(by_id["a-run"].updated_at, 1_000);
+        assert_eq!(by_id["b-idle"].updated_at, 2_000);
+        assert_eq!(by_id["c-done"].updated_at, 3_000);
+    }
+
+    #[test]
     fn merge_fs_scan_skips_empty_agent_id() {
         let mut cache = BTreeMap::new();
         let scanned = vec![StatusSummary {

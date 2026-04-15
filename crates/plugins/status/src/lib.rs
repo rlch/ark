@@ -547,6 +547,24 @@ mod tests {
     }
 
     #[test]
+    fn ingest_foreign_source_leaves_valid_json_cache_untouched() {
+        // T-125 / cavekit-plugin-status R3 source-filter: even a
+        // perfectly well-formed payload addressed at a different pipe
+        // name must NOT mutate the cache. Previous ForeignSource test
+        // uses an empty cache; this one pre-seeds the cache so we can
+        // assert it is byte-identical after the rejected ingest.
+        let mut cache = BTreeMap::new();
+        cache.insert("existing".into(), summary("existing", 1_000));
+        let before = cache.clone();
+        let payload = payload_for("intruder", 9_999);
+
+        let err = ingest_pipe_payload(&mut cache, "some-other-plugin", &payload)
+            .expect_err("foreign source must be rejected");
+        assert!(matches!(err, IngestError::ForeignSource));
+        assert_eq!(cache, before, "cache must be untouched on foreign source");
+    }
+
+    #[test]
     fn ingest_upserts_newer_snapshot_for_same_agent() {
         let mut cache = BTreeMap::new();
         ingest_pipe_payload(&mut cache, PLUGIN_NAME, &payload_for("agent-1", 1_000)).unwrap();

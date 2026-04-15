@@ -664,4 +664,79 @@ mod tests {
             None
         );
     }
+
+    // --- T-125: chip render colour matrix + width-aware truncation ---------
+
+    #[test]
+    fn build_chip_severity_matches_phase_color_contract() {
+        // T-125 / cavekit-plugin-status R3: chip render colour contract.
+        // `Running` → Info (cyan), `Done` → Ok (green), `Failed` → Danger
+        // (red). Host tests exercise the severity bucket directly since
+        // the actual ANSI colour is picked by the zellij theme at render
+        // time; the severity is the stable wire-level signal that drives
+        // which `Text::*_color_range` helper the wasm side picks.
+        let running = build_chip(&summary("auth", "running"), false);
+        assert_eq!(running.severity, Severity::Info, "running → cyan/info");
+        assert_eq!(running.phase, Phase::Running);
+
+        let done = build_chip(&summary("auth", "done"), false);
+        assert_eq!(done.severity, Severity::Ok, "done → green/ok");
+        assert_eq!(done.phase, Phase::Done);
+
+        let failed = build_chip(&summary("auth", "failed"), false);
+        assert_eq!(failed.severity, Severity::Danger, "failed → red/danger");
+        assert_eq!(failed.phase, Phase::Failed);
+    }
+
+    #[test]
+    fn fit_chips_width30_five_long_names_preserves_focused() {
+        // T-125 / R3 "focused session always visible": with 5 chips whose
+        // labels each take a substantial share of a narrow 30-col bar,
+        // most chips must be truncated away — but the focused one MUST
+        // survive on row 1. A chip's rendered text is
+        // `{icon} {orchestrator}:{name} {phase}`, so with the default
+        // `cavekit` orchestrator and phase `running`, a 4-char name
+        // produces ~24 cols — narrow enough to fit one per row at
+        // width=30 (enforces the single-chip-per-row scenario the kit
+        // describes).
+        let names = ["one", "two", "tri", "fou", "fiv"];
+        let chips: Vec<Chip> = names
+            .iter()
+            .map(|n| build_chip(&summary(n, "running"), false))
+            .collect();
+
+        // Sanity: every chip fits alone at cols=30 but two side-by-side
+        // (with the 2-col separator) do not — forcing wrap / truncation.
+        for c in &chips {
+            assert!(
+                c.width() <= 30,
+                "test precondition: chip {:?} width {} must fit alone at 30 cols",
+                c.text,
+                c.width()
+            );
+            assert!(
+                2 * c.width() + CHIP_SEPARATOR_WIDTH > 30,
+                "test precondition: two chips + separator must overflow 30 cols"
+            );
+        }
+
+        // Focus the chip that is LAST in input order — without pinning
+        // it would be dropped after rows 1 and 2 are full.
+        let (row1, row2) = fit_chips(chips, 30, Some("fiv"));
+
+        assert_eq!(row1.len(), 1, "row1 should hold exactly the focused chip");
+        assert!(
+            row1[0].text.contains("fiv"),
+            "focused chip must land on row 1, got {:?}",
+            row1[0].text
+        );
+        // Row 2 gets at most one chip at 30 cols (single-chip-per-row
+        // regime); remaining chips overflow past two rows and are
+        // dropped per fit_chips contract.
+        assert_eq!(row2.len(), 1, "row2 holds exactly one chip at width=30");
+        assert!(
+            !row2[0].text.contains("fiv"),
+            "focused chip is pinned to row1, not row2"
+        );
+    }
 }

@@ -926,6 +926,87 @@ mod tests {
         assert!(out.is_empty());
     }
 
+    // --- T-125: fuzzy ordering + stable tie-break + mixed-case match ------
+
+    #[test]
+    fn fuzzy_exact_prefix_substring_fuzzy_descending_order() {
+        // T-125 / cavekit-plugin-picker R3: nucleo-matcher scoring must
+        // prefer exact/prefix matches over substring/fuzzy matches.
+        //
+        // Names chosen so the haystack `{orch}:{name} {id}` exhibits a
+        // clean gradient when matched against `auth`:
+        //   - "auth"        → exact token → highest score
+        //   - "authservice" → prefix      → high score
+        //   - "myauthsvc"   → substring   → middle score
+        //   - "authfooxyz"  → fuzzy       → lower than exact+prefix
+        //
+        // We assert the exact-match id comes first and that the entire
+        // result set is in monotonically non-increasing score order
+        // (nucleo's exact score values are an implementation detail).
+        let c = cache_of(
+            &[
+                ("fuzz", "authfooxyz"),
+                ("pre", "authservice"),
+                ("sub", "myauthsvc"),
+                ("exact", "auth"),
+            ],
+            &[],
+        );
+        let out = fuzzy_filter_and_sort(&c, "auth");
+        assert_eq!(out.len(), 4, "all four agents match fuzzily");
+        assert_eq!(out[0].0, "exact", "exact match wins, got {out:?}");
+        // Monotonically non-increasing by score.
+        for pair in out.windows(2) {
+            assert!(
+                pair[0].1 >= pair[1].1,
+                "scores must be descending: {:?} then {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    #[test]
+    fn fuzzy_stable_tie_break_preserves_cache_order() {
+        // T-125 / R3: nucleo scores are deterministic for identical
+        // haystacks, so two agents whose names produce the same score
+        // must fall back to the cache's BTreeMap iteration order
+        // (active first, then resurrectable, each sorted by id). Tests
+        // that the sort comparator carries the stable secondary key
+        // (original index) — otherwise the picker row order jitters
+        // between refreshes for equal-scoring agents.
+        let c = cache_of(&[("a", "auth"), ("b", "auth")], &[]);
+        let out = fuzzy_filter_and_sort(&c, "auth");
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].1, out[1].1, "scores must be equal for tie-break");
+        // BTreeMap iterates keys sorted — "a" before "b".
+        assert_eq!(
+            (out[0].0.as_str(), out[1].0.as_str()),
+            ("a", "b"),
+            "equal scores must preserve BTreeMap order"
+        );
+    }
+
+    #[test]
+    fn fuzzy_mixed_case_query_matches_mixed_case_name() {
+        // T-125 / R3: "case-insensitive" — a query of mixed case must
+        // match a name of different mixed case. Needle is lowered
+        // before matching; haystack is lowered by nucleo's config. Tests
+        // three permutations (upper-needle, mixed-needle, upper-name)
+        // collapse to the same match set.
+        let c = cache_of(&[("id-1", "CamelCaseName")], &[]);
+
+        for query in ["camel", "CAMEL", "CaMeL"] {
+            let out = fuzzy_filter_and_sort(&c, query);
+            assert_eq!(
+                out.len(),
+                1,
+                "query {query:?} must match CamelCaseName case-insensitively"
+            );
+            assert_eq!(out[0].0, "id-1");
+        }
+    }
+
     // --- handle_list_key ---------------------------------------------------
 
     #[test]
