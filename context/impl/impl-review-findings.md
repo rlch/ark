@@ -753,3 +753,36 @@ Tier 6 opens a new sweep focused on the release pipeline (`.github/workflows/rel
 - `cargo fmt --all` clean (no Rust changes). `cargo build --workspace` clean (no new warnings).
 
 **Gate status after Tier 6 cycle 1:** CLOSED. Cycle 1 raised zero P1s (two P2s, both fixed); this is the Tier 6 convergence signal in a single cycle. The impl-review-findings.md ledger now spans F-500 through F-701.
+
+## Tier 6 Gate — Cycle 2 (2026-04-15)
+
+Cycle 2 reopened the gate after codex re-scanned the Rust test suite and flagged one P1 timing-sensitive flake in the F-523 zellij-startup-failure test battery. Scope: a single test in `crates/cli/src/commands/spawn.rs`; no production code or helper behaviour changes.
+
+### F-702 — P1 zellij_startup_failure_success_when_still_alive was flaky under load (FIXED)
+
+**Source:** codex
+**Tier:** 6
+**Severity:** P1
+**Status:** fixed
+**Location:** crates/cli/src/commands/spawn.rs (`zellij_startup_failure_success_when_still_alive` test)
+
+**Description:** The F-523 test battery covers `zellij_startup_failure`'s three outcomes: clean exit → None, non-zero exit → Some(err), and still-alive-after-grace-window → None. The "still alive" case spawned `/bin/sh -c "sleep 2"` and asserted the helper returned None. Under heavily loaded CI (parallel test runs + the `sh` → `sleep` double fork/exec chain on macOS) the 1.5s headroom over the 500ms `GRACE_MS` window was insufficient: codex's adversarial reviewer flagged that a scheduler stall between `Command::spawn()` and the internal `zellij_startup_failure` poll loop could, in the worst case, race the helper's `deadline` computation. The failure mode wasn't reproducible locally on the developer's laptop but constituted an intermittent CI failure the gate needed to close. The helper itself (spawn.rs:438) was audited and confirmed correct: its `Instant::now() + Duration::from_millis(GRACE_MS)` deadline, 50ms poll cadence, and three-branch `try_wait()` classification (`Ok(Some(success))` → None, `Ok(Some(non-zero))` → Some(err), `Ok(None) past deadline` → None) all behave as documented. Only the test's choice of test-child was fragile.
+
+**Resolution:** Hardened the test child so it is guaranteed alive for the full grace window plus a wide margin, with one fewer process layer:
+
+1. **Remove the `sh -c` indirection** — `Command::new("/bin/sh").arg("-c").arg("sleep 2")` replaced with `Command::new("/bin/sleep").arg("30")`. This cuts the fork/exec chain from two (shell → sleep) to one (direct sleep), eliminating the shell-startup scheduling stall that was the most plausible flake vector. `/bin/sleep` exists on every supported target (macOS BSD sleep + Linux GNU coreutils), so portability is unaffected.
+2. **Use `sleep 30` instead of `sleep 2`** — raises headroom from 1.5s to 29.5s over the 500ms grace window (~60x margin). Even under extreme scheduler pressure or a GC/profiling pause in the test binary, the child is guaranteed still running when the helper polls `try_wait()`.
+3. **Always-run cleanup before assert** — kept the `child.kill()` + `child.wait()` pair *before* the `assert!` so a future assertion failure still reaps the pid instead of leaking a 30-second zombie in the CI worker.
+4. **Expanded doc comment** — inlined the flake analysis + remediation rationale at the test head so a future reviewer reading the test sees why the margin is large, why the shell layer was removed, and what failure mode the test is still guarding against (still-alive branch classification).
+
+Verified locally: the test passes 10/10 serial runs, the zellij_startup_failure trio passes 10/10 parallel runs, and `cargo test -p ark-cli -- --test-threads=1` is fully green (269 lib tests + integration suites, zero failures) both parallel and sequential. The helper `zellij_startup_failure` was left untouched — the bug lived entirely in the test's choice of child command.
+
+## Test Delta — Tier 6 Cycle 2
+
+- ark-cli: 269 unchanged (rewrote the body of an existing test; no new or removed cases).
+- ark-cli cli_help integration: 3 unchanged.
+- ark-plugin-picker: 215 unchanged. ark-plugin-status: 47 unchanged.
+- Workspace: `cargo test --workspace -- --test-threads=1` fully green on per-crate re-runs.
+- `cargo fmt --all` clean. `cargo build --workspace` clean (no new warnings).
+
+**Gate status after Tier 6 cycle 2:** CLOSED. Cycle 2 resolved the one P1 flake that reopened the gate and raised zero new findings; the Tier 6 ledger now spans F-500 through F-702.

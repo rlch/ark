@@ -1576,21 +1576,41 @@ mod tests {
 
     #[test]
     fn zellij_startup_failure_success_when_still_alive() {
-        // A child that sleeps longer than the grace window is
+        // F-702: A child that sleeps longer than the grace window is
         // considered alive — the helper must return None without
         // killing the process. We reap it afterwards so the test
         // doesn't leak a zombie.
-        let mut child = Command::new("/bin/sh")
-            .arg("-c")
-            .arg("sleep 2")
+        //
+        // Previously this test wrapped `sleep 2` in `/bin/sh -c` and
+        // relied on a ~4x margin over the 500ms grace window. Under
+        // heavily loaded CI (parallel test runs + slow forks on macOS)
+        // codex flagged it as flaky: the extra `sh` layer introduces a
+        // second fork/exec step whose scheduling can stretch
+        // unpredictably, and a 2s sleep only buys 1.5s of headroom.
+        //
+        // Harden by:
+        //   1. Invoking `/bin/sleep` directly — no shell indirection,
+        //      one fewer process in the chain to race.
+        //   2. Using `sleep 30`, giving ~60x headroom over the 500ms
+        //      grace window. Even with extreme scheduler pressure the
+        //      child is guaranteed alive when `zellij_startup_failure`
+        //      polls `try_wait()`.
+        //   3. Killing + reaping in an always-run cleanup block before
+        //      the assertion, so a failed assert still frees the PID.
+        let mut child = Command::new("/bin/sleep")
+            .arg("30")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .expect("spawn sleep");
+            .expect("spawn /bin/sleep 30");
         let got = zellij_startup_failure(&mut child);
+        // Reap before asserting so a failure doesn't leak the pid.
         let _ = child.kill();
         let _ = child.wait();
-        assert!(got.is_none(), "still-alive child must be treated as ok");
+        assert!(
+            got.is_none(),
+            "still-alive child must be treated as ok, got {got:?}"
+        );
     }
 }
