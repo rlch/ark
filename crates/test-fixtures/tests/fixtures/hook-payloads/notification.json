@@ -1,0 +1,8 @@
+{
+  "session_id": "01HZXNOTIFY00000000000001",
+  "cwd": "/Users/example/Coding/demo",
+  "hook_event_name": "Notification",
+  "message": "Waiting on user input",
+  "title": "Claude Code",
+  "transcript_path": "/Users/example/.claude/sessions/01HZXNOTIFY00000000000001.jsonl"
+}

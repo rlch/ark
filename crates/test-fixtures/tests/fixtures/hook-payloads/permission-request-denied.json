@@ -1,0 +1,14 @@
+{
+  "session_id": "01HZXPERMDENY000000000001",
+  "cwd": "/Users/example/Coding/demo",
+  "hook_event_name": "PermissionRequest",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "rm -rf /",
+    "description": "Recursive delete from root"
+  },
+  "permission_mode": "ask",
+  "decision": "deny",
+  "reason": "Destructive command blocked by policy",
+  "transcript_path": "/Users/example/.claude/sessions/01HZXPERMDENY000000000001.jsonl"
+}

@@ -1,0 +1,17 @@
+{
+  "session_id": "01HZXPOSTTOOLUSE0000000001",
+  "cwd": "/Users/example/Coding/demo",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Edit",
+  "tool_input": {
+    "file_path": "/Users/example/Coding/demo/src/lib.rs",
+    "old_string": "fn old()",
+    "new_string": "fn new()"
+  },
+  "tool_output": {
+    "success": true,
+    "lines_changed": 1
+  },
+  "transcript_path": "/Users/example/.claude/sessions/01HZXPOSTTOOLUSE0000000001.jsonl",
+  "permission_mode": "auto"
+}

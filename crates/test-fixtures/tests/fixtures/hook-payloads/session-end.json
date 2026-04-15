@@ -1,0 +1,7 @@
+{
+  "session_id": "01HZXSESSIONEND00000000001",
+  "cwd": "/Users/example/Coding/demo",
+  "hook_event_name": "SessionEnd",
+  "reason": "user_exit",
+  "transcript_path": "/Users/example/.claude/sessions/01HZXSESSIONEND00000000001.jsonl"
+}

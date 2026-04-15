@@ -1,0 +1,9 @@
+{
+  "session_id": "01HZXTASKDONE00000000001",
+  "cwd": "/Users/example/Coding/demo",
+  "hook_event_name": "TaskCompleted",
+  "task_id": "T-113",
+  "description": "Populate hook payload fixtures",
+  "message": "Fixture set complete",
+  "transcript_path": "/Users/example/.claude/sessions/01HZXTASKDONE00000000001.jsonl"
+}

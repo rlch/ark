@@ -1,0 +1,17 @@
+{
+  "session_id": "01HZXPOSTTOOLERR0000000001",
+  "cwd": "/Users/example/Coding/demo",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "cargo build --workspace",
+    "description": "Build all crates"
+  },
+  "tool_output": {
+    "success": false,
+    "exit_code": 101,
+    "stderr": "error[E0308]: mismatched types"
+  },
+  "transcript_path": "/Users/example/.claude/sessions/01HZXPOSTTOOLERR0000000001.jsonl",
+  "permission_mode": "auto"
+}
