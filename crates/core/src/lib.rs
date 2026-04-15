@@ -23,6 +23,7 @@ pub mod config;
 pub mod consumers;
 pub mod control_socket;
 pub mod engine;
+pub mod engine_contract;
 pub mod events_log;
 pub mod multiplexer;
 pub mod orchestrator;
@@ -35,6 +36,7 @@ pub use control_socket::{
     ControlListener, Response, gc_stale_socket, handle_single_request, unlink_if_exists,
 };
 pub use engine::{ApprovalPolicy, Engine, EngineHandle};
+pub use engine_contract::engine_contract_suite;
 pub use events_log::{EventLogHandle, EventLogReader, EventLogWriter, EventRecord};
 pub use multiplexer::Multiplexer;
 pub use orchestrator::{Orchestrator, World};

@@ -164,6 +164,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "ark-config",
+ "ark-test-fixtures",
  "ark-types",
  "async-trait",
  "chrono",
@@ -184,6 +185,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "ark-core",
+ "ark-test-fixtures",
  "ark-types",
  "async-trait",
  "chrono",

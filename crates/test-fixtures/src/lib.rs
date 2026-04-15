@@ -98,6 +98,45 @@ pub mod loaders {
     }
 }
 
+/// Bundle of fixture directories consumed by the engine contract suite
+/// ([`ark_core::engine::contract`] in downstream crates).
+///
+/// Holding the paths in a struct lets the contract suite accept a single
+/// argument that future engines (hypothetical `gpt-engine`, etc.) can reuse
+/// verbatim, and keeps fixture discovery in one place.
+#[derive(Debug, Clone)]
+pub struct EngineFixtures {
+    /// Directory of committed Claude JSONL transcripts (T-112).
+    pub transcripts: std::path::PathBuf,
+    /// Directory of committed Claude hook JSON payloads (T-113).
+    pub hook_payloads: std::path::PathBuf,
+}
+
+impl EngineFixtures {
+    /// Absolute path to the named transcript fixture
+    /// (`{transcripts}/{name}.jsonl`).
+    pub fn transcript(&self, name: &str) -> std::path::PathBuf {
+        self.transcripts.join(format!("{name}.jsonl"))
+    }
+
+    /// Absolute path to the named hook payload fixture
+    /// (`{hook_payloads}/{event}.json`).
+    pub fn hook_payload(&self, event: &str) -> std::path::PathBuf {
+        self.hook_payloads.join(format!("{event}.json"))
+    }
+}
+
+/// Return an [`EngineFixtures`] pointing at the directories this crate ships.
+///
+/// Used by engine contract suites (T-114+) so downstream integration tests do
+/// not have to hand-roll `CARGO_MANIFEST_DIR` juggling.
+pub fn engine_fixtures() -> EngineFixtures {
+    EngineFixtures {
+        transcripts: std::path::PathBuf::from(paths::CLAUDE_TRANSCRIPTS),
+        hook_payloads: std::path::PathBuf::from(paths::HOOK_PAYLOADS),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -151,6 +190,42 @@ mod tests {
     #[should_panic(expected = "ark-test-fixtures: failed to load hook payload")]
     fn load_hook_payload_panics_on_missing_file() {
         let _ = loaders::load_hook_payload("nope-not-a-real-event");
+    }
+
+    #[test]
+    fn engine_fixtures_points_at_committed_dirs() {
+        let fx = super::engine_fixtures();
+        assert!(
+            fx.transcripts.is_absolute(),
+            "engine_fixtures().transcripts must be absolute, got {:?}",
+            fx.transcripts
+        );
+        assert!(
+            fx.hook_payloads.is_absolute(),
+            "engine_fixtures().hook_payloads must be absolute, got {:?}",
+            fx.hook_payloads
+        );
+        assert!(
+            fx.transcripts.is_dir(),
+            "transcripts dir must exist: {:?}",
+            fx.transcripts
+        );
+        assert!(
+            fx.hook_payloads.is_dir(),
+            "hook_payloads dir must exist: {:?}",
+            fx.hook_payloads
+        );
+        // helpers produce the expected on-disk fixtures.
+        assert!(
+            fx.transcript("basic-toolUse").is_file(),
+            "basic-toolUse.jsonl must exist at {:?}",
+            fx.transcript("basic-toolUse")
+        );
+        assert!(
+            fx.hook_payload("post-tool-use").is_file(),
+            "post-tool-use.json must exist at {:?}",
+            fx.hook_payload("post-tool-use")
+        );
     }
 
     #[test]
