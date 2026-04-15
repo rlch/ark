@@ -26,6 +26,7 @@ pub mod selector;
 pub mod scope;
 pub mod suggest;
 pub mod template;
+pub mod use_config;
 pub mod use_resolution;
 pub mod validate;
 pub mod wasm_meta;
