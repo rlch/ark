@@ -14,9 +14,14 @@
 //! The on-disk writer (`${XDG_RUNTIME_DIR}/ark/layouts/{id}-scene.kdl`)
 //! arrives alongside `writer` in T-3.4.
 
+pub mod keybinds;
 pub mod layout;
 pub mod writer;
 
+pub use keybinds::{
+    DEFAULT_MODE as KEYBIND_DEFAULT_MODE, PIPE_MESSAGE_NAME as KEYBIND_PIPE_MESSAGE_NAME,
+    TARGET_PLUGIN as KEYBIND_TARGET_PLUGIN, compile_keybinds,
+};
 pub use layout::{CompileContext, compile_layout};
 pub use writer::{scene_layout_path, write_scene_layout};
 
@@ -69,7 +74,51 @@ pub fn compile_scene_file(
         at: (0, src.len().min(1)).into(),
     })?;
 
-    let kdl = compile_layout(layout, ctx)?;
-    let rendered_path = write_scene_layout(runtime_dir_root, &scene_id, &kdl)?;
+    let layout_kdl = compile_layout(layout, ctx)?;
+    // T-6.5: when the scene declares any `keybind` nodes, render a
+    // sibling `keybinds { … }` block at the TOP of the layout file.
+    // Zellij merges keybinds additively with the user's own config when
+    // the block is at the layout-file root, so this is the
+    // "no-clear-defaults" path called out in cavekit-scene.md R5.
+    let keybinds_node = compile_keybinds(&doc.scene.keybinds)?;
+    let combined = compose_layout_with_keybinds(&layout_kdl, keybinds_node)?;
+    let rendered_path = write_scene_layout(runtime_dir_root, &scene_id, &combined)?;
     Ok((rendered_path, scene_id))
+}
+
+/// Splice an optional `keybinds { … }` node ABOVE the rendered
+/// `layout { }` document. Returns the combined KDL string ready for
+/// `write_scene_layout`.
+///
+/// When `keybinds_node` is `None`, the input layout is returned
+/// unchanged (the typical pre-T-6.5 shape). When `Some`, the keybinds
+/// node is prepended as a sibling so it sits at the file's top
+/// level — zellij requires the `keybinds { }` block to live outside
+/// `layout { }` for additive-merge semantics with the user's config.
+fn compose_layout_with_keybinds(
+    layout_kdl: &str,
+    keybinds_node: Option<kdl::KdlNode>,
+) -> Result<String, SceneError> {
+    let Some(keybinds_node) = keybinds_node else {
+        return Ok(layout_kdl.to_string());
+    };
+
+    // Re-parse the layout output so we can splice into a real document
+    // tree. `compile_layout` already guarantees the output is parseable
+    // — the upstream check is duplicated here for paranoia and to
+    // surface a clean error if the parser ever changes shape.
+    let mut combined = kdl::KdlDocument::parse(layout_kdl).map_err(|e| {
+        SceneError::Grammar {
+            message: format!("compose_layout_with_keybinds: layout failed to re-parse: {e}"),
+            src: NamedSource::new("<compiled-layout>", layout_kdl.to_string()),
+            at: (0, layout_kdl.len().min(1)).into(),
+        }
+    })?;
+    // Prepend by inserting at index 0 so the rendered file leads with
+    // `keybinds { … }` followed by `layout { … }`. Authors reading the
+    // rendered output see "what the bindings are first, then the
+    // layout" — matches the cavekit-scene.md R5 example block.
+    combined.nodes_mut().insert(0, keybinds_node);
+    combined.autoformat();
+    Ok(combined.to_string())
 }
