@@ -214,6 +214,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ark-bus"
+version = "0.1.0"
+dependencies = [
+ "zellij-tile",
+]
+
+[[package]]
 name = "ark-cli"
 version = "0.1.0"
 dependencies = [
