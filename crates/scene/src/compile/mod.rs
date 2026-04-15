@@ -32,9 +32,11 @@ pub use writer::{scene_layout_path, write_scene_layout};
 
 use std::path::{Path, PathBuf};
 
-use crate::ast::SceneDoc;
+use crate::ast::{LayoutNode, SceneDoc, SceneNode};
 use crate::error::SceneError;
+use crate::extends::{SceneSearchCtx, ensure_single_extends};
 use crate::id::SceneId;
+use crate::merge::{ComposedScene, load_composition, merge_fragments};
 use miette::NamedSource;
 
 /// Convenience: read a scene file from disk, parse it, compile the
@@ -98,6 +100,118 @@ pub fn compile_scene_file(
     let combined = compose_layout_with_keybinds(&layout_kdl, keybinds_node)?;
     let rendered_path = write_scene_layout(runtime_dir_root, &scene_id, &combined)?;
     Ok((rendered_path, scene_id))
+}
+
+/// Composition-aware compile: load the full `extends`/`include`
+/// graph, merge per R11, apply clears, then render the merged layout
+/// + keybinds to disk.
+///
+/// Mirrors [`compile_scene_file`] but runs the T-9 composition
+/// pipeline first. When the scene has no `extends` and no `include`
+/// directives, the merged result is semantically equivalent to the
+/// single-file path.
+///
+/// Returns the rendered layout path, the source scene's [`SceneId`]
+/// (keyed off the entry file's bytes, consistent with the
+/// pre-composition pipeline so downstream runtime-dir attribution
+/// stays stable), and the merged [`ComposedScene`] so downstream
+/// compile passes (reactions + plugin lifecycle registration) can
+/// iterate every merged contribution.
+#[allow(clippy::result_large_err)]
+pub fn compile_scene_file_with_composition(
+    scene_file: &Path,
+    runtime_dir_root: &Path,
+    compile_ctx: &CompileContext,
+    scene_search: &SceneSearchCtx,
+) -> Result<(PathBuf, SceneId, ComposedScene), SceneError> {
+    // Step 1: read the entry file + parse.
+    let bytes = std::fs::read(scene_file).map_err(|e| SceneError::Grammar {
+        message: format!("read scene `{}`: {e}", scene_file.display()),
+        src: NamedSource::new(scene_file.display().to_string(), String::new()),
+        at: (0, 0).into(),
+    })?;
+    let scene_id = SceneId::from_bytes(scene_file.to_path_buf(), &bytes);
+    let src = std::str::from_utf8(&bytes).map_err(|e| SceneError::Grammar {
+        message: format!("scene `{}` is not valid utf-8: {e}", scene_file.display()),
+        src: NamedSource::new(scene_file.display().to_string(), String::new()),
+        at: (0, 0).into(),
+    })?;
+
+    // One-extends-per-scene check at the raw-KDL layer so duplicate
+    // `extends` clauses surface as `scene/multiple-extends` rather
+    // than silently getting collapsed by facet-kdl's single-slot
+    // child field.
+    ensure_single_extends(src, scene_file)?;
+
+    let mut doc: SceneDoc = facet_kdl::from_str(src).map_err(|e| SceneError::Parse {
+        src: NamedSource::new(scene_file.display().to_string(), src.to_string()),
+        at: (0, src.len().min(1)).into(),
+        message: e.to_string(),
+    })?;
+    let _injected = maybe_inject_ark_bus(&mut doc.scene);
+
+    // Step 2: load full composition graph + merge.
+    let fragments = load_composition(doc, scene_file.to_path_buf(), scene_search)?;
+    let merged = merge_fragments(fragments)?;
+
+    // Step 3: project the merged state onto a synthetic SceneNode so
+    // the existing layout + keybind compile passes stay unchanged.
+    // The rendered file uses the merged layout and merged keybinds.
+    let synthesized = composed_as_scene_node(&merged);
+    let layout = synthesized.layout.as_ref().ok_or_else(|| SceneError::Grammar {
+        message: format!(
+            "composed scene `{}` does not declare a `layout {{ }}` block",
+            scene_file.display()
+        ),
+        src: NamedSource::new(scene_file.display().to_string(), src.to_string()),
+        at: (0, src.len().min(1)).into(),
+    })?;
+
+    let layout_kdl = compile_layout(layout, compile_ctx)?;
+    let keybinds_node = compile_keybinds(&synthesized.keybinds)?;
+    let combined = compose_layout_with_keybinds(&layout_kdl, keybinds_node)?;
+    let rendered_path = write_scene_layout(runtime_dir_root, &scene_id, &combined)?;
+    Ok((rendered_path, scene_id, merged))
+}
+
+/// Project a [`ComposedScene`] onto a minimal [`SceneNode`] carrying
+/// only the fields the layout + keybind compile passes read.
+///
+/// The projection lets us reuse the existing pass code without
+/// rewriting it against `ComposedScene` directly — once the full
+/// composed-scene surface is consumed by every compile pass (later
+/// tier), this helper goes away.
+fn composed_as_scene_node(merged: &ComposedScene) -> SceneNode {
+    SceneNode {
+        name: merged.name.clone(),
+        max_cascade_depth: merged.max_cascade_depth,
+        extends: None,
+        includes: Vec::new(),
+        uses: Vec::new(),
+        layout: merged.layout.as_ref().map(clone_layout_ref),
+        plugins: merged
+            .plugins
+            .iter()
+            .map(crate::merge::clone_plugin_node)
+            .collect(),
+        ons: merged.reactions.iter().map(crate::merge::clone_on_node).collect(),
+        keybinds: merged
+            .keybinds
+            .iter()
+            .map(crate::merge::clone_keybind_node)
+            .collect(),
+        engine: None,
+        clear_reactions: Vec::new(),
+        clear_keybinds: Vec::new(),
+        disable_plugins: Vec::new(),
+    }
+}
+
+/// Clone a borrowed [`LayoutNode`] — thin wrapper around the crate-
+/// private helper in [`crate::merge`] so this module doesn't have to
+/// reach into internals.
+fn clone_layout_ref(layout: &LayoutNode) -> LayoutNode {
+    crate::merge::clone_layout_node(layout)
 }
 
 /// Splice an optional `keybinds { … }` node ABOVE the rendered

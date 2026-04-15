@@ -1,0 +1,35 @@
+[package]
+name = "acp-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# T-ACP.2: the ACP crate exposes both `Client` (ark's role: drives an
+# agent) and `Agent` traits. We wrap the client side: ark spawns the
+# engine subprocess (Claude/Codex/Gemini), opens stdin/stdout, frames
+# NDJSON JSON-RPC, and translates session updates into ark's
+# `AgentEvent::UserEvent` taxonomy. Pinned at the workspace `=0.10.4`
+# so wire-format parity is preserved across every ark build.
+agent-client-protocol = { workspace = true }
+ark-types = { path = "../types" }
+tokio = { workspace = true }
+# T-ACP.2: tokio-util's `compat` adapts `tokio::process::ChildStdin` /
+# `ChildStdout` (which implement `tokio::io::AsyncRead/AsyncWrite`)
+# into the `futures::io::AsyncRead/AsyncWrite` pair that
+# `agent_client_protocol::ClientSideConnection::new` requires. If a
+# future ACP release takes tokio-native I/O we can drop this hop.
+tokio-util = { workspace = true, features = ["compat"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

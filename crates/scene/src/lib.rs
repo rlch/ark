@@ -7,6 +7,7 @@
 pub mod ast;
 pub mod cel;
 pub mod chord;
+pub mod clear;
 pub mod compile;
 pub mod config_schema;
 pub mod cycle;
@@ -16,7 +17,9 @@ pub mod error;
 pub mod extends;
 pub mod hook_compat;
 pub mod id;
+pub mod include;
 pub mod intent;
+pub mod merge;
 pub mod ops;
 pub mod parse;
 pub mod path;
