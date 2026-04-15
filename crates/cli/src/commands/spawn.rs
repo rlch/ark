@@ -612,45 +612,100 @@ pub fn require_zellij_on_path() -> Result<(), CliError> {
     }
 }
 
-/// T-3.5: three-tier decision for "how does this spawn acquire a
-/// zellij layout?".
+/// T-3.5 / T-8.2: multi-rung decision for "how does this spawn acquire
+/// a zellij layout?".
 ///
 /// Reported back to the caller as a discriminated enum so tests can
 /// assert the resolution path independently of the rendered output.
+///
+/// T-8.2 re-homed the internals of [`resolve_layout_source`] onto the
+/// T-8.0 scene resolver ([`ark_scene::path::resolve_scene_path_from_env`]),
+/// which also consults `ARK_SCENE`, `ARK_APPNAME`, project-local
+/// `.ark/scene.kdl`, and the XDG default scene. The enum shape is
+/// preserved so the spawn pipeline + existing tests keep working:
+///   - `ResolvedScene::Named(n)` → [`Self::SceneExplicit`] under
+///     `${config_dir}/scenes/<n>.kdl` (combo 3A).
+///   - `ResolvedScene::Path(p)` → [`Self::SceneDefault`] (both the
+///     project-local rung and the XDG-default rung yielded a concrete
+///     file on disk).
+///   - `ResolvedScene::BuiltIn(_)` → [`Self::Legacy`] (T-14.1 will
+///     materialize the embedded scene to disk and promote it to a
+///     proper scene compile; today it falls through to the legacy
+///     `--layout <stem>` path).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LayoutResolution {
-    /// Tier 1 — `--scene NAME` explicit.
+    /// Scene identified by name: either `--scene NAME` from the CLI
+    /// (rung 1) or `ARK_SCENE=NAME` from the environment (rung 2).
+    /// `path` is always `${config_dir}/scenes/<name>.kdl`.
     SceneExplicit { path: PathBuf },
-    /// Tier 2 — no flag, `${config_dir}/scenes/default.kdl` exists.
+    /// Scene identified by a concrete file on disk: project-local
+    /// `./.ark/scene.kdl` (rung 3) or XDG-default
+    /// `$XDG_CONFIG_HOME/<appname>/scenes/default.kdl` (rung 4).
     SceneDefault { path: PathBuf },
-    /// Tier 3 — legacy path: the current `--layout <stem>` resolver.
+    /// No scene resolved at any rung — fall through to the legacy
+    /// `--layout <stem>` path (T-14.1 will replace this branch with
+    /// an auto-wrapped minimal scene so both tiers share the compile
+    /// pipeline).
     Legacy,
 }
 
-/// T-3.5: resolve which scene-file, if any, drives this spawn.
+/// T-3.5 / T-8.2: resolve which scene-file, if any, drives this spawn.
 ///
-/// Pure (no I/O except an `exists()` probe on the default-scene
-/// candidate), so tests can drive it directly by poking files into
-/// a tempdir.
+/// Delegates to [`ark_scene::path::resolve_scene_path_from_env`], which
+/// implements the `cavekit-scene.md` R13 precedence (CLI flag →
+/// `ARK_SCENE` → `./.ark/scene.kdl` → XDG default → built-in) and
+/// reads `ARK_SCENE`, `ARK_APPNAME`, and `XDG_CONFIG_HOME` from the
+/// process environment.
 ///
-/// Precedence:
-///   1. `explicit_scene = Some(name)` → `${config_dir}/scenes/<name>.kdl`.
-///      Returns [`LayoutResolution::SceneExplicit`] even if the file
-///      does not exist; the caller is responsible for surfacing the
-///      I/O error when it attempts to read the path.
-///   2. `explicit_scene = None` and `${config_dir}/scenes/default.kdl`
-///      exists → [`LayoutResolution::SceneDefault`].
-///   3. Otherwise → [`LayoutResolution::Legacy`].
-pub fn resolve_layout_source(config_dir: &Path, explicit_scene: Option<&str>) -> LayoutResolution {
-    if let Some(name) = explicit_scene {
-        let path = config_dir.join("scenes").join(format!("{name}.kdl"));
-        return LayoutResolution::SceneExplicit { path };
+/// The translation from [`ResolvedScene`] to [`LayoutResolution`]
+/// preserves the enum shape expected by the downstream spawn pipeline
+/// (see [`run`]):
+///   - [`ResolvedScene::Named`] → [`LayoutResolution::SceneExplicit`]
+///     with the path rooted at `${config_dir}/scenes/<name>.kdl`.
+///     Named scenes intentionally resolve under `ctx.config_dir` (NOT
+///     the XDG-derived path) per the decided combo 3A: `ARK_APPNAME`
+///     matters only for rung 4 (XDG default lookup), which T-8.0
+///     already handles internally.
+///   - [`ResolvedScene::Path`] → [`LayoutResolution::SceneDefault`]
+///     with the path straight through. Covers both rung 3 (project-
+///     local) and rung 4 (XDG default).
+///   - [`ResolvedScene::BuiltIn`] → [`LayoutResolution::Legacy`]. The
+///     embedded default scene is not materialized to disk by this
+///     function; falling through to the legacy `--layout <stem>`
+///     path preserves zero-migration behaviour for users who never
+///     adopted scenes.
+///
+/// Reads from the process environment via [`ark_scene::path::resolve_scene_path_from_env`];
+/// tests that cover env-var rungs must serialize on
+/// [`crate::test_lock::ENV_LOCK`].
+pub fn resolve_layout_source(
+    config_dir: &Path,
+    cwd: &Path,
+    explicit_scene: Option<&str>,
+) -> LayoutResolution {
+    match ark_scene::path::resolve_scene_path_from_env(explicit_scene, cwd) {
+        ark_scene::path::ResolvedScene::Named(name) => {
+            // Combo 3A: named scenes always resolve under
+            // ctx.config_dir/scenes/, independent of ARK_APPNAME /
+            // XDG_CONFIG_HOME. Keeps the flag + env-var rungs
+            // interchangeable and avoids surprising per-appname
+            // namespaces for user-named scenes.
+            let path = config_dir.join("scenes").join(format!("{name}.kdl"));
+            LayoutResolution::SceneExplicit { path }
+        }
+        ark_scene::path::ResolvedScene::Path(path) => {
+            LayoutResolution::SceneDefault { path }
+        }
+        ark_scene::path::ResolvedScene::BuiltIn(_) => {
+            // TODO(T-14.1): materialize the embedded DEFAULT_SCENE_KDL
+            // to a per-agent scene file and compile it via the scene
+            // pipeline so the "zero-migration" path also benefits from
+            // scene-driven rendering. Today we preserve the legacy
+            // `--layout <stem>` behaviour so users who never adopted
+            // scenes see no change.
+            LayoutResolution::Legacy
+        }
     }
-    let default_path = config_dir.join("scenes").join("default.kdl");
-    if default_path.is_file() {
-        return LayoutResolution::SceneDefault { path: default_path };
-    }
-    LayoutResolution::Legacy
 }
 
 /// T-3.5: compile a scene file and emit the rendered zellij layout.
@@ -954,11 +1009,16 @@ pub fn run(args: SpawnArgs, ctx: &Ctx) -> Result<(), CliError> {
     let session = unique_session_name(&spec.id);
     spec.session = session.clone();
 
-    // T-3.5: three-tier layout resolution (scene explicit → scene
-    // default → legacy). Populates `spec.scene_path` when a scene
-    // drove the spawn so downstream subsystems (supervisor, hot-
-    // reload watcher) can attribute events back to the source file.
-    let resolution = resolve_layout_source(&ctx.config_dir, args.scene.as_deref());
+    // T-3.5 / T-8.2: scene resolution across all five T-8.0 rungs
+    // (CLI flag → ARK_SCENE → project-local → XDG-default → built-in).
+    // Populates `spec.scene_path` when a scene drove the spawn so
+    // downstream subsystems (supervisor, hot-reload watcher) can
+    // attribute events back to the source file. `args.cwd` is the
+    // worktree directory and satisfies rung 3 (project-local
+    // `./.ark/scene.kdl`); ARK_SCENE / ARK_APPNAME / XDG_CONFIG_HOME
+    // are read from the process environment by the T-8.0 helper.
+    let resolution =
+        resolve_layout_source(&ctx.config_dir, &args.cwd, args.scene.as_deref());
     let scene_file: Option<PathBuf> = match &resolution {
         LayoutResolution::SceneExplicit { path } | LayoutResolution::SceneDefault { path } => {
             Some(path.clone())
@@ -2487,8 +2547,69 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // T-3.5 --scene flag + three-tier fallback
+    // T-3.5 / T-8.2: --scene flag + ARK_SCENE / ARK_APPNAME env vars +
+    // multi-rung fallback (delegates to T-8.0 scene resolver).
     // ---------------------------------------------------------------
+    //
+    // The tests below mutate process-global env vars (ARK_SCENE,
+    // ARK_APPNAME, XDG_CONFIG_HOME, HOME) because
+    // `resolve_layout_source` delegates to
+    // `ark_scene::path::resolve_scene_path_from_env`, which reads them.
+    // All such tests MUST acquire `ENV_LOCK` and restore/clear the
+    // vars on exit — flaky CI otherwise.
+
+    /// Helper: clear all scene-relevant env vars so rung 1/2 cannot fire
+    /// accidentally based on the caller's environment. Returns a guard
+    /// that restores the previous values on drop.
+    ///
+    /// Called by every scene-resolution test that owns `ENV_LOCK`.
+    struct SceneEnvGuard {
+        ark_scene: Option<std::ffi::OsString>,
+        ark_appname: Option<std::ffi::OsString>,
+        xdg: Option<std::ffi::OsString>,
+        home: Option<std::ffi::OsString>,
+    }
+
+    impl SceneEnvGuard {
+        fn clear_all() -> Self {
+            let g = Self {
+                ark_scene: std::env::var_os("ARK_SCENE"),
+                ark_appname: std::env::var_os("ARK_APPNAME"),
+                xdg: std::env::var_os("XDG_CONFIG_HOME"),
+                home: std::env::var_os("HOME"),
+            };
+            unsafe {
+                std::env::remove_var("ARK_SCENE");
+                std::env::remove_var("ARK_APPNAME");
+                std::env::remove_var("XDG_CONFIG_HOME");
+                std::env::remove_var("HOME");
+            }
+            g
+        }
+    }
+
+    impl Drop for SceneEnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.ark_scene {
+                    Some(v) => std::env::set_var("ARK_SCENE", v),
+                    None => std::env::remove_var("ARK_SCENE"),
+                }
+                match &self.ark_appname {
+                    Some(v) => std::env::set_var("ARK_APPNAME", v),
+                    None => std::env::remove_var("ARK_APPNAME"),
+                }
+                match &self.xdg {
+                    Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                    None => std::env::remove_var("XDG_CONFIG_HOME"),
+                }
+                match &self.home {
+                    Some(v) => std::env::set_var("HOME", v),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+        }
+    }
 
     /// `--scene NAME` surfaces in `SpawnArgs.scene`.
     #[test]
@@ -2504,13 +2625,17 @@ mod tests {
         assert_eq!(h.args.scene, None);
     }
 
-    /// Tier 1: explicit `--scene NAME` resolves to
-    /// `{config_dir}/scenes/NAME.kdl` regardless of whether the file
-    /// exists (resolver is pure; caller surfaces I/O errors later).
+    /// Rung 1: explicit `--scene NAME` resolves to
+    /// `{config_dir}/scenes/NAME.kdl`. The path surface is decided by
+    /// combo 3A — named scenes always land under `ctx.config_dir`, not
+    /// under the XDG-derived path.
     #[test]
-    fn resolve_tier_1_explicit_scene() {
+    fn resolve_rung_1_explicit_scene_flag() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = SceneEnvGuard::clear_all();
+
         let dir = TempDir::new().unwrap();
-        let got = resolve_layout_source(dir.path(), Some("demo"));
+        let got = resolve_layout_source(dir.path(), dir.path(), Some("demo"));
         match got {
             LayoutResolution::SceneExplicit { path } => {
                 assert_eq!(path, dir.path().join("scenes").join("demo.kdl"));
@@ -2519,61 +2644,115 @@ mod tests {
         }
     }
 
-    /// Tier 2: no flag + `{config_dir}/scenes/default.kdl` exists →
-    /// SceneDefault.
+    /// Rung 2: `ARK_SCENE=foo` (no flag) resolves identically to
+    /// `--scene foo` — path rooted at `{config_dir}/scenes/foo.kdl`.
     #[test]
-    fn resolve_tier_2_default_scene_when_present() {
-        let dir = TempDir::new().unwrap();
-        let scenes = dir.path().join("scenes");
-        std::fs::create_dir_all(&scenes).unwrap();
-        let default_path = scenes.join("default.kdl");
-        std::fs::write(&default_path, "scene \"x\" { }").unwrap();
-
-        let got = resolve_layout_source(dir.path(), None);
-        match got {
-            LayoutResolution::SceneDefault { path } => {
-                assert_eq!(path, default_path);
-            }
-            other => panic!("expected SceneDefault, got {other:?}"),
+    fn resolve_rung_2_ark_scene_env_var() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = SceneEnvGuard::clear_all();
+        unsafe {
+            std::env::set_var("ARK_SCENE", "foo");
         }
-    }
 
-    /// Tier 3: no flag + no default.kdl → Legacy.
-    #[test]
-    fn resolve_tier_3_legacy_when_no_scene() {
         let dir = TempDir::new().unwrap();
-        let got = resolve_layout_source(dir.path(), None);
-        assert!(matches!(got, LayoutResolution::Legacy), "{got:?}");
-    }
-
-    /// Tier 1 wins over Tier 2: explicit `--scene NAME` shadows the
-    /// default-scene presence.
-    #[test]
-    fn resolve_explicit_scene_wins_over_default() {
-        let dir = TempDir::new().unwrap();
-        let scenes = dir.path().join("scenes");
-        std::fs::create_dir_all(&scenes).unwrap();
-        std::fs::write(scenes.join("default.kdl"), "scene \"d\" {}").unwrap();
-
-        let got = resolve_layout_source(dir.path(), Some("custom"));
+        let got = resolve_layout_source(dir.path(), dir.path(), None);
         match got {
             LayoutResolution::SceneExplicit { path } => {
-                assert_eq!(path, scenes.join("custom.kdl"));
+                assert_eq!(path, dir.path().join("scenes").join("foo.kdl"));
             }
             other => panic!("expected SceneExplicit, got {other:?}"),
         }
     }
 
-    /// Tier 2 reports a missing default.kdl as Legacy (not as a
-    /// spurious SceneDefault pointing at a non-existent file).
+    /// Rung 4 + `ARK_APPNAME` override: with no flag and no env
+    /// `ARK_SCENE`, a user-global scene under
+    /// `$HOME/.config/<appname>/scenes/default.kdl` resolves to
+    /// `SceneDefault` with that exact path. Confirms the T-8.0
+    /// resolver's ARK_APPNAME handling reaches the CLI surface.
     #[test]
-    fn resolve_default_scene_missing_falls_back_to_legacy() {
-        let dir = TempDir::new().unwrap();
-        let scenes = dir.path().join("scenes");
-        std::fs::create_dir_all(&scenes).unwrap();
-        // No default.kdl written.
-        let got = resolve_layout_source(dir.path(), None);
+    fn resolve_rung_4_xdg_default_with_appname_override() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = SceneEnvGuard::clear_all();
+
+        let xdg = TempDir::new().unwrap();
+        let scene_path = xdg.path().join("myark/scenes/default.kdl");
+        std::fs::create_dir_all(scene_path.parent().unwrap()).unwrap();
+        std::fs::write(&scene_path, "scene \"myark-default\" {}").unwrap();
+
+        // Point the T-8.0 resolver at our tempdir via XDG_CONFIG_HOME
+        // (takes precedence over HOME-derived $HOME/.config fallback).
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", xdg.path());
+            std::env::set_var("ARK_APPNAME", "myark");
+        }
+
+        let config_dir = TempDir::new().unwrap();
+        let cwd = TempDir::new().unwrap();
+        let got = resolve_layout_source(config_dir.path(), cwd.path(), None);
+        match got {
+            LayoutResolution::SceneDefault { path } => {
+                assert_eq!(path, scene_path);
+            }
+            other => panic!("expected SceneDefault, got {other:?}"),
+        }
+    }
+
+    /// Rung 5 → Legacy: no flag, no env, no files on disk. The T-8.0
+    /// resolver returns `BuiltIn(_)` and the CLI adapter translates
+    /// that into [`LayoutResolution::Legacy`] so the legacy
+    /// `--layout <stem>` path is preserved for users who never
+    /// adopted scenes (TODO(T-14.1)).
+    #[test]
+    fn resolve_builtin_falls_through_to_legacy() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = SceneEnvGuard::clear_all();
+
+        let config_dir = TempDir::new().unwrap();
+        let cwd = TempDir::new().unwrap();
+        let got = resolve_layout_source(config_dir.path(), cwd.path(), None);
         assert!(matches!(got, LayoutResolution::Legacy), "{got:?}");
+    }
+
+    /// Rung 1 (flag) beats rung 2 (env var): `--scene custom` wins
+    /// even when `ARK_SCENE` is also set.
+    #[test]
+    fn resolve_explicit_flag_wins_over_ark_scene_env() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = SceneEnvGuard::clear_all();
+        unsafe {
+            std::env::set_var("ARK_SCENE", "from-env");
+        }
+
+        let dir = TempDir::new().unwrap();
+        let got = resolve_layout_source(dir.path(), dir.path(), Some("custom"));
+        match got {
+            LayoutResolution::SceneExplicit { path } => {
+                assert_eq!(path, dir.path().join("scenes").join("custom.kdl"));
+            }
+            other => panic!("expected SceneExplicit, got {other:?}"),
+        }
+    }
+
+    /// Rung 3: project-local `./.ark/scene.kdl` resolves to
+    /// `SceneDefault` when no flag / env is set.
+    #[test]
+    fn resolve_rung_3_project_local_scene() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = SceneEnvGuard::clear_all();
+
+        let cwd = TempDir::new().unwrap();
+        std::fs::create_dir_all(cwd.path().join(".ark")).unwrap();
+        let scene_file = cwd.path().join(".ark/scene.kdl");
+        std::fs::write(&scene_file, "scene \"local\" {}").unwrap();
+
+        let config_dir = TempDir::new().unwrap();
+        let got = resolve_layout_source(config_dir.path(), cwd.path(), None);
+        match got {
+            LayoutResolution::SceneDefault { path } => {
+                assert_eq!(path, scene_file);
+            }
+            other => panic!("expected SceneDefault (project-local), got {other:?}"),
+        }
     }
 
     /// End-to-end: compile a scene file and write it to a runtime dir,
