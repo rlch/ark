@@ -77,6 +77,30 @@ pub enum PickerAction {
     /// Esc on the new-agent form — transition back to the list without
     /// spawning anything.
     CancelNewAgent,
+    /// User confirmed kill in the W4 modal. `keep_worktree` distinguishes
+    /// the lowercase-`y` (keep) vs uppercase-`Y` (wipe) variants the R7
+    /// wireframe calls out.
+    ExecKill {
+        /// Agent id to terminate.
+        agent_id: String,
+        /// `true` = `Kill` (preserve worktree); `false` = `ForceKill` +
+        /// remove worktree (the uppercase-`Y` variant).
+        keep_worktree: bool,
+    },
+    /// User cancelled the kill modal (lowercase `n` / Esc).
+    CancelKill,
+    /// User submitted a new name from the rename prompt. `(agent_id,
+    /// new_name)`.
+    ExecRename(String, String),
+    /// User cancelled the rename prompt (Esc).
+    CancelRename,
+    /// User pressed `Ctrl+D` on a live agent; the supervisor should forget
+    /// the agent (spec.json stays but `Forget` tells the supervisor to
+    /// detach from tracking). Fires immediately — no confirm, per T-105.
+    ExecForget(String),
+    /// User pressed `Ctrl+R` on a live agent; open the rename prompt
+    /// focused on that id.
+    OpenRenamePrompt(String),
     /// Key ignored (no matching action).
     None,
 }
@@ -110,6 +134,12 @@ pub enum KeyInput {
     /// `Ctrl+F` — on the new-agent form's Cwd field, opens the filepicker
     /// overlay (T-104 STUB: sets `NewAgentState::open_filepicker = true`).
     CtrlF,
+    /// `Ctrl+R` — on the list screen, opens the rename prompt for the
+    /// currently selected live agent (T-105 R7).
+    CtrlR,
+    /// `Ctrl+D` — on the list screen, tells the supervisor to `Forget` the
+    /// currently selected live agent (detach; no confirm). T-105 R7.
+    CtrlD,
     /// `Tab` — on the detail screen this collapses back to the list; on
     /// the new-agent form it cycles focus forward.
     Tab,
@@ -455,6 +485,20 @@ pub fn handle_list_key(state: &mut ListState, cache: &PickerCache, key: KeyInput
             }
         }
         KeyInput::CtrlN => PickerAction::NewAgent,
+        KeyInput::CtrlR => match selected_agent(cache, state) {
+            // R7: Ctrl+R opens the rename prompt on live agents only —
+            // renaming a crashed agent would race with the supervisor
+            // replay on resurrect.
+            Some((id, false)) => PickerAction::OpenRenamePrompt(id.to_string()),
+            _ => PickerAction::None,
+        },
+        KeyInput::CtrlD => match selected_agent(cache, state) {
+            // R7: Ctrl+D fires Forget immediately (no confirm) on live
+            // agents. Crashed agents already ignore the supervisor so a
+            // Forget would be a no-op — skip.
+            Some((id, false)) => PickerAction::ExecForget(id.to_string()),
+            _ => PickerAction::None,
+        },
         KeyInput::Char(c) => {
             // R9 bindings: `?` → help, `r` → resurrect (on selected
             // crashed agent), `N` → new (also covered by CtrlN).

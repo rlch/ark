@@ -36,6 +36,10 @@ pub enum PickerScreen {
     NewAgent(NewAgentState),
     /// Kill-confirmation modal (R7).
     ConfirmKill(ConfirmKillState),
+    /// Rename prompt modal (R7 — `Ctrl+R` on a live agent). Captures the
+    /// in-flight new-name buffer plus cursor position so typing keeps the
+    /// same lossless round-trip behaviour the new-agent form gets.
+    RenamePrompt(RenamePromptState),
     /// Help overlay (W5).
     Help,
     /// Error banner — one-off message, cleared on next key (R6 exec
@@ -234,6 +238,35 @@ impl NewAgentState {
 pub struct ConfirmKillState {
     /// Agent id the user is about to terminate.
     pub agent_id: String,
+}
+
+/// State for the `Ctrl+R` rename prompt (R7 W4).
+///
+/// `new_name` starts empty (not pre-filled with the current name — the R7
+/// wireframe shows an input field the operator types into fresh) and
+/// `focus_cursor` tracks the insertion point. T-105 only uses append /
+/// backspace, so the cursor always sits at `new_name.chars().count()`; the
+/// field is kept so a later polish task can add arrow-key cursor moves
+/// without widening the struct.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RenamePromptState {
+    /// Agent id whose name is being edited.
+    pub agent_id: String,
+    /// In-flight new name buffer.
+    pub new_name: String,
+    /// Character-index cursor position within `new_name`.
+    pub focus_cursor: usize,
+}
+
+impl RenamePromptState {
+    /// Construct a fresh prompt for `agent_id` with an empty name buffer.
+    pub fn new(agent_id: impl Into<String>) -> Self {
+        Self {
+            agent_id: agent_id.into(),
+            new_name: String::new(),
+            focus_cursor: 0,
+        }
+    }
 }
 
 /// State for the transient error banner (R6 exec failure, etc.).

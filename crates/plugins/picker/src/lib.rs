@@ -45,15 +45,20 @@
 //! [`Picker::new`].
 
 pub mod bootstrap;
+pub mod render_confirm;
 pub mod render_detail;
 pub mod render_list;
 pub mod render_new_agent;
+pub mod socket_cmd;
 pub mod state;
 
 pub use bootstrap::{
     Classification, REACHABILITY_TIMEOUT_MS, bootstrap as bootstrap_cache, check_reachable,
     classify, gc_stale_sockets, parse_agent_status_minimal, resolve_xdg_paths, scan_socket_dir,
     scan_state_dir,
+};
+pub use render_confirm::{
+    handle_confirm_kill_key, handle_rename_prompt_key, render_confirm_kill, render_rename_prompt,
 };
 pub use render_detail::{
     DETAIL_CONT, DETAIL_INDENT, DETAIL_TREE, DetailError, build_detail_rows, format_humantime,
@@ -67,10 +72,13 @@ pub use render_new_agent::{
     Direction, apply_backspace, apply_char, basename_of, build_new_agent_rows, build_spawn_argv,
     cycle_value, handle_new_agent_key, next_field, prev_field,
 };
+pub use socket_cmd::{
+    SocketError, escape_json_string, forget_cmd, kill_cmd, rename_cmd, send_command,
+};
 pub use state::{
     AgentSummary, ConfirmKillState, DetailSnapshot, DetailState, ErrorState, FormField, ListState,
-    NewAgentState, Orchestrator, PickerCache, PickerScreen, apply_scroll, filter_matches,
-    move_selection_down, move_selection_up,
+    NewAgentState, Orchestrator, PickerCache, PickerScreen, RenamePromptState, apply_scroll,
+    filter_matches, move_selection_down, move_selection_up,
 };
 
 /// Registered plugin name used by supervisors when targeting `zellij pipe
@@ -156,10 +164,12 @@ impl Picker {
 #[cfg(target_arch = "wasm32")]
 mod wasm_plugin {
     use super::{
-        DetailState, ErrorState, KeyInput, NewAgentState, Picker, PickerAction, PickerScreen,
-        bootstrap, build_detail_rows, build_footer, build_header, build_new_agent_rows,
-        build_spawn_argv, format_row, fuzzy_filter_and_sort, handle_detail_key, handle_list_key,
-        handle_new_agent_key,
+        ConfirmKillState, DetailState, ErrorState, KeyInput, NewAgentState, Picker, PickerAction,
+        PickerScreen, RenamePromptState, bootstrap, build_detail_rows, build_footer, build_header,
+        build_new_agent_rows, build_spawn_argv, forget_cmd, format_row, fuzzy_filter_and_sort,
+        handle_confirm_kill_key, handle_detail_key, handle_list_key, handle_new_agent_key,
+        handle_rename_prompt_key, kill_cmd, rename_cmd, render_confirm_kill, render_rename_prompt,
+        socket_cmd::SocketError,
     };
     use zellij_tile::prelude::*;
 
@@ -182,6 +192,8 @@ mod wasm_plugin {
             BareKey::Delete => KeyInput::Delete,
             BareKey::Char('n') if ctrl => KeyInput::CtrlN,
             BareKey::Char('f') if ctrl => KeyInput::CtrlF,
+            BareKey::Char('r') if ctrl => KeyInput::CtrlR,
+            BareKey::Char('d') if ctrl => KeyInput::CtrlD,
             BareKey::Char('k') if key.has_no_modifiers() => KeyInput::Up,
             BareKey::Char('j') if key.has_no_modifiers() => KeyInput::Down,
             BareKey::Tab if shift => KeyInput::ShiftTab,
@@ -209,6 +221,31 @@ mod wasm_plugin {
     /// Pulled out as its own fn so `update`/`load` share it.
     fn wasm_paths() -> (std::path::PathBuf, std::path::PathBuf) {
         bootstrap::resolve_xdg_paths(|k| std::env::var(k).ok())
+    }
+
+    /// Map a `SocketError` into the user-facing banner text R7 calls out.
+    ///
+    /// `Unreachable` maps to "agent no longer alive — press r to refresh
+    /// [y/n]" per T-105 spec; Nak carries the supervisor-supplied error
+    /// message inline; ProtocolError surfaces the raw bytes so operators
+    /// can diagnose pipe-layer bugs without pawing through logs.
+    fn socket_error_message(err: &SocketError) -> String {
+        match err {
+            SocketError::Unreachable => {
+                "agent no longer alive — press r to refresh [y/n]".to_string()
+            }
+            SocketError::Nak(msg) => format!("supervisor rejected: {msg}"),
+            SocketError::ProtocolError(raw) => format!("protocol error: {raw}"),
+        }
+    }
+
+    /// Resolve the control socket path for `agent_id` inside the runtime
+    /// dir discovered by [`wasm_paths`]. Centralised so kill / rename /
+    /// forget and the detail-screen `query_agent_status` call site share
+    /// one source of truth.
+    fn agent_sock(agent_id: &str) -> std::path::PathBuf {
+        let (_state_dir, runtime_dir) = wasm_paths();
+        runtime_dir.join(format!("{agent_id}.sock"))
     }
 
     impl ZellijPlugin for Picker {
@@ -318,6 +355,41 @@ mod wasm_plugin {
                                         PickerScreen::NewAgent(NewAgentState::with_cwd(cwd));
                                     true
                                 }
+                                PickerAction::ConfirmKill(id) => {
+                                    // T-105: Del on a live agent opens the
+                                    // W4 confirm modal; the keystroke that
+                                    // dismisses the modal dispatches the
+                                    // actual socket command.
+                                    self.screen = PickerScreen::ConfirmKill(ConfirmKillState {
+                                        agent_id: id,
+                                    });
+                                    true
+                                }
+                                PickerAction::OpenRenamePrompt(id) => {
+                                    // T-105: Ctrl+R opens the rename prompt
+                                    // focused on the selected agent.
+                                    self.screen =
+                                        PickerScreen::RenamePrompt(RenamePromptState::new(id));
+                                    true
+                                }
+                                PickerAction::ExecForget(id) => {
+                                    // T-105: Ctrl+D fires Forget immediately
+                                    // (no confirm). Unreachable → error
+                                    // banner; everything else optimistically
+                                    // refreshes the cache next tick.
+                                    let sock = agent_sock(&id);
+                                    match forget_cmd(&sock) {
+                                        Ok(()) => {
+                                            self.screen = PickerScreen::default();
+                                        }
+                                        Err(e) => {
+                                            self.screen = PickerScreen::Error(ErrorState {
+                                                message: socket_error_message(&e),
+                                            });
+                                        }
+                                    }
+                                    true
+                                }
                                 PickerAction::FilterChanged
                                 | PickerAction::MoveUp
                                 | PickerAction::MoveDown => true,
@@ -362,10 +434,93 @@ mod wasm_plugin {
                                     switch_session(Some(&name));
                                     false
                                 }
-                                PickerAction::ConfirmKill(_id) => {
-                                    // T-105 wires the ConfirmKill screen;
-                                    // for now staying on Detail is the
-                                    // least-surprising behaviour.
+                                PickerAction::ConfirmKill(id) => {
+                                    // T-105: Del on Detail also opens the
+                                    // confirm modal — parity with List.
+                                    self.screen = PickerScreen::ConfirmKill(ConfirmKillState {
+                                        agent_id: id,
+                                    });
+                                    true
+                                }
+                                _ => false,
+                            }
+                        }
+                        PickerScreen::ConfirmKill(ref confirm_state) => {
+                            let action = handle_confirm_kill_key(confirm_state, input);
+                            match action {
+                                PickerAction::ExecKill {
+                                    agent_id,
+                                    keep_worktree,
+                                } => {
+                                    let sock = agent_sock(&agent_id);
+                                    // `keep_worktree=false` maps to the
+                                    // uppercase-`Y` variant: ForceKill +
+                                    // remove worktree. The helper takes
+                                    // both bools so the semantics stay
+                                    // symmetric with the R7 wireframe.
+                                    let force = !keep_worktree;
+                                    match kill_cmd(&sock, force, keep_worktree) {
+                                        Ok(()) => {
+                                            self.screen = PickerScreen::default();
+                                        }
+                                        Err(e) => {
+                                            self.screen = PickerScreen::Error(ErrorState {
+                                                message: socket_error_message(&e),
+                                            });
+                                        }
+                                    }
+                                    true
+                                }
+                                PickerAction::CancelKill => {
+                                    self.screen = PickerScreen::default();
+                                    true
+                                }
+                                _ => false,
+                            }
+                        }
+                        PickerScreen::RenamePrompt(ref mut rename_state) => {
+                            let action = handle_rename_prompt_key(rename_state, input);
+                            match action {
+                                PickerAction::ExecRename(agent_id, new_name) => {
+                                    let sock = agent_sock(&agent_id);
+                                    match rename_cmd(&sock, &new_name) {
+                                        Ok(()) => {
+                                            self.screen = PickerScreen::default();
+                                        }
+                                        Err(e) => {
+                                            self.screen = PickerScreen::Error(ErrorState {
+                                                message: socket_error_message(&e),
+                                            });
+                                        }
+                                    }
+                                    true
+                                }
+                                PickerAction::CancelRename => {
+                                    self.screen = PickerScreen::default();
+                                    true
+                                }
+                                // Typing / backspace: state already mutated
+                                // in-place; just redraw.
+                                PickerAction::None => true,
+                                _ => true,
+                            }
+                        }
+                        PickerScreen::Error(_) => {
+                            // R7 "agent no longer alive — refresh? [y/n]".
+                            // `y` fires a refresh and returns to List; `n`
+                            // / Esc just returns to List. Any other key is
+                            // a no-op so the banner stays visible.
+                            match input {
+                                KeyInput::Char('y') | KeyInput::Char('r') => {
+                                    let (state_dir, runtime_dir) = wasm_paths();
+                                    if !state_dir.as_os_str().is_empty() {
+                                        self.refresh_cache(&state_dir, &runtime_dir);
+                                    }
+                                    self.screen = PickerScreen::default();
+                                    true
+                                }
+                                KeyInput::Char('n') | KeyInput::Esc => {
+                                    self.screen = PickerScreen::default();
                                     true
                                 }
                                 _ => false,
@@ -443,6 +598,12 @@ mod wasm_plugin {
                 PickerScreen::NewAgent(form_state) => {
                     render_new_agent_screen(form_state, rows, cols);
                 }
+                PickerScreen::ConfirmKill(confirm_state) => {
+                    render_confirm_kill_screen(&confirm_state.agent_id, rows, cols);
+                }
+                PickerScreen::RenamePrompt(rename_state) => {
+                    render_rename_prompt_screen(rename_state, rows, cols);
+                }
                 PickerScreen::Error(err) => {
                     let text = Text::new(&format!("Error: {}", err.message));
                     print_text_with_coordinates(text, 0, 0, Some(cols), Some(1));
@@ -460,6 +621,37 @@ mod wasm_plugin {
             return;
         }
         let body = build_new_agent_rows(state);
+        for (y, line) in body.iter().enumerate() {
+            if y >= rows {
+                break;
+            }
+            print_text_with_coordinates(Text::new(line), 0, y, Some(cols), Some(1));
+        }
+    }
+
+    /// T-105 W4: render the kill-confirm modal. The [`render_confirm_kill`]
+    /// helper returns the already-laid-out lines so this wrapper just
+    /// feeds them to `print_text_with_coordinates`.
+    fn render_confirm_kill_screen(agent_id: &str, rows: usize, cols: usize) {
+        if rows == 0 || cols == 0 {
+            return;
+        }
+        let body = render_confirm_kill(agent_id);
+        for (y, line) in body.iter().enumerate() {
+            if y >= rows {
+                break;
+            }
+            print_text_with_coordinates(Text::new(line), 0, y, Some(cols), Some(1));
+        }
+    }
+
+    /// T-105 W4: render the rename prompt. Mirrors
+    /// [`render_confirm_kill_screen`].
+    fn render_rename_prompt_screen(state: &RenamePromptState, rows: usize, cols: usize) {
+        if rows == 0 || cols == 0 {
+            return;
+        }
+        let body = render_rename_prompt(state);
         for (y, line) in body.iter().enumerate() {
             if y >= rows {
                 break;
