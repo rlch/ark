@@ -27,3 +27,4 @@ pub mod scope;
 pub mod suggest;
 pub mod template;
 pub mod validate;
+pub mod wasm_meta;

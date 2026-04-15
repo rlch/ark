@@ -96,6 +96,24 @@ strsim = "0.11"
 # with `cargo insta review` (or `INSTA_UPDATE=1 cargo test`).
 insta = "1"
 
+# T-10.2 (scene): `wasmparser` walks the wasm payload stream looking for
+# the `ark.metadata` custom section emitted by extension authors via
+# `#[link_section]`. Pinned to 0.246 — same version chain as
+# `wasm-tools`. Strictly no-std-friendly + zero-copy parsing.
+wasmparser = "0.246"
+
+# T-10.4 (scene): `semver` parses the `ark-range` / `zellij-range`
+# fields on `ExtensionMetadata` for compatibility checks at scene
+# compile time. Cargo-style range syntax (`>= 1.2, < 2.0`) ships in
+# `semver::VersionReq`.
+semver = "1"
+
+# T-10.2 dev (scene): `wat` constructs `(module (@custom "ark.metadata"
+# "<kdl>"))` test fixtures so the wasm-meta reader can be exercised
+# without a real cartridge build. Same major as the workspace's
+# `wasmparser`.
+wat = "1"
+
 # T-ACP.1 (cavekit-scene R17, cavekit-distribution R4c): the Agent
 # Client Protocol crate is pinned to an equality version so every
 # ark build speaks the identical ACP wire format. Ark is a first-

@@ -20,6 +20,10 @@
 //! scene/engine-conflict
 //! op/unresolved-ref
 //! op/failed
+//! ext/metadata-missing
+//! ext/metadata-invalid
+//! ext/version-mismatch
+//! ext/bad-config
 //! ```
 //!
 //! Cross-file errors (include-cycle, engine-conflict, etc.) attach the
@@ -105,6 +109,19 @@ pub enum ErrorCode {
     /// Plugin `config { }` block declared a key the shipped-plugin's
     /// Config schema doesn't recognise (R10 / T-7.6).
     PluginUnknownConfigKey,
+    /// Wasm cartridge does not contain an `ark.metadata` custom section
+    /// (R10 / T-10.2). The author forgot the `#[link_section]` static.
+    WasmMetaMissing,
+    /// `ark.metadata` custom section is present but its bytes do not
+    /// decode as a valid `ExtensionMetadata` KDL document (R10 / T-10.2).
+    WasmMetaInvalid,
+    /// `ExtensionMetadata::ark_range` (or `zellij_range`) does not admit
+    /// the host's running version (R10 / R16 / T-10.4).
+    ExtVersionMismatch,
+    /// User-supplied value for an extension config field does not match
+    /// the field's declared type (R10 / T-10.5). Distinct from
+    /// [`Self::PluginUnknownConfigKey`] which fires on unknown keys.
+    ExtBadConfig,
 }
 
 impl ErrorCode {
@@ -136,6 +153,10 @@ impl ErrorCode {
             ErrorCode::InvalidChord => "scene/invalid-chord",
             ErrorCode::PluginBadConfig => "plugin/bad-config",
             ErrorCode::PluginUnknownConfigKey => "plugin/unknown-config-key",
+            ErrorCode::WasmMetaMissing => "ext/metadata-missing",
+            ErrorCode::WasmMetaInvalid => "ext/metadata-invalid",
+            ErrorCode::ExtVersionMismatch => "ext/version-mismatch",
+            ErrorCode::ExtBadConfig => "ext/bad-config",
         }
     }
 }
@@ -687,6 +708,84 @@ pub enum SceneError {
         /// The unknown key as it appeared in source.
         key: String,
     },
+
+    /// Wasm cartridge bytes do not contain an `ark.metadata` custom
+    /// section (R10 / T-10.2). Authors embed the section through a
+    /// `#[link_section = "ark.metadata"]` static in the cartridge crate;
+    /// this error means either the static is missing or the cartridge
+    /// was built with `--strip` / `wasm-opt --strip-debug` that dropped
+    /// custom sections.
+    #[error("wasm cartridge `{path}` is missing the `ark.metadata` custom section")]
+    #[diagnostic(
+        code = "ext/metadata-missing",
+        help("Embed the metadata bytes via `#[link_section = \"ark.metadata\"] pub static ARK_METADATA: [u8; N] = …;` and rebuild without `--strip`. Run `wasm-objdump -h` to verify the section is present.")
+    )]
+    WasmMetaMissing {
+        /// Best-effort identifier for the cartridge whose section is
+        /// missing. Filesystem path when known, otherwise a synthetic
+        /// label like `"<bytes>"`.
+        path: String,
+    },
+
+    /// `ark.metadata` custom section is present but cannot be decoded
+    /// as a valid `ExtensionMetadata` KDL document (R10 / T-10.2). The
+    /// inner `message` carries the underlying KDL / facet-kdl parse
+    /// error verbatim.
+    #[error("wasm cartridge `{path}` has an invalid `ark.metadata` section: {message}")]
+    #[diagnostic(
+        code = "ext/metadata-invalid",
+        help("The `ark.metadata` custom section must be UTF-8 KDL produced by `ark_ext_metadata::extension_metadata_kdl_bytes`. Re-run the build script that generates the bytes; do not hand-edit the section body.")
+    )]
+    WasmMetaInvalid {
+        /// Cartridge identifier (filesystem path or synthetic label).
+        path: String,
+        /// Underlying decoder error. May be a UTF-8 conversion failure,
+        /// a KDL parse error, or a facet-kdl shape mismatch.
+        message: String,
+    },
+
+    /// Extension's declared `ark-range` / `zellij-range` does not admit
+    /// the host's running version (R10 / R16 / T-10.4). The renderer
+    /// shows both the host version and the extension's range so the
+    /// user knows whether to upgrade ark or downgrade the extension.
+    #[error(
+        "extension `{ext}` requires {component} {required} but host is {actual}"
+    )]
+    #[diagnostic(
+        code = "ext/version-mismatch",
+        help("Either install a build of the extension that supports the host version range, or upgrade / downgrade ark to a version inside the extension's declared range. R16 governs the wire-compat policy.")
+    )]
+    ExtVersionMismatch {
+        /// Extension name as declared in its manifest.
+        ext: String,
+        /// Which version axis failed: `"ark"` or `"zellij"`.
+        component: &'static str,
+        /// The semver range string the extension declared
+        /// (e.g. `">= 1.2, < 2.0"`).
+        required: String,
+        /// The host's actual version (e.g. `"0.1.0"`).
+        actual: String,
+    },
+
+    /// Value for a known extension config field doesn't match the
+    /// field's declared type (R10 / T-10.5). Distinct from
+    /// [`Self::PluginUnknownConfigKey`], which fires on unknown KEYS.
+    #[error(
+        "extension `{ext}` config key `{key}` has the wrong type: {message}"
+    )]
+    #[diagnostic(
+        code = "ext/bad-config",
+        help("The extension's `ConfigSchema` declared this field with a specific `type` (one of `string`, `int`, `bool`, `path`, `url`, `duration`). Update the `config {{ }}` block to match, or run `ark ext info <ext>` to inspect the schema.")
+    )]
+    ExtBadConfig {
+        /// Extension name whose config block tripped the validator.
+        ext: String,
+        /// Offending field name.
+        key: String,
+        /// Human-readable explanation of the mismatch
+        /// (e.g. `"expected int, got string"`).
+        message: String,
+    },
 }
 
 /// Canonical static help text for `scene/unknown-node` — the list
@@ -789,6 +888,10 @@ impl SceneError {
             SceneError::InvalidChord { .. } => ErrorCode::InvalidChord,
             SceneError::PluginBadConfig { .. } => ErrorCode::PluginBadConfig,
             SceneError::PluginUnknownConfigKey { .. } => ErrorCode::PluginUnknownConfigKey,
+            SceneError::WasmMetaMissing { .. } => ErrorCode::WasmMetaMissing,
+            SceneError::WasmMetaInvalid { .. } => ErrorCode::WasmMetaInvalid,
+            SceneError::ExtVersionMismatch { .. } => ErrorCode::ExtVersionMismatch,
+            SceneError::ExtBadConfig { .. } => ErrorCode::ExtBadConfig,
         }
     }
 }

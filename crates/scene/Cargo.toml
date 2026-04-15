@@ -43,10 +43,25 @@ tracing = { workspace = true }
 # when joining them into the synthesised `exec script="…"` op so
 # metacharacters in argv slots survive the `sh -c` round-trip.
 shlex = { workspace = true }
+# T-10.2 (scene::wasm_meta): scan a wasm cartridge for the
+# `ark.metadata` custom section and decode the contents as KDL via
+# facet-kdl. Path dep on the metadata-types crate keeps the
+# `ExtensionMetadata` shape symmetric with the plugin-side helper —
+# same struct on both sides of the wire (R10).
+wasmparser = { workspace = true }
+ark-ext-metadata-types = { path = "../ark-ext-metadata-types" }
+# T-10.4 (scene::use_resolution): semver-range checks on
+# `ExtensionMetadata::ark_range` / `zellij_range` against the host's
+# version. Cargo-style range syntax via `semver::VersionReq`.
+semver = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 insta = { workspace = true }
+# T-10.2 tests: build minimal wasm fixtures with embedded `ark.metadata`
+# custom sections via `(module (@custom "ark.metadata" "<kdl>"))` so the
+# reader can be exercised without compiling a real cartridge.
+wat = { workspace = true }
 # T-2.2 tests: build realistic AgentEvent samples for context-builder
 # unit tests; chrono for `Stall { since: DateTime<Utc> }`.
 chrono = { workspace = true }
