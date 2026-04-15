@@ -36,6 +36,9 @@ strsim = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
+# T-2.5: runtime template renderer emits `tracing::debug!` for every
+# undefined-access trail so users can diagnose via `ark pane log`.
+tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
