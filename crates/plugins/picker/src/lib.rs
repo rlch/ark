@@ -45,12 +45,17 @@
 //! [`Picker::new`].
 
 pub mod bootstrap;
+pub mod render_list;
 pub mod state;
 
 pub use bootstrap::{
     Classification, REACHABILITY_TIMEOUT_MS, bootstrap as bootstrap_cache, check_reachable,
     classify, gc_stale_sockets, parse_agent_status_minimal, resolve_xdg_paths, scan_socket_dir,
     scan_state_dir,
+};
+pub use render_list::{
+    KeyInput, PickerAction, build_footer, build_header, format_age, format_progress, format_row,
+    fuzzy_filter_and_sort, fuzzy_haystack, handle_list_key, phase_extra, phase_icon,
 };
 pub use state::{
     AgentSummary, ConfirmKillState, DetailState, ErrorState, FormField, ListState, NewAgentState,
@@ -134,8 +139,42 @@ impl Picker {
 
 #[cfg(target_arch = "wasm32")]
 mod wasm_plugin {
-    use super::{Picker, bootstrap};
+    use super::{
+        KeyInput, Picker, PickerAction, PickerScreen, bootstrap, build_footer, build_header,
+        format_row, fuzzy_filter_and_sort, handle_list_key,
+    };
     use zellij_tile::prelude::*;
+
+    /// Selected-row highlight level — reused from the status-plugin
+    /// convention so both plugins feel consistent in zellij's theme.
+    const HIGHLIGHT_LEVEL: usize = 0;
+
+    /// Translate a zellij `KeyWithModifier` into the picker's narrow
+    /// [`KeyInput`] vocabulary. Unknown keys collapse to
+    /// [`KeyInput::Other`].
+    fn map_key(key: &KeyWithModifier) -> KeyInput {
+        let ctrl = key.has_modifiers(&[KeyModifier::Ctrl]);
+        match key.bare_key {
+            BareKey::Up => KeyInput::Up,
+            BareKey::Down => KeyInput::Down,
+            BareKey::Enter => KeyInput::Enter,
+            BareKey::Esc => KeyInput::Esc,
+            BareKey::Backspace => KeyInput::Backspace,
+            BareKey::Delete => KeyInput::Delete,
+            BareKey::Char('n') if ctrl => KeyInput::CtrlN,
+            BareKey::Char('k') if key.has_no_modifiers() => KeyInput::Up,
+            BareKey::Char('j') if key.has_no_modifiers() => KeyInput::Down,
+            BareKey::Char(c) => KeyInput::Char(c),
+            _ => KeyInput::Other,
+        }
+    }
+
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
 
     /// R3: "2s timer: re-render for timing-sensitive fields … AND re-scan
     /// socket dir for liveness changes". Expressed as f64 because that's
@@ -203,7 +242,32 @@ mod wasm_plugin {
 
         fn update(&mut self, event: Event) -> bool {
             match event {
-                Event::Key(_key) => false,
+                Event::Key(key) => {
+                    // Only the List screen is wired in T-102; other screens
+                    // land in later tasks.
+                    if let PickerScreen::List(ref mut list_state) = self.screen {
+                        let input = map_key(&key);
+                        let action = handle_list_key(list_state, &self.cache, input);
+                        match action {
+                            PickerAction::Close => {
+                                hide_self();
+                                false
+                            }
+                            PickerAction::OpenSession(name) => {
+                                switch_session(Some(&name));
+                                false
+                            }
+                            PickerAction::FilterChanged
+                            | PickerAction::MoveUp
+                            | PickerAction::MoveDown => true,
+                            // Later tiers wire the rest; for now, a redraw
+                            // is harmless and keeps the UI snappy.
+                            _ => true,
+                        }
+                    } else {
+                        false
+                    }
+                }
                 Event::Timer(_elapsed) => {
                     // R3: 2 s timer re-scans state + sockets. We always
                     // re-arm so the cadence stays steady regardless of
@@ -245,11 +309,82 @@ mod wasm_plugin {
             true
         }
 
-        fn render(&mut self, _rows: usize, _cols: usize) {
-            // Scaffold stub: no-op render. T-102 lands the list screen per
-            // R4. Leaving render empty here is intentional — a placeholder
-            // string would flash in the first iteration's compiled artefact
-            // and then have to be unwound.
+        fn render(&mut self, rows: usize, cols: usize) {
+            // T-102: render the list screen. Other screens land in later
+            // tasks — for now they fall through to a stub line so the
+            // compile-time match is total.
+            match &self.screen {
+                PickerScreen::List(list_state) => {
+                    render_list_screen(&self.cache, list_state, &self.focused_session, rows, cols);
+                }
+                _ => {
+                    let text = Text::new("(screen not yet implemented)");
+                    print_text_with_coordinates(text, 0, 0, Some(cols), Some(1));
+                }
+            }
+        }
+    }
+
+    fn render_list_screen(
+        cache: &super::PickerCache,
+        list_state: &super::ListState,
+        focused: &Option<String>,
+        rows: usize,
+        cols: usize,
+    ) {
+        if rows == 0 || cols == 0 {
+            return;
+        }
+        // Header (row 0).
+        let header = build_header(cache.active.len(), cache.resurrectable.len());
+        print_text_with_coordinates(Text::new(&header), 0, 0, Some(cols), Some(1));
+
+        // Filter line (row 1). Show cursor via trailing underscore.
+        let filter_line = format!("filter: {}_", list_state.filter);
+        print_text_with_coordinates(Text::new(&filter_line), 0, 1, Some(cols), Some(1));
+
+        // Footer (last row).
+        let footer_row = rows.saturating_sub(1);
+        let footer = build_footer();
+        print_text_with_coordinates(Text::new(&footer), 0, footer_row, Some(cols), Some(1));
+
+        // Visible rows: between row 2 and footer_row (exclusive).
+        let first_row_y = 2usize;
+        if footer_row <= first_row_y {
+            return;
+        }
+        let visible = footer_row - first_row_y;
+        let now = now_ms();
+        let filtered = fuzzy_filter_and_sort(cache, &list_state.filter);
+        for (i, (id, _score)) in filtered
+            .iter()
+            .skip(list_state.scroll_offset)
+            .take(visible)
+            .enumerate()
+        {
+            let is_resurrectable = cache.resurrectable.contains_key(id.as_str());
+            let summary_opt = if is_resurrectable {
+                cache.resurrectable.get(id.as_str())
+            } else {
+                cache.active.get(id.as_str())
+            };
+            let Some(summary) = summary_opt else { continue };
+            let idx = list_state.scroll_offset + i;
+            let is_selected = idx == list_state.selected;
+            let is_focused = focused.as_deref() == Some(summary.name.as_str());
+            let row_text = format_row(
+                summary,
+                is_selected,
+                is_focused,
+                is_resurrectable,
+                now,
+                cols,
+            );
+            let mut text = Text::new(&row_text);
+            if is_selected {
+                text = text.color_range(HIGHLIGHT_LEVEL, ..);
+            }
+            print_text_with_coordinates(text, 0, first_row_y + i, Some(cols), Some(1));
         }
     }
 
