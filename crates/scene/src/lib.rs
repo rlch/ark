@@ -8,6 +8,7 @@ pub mod ast;
 pub mod cel;
 pub mod error;
 pub mod id;
+pub mod intent;
 pub mod parse;
 pub mod scope;
 pub mod suggest;
