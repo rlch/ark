@@ -25,19 +25,30 @@
 //!    module exposes `<PLUGIN>_WASM_AVAILABLE` so `doctor` skips the
 //!    check cleanly when the binary ships without a real plugin.
 //!
-//! ## Why we don't invoke `cargo` from build.rs
+//! ## Why inline `cargo build` is opt-in (T-130)
 //!
 //! Running `cargo build --target wasm32-wasip1 ...` from inside a
 //! build.rs that is itself driven by a `cargo build --workspace`
 //! introduces lock-file / target-dir contention (the inner and outer
 //! cargo fight over `target/` and `Cargo.lock`), and on some hosts
-//! deadlocks on the jobserver. T-098/T-109 keep the build.rs side
-//! purely about discovering an already-built artifact; orchestrating
-//! the wasm build itself is T-130's responsibility.
+//! deadlocks on the jobserver. T-130 therefore keeps the inline build
+//! **opt-in** behind `ARK_BUILD_WASM=1`, and isolates the nested build
+//! in `$OUT_DIR/wasm-target/` so the outer workspace `target/` is
+//! untouched. Without the opt-in, build.rs behaves exactly like the
+//! T-098/T-109 state: discover an already-built artifact or fall back
+//! to a zero-byte placeholder plus a `cargo:warning`.
+//!
+//! The recommended path for most users is either the `just wasm`
+//! convenience target at the repo root, or running `cargo build
+//! --target wasm32-wasip1 --release -p ark-plugin-status -p
+//! ark-plugin-picker` manually before `cargo build -p ark-cli`. CI
+//! and `cargo-dist` release pipelines (T-133) pre-build the wasm
+//! outside build.rs.
 
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 fn main() {
     // Re-run when either plugin source changes so developers iterating
@@ -51,6 +62,9 @@ fn main() {
     // F-615: CARGO_TARGET_DIR / `--target-dir` may move the wasm
     // artifact out of `<workspace>/target/`. Re-run when it changes.
     println!("cargo:rerun-if-env-changed=CARGO_TARGET_DIR");
+    // T-130: opt-in inline build toggle. Flipping the env var must
+    // re-invoke build.rs so the nested `cargo build` runs.
+    println!("cargo:rerun-if-env-changed=ARK_BUILD_WASM");
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR set by cargo"));
     let wasm_out_dir = out_dir.join("wasm");
@@ -92,20 +106,204 @@ fn main() {
         wasm_release_dir.join("ark_plugin_picker.wasm").display()
     );
 
+    // T-130: opt-in inline wasm build. When ARK_BUILD_WASM=1, run
+    // `cargo build --target wasm32-wasip1 --release -p <plugin>` in an
+    // isolated target dir under $OUT_DIR and redirect the artifact
+    // lookup there. Otherwise, fall through to the discover-or-
+    // placeholder path that has been in place since T-098/T-109.
+    let inline_target_dir = out_dir.join("wasm-target");
+    let effective_target_dir = if inline_build_enabled() {
+        let ok_status = maybe_build_wasm(
+            workspace_root,
+            &inline_target_dir,
+            "ark-plugin-status",
+            "ark_plugin_status.wasm",
+        );
+        let ok_picker = maybe_build_wasm(
+            workspace_root,
+            &inline_target_dir,
+            "ark-plugin-picker",
+            "ark_plugin_picker.wasm",
+        );
+        if ok_status && ok_picker {
+            // Both built cleanly — embed from the isolated target dir.
+            inline_target_dir.clone()
+        } else {
+            // Partial/failed inline build: warn and fall back to the
+            // caller-visible target dir so a previously-built artifact
+            // (if any) still gets embedded.
+            println!(
+                "cargo:warning=ARK_BUILD_WASM=1 inline build failed for at least one plugin; \
+                 falling back to discover-or-placeholder from {}",
+                target_dir.display()
+            );
+            target_dir.clone()
+        }
+    } else {
+        target_dir.clone()
+    };
+
     embed_plugin(
-        &target_dir,
+        &effective_target_dir,
         &wasm_out_dir,
         "ark_plugin_status.wasm",
         "ark-plugin-status.wasm",
         "ark-plugin-status",
     );
     embed_plugin(
-        &target_dir,
+        &effective_target_dir,
         &wasm_out_dir,
         "ark_plugin_picker.wasm",
         "ark-plugin-picker.wasm",
         "ark-plugin-picker",
     );
+}
+
+/// T-130: `true` when the operator explicitly opted into the inline
+/// wasm build via `ARK_BUILD_WASM=1`. Anything else (unset, `0`,
+/// empty string, arbitrary text) leaves the nested `cargo build`
+/// disabled so default `cargo build --workspace` invocations stay
+/// safe and deadlock-free.
+fn inline_build_enabled() -> bool {
+    env::var("ARK_BUILD_WASM")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
+/// T-130: opt-in nested `cargo build --target wasm32-wasip1 --release
+/// -p <plugin_pkg>`. Returns `true` if the artifact is present at the
+/// expected path after this function runs (either because it was
+/// already fresh or because the nested build succeeded), `false`
+/// otherwise. Never panics — a failure prints `cargo:warning` and
+/// returns `false` so the caller can fall back to the placeholder.
+///
+/// Safeguards:
+/// - Uses an isolated `CARGO_TARGET_DIR` (`$OUT_DIR/wasm-target`) so
+///   the outer workspace `target/` is never clobbered.
+/// - Skips if the artifact is already newer than every tracked
+///   source file in the plugin crate (simple mtime check).
+/// - Clears `CARGO_MAKEFLAGS` / `MAKEFLAGS` in the child env to avoid
+///   inheriting a jobserver fd the nested cargo can't use.
+fn maybe_build_wasm(
+    workspace_root: &Path,
+    inline_target_dir: &Path,
+    plugin_pkg: &str,
+    artifact_name: &str,
+) -> bool {
+    let artifact = inline_target_dir
+        .join("wasm32-wasip1")
+        .join("release")
+        .join(artifact_name);
+
+    // Resolve the plugin crate source dir. `ark-plugin-status` lives
+    // at `crates/plugins/status`, `ark-plugin-picker` at
+    // `crates/plugins/picker`.
+    let subdir = plugin_pkg.trim_start_matches("ark-plugin-");
+    let plugin_src = workspace_root.join("crates").join("plugins").join(subdir);
+
+    if artifact_is_fresh(&artifact, &plugin_src) {
+        println!(
+            "cargo:warning=ARK_BUILD_WASM=1: {plugin_pkg} artifact already fresh at {}",
+            artifact.display()
+        );
+        return true;
+    }
+
+    println!(
+        "cargo:warning=ARK_BUILD_WASM=1: building {plugin_pkg} (target dir: {})",
+        inline_target_dir.display()
+    );
+
+    let mut cmd = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+    cmd.current_dir(workspace_root)
+        .arg("build")
+        .arg("--target")
+        .arg("wasm32-wasip1")
+        .arg("--release")
+        .arg("-p")
+        .arg(plugin_pkg)
+        .env("CARGO_TARGET_DIR", inline_target_dir)
+        .env_remove("CARGO_MAKEFLAGS")
+        .env_remove("MAKEFLAGS");
+
+    match cmd.status() {
+        Ok(status) if status.success() => {
+            if artifact.is_file() {
+                true
+            } else {
+                println!(
+                    "cargo:warning=ARK_BUILD_WASM=1: {plugin_pkg} build succeeded but artifact \
+                     missing at {} — falling back to placeholder",
+                    artifact.display()
+                );
+                false
+            }
+        }
+        Ok(status) => {
+            println!(
+                "cargo:warning=ARK_BUILD_WASM=1: `cargo build -p {plugin_pkg} --target \
+                 wasm32-wasip1 --release` exited {status}; falling back to placeholder"
+            );
+            false
+        }
+        Err(e) => {
+            println!(
+                "cargo:warning=ARK_BUILD_WASM=1: failed to spawn cargo for {plugin_pkg}: {e}; \
+                 falling back to placeholder"
+            );
+            false
+        }
+    }
+}
+
+/// Cheap mtime-based freshness check. The nested `cargo build` itself
+/// is incremental, so this guard mostly exists to avoid re-spawning
+/// cargo on every ark-cli rebuild when nothing changed.
+fn artifact_is_fresh(artifact: &Path, plugin_src: &Path) -> bool {
+    let Ok(art_meta) = fs::metadata(artifact) else {
+        return false;
+    };
+    let Ok(art_mtime) = art_meta.modified() else {
+        return false;
+    };
+
+    let newest_src = walk_newest_mtime(plugin_src).unwrap_or(art_mtime);
+    art_mtime >= newest_src
+}
+
+/// Return the newest `SystemTime` mtime among regular files under
+/// `root`. Returns `None` if `root` doesn't exist or nothing is
+/// readable — callers treat that as "can't prove staleness, assume
+/// the artifact is fresh enough".
+fn walk_newest_mtime(root: &Path) -> Option<std::time::SystemTime> {
+    let mut newest: Option<std::time::SystemTime> = None;
+    let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.is_dir() {
+            // Skip nested target dirs in case a contributor built inside
+            // the plugin crate directly — they're artifacts, not sources.
+            if path.file_name().and_then(|s| s.to_str()) == Some("target") {
+                continue;
+            }
+            let Ok(entries) = fs::read_dir(&path) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                stack.push(entry.path());
+            }
+        } else if meta.is_file() {
+            if let Ok(m) = meta.modified() {
+                newest = Some(match newest {
+                    Some(n) if n >= m => n,
+                    _ => m,
+                });
+            }
+        }
+    }
+    newest
 }
 
 /// F-615: resolve the base directory containing `wasm32-wasip1/release/`.
