@@ -1,0 +1,27 @@
+// ark v0.1 built-in default scene.
+//
+// Used as the final fallback in `resolve_scene_path` (see `path.rs`)
+// when no user scene is supplied via --scene, ARK_SCENE,
+// ./.ark/scene.kdl, or $XDG_CONFIG_HOME/<appname>/scenes/default.kdl.
+//
+// Inline-declares the picker and status plugins rather than going
+// through `use "picker"` / `use "status"`. The `use` extension surface
+// ships at v0.3 (T-10.x); v0.1 systems must run without it. T-10.10
+// migrates this file to the `use` form once that surface is live;
+// inline declarations remain supported indefinitely (Rust-editions
+// precedent — old shapes never break).
+
+scene "default" {
+    plugin "picker" {
+        source "shipped:picker"
+        mount "floating"
+    }
+
+    plugin "status" {
+        source "shipped:status"
+        mount "status-bar"
+    }
+
+    keybind "Alt p" intent="ark.core.show_picker"
+    keybind "Alt q" intent="ark.core.quit"
+}
