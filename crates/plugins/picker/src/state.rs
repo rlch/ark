@@ -153,6 +153,8 @@ pub enum FormField {
     Layout,
     /// Launch command, default `claude --resume`.
     Cmd,
+    /// Submit button — Enter from here fires the spawn.
+    Submit,
 }
 
 impl Default for FormField {
@@ -168,7 +170,7 @@ impl Default for FormField {
 /// typing, cycling, and submission logic; this struct just holds the
 /// values so the state transition into/out of the form is lossless
 /// (users who tab away and back shouldn't lose partial input).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewAgentState {
     /// Orchestrator choice.
     pub orchestrator: Orchestrator,
@@ -182,6 +184,45 @@ pub struct NewAgentState {
     pub cmd: String,
     /// Currently focused field for keyboard input.
     pub focus: FormField,
+    /// Layouts known to the plugin; drives the dropdown cycler. Populated
+    /// on entering the NewAgent screen — defaults to
+    /// `["builder", "cavekit"]` when scanning the layouts dir isn't
+    /// available.
+    pub available_layouts: Vec<String>,
+    /// Stub flag raised when the user presses `Ctrl+F` on the Cwd field.
+    /// The real filepicker integration is deferred; host-side tests assert
+    /// this toggles.
+    pub open_filepicker: bool,
+}
+
+impl Default for NewAgentState {
+    fn default() -> Self {
+        Self {
+            orchestrator: Orchestrator::default(),
+            cwd: String::new(),
+            name: String::new(),
+            layout: "builder".to_string(),
+            cmd: "claude --resume".to_string(),
+            focus: FormField::default(),
+            available_layouts: vec!["builder".to_string(), "cavekit".to_string()],
+            open_filepicker: false,
+        }
+    }
+}
+
+impl NewAgentState {
+    /// Build a fresh `NewAgentState` seeded with `cwd`. `name` defaults to
+    /// `basename(cwd)`. Used by the wasm layer when `Ctrl+N` fires from
+    /// the list screen.
+    pub fn with_cwd(cwd: impl Into<String>) -> Self {
+        let cwd = cwd.into();
+        let name = crate::render_new_agent::basename_of(&cwd);
+        Self {
+            cwd,
+            name,
+            ..Self::default()
+        }
+    }
 }
 
 /// State for the Del confirmation modal (R7 W4).

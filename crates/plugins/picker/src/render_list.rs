@@ -70,6 +70,13 @@ pub enum PickerAction {
     ExpandDetail(String),
     /// Left / Tab / Esc on the detail screen: collapse back to the list.
     CollapseDetail,
+    /// Enter on the new-agent form — the wasm layer materialises the argv
+    /// via [`crate::render_new_agent::build_spawn_argv`] and fires
+    /// `run_command` as a detached subprocess (T-104).
+    SubmitNewAgent,
+    /// Esc on the new-agent form — transition back to the list without
+    /// spawning anything.
+    CancelNewAgent,
     /// Key ignored (no matching action).
     None,
 }
@@ -100,11 +107,21 @@ pub enum KeyInput {
     Char(char),
     /// `Ctrl+N` — open new-agent form. (`N` by itself also maps to this.)
     CtrlN,
-    /// `Tab` — on the detail screen this collapses back to the list.
+    /// `Ctrl+F` — on the new-agent form's Cwd field, opens the filepicker
+    /// overlay (T-104 STUB: sets `NewAgentState::open_filepicker = true`).
+    CtrlF,
+    /// `Tab` — on the detail screen this collapses back to the list; on
+    /// the new-agent form it cycles focus forward.
     Tab,
+    /// `Shift+Tab` — on the new-agent form it cycles focus backward.
+    ShiftTab,
     /// `Left` arrow — on the detail screen this collapses back to the
-    /// list; otherwise ignored.
+    /// list; on the new-agent form it cycles the focused radio / dropdown
+    /// backward.
     Left,
+    /// `Right` arrow — on the new-agent form it cycles the focused radio
+    /// / dropdown forward.
+    Right,
     /// Any key we don't care about.
     Other,
 }
@@ -455,9 +472,15 @@ pub fn handle_list_key(state: &mut ListState, cache: &PickerCache, key: KeyInput
                 c => append_to_filter(state, c),
             }
         }
-        // Tab/Left are meaningful on the detail screen (collapse back
-        // to list) but ignored on the list screen itself.
-        KeyInput::Tab | KeyInput::Left | KeyInput::Other => PickerAction::None,
+        // Tab/Left are meaningful on the detail / new-agent screens but
+        // ignored on the list screen itself. Same for ShiftTab/Right/CtrlF
+        // (new-agent form only).
+        KeyInput::Tab
+        | KeyInput::ShiftTab
+        | KeyInput::Left
+        | KeyInput::Right
+        | KeyInput::CtrlF
+        | KeyInput::Other => PickerAction::None,
     }
 }
 

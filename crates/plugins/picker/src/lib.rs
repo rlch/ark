@@ -47,6 +47,7 @@
 pub mod bootstrap;
 pub mod render_detail;
 pub mod render_list;
+pub mod render_new_agent;
 pub mod state;
 
 pub use bootstrap::{
@@ -61,6 +62,10 @@ pub use render_detail::{
 pub use render_list::{
     KeyInput, PickerAction, build_footer, build_header, format_age, format_progress, format_row,
     fuzzy_filter_and_sort, fuzzy_haystack, handle_list_key, phase_extra, phase_icon,
+};
+pub use render_new_agent::{
+    Direction, apply_backspace, apply_char, basename_of, build_new_agent_rows, build_spawn_argv,
+    cycle_value, handle_new_agent_key, next_field, prev_field,
 };
 pub use state::{
     AgentSummary, ConfirmKillState, DetailSnapshot, DetailState, ErrorState, FormField, ListState,
@@ -151,9 +156,10 @@ impl Picker {
 #[cfg(target_arch = "wasm32")]
 mod wasm_plugin {
     use super::{
-        DetailState, KeyInput, Picker, PickerAction, PickerScreen, bootstrap, build_detail_rows,
-        build_footer, build_header, format_row, fuzzy_filter_and_sort, handle_detail_key,
-        handle_list_key,
+        DetailState, ErrorState, KeyInput, NewAgentState, Picker, PickerAction, PickerScreen,
+        bootstrap, build_detail_rows, build_footer, build_header, build_new_agent_rows,
+        build_spawn_argv, format_row, fuzzy_filter_and_sort, handle_detail_key, handle_list_key,
+        handle_new_agent_key,
     };
     use zellij_tile::prelude::*;
 
@@ -166,6 +172,7 @@ mod wasm_plugin {
     /// [`KeyInput::Other`].
     fn map_key(key: &KeyWithModifier) -> KeyInput {
         let ctrl = key.has_modifiers(&[KeyModifier::Ctrl]);
+        let shift = key.has_modifiers(&[KeyModifier::Shift]);
         match key.bare_key {
             BareKey::Up => KeyInput::Up,
             BareKey::Down => KeyInput::Down,
@@ -174,10 +181,13 @@ mod wasm_plugin {
             BareKey::Backspace => KeyInput::Backspace,
             BareKey::Delete => KeyInput::Delete,
             BareKey::Char('n') if ctrl => KeyInput::CtrlN,
+            BareKey::Char('f') if ctrl => KeyInput::CtrlF,
             BareKey::Char('k') if key.has_no_modifiers() => KeyInput::Up,
             BareKey::Char('j') if key.has_no_modifiers() => KeyInput::Down,
+            BareKey::Tab if shift => KeyInput::ShiftTab,
             BareKey::Tab => KeyInput::Tab,
             BareKey::Left => KeyInput::Left,
+            BareKey::Right => KeyInput::Right,
             BareKey::Char(c) => KeyInput::Char(c),
             _ => KeyInput::Other,
         }
@@ -296,9 +306,48 @@ mod wasm_plugin {
                                     self.screen = PickerScreen::Detail(detail);
                                     true
                                 }
+                                PickerAction::NewAgent => {
+                                    // T-104: open W3 with cwd seeded from
+                                    // $PWD (best-effort) so `name` defaults
+                                    // to `basename(cwd)`. The plugin runs
+                                    // in the zellij cwd; this matches the
+                                    // supervisor's expectation that spawn
+                                    // happens "where the user is".
+                                    let cwd = std::env::var("PWD").unwrap_or_default();
+                                    self.screen =
+                                        PickerScreen::NewAgent(NewAgentState::with_cwd(cwd));
+                                    true
+                                }
                                 PickerAction::FilterChanged
                                 | PickerAction::MoveUp
                                 | PickerAction::MoveDown => true,
+                                _ => true,
+                            }
+                        }
+                        PickerScreen::NewAgent(ref mut form_state) => {
+                            let action = handle_new_agent_key(form_state, input);
+                            match action {
+                                PickerAction::SubmitNewAgent => {
+                                    // T-104: exec `ark spawn ...` as a
+                                    // detached subprocess via
+                                    // `run_command`. zellij-tile's
+                                    // `run_command` is fire-and-forget —
+                                    // no synchronous error channel, so we
+                                    // optimistically transition back to
+                                    // the list. Failures surface at the
+                                    // next 2 s cache refresh (no new
+                                    // agent = nothing in the cache).
+                                    let argv = build_spawn_argv(form_state);
+                                    let argv_refs: Vec<&str> =
+                                        argv.iter().map(|s| s.as_str()).collect();
+                                    run_command(&argv_refs, std::collections::BTreeMap::new());
+                                    self.screen = PickerScreen::default();
+                                    true
+                                }
+                                PickerAction::CancelNewAgent => {
+                                    self.screen = PickerScreen::default();
+                                    true
+                                }
                                 _ => true,
                             }
                         }
@@ -391,6 +440,13 @@ mod wasm_plugin {
                         cols,
                     );
                 }
+                PickerScreen::NewAgent(form_state) => {
+                    render_new_agent_screen(form_state, rows, cols);
+                }
+                PickerScreen::Error(err) => {
+                    let text = Text::new(&format!("Error: {}", err.message));
+                    print_text_with_coordinates(text, 0, 0, Some(cols), Some(1));
+                }
                 _ => {
                     let text = Text::new("(screen not yet implemented)");
                     print_text_with_coordinates(text, 0, 0, Some(cols), Some(1));
@@ -398,6 +454,24 @@ mod wasm_plugin {
             }
         }
     }
+
+    fn render_new_agent_screen(state: &NewAgentState, rows: usize, cols: usize) {
+        if rows == 0 || cols == 0 {
+            return;
+        }
+        let body = build_new_agent_rows(state);
+        for (y, line) in body.iter().enumerate() {
+            if y >= rows {
+                break;
+            }
+            print_text_with_coordinates(Text::new(line), 0, y, Some(cols), Some(1));
+        }
+    }
+
+    // Silence dead_code warning when ErrorState isn't otherwise referenced in
+    // wasm_plugin — it is used by future T-105 wiring.
+    #[allow(dead_code)]
+    fn _keep_error_state_used(_e: &ErrorState) {}
 
     fn render_list_screen(
         cache: &super::PickerCache,

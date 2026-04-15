@@ -20,6 +20,10 @@ zellij-tile = "0.44"
 # workspace already pins 0.3 so the picker shares a single version.
 nucleo-matcher = { workspace = true }
 serde = { workspace = true }
+# shlex for tokenising the new-agent form's `cmd` field (cavekit-plugin-picker R6 /
+# T-104). Tiny; already pulled in by `crates/cli`, so sharing the workspace
+# version keeps wasm dedup clean and doesn't grow the dep graph.
+shlex = { workspace = true }
 
 # NOTE: serde_json, humantime, and chrono are intentionally NOT listed here.
 # cavekit-plugin-picker R1 and cavekit-distribution.md R3 ban them from the

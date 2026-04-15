@@ -284,6 +284,7 @@ version = "0.1.0"
 dependencies = [
  "nucleo-matcher",
  "serde",
+ "shlex",
  "zellij-tile",
 ]
 
