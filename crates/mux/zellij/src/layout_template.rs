@@ -252,4 +252,87 @@ mod tests {
         assert!(out.contains("cavekit-auth-01jx7z8k6x9y2zt4abcdef0123"));
         assert!(out.contains("name=builder"));
     }
+
+    // ------- T-122: additional coverage for R5 template surface -------
+
+    /// All five standard vars resolve in a single template. Guards against
+    /// silent regressions where one var gets dropped from `to_context`.
+    #[test]
+    fn all_five_standard_vars_resolve_in_one_template() {
+        let tmpl = r#"layout {
+    cwd "{{ cwd }}"
+    // id={{ id }}
+    tab name="{{ name }}" {
+        pane command="{{ agent_cmd }}" {
+            args{% for a in agent_args %} "{{ a }}"{% endfor %}
+        }
+    }
+}
+"#;
+        let out = render(tmpl, &vars()).unwrap();
+        assert!(out.contains("cwd \"/tmp/work\""), "missing cwd: {out}");
+        assert!(
+            out.contains("cavekit-auth-01jx7z8k6x9y2zt4abcdef0123"),
+            "missing id: {out}"
+        );
+        assert!(out.contains("name=\"builder\""), "missing name: {out}");
+        assert!(
+            out.contains("command=\"claude\""),
+            "missing agent_cmd: {out}"
+        );
+        assert!(out.contains("\"--resume\""), "missing agent_args[0]: {out}");
+        assert!(
+            out.contains("\"--verbose\""),
+            "missing agent_args[1]: {out}"
+        );
+    }
+
+    /// `{% if agent_cmd %}` — truthy branch when agent_cmd is non-empty.
+    #[test]
+    fn conditional_if_agent_cmd_truthy_branch() {
+        let tmpl = "{% if agent_cmd %}pane command=\"{{ agent_cmd }}\"{% else %}pane{% endif %}";
+        let out = render(tmpl, &vars()).unwrap();
+        assert_eq!(out, "pane command=\"claude\"");
+    }
+
+    /// `{% if agent_cmd %}` — falsy branch when agent_cmd is the empty
+    /// string. Minijinja treats `""` as falsy by default.
+    #[test]
+    fn conditional_if_agent_cmd_falsy_branch_with_empty_string() {
+        let tmpl = "{% if agent_cmd %}HAS_CMD{% else %}NO_CMD{% endif %}";
+        let v = LayoutVars {
+            cwd: "/tmp".into(),
+            agent_cmd: String::new(),
+            agent_args: Vec::new(),
+            id: "id".into(),
+            name: "n".into(),
+        };
+        let out = render(tmpl, &v).unwrap();
+        assert_eq!(out, "NO_CMD");
+    }
+
+    /// Empty `agent_args` iterates zero times. Edge case for the common
+    /// `{% for a in agent_args %}` pattern in shipped layouts.
+    #[test]
+    fn empty_agent_args_iterates_zero_times() {
+        let tmpl = "START{% for a in agent_args %} arg={{ a }}{% endfor %}END";
+        let v = LayoutVars {
+            cwd: "/tmp".into(),
+            agent_cmd: "x".into(),
+            agent_args: Vec::new(),
+            id: "id".into(),
+            name: "n".into(),
+        };
+        let out = render(tmpl, &v).unwrap();
+        assert_eq!(out, "STARTEND");
+    }
+
+    /// Nested `{% if %}` inside `{% for %}` — the common layout pattern
+    /// "emit args only when present". Exercises both block constructs.
+    #[test]
+    fn nested_for_with_if_inside_resolves() {
+        let tmpl = "{% for a in agent_args %}{% if a %}[{{ a }}]{% endif %}{% endfor %}";
+        let out = render(tmpl, &vars()).unwrap();
+        assert_eq!(out, "[--resume][--verbose]");
+    }
 }

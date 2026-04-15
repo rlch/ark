@@ -144,4 +144,38 @@ mod tests {
         cleanup_rendered(&p);
         cleanup_rendered(&p);
     }
+
+    // ------- T-122: additional .kdl validation edge cases -------
+
+    /// Path with no extension at all must be rejected. Zellij issue
+    /// #4994 silently ignores such layouts, so the writer MUST bounce
+    /// them at the Rust boundary.
+    #[test]
+    fn write_rendered_rejects_path_with_no_extension() {
+        let dir = tempdir().unwrap();
+        let bad = dir.path().join("layouts").join("no_ext_here");
+        let err = write_rendered(&bad, "layout {}").unwrap_err();
+        assert!(
+            matches!(err, LayoutWriteError::InvalidExtension(_)),
+            "got: {err:?}"
+        );
+        assert!(
+            !bad.exists(),
+            "no file should be created for a rejected path"
+        );
+    }
+
+    /// Only the FINAL extension is inspected — `layout.kdl.bak` is
+    /// `.bak`, not `.kdl`, and must be rejected. Guards against a
+    /// common backup-file naming convention slipping through.
+    #[test]
+    fn write_rendered_rejects_double_extension_where_final_is_not_kdl() {
+        let dir = tempdir().unwrap();
+        let bad = dir.path().join("layouts").join("layout.kdl.bak");
+        let err = write_rendered(&bad, "layout {}").unwrap_err();
+        assert!(
+            matches!(err, LayoutWriteError::InvalidExtension(_)),
+            "got: {err:?}"
+        );
+    }
 }

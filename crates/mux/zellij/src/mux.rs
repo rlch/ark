@@ -859,4 +859,97 @@ mod tests {
         stub.queue_response(output(fail_status().await, b"", b"no active sessions\n"));
         mux.ensure_session("s").await.unwrap();
     }
+
+    // ------- T-122: additional argv shape guards -------
+
+    /// Inside-zellij first-tab spawn also uses `switch-session` (plus
+    /// `--layout`) and must NOT carry `--create`. That flag exists on
+    /// `attach` only; smuggling it onto `switch-session` is a known
+    /// regression (cavekit-mux-zellij.md R1 / Q5).
+    #[tokio::test]
+    async fn create_tab_inside_first_does_not_include_create_flag() {
+        let (mux, stub) = mux_with_stub(true);
+        stub.queue_response(output(ok_status().await, b"", b""));
+        mux.create_tab("sess", "builder", Path::new("/tmp/x.kdl"))
+            .await
+            .unwrap();
+
+        let calls = stub.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert!(
+            calls[0].1.iter().any(|a| a == "switch-session"),
+            "expected switch-session verb"
+        );
+        assert!(
+            !calls[0].1.iter().any(|a| a == "--create"),
+            "switch-session must NOT pass --create; argv: {:?}",
+            calls[0].1
+        );
+    }
+
+    /// Guard on the full new-session argv shape from the outside-zellij
+    /// path: `setsid zellij -s <name> --layout <path>`. Pins
+    /// cavekit-mux-zellij R2 token-by-token, catching drops or reorders
+    /// of `-s` or `--layout`.
+    #[tokio::test]
+    async fn create_tab_new_session_includes_session_name_and_layout_flags() {
+        let (mux, stub) = mux_with_stub(false);
+        stub.queue_response(output(ok_status().await, b"", b""));
+        mux.create_tab("my-sess", "builder", Path::new("/tmp/layout.kdl"))
+            .await
+            .unwrap();
+
+        let calls = stub.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "setsid");
+        let a = &calls[0].1;
+        assert_eq!(a.first().map(String::as_str), Some("zellij"));
+        let s_pos = a.iter().position(|t| t == "-s").expect("missing -s flag");
+        assert_eq!(a.get(s_pos + 1).map(String::as_str), Some("my-sess"));
+        let l_pos = a
+            .iter()
+            .position(|t| t == "--layout")
+            .expect("missing --layout flag");
+        assert_eq!(
+            a.get(l_pos + 1).map(String::as_str),
+            Some("/tmp/layout.kdl")
+        );
+        assert!(!a.iter().any(|t| t == "--create"));
+    }
+
+    /// Guard on the `action new-tab` argv shape: must match the exact
+    /// verb ordering `action new-tab --layout <path> --name <tab>`
+    /// under a `--session <name>` prefix.
+    #[tokio::test]
+    async fn create_tab_additional_uses_action_new_tab_verb() {
+        let (mux, stub) = mux_with_stub(false);
+        stub.queue_response(output(ok_status().await, b"", b""));
+        stub.queue_response(output(ok_status().await, b"", b""));
+        let layout = PathBuf::from("/tmp/layout.kdl");
+        mux.create_tab("ss", "one", &layout).await.unwrap();
+        mux.create_tab("ss", "two", &layout).await.unwrap();
+
+        let calls = stub.recorded_calls();
+        assert_eq!(calls.len(), 2);
+        let a = &calls[1].1;
+        let act_pos = a
+            .iter()
+            .position(|t| t == "action")
+            .expect("missing action verb");
+        assert_eq!(
+            a.get(act_pos + 1).map(String::as_str),
+            Some("new-tab"),
+            "action must be followed by new-tab"
+        );
+        let l_pos = a.iter().position(|t| t == "--layout").unwrap();
+        assert_eq!(
+            a.get(l_pos + 1).map(String::as_str),
+            Some("/tmp/layout.kdl")
+        );
+        let n_pos = a.iter().position(|t| t == "--name").unwrap();
+        assert_eq!(a.get(n_pos + 1).map(String::as_str), Some("two"));
+        let sess_pos = a.iter().position(|t| t == "--session").unwrap();
+        assert!(sess_pos < act_pos, "--session must precede action verb");
+        assert_eq!(a.get(sess_pos + 1).map(String::as_str), Some("ss"));
+    }
 }
