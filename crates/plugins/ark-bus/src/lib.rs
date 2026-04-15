@@ -60,6 +60,20 @@ pub const PLUGIN_NAME: &str = "ark-bus";
 /// payload=<json>` to this endpoint.
 pub const PIPE_INTENT: &str = "ark-intent";
 
+/// Canonical UserEvent name prefix for zellij-side events forwarded
+/// onto the ark event bus (T-6.3). Each subscribed zellij `Event`
+/// becomes `UserEvent { name: "ark.zellij.<kind>", … }` so scene
+/// reactions can listen via selectors of the form
+/// `UserEvent:ark.zellij.<kind>`.
+pub const FORWARDED_EVENT_PREFIX: &str = "ark.zellij.";
+
+/// Canonical attribution tag used by every event ark-bus emits onto
+/// the supervisor's event bus (T-6.3). Per `cavekit-scene.md` R4 the
+/// `source` field on a `UserEvent` MUST be one of
+/// `core | scene | ext:<n> | plugin:<n> | hook:<n> | agent` — `ext:`
+/// is correct here because ark-bus is a wasm extension, not core code.
+pub const FORWARDED_EVENT_SOURCE: &str = "ext:ark-bus";
+
 /// Pipe endpoint name for the rebind dispatcher (T-6.4). Used by the
 /// `reload_scene` keybind-diff path: the scene reloader sends a JSON
 /// document of bindings to add and remove, and ark-bus invokes
@@ -241,6 +255,27 @@ impl std::fmt::Display for RebindPayloadError {
     }
 }
 
+/// Build the `--json` payload that `ark-hook emit` consumes when
+/// forwarding a zellij-side event onto the ark event bus (T-6.3).
+///
+/// Schema: `{"event": "<name>", "payload": <map>, "source": "ext:ark-bus"}`.
+/// `event` carries the canonical `ark.zellij.<kind>` name; `payload`
+/// holds whatever event-specific fields the kind emits (terminal pane
+/// id, exit code, file paths, …). The `source` is pinned to
+/// [`FORWARDED_EVENT_SOURCE`] so reaction telemetry attributes the
+/// broadcast to ark-bus, not the user scene.
+///
+/// Caller passes the bare `kind` string (e.g. `"command_pane_exited"`)
+/// — this helper splices the prefix.
+pub fn build_emit_payload(kind: &str, payload: serde_json::Value) -> String {
+    let envelope = serde_json::json!({
+        "event": format!("{FORWARDED_EVENT_PREFIX}{kind}"),
+        "payload": payload,
+        "source": FORWARDED_EVENT_SOURCE,
+    });
+    envelope.to_string()
+}
+
 /// Errors returned by [`validate_intent_payload`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IntentPayloadError {
@@ -273,7 +308,7 @@ impl std::fmt::Display for IntentPayloadError {
 mod wasm_plugin {
     use super::{
         ArkBus, IntentPayloadError, PIPE_INTENT, PIPE_REBIND, PLUGIN_NAME,
-        RebindPayloadError, validate_intent_payload, validate_rebind_payload,
+        RebindPayloadError, build_emit_payload, validate_intent_payload, validate_rebind_payload,
     };
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -286,25 +321,78 @@ mod wasm_plugin {
     use zellij_tile::prelude::actions::Action;
 
     impl ZellijPlugin for ArkBus {
-        /// Lifecycle entry. ark-bus needs `RunCommands` permission to
-        /// spawn the hidden `ark-hook` command pane; later (T-6.3) we
-        /// will also subscribe to pane-lifecycle events here.
+        /// Lifecycle entry. ark-bus needs:
+        ///   * `ReadCliPipes` — receive `MessagePlugin` payloads posted
+        ///     by scene-compiled keybinds (T-6.2 / T-6.4).
+        ///   * `RunCommands` — spawn the hidden `ark-hook` panes that
+        ///     bridge into the supervisor control socket
+        ///     (T-6.2 / T-6.3).
+        ///   * `ChangeApplicationState` — required by zellij to receive
+        ///     pane-lifecycle events (`CommandPaneOpened`,
+        ///     `CommandPaneExited`, `PaneClosed`); see zellij-tile docs.
+        ///
+        /// And subscribes to the four canonical zellij-side events
+        /// forwarded onto the ark event bus per T-6.3:
+        ///   * `CommandPaneOpened`
+        ///   * `CommandPaneExited`
+        ///   * `PaneClosed`
+        ///   * `FileSystemUpdate`
         fn load(&mut self, _configuration: BTreeMap<String, String>) {
             eprintln!("{PLUGIN_NAME}: load");
-            // R6 of cavekit-scene + zellij-tile docs: every host-call
-            // surface (pipe, command pane, rebind, subscribe) needs an
-            // explicit permission grant from the user on first run.
-            // ark-bus needs:
-            //   * `ReadCliPipes` — to receive `MessagePlugin` payloads
-            //     posted by scene-compiled keybinds.
-            //   * `RunCommands` — to spawn the hidden `ark-hook` panes
-            //     that bridge into the supervisor control socket.
-            request_permission(&[PermissionType::ReadCliPipes, PermissionType::RunCommands]);
+            request_permission(&[
+                PermissionType::ReadCliPipes,
+                PermissionType::RunCommands,
+                PermissionType::ChangeApplicationState,
+            ]);
+            subscribe(&[
+                EventType::CommandPaneOpened,
+                EventType::CommandPaneExited,
+                EventType::PaneClosed,
+                EventType::FileSystemUpdate,
+            ]);
         }
 
-        /// Lifecycle breadcrumb — T-6.3 will route subscribed events
-        /// through here. Today this is intentionally a no-op.
-        fn update(&mut self, _event: Event) -> bool {
+        /// Forward a subscribed zellij event onto the ark event bus by
+        /// spawning a hidden `ark-hook emit --json '<json>'` command
+        /// pane (T-6.3). Unmatched events are silently ignored — we
+        /// only act on the four we explicitly subscribed to.
+        fn update(&mut self, event: Event) -> bool {
+            match event {
+                Event::CommandPaneOpened(pane_id, _ctx) => {
+                    let payload = serde_json::json!({
+                        "terminal_pane_id": pane_id,
+                    });
+                    spawn_emit("command_pane_opened", payload);
+                }
+                Event::CommandPaneExited(pane_id, exit_code, _ctx) => {
+                    let payload = serde_json::json!({
+                        "terminal_pane_id": pane_id,
+                        "exit_code": exit_code,
+                    });
+                    spawn_emit("command_pane_exited", payload);
+                }
+                Event::PaneClosed(pane_id) => {
+                    // PaneId is an enum (`Terminal(u32) | Plugin(u32)`);
+                    // serialise via Debug for now — the supervisor
+                    // re-parses the payload through serde_json::Value
+                    // and downstream consumers (scene reactions) match
+                    // on the kind name, not the inner shape.
+                    let payload = serde_json::json!({
+                        "pane_id": format!("{pane_id:?}"),
+                    });
+                    spawn_emit("pane_closed", payload);
+                }
+                Event::FileSystemUpdate(updates) => {
+                    let paths: Vec<String> = updates
+                        .iter()
+                        .map(|(p, _meta)| p.display().to_string())
+                        .collect();
+                    let payload = serde_json::json!({ "paths": paths });
+                    spawn_emit("file_system_update", payload);
+                }
+                _ => {}
+            }
+            // No render needed — ark-bus is headless.
             false
         }
 
@@ -358,6 +446,22 @@ mod wasm_plugin {
         // zellij log so failed dispatches are debuggable.
         let _ = open_command_pane_background(cmd, BTreeMap::new());
         false
+    }
+
+    /// Spawn `ark-hook emit --json '<envelope>'` in a hidden command
+    /// pane to broadcast a forwarded zellij event onto the ark event
+    /// bus (T-6.3). The `kind` is appended to
+    /// `super::FORWARDED_EVENT_PREFIX` to form the canonical user-event
+    /// name; `payload` is the kind-specific JSON object that scene
+    /// reactions can read via the CEL `payload` binding.
+    fn spawn_emit(kind: &str, payload: serde_json::Value) {
+        let envelope = build_emit_payload(kind, payload);
+        let cmd = CommandToRun {
+            path: PathBuf::from("ark-hook"),
+            args: vec!["emit".to_string(), "--json".to_string(), envelope],
+            cwd: None,
+        };
+        let _ = open_command_pane_background(cmd, BTreeMap::new());
     }
 
     /// Apply a parsed `ark-rebind` payload via
@@ -605,6 +709,49 @@ mod tests {
             assert!(!s.is_empty());
             assert!(s.contains("ark-rebind"));
         }
+    }
+
+    // ---- T-6.3: emit payload builder ----
+
+    #[test]
+    fn build_emit_payload_envelopes_kind_and_payload() {
+        let payload =
+            serde_json::json!({ "terminal_pane_id": 7, "exit_code": 0 });
+        let envelope = build_emit_payload("command_pane_exited", payload);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&envelope).expect("ok");
+        assert_eq!(
+            parsed["event"],
+            serde_json::Value::String("ark.zellij.command_pane_exited".into())
+        );
+        assert_eq!(
+            parsed["source"],
+            serde_json::Value::String(FORWARDED_EVENT_SOURCE.into())
+        );
+        assert_eq!(parsed["payload"]["terminal_pane_id"], serde_json::json!(7));
+        assert_eq!(parsed["payload"]["exit_code"], serde_json::json!(0));
+    }
+
+    #[test]
+    fn build_emit_payload_supports_arbitrary_payload_shapes() {
+        let envelope = build_emit_payload(
+            "file_system_update",
+            serde_json::json!({ "paths": ["/a", "/b"] }),
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&envelope).expect("ok");
+        assert_eq!(
+            parsed["event"],
+            serde_json::Value::String("ark.zellij.file_system_update".into())
+        );
+        assert_eq!(parsed["payload"]["paths"][0], serde_json::json!("/a"));
+        assert_eq!(parsed["payload"]["paths"][1], serde_json::json!("/b"));
+    }
+
+    #[test]
+    fn forwarded_event_constants_are_stable() {
+        assert_eq!(FORWARDED_EVENT_PREFIX, "ark.zellij.");
+        assert_eq!(FORWARDED_EVENT_SOURCE, "ext:ark-bus");
     }
 
     #[test]
