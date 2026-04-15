@@ -30,5 +30,15 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 
+[[bin]]
+# T-9.5.2 (cavekit-scene R16): canonical extension-protocol.kdl emitter.
+# Walks the `ArkExtension` method table + every request/response type in
+# `lib.rs` via facet SHAPE reflection and writes
+# `share/extension-protocol.kdl` — the ark-side analog of JSON-Schema,
+# shipped as the cross-language reference. CI diffs regenerated output
+# against the committed file to catch protocol drift.
+name = "gen-extension-spec"
+path = "src/bin/gen-extension-spec.rs"
+
 [dev-dependencies]
 tokio = { workspace = true }
