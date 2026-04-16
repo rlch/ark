@@ -328,10 +328,10 @@ fn check_scope(program: &Program, expected: RhaiScope) -> Result<(), SceneError>
     Err(SceneError::RhaiScopeMismatch {
         message: format!(
             "expected {} scope (bindings: {}), got {} scope (bindings: {})",
-            program.scope.as_str(),
-            program.scope.bindings(),
             expected.as_str(),
             expected.bindings(),
+            program.scope.as_str(),
+            program.scope.bindings(),
         ),
         src: NamedSource::new("<expression>", program.src.clone()),
         span: SourceSpan::new(0.into(), program.src.len().min(1)),

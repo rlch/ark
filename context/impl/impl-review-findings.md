@@ -1,6 +1,32 @@
 # Peer Review Findings
 
-## Latest Review: scene v3 Tier 1 — 2026-04-17
+## Latest Review: scene v3 Tiers 2-4 — 2026-04-17
+
+**Base ref:** `57488f7` (tier-1 peer-review fixes)
+**Head:** `53d4757` (Tier 4 scene: layout compile + modes + reconciler)
+**Reviewer:** Codex (codex-cli 0.120.0)
+**Commits:** T-019..T-021 (Rhai), T-022..T-025 (interp/compile/context), T-026..T-033 (views), T-034..T-046 (layout compile + reconciler).
+**Diff:** 5746 lines.
+
+### Findings
+
+| # | Severity | File | Line | Issue | Status |
+|---|----------|------|------|-------|--------|
+| F-0009 | P1 | crates/scene/src/compile/layout.rs | 538 | `pane_overlay_attrs()` hardcoded to `None` — overlay scenes silently render as tiled panes (R3/T-037 spec break). PaneNode.overlay threading blocked on parser hook. | DEFERRED |
+| F-0010 | P1 | crates/scene/src/compile/layout.rs | 417 | Command-pane emits `command="env"` + bare positional args instead of zellij-idiomatic `command "env"` / `args ...` KDL shape. Reconciler's (command,args) matching may break. | DEFERRED |
+| F-0011 | P1 | crates/scene/src/compile/layout.rs | 391 | Unknown view aliases silently fall back to `shell` or emit placeholder `plugin=`. SceneError::UnknownView never surfaces. Violates R3.14/T-031. | DEFERRED |
+| F-0012 | P1 | crates/scene/src/compile/layout.rs | 130 | `compile_layout_kdl_with_terminal()` doesn't enforce "at least one tab" invariant. Predicate filtering can produce `layout {}` artifact that zellij rejects. | DEFERRED |
+| F-0013 | P2 | crates/scene/src/compile/mod.rs | 242 | Compile pass doesn't visit pane view config strings; `{Rhai}` interpolation inside view configs silently ignored. AST/compile drift. | DEFERRED |
+| F-0014 | P3 | crates/scene/src/rhai.rs | 330 | `check_scope()` inverts "expected" vs "got" in scope-mismatch error message. Misleads debugging. | FIXED |
+
+### Disposition
+
+- **F-0009 through F-0013 deferred to Tier 5+** — these are all interconnected compile-pipeline issues. T-034..T-046 landed a working foundation; Tier 5 ops dispatch + op compile (T-052, T-053) will exercise the full pane view config → compile → lowering path, surfacing the right integration points. Fixing in isolation risks re-churn.
+- **F-0014 fixed** inline in the same commit as this findings update.
+
+---
+
+## Prior Review: scene v3 Tier 1 — 2026-04-17
 
 **Base ref:** `b0cee47` (fix: restore pre-v3 findings history)
 **Head:** `155d7d3` (T-018 scene: fixture-driven diagnostic snapshot tests)

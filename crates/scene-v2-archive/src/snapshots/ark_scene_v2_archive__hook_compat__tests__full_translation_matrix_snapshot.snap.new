@@ -1,0 +1,9 @@
+---
+source: crates/scene-v2-archive/src/hook_compat.rs
+assertion_line: 556
+expression: frag
+---
+// hook[0] -> Done
+on "Done" if="(agent.orchestrator == \"cavekit\" || agent.orchestrator == \"claude-code\") && (event.severity == \"P0\")" {
+    exec script="notify-send done"
+}
