@@ -10,6 +10,7 @@ use clap::Args;
 use ark_scene::error::SceneError;
 use ark_scene::parse::parse_scene;
 use ark_scene::path::{ResolvedScene, resolve_scene_path_from_env};
+use ark_scene::v1_strict::v1_strict_validate;
 use ark_scene::validate::validate_scene;
 
 use crate::ctx::Ctx;
@@ -48,8 +49,23 @@ pub fn run(args: CheckArgs, ctx: &Ctx) -> Result<(), CliError> {
         }
     }
 
+    // Phase 3 (T-15.3): v1-strict gate. Only runs when --v1-strict is
+    // set AND parsing succeeded — strict mode layers on top of the
+    // normal check; a file that doesn't even parse has no shape to
+    // enforce the contract against. Walks the raw KDL because op
+    // names live on the KDL nodes rather than the typed AST (see
+    // `ark_scene::v1_strict` module docs for the rationale).
+    if args.v1_strict {
+        if let Ok(kdl_doc) = src.parse::<kdl::KdlDocument>() {
+            if let Err(mut errs) = v1_strict_validate(&src, Path::new(&display_path), &kdl_doc) {
+                all_errors.append(&mut errs);
+            }
+        }
+    }
+
     if all_errors.is_empty() {
-        eprintln!("scene check: {} ok", display_path);
+        let suffix = if args.v1_strict { " (v1-strict)" } else { "" };
+        eprintln!("scene check: {} ok{}", display_path, suffix);
         Ok(())
     } else {
         render_diagnostics(&all_errors, ctx.no_color);

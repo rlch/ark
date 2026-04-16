@@ -154,6 +154,11 @@ pub enum ErrorCode {
     /// `ark.core.*` prefix (R11 / T-10.7). Core ops are host-owned;
     /// extensions MUST NOT shadow them.
     ReservedNamespace,
+    /// `ark scene check --v1-strict` (T-15.3) rejected the scene for
+    /// violating the v1.0 contract documented in
+    /// `context/refs/intent-api-v1.md` and
+    /// `context/refs/wasm-metadata-v1.md`.
+    V1Strict,
 }
 
 impl ErrorCode {
@@ -197,6 +202,7 @@ impl ErrorCode {
             ErrorCode::ExtCycle => "ext/cycle",
             ErrorCode::ExtCycleDepthExceeded => "ext/cycle-depth-exceeded",
             ErrorCode::ReservedNamespace => "ext/reserved-namespace",
+            ErrorCode::V1Strict => "scene/v1-strict",
         }
     }
 }
@@ -972,6 +978,39 @@ pub enum SceneError {
         /// rewrite been permitted.
         attempted: String,
     },
+
+    /// `ark scene check --v1-strict` (T-15.3) rejected the scene for
+    /// violating the v1.0 contract documented in
+    /// `context/refs/intent-api-v1.md` and
+    /// `context/refs/wasm-metadata-v1.md`.
+    ///
+    /// The carried `reason` is a one-line explanation (e.g. "op
+    /// `my_ext.do_thing` is outside the frozen `ark.core.*`
+    /// vocabulary"); `help` is a longer hint surfaced via miette's
+    /// `#[help]` attribute. Both are pre-rendered by the v1-strict
+    /// validator so the diagnostic carries actionable text without
+    /// the renderer having to know about the contract.
+    #[error("v1-strict violation: {reason}")]
+    #[diagnostic(code = "scene/v1-strict")]
+    V1Strict {
+        /// Short human-readable description of the violation.
+        reason: String,
+
+        /// Pre-rendered help text (pointer to the relevant contract
+        /// section, suggestion, etc.).
+        #[help]
+        help: String,
+
+        /// File that tripped the strict check.
+        #[source_code]
+        src: NamedSource<String>,
+
+        /// Span of the offending token. Zero-length spans at offset
+        /// 0 are acceptable when the violation has no single byte
+        /// to point at (e.g. a missing required field).
+        #[label("v1-strict violation here")]
+        at: SourceSpan,
+    },
 }
 
 /// Canonical static help text for `scene/unknown-node` — the list
@@ -1086,6 +1125,29 @@ impl SceneError {
             SceneError::ExtCycle { .. } => ErrorCode::ExtCycle,
             SceneError::ExtCycleDepthExceeded { .. } => ErrorCode::ExtCycleDepthExceeded,
             SceneError::ReservedNamespace { .. } => ErrorCode::ReservedNamespace,
+            SceneError::V1Strict { .. } => ErrorCode::V1Strict,
+        }
+    }
+}
+
+impl SceneError {
+    /// Build a `V1Strict` diagnostic with pre-rendered help text.
+    ///
+    /// Keeps construction terse at call sites in
+    /// `crate::v1_strict` (T-15.3). `reason` lands on the error
+    /// message line, `help` renders as miette's advisory text, and
+    /// the span/source pair drives the caret.
+    pub fn v1_strict(
+        reason: impl Into<String>,
+        help: impl Into<String>,
+        src: NamedSource<String>,
+        at: SourceSpan,
+    ) -> Self {
+        SceneError::V1Strict {
+            reason: reason.into(),
+            help: help.into(),
+            src,
+            at,
         }
     }
 }
