@@ -28,8 +28,9 @@ pub mod cache;
 pub mod suggest;
 pub mod validate;
 
-// T-019..T-021: Rhai expression engine wrapper. Stubbed in this
-// packet; replaced by the parallel T-019 packet's full implementation.
+// T-019 + T-020 + T-021: Rhai expression-only engine wrapper, two-scope
+// system, and ark-owned stdlib helpers (`glob`, `matches`, `basename`,
+// `dirname`).
 pub mod rhai;
 // T-022: `{Rhai}` brace-hole interpolation.
 pub mod interp;
