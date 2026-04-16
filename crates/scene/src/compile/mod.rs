@@ -35,6 +35,10 @@ use crate::parse::SceneIR;
 use crate::rhai::{Engine, Program, RhaiScope, compile_in_scope};
 use miette::{NamedSource, SourceSpan};
 
+// Tier 4 — layout lowering to zellij KDL (T-034..T-040) and mode
+// pre-rendering (T-045) will add `compile::layout` + `compile::modes`
+// submodules here and re-export their entry points.
+
 /// Upper bound on the source length of any single Rhai expression (T-024).
 pub const MAX_EXPR_LEN: usize = 4096;
 

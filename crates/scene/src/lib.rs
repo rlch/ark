@@ -35,6 +35,16 @@ pub mod rhai;
 // T-022: `{Rhai}` brace-hole interpolation.
 pub mod interp;
 // T-023 + T-024: `when="<Rhai>"` + full-scene compile pass.
+// Layout + mode lowering (T-034..T-040, T-045) will add
+// `compile::layout` and `compile::modes` submodules.
 pub mod compile;
 // T-025: scope builders for spawn / event contexts.
 pub mod context;
+// T-026 + T-027 + T-028..T-031: view registry + primitives.
+pub mod view;
+// T-033: typed pane handle wrappers (`CommandPane`, `PluginPane`,
+// `TabHandle`) — compile-time inference from `ViewMeta::render_mode`
+// lands in T-090's derive macro.
+pub mod handle_types;
+// T-041..T-044 + T-046: reconciler + mode switching via override-layout
+// will land `pub mod reconciler;` here.
