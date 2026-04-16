@@ -8,6 +8,7 @@
 //! compiled artifacts (validated layout, resolved views, etc.).
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use crate::id::SceneId;
 use crate::parse::SceneIR;
@@ -59,6 +60,15 @@ impl SceneCache {
     /// Remove the cache entry for `id`. Returns `true` if an entry existed.
     pub fn invalidate(&mut self, id: &SceneId) -> bool {
         self.inner.remove(id).is_some()
+    }
+
+    /// Remove ALL cache entries whose path matches `path`, regardless of
+    /// content hash. Use on hot-reload: the old hash is unknown but the
+    /// file changed, so every generation for that path is stale.
+    pub fn invalidate_by_path(&mut self, path: &Path) -> usize {
+        let before = self.inner.len();
+        self.inner.retain(|id, _| id.path != path);
+        before - self.inner.len()
     }
 }
 

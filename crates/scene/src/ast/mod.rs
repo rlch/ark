@@ -33,7 +33,6 @@ pub mod selector;
 
 use facet::Facet;
 use facet_kdl as kdl;
-use ::kdl::KdlDocument;
 
 use crate::ast::layout::TabNode;
 use crate::ast::ops::OpNode;
@@ -133,12 +132,13 @@ pub struct UseNode {
     #[facet(kdl::argument)]
     pub name: String,
 
-    /// Optional `config { … }` child block, preserved verbatim for deferred
-    /// schema validation (T-096). Populated by the parse pass in T-011
-    /// (facet-kdl has no direct mapping for an opaque sub-document; skipped
-    /// from derive-dispatch so the surrounding `UseNode` stays facet-derivable).
-    #[facet(opaque)]
-    pub config_block: Option<KdlDocument>,
+    /// Optional raw config block text, preserved for deferred schema
+    /// validation (T-096). Populated manually in a post-parse pass;
+    /// `None` when `use "<name>"` has no config block. Stored as raw
+    /// KDL text rather than `KdlDocument` because `KdlDocument` doesn't
+    /// implement `Facet` and opaque fields need `Default`.
+    #[facet(skip)]
+    pub config_block: Option<String>,
 }
 
 /// `include "<path-or-ext:fragment>"` — splice a KDL fragment verbatim (R11.2).
