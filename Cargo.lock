@@ -513,6 +513,7 @@ dependencies = [
  "regex",
  "rhai",
  "strsim 0.11.1",
+ "tempfile",
  "thiserror 2.0.18",
 ]
 

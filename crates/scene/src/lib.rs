@@ -14,3 +14,7 @@
 //!
 //! Modules are declared here once they land. Today the crate is intentionally
 //! empty — T-001 only establishes the workspace membership and dependency set.
+
+pub mod id;
+
+pub use id::SceneId;

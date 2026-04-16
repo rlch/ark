@@ -42,3 +42,7 @@ strsim = { workspace = true }
 # T-001: error enum derive for `SceneError` (T-006). Pairs with
 # `miette::Diagnostic` impls per variant.
 thiserror = { workspace = true }
+
+[dev-dependencies]
+# T-007: `SceneId::from_file` round-trip test needs a real on-disk file.
+tempfile = { workspace = true }
