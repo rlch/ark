@@ -84,6 +84,13 @@ pub use orchestration::{
     SupervisorMode, finalize_state, outcome_exit_code, run_supervisor, run_supervisor_with,
 };
 
+// W-1: supervisor_main bootstrap helper (cavekit-supervisor R1 + R3 step 12).
+// Top-level async entry point wrapping run_supervisor with readiness-signal
+// ownership and structured error logging. Both the daemon branch and the
+// --no-detach foreground path call this.
+pub mod bootstrap;
+pub use bootstrap::supervisor_main;
+
 // T-070: SIGTERM kill handler (cavekit-supervisor R4).
 pub mod kill;
 pub use kill::{DEFAULT_KILL_GRACE, TabRegistry, apply_tab_event, kill_handler, new_tab_registry};
