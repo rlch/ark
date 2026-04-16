@@ -46,3 +46,8 @@ thiserror = { workspace = true }
 [dev-dependencies]
 # T-007: `SceneId::from_file` round-trip test needs a real on-disk file.
 tempfile = { workspace = true }
+# T-010: snapshot-test harness for miette-rendered `SceneError` diagnostics.
+# Snapshots live under `tests/snapshots/` and serve as the `ark scene check`
+# diagnostic contract per R12. Rendered via `GraphicalReportHandler` with
+# the `unicode_nocolor` theme so review stays stable across terminals.
+insta = { workspace = true }

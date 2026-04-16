@@ -1,0 +1,14 @@
+---
+source: crates/scene/tests/errors.rs
+expression: render(err)
+---
+scene/handle-clash
+
+  × handle `@bad` declared more than once
+   ╭─[scene.kdl:1:13]
+ 1 │ scene "x" { bad }
+   ·             ─┬─┬
+   ·              │ ╰── duplicate here
+   ·              ╰── first declared here
+   ╰────
+  help: Handles are flat-namespaced across tabs and panes. Rename one of the occurrences so the reconciler can tell them apart.

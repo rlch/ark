@@ -1,0 +1,13 @@
+---
+source: crates/scene/tests/errors.rs
+expression: render(err)
+---
+ext/bad-config
+
+  × extension `status` config is invalid: expected `int`, got `string`
+   ╭─[scene.kdl:1:13]
+ 1 │ scene "x" { bad }
+   ·             ─┬─
+   ·              ╰── invalid here
+   ╰────
+  help: The extension's `ConfigSchema` declared a specific shape for this field. Run `ark ext info <ext>` to inspect the schema.

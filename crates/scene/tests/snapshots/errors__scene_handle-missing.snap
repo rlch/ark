@@ -1,0 +1,13 @@
+---
+source: crates/scene/tests/errors.rs
+expression: render(err)
+---
+scene/handle-missing
+
+  × `pane` node is missing its required `@handle`
+   ╭─[scene.kdl:1:13]
+ 1 │ scene "x" { bad }
+   ·             ─┬─
+   ·              ╰── needs an `@handle` here
+   ╰────
+  help: Every `tab` and `pane` needs an `@handle`. Handles are the reconciler's identity keys — without them ark cannot map desired-state panes back to running zellij panes.

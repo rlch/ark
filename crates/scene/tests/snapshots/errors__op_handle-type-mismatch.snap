@@ -1,0 +1,14 @@
+---
+source: crates/scene/tests/errors.rs
+expression: render(err)
+---
+op/handle-type-mismatch
+
+  × op `resize` argument `target`: handle `@bad` is a tab, expected a pane
+   ╭─[scene.kdl:1:13]
+ 1 │ scene "x" { bad }
+   ·             ─┬─
+   ·              ╰── wrong handle type here
+   ╰────
+  help: Check R7's op vocabulary for the required handle type on this argument. Pane-only ops (`resize`, `pin`, `unpin`, `move`) reject tab handles; tab-only ops (`rename`, `new_tab`) reject pane
+        handles.

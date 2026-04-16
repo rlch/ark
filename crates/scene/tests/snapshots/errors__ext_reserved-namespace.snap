@@ -1,0 +1,8 @@
+---
+source: crates/scene/tests/errors.rs
+expression: render(err)
+---
+ext/reserved-namespace
+
+  × extension `core` namespace `ark.core.frobnicate` collides with reserved `ark.core.*`
+  help: `ark.core.*` is reserved for host-owned ops. Rename the extension (or the offending declaration) so the resulting namespace is anything other than `ark.core`.

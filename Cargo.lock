@@ -508,6 +508,7 @@ dependencies = [
  "facet",
  "facet-kdl",
  "globset",
+ "insta",
  "kdl 6.5.0",
  "miette 7.6.0",
  "regex",

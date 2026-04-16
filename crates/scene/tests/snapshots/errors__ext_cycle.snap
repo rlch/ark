@@ -1,0 +1,8 @@
+---
+source: crates/scene/tests/errors.rs
+expression: render(err)
+---
+ext/cycle
+
+  × extension dependency cycle: alpha -> beta -> gamma -> alpha
+  help: Break the cycle by removing one of the `use` declarations along the chain. Transitive `use` is one-way — extensions contribute intents/events once; there's no need to re-use an ancestor.

@@ -1,0 +1,8 @@
+---
+source: crates/scene/tests/errors.rs
+expression: render(err)
+---
+ext-proto/capability-denied
+
+  × extension `status` denied capability `fs.write`
+  help: The host refused this capability for the extension. Check the extension's manifest against the host's capability policy, or grant the capability at install time.

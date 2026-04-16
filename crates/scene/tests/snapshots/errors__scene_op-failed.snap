@@ -1,0 +1,8 @@
+---
+source: crates/scene/tests/errors.rs
+expression: render(err)
+---
+scene/op-failed
+
+  × op `spawn` failed: no such handle `@missing`
+  help: The op ran but returned an error. Check the op's own logs for the underlying cause; subsequent ops in this reaction are skipped.

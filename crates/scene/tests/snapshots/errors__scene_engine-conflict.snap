@@ -1,0 +1,14 @@
+---
+source: crates/scene/tests/errors.rs
+expression: render(err)
+---
+scene/engine-conflict
+
+  × scene declares two conflicting engine sources: inline and `use "claude-code"`
+   ╭─[scene.kdl:1:13]
+ 1 │ scene "x" { bad }
+   ·             ─┬─┬
+   ·              │ ╰── extension engine declared here
+   ·              ╰── inline engine declared here
+   ╰────
+  help: Pick one. Delete the inline engine declaration or remove the `use "claude-code"` entry.

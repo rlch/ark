@@ -1,0 +1,13 @@
+---
+source: crates/scene/tests/errors.rs
+expression: render(err)
+---
+op/unresolved-ref
+
+  × op `focus` references unknown handle `@bad`
+   ╭─[scene.kdl:1:13]
+ 1 │ scene "x" { bad }
+   ·             ─┬─
+   ·              ╰── no such handle declared in this scene
+   ╰────
+  help: did you mean `@main`? Available handles: `@main`, `@side`.

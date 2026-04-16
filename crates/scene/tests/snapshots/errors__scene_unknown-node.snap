@@ -1,0 +1,13 @@
+---
+source: crates/scene/tests/errors.rs
+expression: render(err)
+---
+scene/unknown-node
+
+  × unknown node `bad`
+   ╭─[scene.kdl:1:13]
+ 1 │ scene "x" { bad }
+   ·             ─┬─
+   ·              ╰── not a recognised node
+   ╰────
+  help: did you mean `bind`? Scene-root admits: `use`, `include`, `layout`, `mode`, `on`, `bind`, `clear-reactions`, `clear-bind`, `disable-extension`.

@@ -1,0 +1,13 @@
+---
+source: crates/scene/tests/errors.rs
+expression: render(err)
+---
+ext/missing
+
+  × extension `bad` not found
+   ╭─[scene.kdl:1:13]
+ 1 │ scene "x" { bad }
+   ·             ─┬─
+   ·              ╰── no extension found with this name
+   ╰────
+  help: did you mean `status`? Searched: compiled-in, ~/.local/share/ark/extensions/, .ark/extensions/.

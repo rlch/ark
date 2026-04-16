@@ -1,0 +1,14 @@
+---
+source: crates/scene/tests/errors.rs
+expression: render(err)
+---
+scene/rhai-scope-mismatch
+
+  × Rhai expression scope mismatch: `event` unavailable in spawn scope
+   ╭─[scene.kdl:1:13]
+ 1 │ scene "x" { bad }
+   ·             ─┬─
+   ·              ╰── scope not available here
+   ╰────
+  help: Layout predicates see only the spawn scope (`cwd`, `id`, `name`, `env`). Reaction / bind predicates see only the event scope (`event`, `payload`, `agent`, `session`, plus selector-captured
+        locals). Move the expression, or use a different binding.

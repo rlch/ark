@@ -1,0 +1,8 @@
+---
+source: crates/scene/tests/errors.rs
+expression: render(err)
+---
+ext-proto/unsupported-version
+
+  × extension `status` requires protocol >= 2.0 but host speaks 1.0
+  help: Either install a build of the extension that targets the host protocol version, or upgrade/downgrade ark to a version that speaks the extension's required protocol.

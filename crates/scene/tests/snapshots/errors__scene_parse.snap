@@ -1,0 +1,13 @@
+---
+source: crates/scene/tests/errors.rs
+expression: render(err)
+---
+scene/parse
+
+  × scene file is not valid KDL: unexpected token
+   ╭─[scene.kdl:1:13]
+ 1 │ scene "x" { bad }
+   ·             ─┬─
+   ·              ╰── here
+   ╰────
+  help: KDL 2.0 syntax error — see the caret below. Run `ark scene fmt` on a known-good reference to compare shapes.

@@ -1,0 +1,8 @@
+---
+source: crates/scene/tests/errors.rs
+expression: render(err)
+---
+scene/rhai-eval
+
+  × Rhai evaluation failed: nil access on `agent.missing_field`
+  help: Check that every identifier used in the expression is bound by the surrounding context. Reactions see `event.*`, `payload.*`, `agent.*`, `session.*`, plus selector-captured locals.

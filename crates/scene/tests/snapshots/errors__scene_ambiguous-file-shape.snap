@@ -1,0 +1,14 @@
+---
+source: crates/scene/tests/errors.rs
+expression: render(err)
+---
+scene/ambiguous-file-shape
+
+  × scene file has both a `scene { }` wrapper and a top-level `layout { }`
+   ╭─[scene.kdl:1:13]
+ 1 │ scene "x" { bad }
+   ·             ─┬─┬
+   ·              │ ╰── and top-level layout here
+   ·              ╰── scene wrapper here
+   ╰────
+  help: Pick one. Either move the top-level `layout` into the `scene { }` body, or delete the `scene` wrapper so the file parses in legacy layout-only mode. Run `ark scene fmt` to auto-convert.

@@ -1,0 +1,13 @@
+---
+source: crates/scene/tests/errors.rs
+expression: render(err)
+---
+scene/empty-or-unknown
+
+  × scene file has neither a `scene { }` wrapper nor a top-level `layout { }`
+   ╭─[scene.kdl:1:13]
+ 1 │ scene "x" { bad }
+   ·             ─┬─
+   ·              ╰── no recognisable scene or layout root
+   ╰────
+  help: Wrap the contents in `scene "<name>" { … }`; see `cavekit-scene.md` R1 for the full grammar.

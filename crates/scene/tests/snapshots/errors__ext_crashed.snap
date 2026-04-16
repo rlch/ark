@@ -1,0 +1,8 @@
+---
+source: crates/scene/tests/errors.rs
+expression: render(err)
+---
+ext/crashed
+
+  × extension `status` crashed: exit code 137 (SIGKILL)
+  help: The extension subprocess exited unexpectedly. Check the extension's logs for the underlying cause; subsequent intents dispatched to this extension will fail until it is restarted.

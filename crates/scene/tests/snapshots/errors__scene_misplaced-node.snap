@@ -1,0 +1,13 @@
+---
+source: crates/scene/tests/errors.rs
+expression: render(err)
+---
+scene/misplaced-node
+
+  × `bad` not allowed inside `scene`
+   ╭─[scene.kdl:1:13]
+ 1 │ scene "x" { bad }
+   ·             ─┬─
+   ·              ╰── not allowed here
+   ╰────
+  help: R2 scope table: `use`, `include`, `on`, `bind`, `mode`, `clear-*`, `disable-extension` live only at scene root; `tab` only inside `layout`; `row`/`col`/`pane` only inside `tab` (or nested).

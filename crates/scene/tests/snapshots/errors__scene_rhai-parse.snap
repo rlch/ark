@@ -1,0 +1,14 @@
+---
+source: crates/scene/tests/errors.rs
+expression: render(err)
+---
+scene/rhai-parse
+
+  × Rhai expression failed to parse: unexpected token `+`
+   ╭─[scene.kdl:1:13]
+ 1 │ scene "x" { bad }
+   ·             ─┬─
+   ·              ╰── while compiling this Rhai expression
+   ╰────
+  help: Rhai runs in expression-only mode: no `fn`, no loops, no assignment. Predicates with string literals require KDL raw strings (`when=#"agent.phase == "review""#`) because Rhai also uses
+        double quotes. `ark scene fmt` auto-promotes plain → raw when a predicate body contains `"`.

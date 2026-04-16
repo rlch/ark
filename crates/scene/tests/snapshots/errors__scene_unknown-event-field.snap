@@ -1,0 +1,13 @@
+---
+source: crates/scene/tests/errors.rs
+expression: render(err)
+---
+scene/unknown-event-field
+
+  × event `AgentTurn` has no field `bad`
+   ╭─[scene.kdl:1:13]
+ 1 │ scene "x" { bad }
+   ·             ─┬─
+   ·              ╰── not a field of this event
+   ╰────
+  help: did you mean `phase`? Available fields: `phase`, `session_id`.

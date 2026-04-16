@@ -1,0 +1,14 @@
+---
+source: crates/scene/tests/errors.rs
+expression: render(err)
+---
+scene/handle-type-mismatch
+
+  × handle `@bad` is a pane but op `rename` expects a tab
+   ╭─[scene.kdl:1:13]
+ 1 │ scene "x" { bad }
+   ·             ─┬─┬
+   ·              │ ╰── declared here
+   ·              ╰── used here
+   ╰────
+  help: Op vocabulary R7: some ops are tab-only (`rename`, `new_tab`), others pane-only (`resize`, `move`, `pin`, `unpin`). The compiler infers handle type from the declaration site.

@@ -1,0 +1,8 @@
+---
+source: crates/scene/tests/errors.rs
+expression: render(err)
+---
+scene/rhai-oom
+
+  × Rhai expression exceeded the operation limit (10000)
+  help: Scene expressions are capped at 10,000 operations. Flatten nested conditionals or factor the predicate into multiple reactions.
