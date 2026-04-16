@@ -503,6 +503,7 @@ dependencies = [
  "kdl 6.5.0",
  "miette 7.6.0",
  "minijinja",
+ "notify 7.0.0",
  "semver",
  "serde",
  "serde_json",

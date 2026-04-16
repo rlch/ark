@@ -48,6 +48,10 @@ tracing = { workspace = true }
 # when joining them into the synthesised `exec script="…"` op so
 # metacharacters in argv slots survive the `sh -c` round-trip.
 shlex = { workspace = true }
+# T-11.6 (scene::watcher): filesystem watcher for auto-reload. notify
+# uses inotify on Linux / FSEvents on macOS; the same crate powers
+# `ark pane diff` + `ark pane log` live-update.
+notify = { workspace = true }
 # T-10.2 (scene::wasm_meta): scan a wasm cartridge for the
 # `ark.metadata` custom section and decode the contents as KDL via
 # facet-kdl. Path dep on the metadata-types crate keeps the

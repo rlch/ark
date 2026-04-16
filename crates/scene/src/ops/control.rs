@@ -279,16 +279,31 @@ impl Intent for ReloadSceneOp {
             reloader.reload(move || supervisor.any_turn_inflight());
 
         match &outcome {
-            crate::reload::ReloadOutcome::Applied { diff } => {
+            crate::reload::ReloadOutcome::Applied { diff, telemetry } => {
                 tracing::info!(
                     target: "scene::ops",
                     op = Self::NAME,
                     old_reactions = diff.old_reaction_count,
                     new_reactions = diff.new_reaction_count,
+                    reactions_added = telemetry.reactions_added,
+                    reactions_removed = telemetry.reactions_removed,
+                    keybinds_changed = telemetry.keybinds_changed,
+                    plugins_changed = telemetry.plugins_changed,
+                    status = telemetry.status.as_str(),
                     "reload_scene: applied"
                 );
+                // T-11.8: the op's return value doubles as the payload
+                // the supervisor reuses to emit
+                // `UserEvent:ark.scene.reloaded`. Keep the field
+                // names aligned with the event contract.
                 Ok(Some(serde_json::json!({
-                    "status": "applied",
+                    "status": telemetry.status.as_str(),
+                    "duration_ms": telemetry.duration_ms,
+                    "reactions_added": telemetry.reactions_added,
+                    "reactions_removed": telemetry.reactions_removed,
+                    "keybinds_changed": telemetry.keybinds_changed,
+                    "plugins_changed": telemetry.plugins_changed,
+                    "failed_stage": telemetry.failed_stage,
                     "old_reactions": diff.old_reaction_count,
                     "new_reactions": diff.new_reaction_count,
                     "old_keybinds": diff.old_keybind_count,
@@ -317,7 +332,7 @@ impl Intent for ReloadSceneOp {
                     "pending_sessions": pending_sessions,
                 })))
             }
-            crate::reload::ReloadOutcome::Failed { error } => {
+            crate::reload::ReloadOutcome::Failed { error, telemetry: _ } => {
                 Err(IntentError::failed(
                     Self::NAME,
                     format!("reload_scene: {error}").into(),

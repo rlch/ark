@@ -16,6 +16,7 @@
 //! [[hooks]]               # repeatable hook definitions
 //! [acp]                   # ACP behaviour knobs (T-ACP.5b timeout)
 //! [engines.<name>]        # ACP engine launch specs (T-ACP.4a rung 4)
+//! [scene]                 # scene hot-reload knobs (T-11.6 watcher)
 //! ```
 //!
 //! `Config::defaults()` is the canonical entry point — the same as
@@ -81,6 +82,17 @@ pub const DEFAULT_ZELLIJ_PICKER_PLUGIN: &str = "~/.config/zellij/plugins/ark-pic
 /// Default `mux.zellij.default_layout_dir`.
 pub const DEFAULT_ZELLIJ_LAYOUT_DIR: &str = "~/.config/ark/layouts";
 
+/// Default `[scene] watch`.
+///
+/// T-11.6: disabled by default. When `true`, the supervisor spawns a
+/// `notify` watcher on the resolved scene path and auto-fires
+/// `reload_scene` whenever the file changes (debounced 200 ms,
+/// editor temp files filtered by suffix).
+pub const DEFAULT_SCENE_WATCH: bool = false;
+
+/// Default `[scene] watch_debounce_ms`. 200 ms matches T-11.6 spec.
+pub const DEFAULT_SCENE_WATCH_DEBOUNCE_MS: u64 = 200;
+
 /// Default `[acp] permission_timeout_ms` (interactive).
 ///
 /// T-ACP.5b: picker picks the permission prompt by default; the dispatcher
@@ -125,6 +137,9 @@ pub struct Config {
     /// default.
     #[serde(default)]
     pub engines: BTreeMap<String, EngineLaunchSpec>,
+    /// `[scene]` — scene hot-reload + watcher knobs (T-11.6).
+    #[serde(default)]
+    pub scene: SceneSection,
 }
 
 impl Default for Config {
@@ -148,6 +163,39 @@ impl Config {
             hooks: Vec::new(),
             acp: AcpSection::default(),
             engines: BTreeMap::new(),
+            scene: SceneSection::default(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [scene]
+// ---------------------------------------------------------------------------
+
+/// `[scene]` section — scene hot-reload + file-watcher knobs (T-11.6).
+///
+/// Controls whether the supervisor spawns a `notify` watcher on the
+/// resolved scene path and auto-fires `reload_scene` on change. The
+/// watcher is debounced and ignores editor temp files (`.swp`, `.tmp`,
+/// trailing `~`, leading `.#`, `.bak`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SceneSection {
+    /// Whether to watch the scene file and auto-reload on change.
+    /// Defaults to `false` — users opt in (T-11.6).
+    pub watch: bool,
+
+    /// Debounce window in milliseconds. Rapid save bursts (editor
+    /// atomic-rename strategy, rsync-style temp-then-move) are
+    /// coalesced into a single reload fire. Default 200 ms per T-11.6.
+    pub watch_debounce_ms: u64,
+}
+
+impl Default for SceneSection {
+    fn default() -> Self {
+        Self {
+            watch: DEFAULT_SCENE_WATCH,
+            watch_debounce_ms: DEFAULT_SCENE_WATCH_DEBOUNCE_MS,
         }
     }
 }
