@@ -107,6 +107,8 @@ pub enum EngineChoice {
 }
 
 impl EngineChoice {
+    #[allow(dead_code)] // Reserved for future CLI-level engine switching;
+    // current spawn path takes `engine` as a free-form String.
     fn as_str(self) -> &'static str {
         match self {
             EngineChoice::ClaudeCode => "claude-code",

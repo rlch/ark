@@ -26,7 +26,6 @@ use clap::Args;
 use kdl::KdlDocument;
 use serde_json::{Value, json};
 
-use ark_scene::ast::SceneDoc;
 use ark_scene::extends::SceneSearchCtx;
 use ark_scene::merge::{FragmentRole, LoadedFragment, load_composition};
 use ark_scene::parse::parse_scene;

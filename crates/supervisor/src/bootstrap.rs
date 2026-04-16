@@ -30,8 +30,6 @@
 //!   Passes an `external_cancel` so the main thread can trigger shutdown
 //!   when the foreground zellij process exits.
 
-use std::sync::Arc;
-
 use anyhow::Result;
 use ark_core::Config;
 use ark_types::{AgentSpec, CancellationToken, Outcome};
@@ -102,7 +100,7 @@ pub async fn supervisor_main(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_types::{AgentId, AgentSpec, Outcome};
+    use ark_types::{AgentId, AgentSpec};
 
     fn sample_spec() -> AgentSpec {
         let id = AgentId::new("cavekit", "bootstrap");

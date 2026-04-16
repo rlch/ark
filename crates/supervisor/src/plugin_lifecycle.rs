@@ -50,7 +50,9 @@ use ark_scene::intent::{IntentContext, IntentRegistry};
 use ark_scene::plugin::{Lifecycle, PluginDecl};
 use ark_types::event::AgentEvent;
 use ark_types::EventSink;
-use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
+#[cfg(test)]
+use kdl::KdlDocument;
+use kdl::{KdlEntry, KdlNode, KdlValue};
 use serde_json::json;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};

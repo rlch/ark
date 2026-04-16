@@ -1,3 +1,8 @@
+// miette + thiserror derive expansion triggers `unused_assignments` on
+// struct-variant fields that ARE read via the derived `source_code()` /
+// `labels()` impls. Silence at module scope (false positive).
+#![allow(unused_assignments)]
+
 //! Intent + op registry — R7 runtime surface.
 //!
 //! Scene reactions and keybinds both dispatch through a single

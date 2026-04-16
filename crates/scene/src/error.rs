@@ -41,6 +41,15 @@
 //! `cel/*`, `acp/*` families separately — those land in their owning
 //! crates, not here).
 
+// miette's `#[diagnostic]` + thiserror's `#[derive(Error)]` derive expand
+// into field-destructuring patterns that rustc's `unused_assignments`
+// lint misdiagnoses as "value never read" on struct-variant fields.
+// Every field here is read by the derived `source_code()` / `labels()`
+// / `related()` impls — the warning is a false positive specific to
+// this derive pair. Silence at module scope rather than peppering
+// `#[allow]` on every variant.
+#![allow(unused_assignments)]
+
 use miette::{Diagnostic, NamedSource, SourceSpan};
 use thiserror::Error;
 

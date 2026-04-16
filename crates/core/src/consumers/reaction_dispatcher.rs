@@ -337,6 +337,8 @@ pub(crate) struct TelemetryRecord {
 impl TelemetryRecord {
     /// Render as a `key="value" key=value …` string. Deterministic key
     /// ordering so tests can string-compare slices.
+    #[allow(dead_code)] // Public formatter surface; used in tests and
+    // reserved for downstream telemetry consumers.
     pub fn render(&self) -> String {
         let mut s = String::new();
         s.push_str(&format!("selector=\"{}\"", self.selector));

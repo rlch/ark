@@ -49,7 +49,6 @@ use semver::{Version, VersionReq};
 use crate::ast::{OpaqueBlock, UseNode};
 use crate::error::SceneError;
 use crate::parse::{SceneIR, parse_scene};
-use crate::wasm_meta::read_extension_metadata;
 
 /// Context describing the host environment for `use` resolution.
 ///

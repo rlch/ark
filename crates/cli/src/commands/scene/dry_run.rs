@@ -27,7 +27,7 @@
 use std::path::{Path, PathBuf};
 
 use clap::Args;
-use kdl::{KdlDocument, KdlNode};
+use kdl::KdlDocument;
 use serde_json::Value;
 
 use ark_scene::cel;

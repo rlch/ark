@@ -48,6 +48,7 @@ use ark_core::consumers::{ReactionDispatcherCtx, reaction_dispatcher, state_writ
 use ark_core::{Config, Engine, Orchestrator, World, write_status_atomic};
 use ark_scene::context::{AgentSnapshot, SessionSnapshot};
 use ark_scene::hook_compat::HookEntry as SceneHookEntry;
+#[cfg(test)]
 use ark_scene::id::SceneId;
 use ark_scene::intent::{IntentContext, IntentRegistry};
 use ark_scene::ops::register_core_ops;
@@ -780,8 +781,8 @@ fn is_noninteractive() -> bool {
 fn is_tty_stdin() -> bool {
     use std::os::unix::io::AsRawFd;
     let fd = std::io::stdin().as_raw_fd();
-    // `libc::isatty` returns 1 for TTY, 0 otherwise.
-    unsafe { nix::unistd::isatty(fd).unwrap_or(false) }
+    // `nix::unistd::isatty` returns `Ok(true)` for TTY, `Ok(false)` otherwise.
+    nix::unistd::isatty(fd).unwrap_or(false)
 }
 
 /// Write the final `status.json` with the terminal phase derived from
