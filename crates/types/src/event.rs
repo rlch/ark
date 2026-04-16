@@ -128,31 +128,41 @@ pub enum AgentEvent {
         id: AgentId,
         outcome: Outcome,
     },
-    /// Namespaced, free-form event emitted by scenes, extensions, hooks, the agent,
-    /// or ark-core. Carries an arbitrary JSON `payload` and a `source` tag so
-    /// `ark scene explain` can attribute reactions to their origin. See
-    /// cavekit-scene.md R4 and R8.
+    /// Namespaced, free-form event emitted by scenes, extensions, hooks, the ACP
+    /// agent, or ark-core. Carries an arbitrary JSON `payload` and a `source` tag
+    /// so `ark scene explain` can attribute reactions to their origin.
+    ///
+    /// ## Reserved payload top-level keys
+    ///
+    /// The keys `name`, `source`, and `payload` are reserved at the top of the
+    /// variant itself. Scene selectors with the UserEvent hybrid access route
+    /// bare field names into `payload`; reserved keys bypass that routing and
+    /// bind to the top-level variant fields directly. See cavekit-scene.md R4.
+    ///
+    /// ## Canonical `source` values
+    ///
+    /// - `"scene"` — emitted by a scene reaction (`emit` op).
+    /// - `"ext:<name>"` — emitted by an ark-native extension with that manifest name.
+    /// - `"hook:<name>"` — emitted by a legacy TOML `[[hooks]]` entry (compat).
+    /// - `"core"` — emitted by ark-core (supervisor, scene runtime, etc.).
+    /// - `"acp"` — emitted by the ACP agent (permission requests, session updates).
+    ///
+    /// Must be non-empty; the scene compiler rejects empty strings. See
+    /// cavekit-scene.md R4 and R10.
     #[serde(rename = "user_event")]
     UserEvent {
         /// Dotted, namespaced event name (e.g. `ark.acp.permission_requested`,
         /// `ark.scene.reloaded`, `myext.my_event`). Matched verbatim by scene
         /// selectors of the form `"UserEvent:<name>"`.
         name: String,
-        /// Arbitrary JSON payload; bound to the `payload` map in CEL predicates.
-        /// Shape is owned by the emitter — consumers should treat unknown
-        /// fields as tolerated.
-        payload: serde_json::Value,
         /// Origin attribution, used by `ark scene explain` to trace which
-        /// reaction graph produced this event. Canonical values:
-        ///
-        /// - `"core"` — emitted by ark-core (supervisor, scene runtime, etc.)
-        /// - `"scene"` — emitted by a scene reaction (`emit` op).
-        /// - `"ext:<name>"` — emitted by an ark-native extension with that manifest name.
-        /// - `"hook:<name>"` — emitted by a legacy TOML `[[hooks]]` entry (compat).
-        /// - `"agent"` — emitted by the ACP agent (reserved; v1 has no surface for this).
-        ///
-        /// Must be non-empty; the scene compiler rejects empty strings.
+        /// reaction graph produced this event. See the variant-level doc
+        /// comment for canonical values.
         source: String,
+        /// Arbitrary JSON payload; bound to the `payload` map in scene Rhai
+        /// predicates. Shape is owned by the emitter — consumers should treat
+        /// unknown fields as tolerated.
+        payload: serde_json::Value,
     },
 }
 
@@ -431,12 +441,12 @@ mod tests {
     fn user_event_roundtrip_and_tag() {
         let ev = AgentEvent::UserEvent {
             name: "ark.acp.permission_requested".into(),
+            source: "acp".into(),
             payload: serde_json::json!({
                 "request_id": "req-1",
                 "tool": "Bash",
                 "params": {"command": "ls"},
             }),
-            source: "core".into(),
         };
         let json = serde_json::to_string(&ev).expect("ser");
         assert!(
@@ -444,7 +454,7 @@ mod tests {
             "serde rename check — must tag as snake_case `user_event`: {json}"
         );
         assert!(
-            json.contains("\"source\":\"core\""),
+            json.contains("\"source\":\"acp\""),
             "source field must round-trip verbatim: {json}"
         );
         roundtrip(&ev);
@@ -452,18 +462,13 @@ mod tests {
 
     #[test]
     fn user_event_source_attribution_values() {
-        // Exercise each canonical `source` value documented in cavekit-scene.md R4.
-        for source in [
-            "core",
-            "scene",
-            "ext:my-extension",
-            "hook:on-stop",
-            "agent",
-        ] {
+        // Exercise each canonical `source` value documented on UserEvent (see
+        // cavekit-scene.md R4 + build-site-scene.md T-008).
+        for source in ["scene", "ext:my-extension", "hook:on-stop", "core", "acp"] {
             let ev = AgentEvent::UserEvent {
                 name: "myns.some_event".into(),
-                payload: serde_json::Value::Null,
                 source: source.into(),
+                payload: serde_json::Value::Null,
             };
             roundtrip(&ev);
         }
@@ -687,8 +692,8 @@ mod tests {
             },
             AgentEvent::UserEvent {
                 name: "myns.event".into(),
-                payload: serde_json::json!({"k": "v"}),
                 source: "scene".into(),
+                payload: serde_json::json!({"k": "v"}),
             },
         ];
         assert_eq!(_events.len(), 18);
