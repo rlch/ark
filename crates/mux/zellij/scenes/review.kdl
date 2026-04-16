@@ -1,0 +1,28 @@
+// T-14.2: scene-shaped port of `crates/mux/zellij/layouts/review.kdl`.
+//
+// Wraps the legacy zellij layout in a `scene "review" { … }` envelope
+// per `cavekit-scene.md` R15 (file shape). Zero behaviour change versus
+// the legacy `layouts/review.kdl`: the inner `layout { }` body is
+// byte-identical except for the indentation shift required by sitting
+// inside a `scene { }` block. The legacy `layouts/review.kdl` file
+// stays in place per `cavekit-layouts.md` R5 ("keep old shapes for N
+// versions"). T-8.1's scene compile pipeline (and the eventual T-14.1
+// auto-wrap) consume this scene through the same path that produces a
+// rendered zellij layout for `zellij --layout`.
+scene "review" {
+    layout {
+        tab name="{{ name }}" cwd="{{ cwd }}" {
+            pane split_direction="horizontal" {
+                pane size="70%" name="agent" {
+                    command "{{ agent_cmd }}"
+                    {% for a in agent_args %}args "{{ a }}"
+                    {% endfor %}
+                }
+                pane name="log" {
+                    command "ark"
+                    args "pane" "log" "--id" "{{ id }}"
+                }
+            }
+        }
+    }
+}

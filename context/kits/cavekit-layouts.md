@@ -227,6 +227,11 @@ layout {
 - Multi-tab layouts in one file — one KDL = one tab; orchestrator composes tabs
 
 ## Cross-References
+- **cavekit-scene.md** — superset format. Scenes wrap layouts with additional
+  nodes (`on {}`, `keybind {}`, `plugin {}`, `engine {}`). Pure layout KDL
+  files are auto-wrapped into a `scene { layout { … } }` envelope at compile
+  time (T-14.1 auto-wrap), so bare `layouts/*.kdl` files remain valid inputs.
+  Scene-shaped ports of every shipped layout live in `scenes/*.kdl` (T-14.2).
 - cavekit-mux-zellij.md R5 — layout rendering
 - cavekit-pane-commands.md — pane subcommands referenced in layouts
 - cavekit-orchestrator-cavekit.md / cavekit-orchestrator-claude-code.md — layout selection
