@@ -2,13 +2,14 @@
 //!
 //! T-12.1 (cavekit-scene R13). Houses the scene lifecycle commands:
 //!
-//! * [`check`]       — validate scene KDL files
-//! * [`fmt`]         — auto-format scene KDL files
-//! * [`schema_dump`] — emit scene-grammar schema from facet SHAPE
-//! * [`dry_run`]     — simulate event dispatch without side-effects
-//! * [`graph`]       — render attribution tree (extensions, plugins, reactions, keybinds)
-//! * [`explain`]     — trace resolution of a specific ref (intent, keybind, plugin, reaction, ext)
-//! * [`reload`]      — hot-reload scene via supervisor control socket
+//! * [`check`]         — validate scene KDL files
+//! * [`fmt`]           — auto-format scene KDL files
+//! * [`schema_dump`]   — emit scene-grammar schema from facet SHAPE
+//! * [`dry_run`]       — simulate event dispatch without side-effects
+//! * [`graph`]         — render attribution tree (extensions, plugins, reactions, keybinds)
+//! * [`explain`]       — trace resolution of a specific ref (intent, keybind, plugin, reaction, ext)
+//! * [`explain_merge`] — trace R11 composition (which fragment each contribution came from)
+//! * [`reload`]        — hot-reload scene via supervisor control socket
 
 use clap::{Args, Subcommand};
 
@@ -18,6 +19,7 @@ use crate::error::CliError;
 pub mod check;
 pub mod dry_run;
 pub mod explain;
+pub mod explain_merge;
 pub mod fmt;
 pub mod graph;
 pub mod reload;
@@ -35,8 +37,9 @@ pub mod schema_dump;
                   ark scene dry-run --event 'Started'\n  \
                   ark scene graph\n  \
                   ark scene explain intent:ark.core.close_tab\n  \
+                  ark scene explain-merge scene.kdl\n  \
                   ark scene schema-dump\n  \
-                  ark scene reload"
+                  ark scene reload --session myfeat"
 )]
 pub struct SceneArgs {
     /// Which `scene` subcommand to run.
@@ -59,6 +62,8 @@ pub enum SceneCommand {
     Graph(graph::GraphArgs),
     /// Trace resolution of a ref (intent, keybind, plugin, reaction, ext).
     Explain(explain::ExplainArgs),
+    /// Trace scene composition — which contribution came from which fragment (R11).
+    ExplainMerge(explain_merge::ExplainMergeArgs),
     /// Hot-reload the active scene via supervisor control socket.
     Reload(reload::ReloadArgs),
 }
@@ -72,6 +77,7 @@ pub fn run(args: SceneArgs, ctx: &Ctx) -> Result<(), CliError> {
         SceneCommand::DryRun(a) => dry_run::run(a, ctx),
         SceneCommand::Graph(a) => graph::run(a, ctx),
         SceneCommand::Explain(a) => explain::run(a, ctx),
+        SceneCommand::ExplainMerge(a) => explain_merge::run(a, ctx),
         SceneCommand::Reload(a) => reload::run(a, ctx),
     }
 }
