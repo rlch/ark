@@ -24,7 +24,11 @@ members = [
     "crates/ark-ext-metadata-types",
     # T-10.1 + T-10.3: plugin-side helper + search-path resolver (R10).
     "crates/ark-ext-metadata",
-    "crates/engines/*",
+    # T-ACP.7: `crates/engines/*` is gone — the legacy
+    # `ark-engines-claude-code` crate was retired and replaced by
+    # `ark-supervisor::engine_stub` + `acp-client` (ACP wire
+    # client). Future engines ship as extensions (R17 rung 3), not
+    # as workspace-member crates.
     "crates/orchestrators/*",
     "crates/mux/*",
     "crates/plugins/*",

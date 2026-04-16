@@ -14,9 +14,9 @@
 //! runs `CavekitOrchestrator::detect` first and only falls back to
 //! `ClaudeCodeOrchestrator::detect` when cavekit does not match.
 //!
-//! The PATH walk mirrors
-//! [`ark_engines_claude_code::preflight`] so detection is consistent with
-//! preflight. We deliberately avoid pulling in the `which` crate.
+//! The PATH walk mirrors `ark_supervisor::engine_stub::preflight` (T-ACP.7
+//! retired the former `ark_engines_claude_code::preflight`). We deliberately
+//! avoid pulling in the `which` crate.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};

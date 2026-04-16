@@ -51,7 +51,6 @@ use ark_scene::hook_compat::HookEntry as SceneHookEntry;
 use ark_scene::id::SceneId;
 use ark_scene::intent::{IntentContext, IntentRegistry};
 use ark_scene::ops::register_core_ops;
-use ark_engines_claude_code::preflight;
 use ark_mux_zellij::ZellijMux;
 use ark_types::{
     AgentEvent, AgentId, AgentSpec, AgentStatus, CancellationToken, EventSink, Outcome, Phase,
@@ -380,8 +379,13 @@ pub async fn run_supervisor_with(
         .with_context(|| format!("mux.ensure_session({})", spec.session))?;
 
     // ---- Step 8: preflight ----
-    if run_preflight && spec.engine == "claude-code" {
-        preflight::preflight(&spec).context("engine preflight")?;
+    //
+    // T-ACP.7: the legacy `ark-engines-claude-code::preflight` was
+    // retired. The replacement in `engine_stub::preflight` is a
+    // lightweight PATH check — anything heavier lives in
+    // `ark doctor` (T-ACP.6).
+    if run_preflight {
+        crate::engine_stub::preflight(&spec).context("engine preflight")?;
     }
 
     // ---- Step 9: spawn consumer tasks ----

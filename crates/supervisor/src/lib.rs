@@ -75,6 +75,11 @@ pub use permission::{
     PENDING_REQUEST_CAPACITY, PERMISSION_TIMEOUT_EVENT, PermissionDispatcher, TIMEOUT_OPTION_ID,
     Tier1Outcome, evaluate_tier1, spawn_request_watcher,
 };
+
+// T-ACP.7: minimal ACP-engine Engine-trait stub that replaces the
+// retired `ark-engines-claude-code` crate.
+pub mod engine_stub;
+pub use engine_stub::{AcpEngineStub, preflight as engine_preflight};
 pub use orchestration::{
     SupervisorMode, finalize_state, outcome_exit_code, run_supervisor, run_supervisor_with,
 };

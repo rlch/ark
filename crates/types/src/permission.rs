@@ -1,13 +1,14 @@
-//! Shared permission-policy primitives for Claude Code's `PermissionRequest`
-//! hook (cavekit-engine-claude-code R3 / cavekit-hook-ipc R3).
+//! Shared permission-policy primitives for the legacy hook flow
+//! (cavekit-hook-ipc R3).
 //!
-//! Both `ark-engines-claude-code` (writer/engine side) and `ark-hook`
-//! (reader/CLI side) need the exact same three-valued policy and
-//! read-only-tool allowlist. Duplicating the enum in two crates caused
-//! F-044 (the hook ignored policy entirely and auto-approved every
-//! request). Promoting the shared logic here makes that class of
-//! drift impossible — both crates parse the same wire form and apply
-//! the same allowlist.
+//! Under T-ACP.7 the engine-side writer (formerly
+//! `ark-engines-claude-code`) is gone and ACP's
+//! `session/request_permission` replaces the write-to-disk policy
+//! hand-off for ACP-speaking engines. `ark-hook` still consumes these
+//! primitives for existing (non-ACP) hook payloads, so the types
+//! remain in `ark-types` for compat. Duplicating the enum in two
+//! crates caused F-044 in the pre-T-ACP.7 codebase; keeping it here
+//! prevents that class of drift from returning.
 //!
 //! ## Wire contract
 //!

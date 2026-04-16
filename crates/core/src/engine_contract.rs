@@ -7,19 +7,19 @@
 //! bundle of on-disk fixtures, and the suite asserts every scripted
 //! scenario the `Engine` trait is contractually required to satisfy.
 //!
-//! The sole in-tree impl today is
-//! [`ark_engines_claude_code::ClaudeCodeEngine`]; future engines would
-//! pass the same suite against their own factory.
+//! The sole in-tree impl today is `ark_supervisor::AcpEngineStub`
+//! (T-ACP.7 retired `ark_engines_claude_code::ClaudeCodeEngine`); future
+//! engines would pass the same suite against their own factory.
 //!
 //! ## Trait surface vs. timeline scenarios
 //!
 //! The [`Engine`] trait surface covers the install/teardown lifecycle,
 //! naming, pane command, transcript path, and permission policy write. It
 //! does **NOT** currently expose a unified "feed me a hook payload, emit
-//! events" method or a transcript-parsing method — those live on the
-//! concrete engine crate's free functions
-//! ([`ark_engines_claude_code::parse_line`],
-//! [`ark_engines_claude_code::tail_transcript_path`], etc.).
+//! events" method or a transcript-parsing method — those used to live on
+//! the retired `ark_engines_claude_code` crate (T-ACP.7). Under ACP
+//! every engine-emitted signal lands on the ACP event bus, so the
+//! transcript-parsing surface is gone.
 //!
 //! Rather than expand the trait purely to satisfy the contract, the suite
 //! asserts what the trait guarantees today, and also **validates that the
@@ -28,8 +28,8 @@
 //! through their crate-specific parsers. The deferred timeline /
 //! transcript-parsing scenarios are documented below — engine-crate
 //! integration tests (e.g.
-//! `crates/engines/claude-code/tests/contract.rs`) layer those
-//! assertions on top of this suite.
+//! the retired `crates/engines/claude-code/tests/contract.rs`) layered
+//! those assertions on top of this suite before T-ACP.7.
 //!
 //! Deferred (tracked for trait expansion in a follow-up):
 //! - `hook_timeline_post_tool_use`

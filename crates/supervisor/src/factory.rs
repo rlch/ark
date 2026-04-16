@@ -24,12 +24,13 @@ use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use ark_core::{Config, Engine, Orchestrator};
-use ark_engines_claude_code::engine::ClaudeCodeEngine;
 use ark_mux_zellij::ZellijMux;
 use ark_orchestrators_cavekit::CavekitOrchestrator;
 use ark_orchestrators_claude_code::ClaudeCodeOrchestrator;
 use ark_types::{is_v1_engine, is_v1_mux, is_v1_orchestrator};
 use thiserror::Error;
+
+use crate::engine_stub::AcpEngineStub;
 
 // ---------------------------------------------------------------------------
 // SupervisorError — typed-error surface shared by the supervisor crate.
@@ -88,6 +89,15 @@ pub enum SupervisorError {
 // ---------------------------------------------------------------- engines ----
 
 /// Mint a concrete `Engine` trait object for `slug`.
+///
+/// T-ACP.7 retired the legacy `ark-engines-claude-code` crate; the
+/// factory now returns a thin [`AcpEngineStub`] for every slug
+/// because the real engine lifecycle lives on the ACP client side
+/// (spawned via
+/// [`crate::engine_resolution::resolve_engine`] + `AcpClient::spawn`).
+/// The Engine trait object is retained only for the pieces of the
+/// boot sequence that haven't been migrated off it yet (orchestrator
+/// `engine()` slug, install/teardown symmetry, `default_pane_cmd`).
 pub fn build_engine(slug: &str, _config: &Config) -> Result<Box<dyn Engine>> {
     if !is_v1_engine(slug) {
         return Err(anyhow!(
@@ -95,12 +105,7 @@ pub fn build_engine(slug: &str, _config: &Config) -> Result<Box<dyn Engine>> {
             ark_types::ENGINES_V1
         ));
     }
-    match slug {
-        "claude-code" => Ok(Box::new(ClaudeCodeEngine::new())),
-        other => Err(anyhow!(
-            "engine slug `{other}` is v1-locked but has no factory branch — plumb it here"
-        )),
-    }
+    Ok(Box::new(AcpEngineStub::new(slug)))
 }
 
 // ---------------------------------------------------------- orchestrators ----

@@ -274,6 +274,7 @@ dependencies = [
 name = "ark-cli"
 version = "0.1.0"
 dependencies = [
+ "acp-client",
  "anyhow",
  "ark-config",
  "ark-core",
@@ -336,28 +337,6 @@ dependencies = [
  "nix 0.29.0",
  "serde",
  "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "ark-engines-claude-code"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "ark-core",
- "ark-test-fixtures",
- "ark-types",
- "async-trait",
- "chrono",
- "nix 0.29.0",
- "notify 7.0.0",
- "serde",
- "serde_json",
- "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -542,7 +521,6 @@ dependencies = [
  "anyhow",
  "ark-config",
  "ark-core",
- "ark-engines-claude-code",
  "ark-ext-metadata-types",
  "ark-mux-zellij",
  "ark-orchestrators-cavekit",

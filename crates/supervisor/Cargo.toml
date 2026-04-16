@@ -17,7 +17,6 @@ ark-config = { path = "../config" }
 # the reaction_dispatcher consumes, and spawns reaction_dispatcher in
 # place of the old hook_dispatcher.
 ark-scene = { path = "../scene" }
-ark-engines-claude-code = { path = "../engines/claude-code" }
 ark-orchestrators-cavekit = { path = "../orchestrators/cavekit" }
 ark-orchestrators-claude-code = { path = "../orchestrators/claude-code" }
 ark-mux-zellij = { path = "../mux/zellij" }
