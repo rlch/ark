@@ -1,21 +1,22 @@
 ---
 created: "2026-04-14T00:00:00Z"
 last_edited: "2026-04-16"
+note: "Scene cavekit revised to v3 — see cavekit-scene.md changelog 2026-04-16"
 ---
 
 # Cavekit Overview — ark
 
 ## Project
-**ark** is a zellij-native agent orchestration layer written in Rust. It spawns AI coding agents (Claude Code CLI, Aider, Codex, future) into dedicated zellij sessions, each with a live diff pane, a git-status pane, and a rich claude TUI pane. Observability across all agents is surfaced via a zellij status-bar plugin and a zellij session-picker plugin. Users never open a custom TUI — zellij itself is the UI.
+**ark** is a **terminal IDE** written in Rust. It uses zellij as its rendering backend, providing extensible sessions with layout, reactions, keybinds, and views. AI coding agents are one extension capability — ark is not an AI terminal; it is a terminal IDE that supports AI via extensions.
 
-Pluggability is **three-layer** (locked 2026-04-16):
-- **Scene** — user-facing KDL config (preprocessed superset of zellij layout) declaring layout + reactions + keybinds + plugin lifecycle + extension composition. Author-side artifact. See `cavekit-scene.md`.
-- **Extension protocol** — ark-native JSON-RPC 2.0 contract between ark core and running extensions. Three delivery modes share one protocol: compiled-in (workspace crate), subprocess (any language, NDJSON stdio), wasm-component (WASI p2). Replaces the earlier "v2 subprocess NDJSON" plan — extensions ship in v0.3. See `cavekit-scene.md` R10 + R16.
-- **ACP** (Agent Client Protocol, external open standard, [agentclientprotocol.com](https://agentclientprotocol.com)) — editor↔coding-agent JSON-RPC. Ark is a first-class ACP client; engines are ACP agents (Claude Code, Codex, Gemini CLI speak ACP natively; aider via an adapter extension). Ark does NOT invent an agent protocol. See `cavekit-scene.md` R17.
+Pluggability is **two-layer** (locked 2026-04-16, converged v3):
+- **Scene** — user-facing KDL config declaring layout + reactions + keybinds + extension activation + composition. Ark owns the layout DSL (row/col/span/handle/mode/when=); zellij is a compile target, not a vocabulary source. See `cavekit-scene.md`.
+- **Extension** — bundles providing views, intents, events. Three delivery modes share one protocol: compiled-in (workspace crate), subprocess (any language, NDJSON unix socket), zellij-wasm (pane rendering). ACP (Agent Client Protocol) is an extension capability, not a separate layer — any extension can speak ACP. See `cavekit-scene.md` R10 + R16.
 
 Legacy vocabulary for reference:
-- **Engines** extract structured signal from agent CLIs (e.g., `ClaudeCodeEngine` injects hooks + tails transcript). After R17 ACP adoption, the engine abstraction collapses to a launch spec: just `command` + `args` + `env`. `ClaudeCodeEngine` hook-injection + transcript-tailing retires at v0.3 (plan T-ACP.7).
-- **Orchestrators** encode workflow methodology (e.g., `CavekitOrchestrator` watches impl-tracking + ralph-loop + spawns codex review tabs; `ClaudeCodeOrchestrator` is methodology-free passthrough). Orchestrator abstraction survives; scene reactions are additive.
+- **Engines** — collapsed to ACP extension capability. No `agent { }` block; scene says `use "claude-code"`. Legacy `ClaudeCodeEngine` hook-injection retires when ACP adoption complete.
+- **Orchestrators** — encode workflow methodology. Abstraction survives; scene reactions are additive.
+- **Plugins** — noun removed from scene DSL. Replaced by "views" (what fills a pane). Zellij wasm plugins are a delivery mode of extensions, not a separate concept.
 
 ## Principles
 1. **Zellij-native UX** — no custom TUI wrapper. Sessions, tabs, panes, plugins.
@@ -48,16 +49,15 @@ Legacy vocabulary for reference:
 | Hook sidecar + IPC | cavekit-hook-ipc.md | 5 | APPROVED | `ark-hook` binary, control socket protocol for picker→host. Expanded for scene ark-bus: `ark-hook intent` + `ark-hook emit` subcommands route keybind/event dispatch through the existing socket. |
 | Testing strategy | cavekit-testing.md | 5 | APPROVED | Contract tests, fixtures, e2e, CI matrix |
 | Distribution | cavekit-distribution.md | 4 | APPROVED | cargo-dist, homebrew, install flow, wasm embedding. Ark ships its own zellij — the release tarballs, brew formula, and binstall payload each carry a pinned zellij binary alongside `ark`, so `$PATH` lookup is only a dev-mode fallback (`ARK_USE_SYSTEM_ZELLIJ=1` opts into the system copy). Pins `agent-client-protocol` crate version. |
-| Scene (reactive KDL + ACP) | cavekit-scene.md | 17 (R1-R17) | DRAFT → APPROVED pending T-11.2+ and T-12.4+ | KDL 2.0 superset of zellij layout; reactions, keybinds, plugin lifecycle, extension composition via `use`, ACP client integration (engines as ACP agents). CEL predicates + minijinja templates. Nvim-class extensibility. Flips to APPROVED once R1-R15 are fully implemented (R14 hot-reload tiers T-11.2 through T-11.8 + R13 CLI tiers T-12.4 through T-12.11 remain). R16-R17 tracked separately under the Extension entry below + the ACP client row. |
-| Extension protocol (runtime RPC) | cavekit-scene.md R10 + R16 | 2 (R10 + R16) | DRAFT | ark-native JSON-RPC 2.0 contract between ark core and running extensions. Three delivery modes share one protocol: compiled-in (workspace crate, `register_extension!` macro), subprocess (any language, NDJSON stdio), wasm-component (WASI p2). Picker + status will port from inline-plugins to ark-native extensions at v0.3. Replaces the earlier "v2 subprocess NDJSON" plan — extensions ship in v0.3. |
+| Scene + Extensions (v3) | cavekit-scene.md | 17 (R1-R17) | CONVERGED | v3 redesign: ark-native layout DSL (row/col/span/@handle/mode/when=), views replace plugins, CEL-only (minijinja dead), extensions unified (3 delivery modes: compiled-in/subprocess/zellij-wasm), agent=extension capability (ACP not privileged), reconciler via override-layout, composition via include-only, code-generated manifest via Rust derives. See cavekit-scene.md changelog 2026-04-16. Build site needs regeneration (`/ck:map`). |
 
 ## Cross-Reference Map
 
 | Domain A | Interacts With | Interaction Type |
 |----------|----------------|------------------|
-| Scene | Supervisor, Mux, Event bus, Intent registry, Extension protocol, ACP client, Hook-IPC (via ark-bus) | Compiled at spawn; registers reactions + keybinds + plugin lifecycle + intent registry; gates hot-reload on ACP turn state |
-| Extension protocol | Scene (R10, R16), Supervisor (supervision tree), Event bus | ark↔ext JSON-RPC 2.0; bidirectional; three delivery modes share one protocol |
-| ACP client | Supervisor, Event bus, Scene reactions, Picker plugin | Per-engine-session JSON-RPC; surfaces `session/update` as `UserEvent:ark.acp.*`; permission dispatch routes via Zed 5-tier precedence |
+| Scene + Extensions | Supervisor, Mux, Event bus, Intent registry, Extension protocol | Compiled at launch; registers reactions + keybinds + views; reconciles layout via override-layout; gates hot-reload on ACP turn state |
+| Extension protocol | Scene (R10, R16), Supervisor, Event bus | ark↔ext JSON-RPC 2.0; three delivery modes (compiled-in, subprocess, zellij-wasm); views determined by trait impl (CommandView/ZellijView) |
+| ACP (extension capability) | Extensions, Event bus, Scene reactions | Extension declares `agent { speaks "acp" }`; events surfaced as `ark.acp.*`; no separate `agent { }` block |
 | Supervisor | Scene, Engine→ACP client, Orchestrator, Mux, State dir, Event bus | Owns lifecycle, compiles scene, spawns ACP client, tracks turn-inflight per session |
 | Engine (claude-code, LEGACY) | State dir, Hook sidecar, Event bus | Writes events from hook callbacks. Retires at v0.3 — replaced by ACP launch spec. |
 | Orchestrator (cavekit) | Engine/ACP, Mux, State dir, Pane cmd (log) | Observes FS + consumes engine events |
