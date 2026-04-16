@@ -52,22 +52,29 @@ impl Handle {
     /// Construct a handle from its raw `@name` form, validating the
     /// `@<ident>` prefix.
     ///
+    /// Identifier grammar: `[A-Za-z_][A-Za-z0-9_]*`. Mirrors Rust/zellij
+    /// identifier rules so handles map cleanly to env var names
+    /// (`ARK_HANDLE=@<ident>`) and don't need shell quoting.
+    ///
     /// Rejected inputs:
     /// - missing leading `@` (e.g. `main`)
     /// - `@` on its own (no identifier)
     /// - the empty string
-    /// - whitespace or embedded `@` inside the identifier (e.g. `@ x`,
-    ///   ` @x`, `@x@`)
+    /// - first char not `[A-Za-z_]` (e.g. `@1x`, `@-x`, `@.`)
+    /// - subsequent char not `[A-Za-z0-9_]` (e.g. `@foo/bar`, `@x@`,
+    ///   `@x y`)
     pub fn new(raw: &str) -> Result<Self, HandleParseError> {
         if !raw.starts_with('@') {
             return Err(HandleParseError::MissingAtPrefix);
         }
         let ident = &raw[1..];
-        if ident.is_empty() {
-            return Err(HandleParseError::EmptyName);
+        let mut chars = ident.chars();
+        let first = chars.next().ok_or(HandleParseError::EmptyName)?;
+        if !(first.is_ascii_alphabetic() || first == '_') {
+            return Err(HandleParseError::InvalidChar(first));
         }
-        for ch in ident.chars() {
-            if ch.is_whitespace() || ch == '@' {
+        for ch in chars {
+            if !(ch.is_ascii_alphanumeric() || ch == '_') {
                 return Err(HandleParseError::InvalidChar(ch));
             }
         }

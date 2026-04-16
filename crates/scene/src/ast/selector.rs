@@ -88,17 +88,6 @@ pub enum SelectorParseError {
     /// an exact match of `""` is almost always a bug).
     #[error("empty field pattern")]
     EmptyPattern,
-
-    /// A `(…)` annotation prefix was present but the name inside was not
-    /// one of `glob` / `exact` / `regex`. Payload is the offending name.
-    #[error("unknown field-pattern type annotation `({0})`: expected glob, exact, or regex")]
-    UnknownTypeAnnotation(String),
-
-    /// The pattern began with `(` but did not close with `)` before the
-    /// pattern body — e.g. `path="(glob*"` with no closing paren. Payload
-    /// is the full offending raw value for diagnostic context.
-    #[error("malformed field-pattern type annotation in `{0}`: expected `(glob|exact|regex)…`")]
-    MalformedTypeAnnotation(String),
 }
 
 impl FieldPattern {
@@ -121,29 +110,25 @@ impl FieldPattern {
             return Err(SelectorParseError::EmptyPattern);
         }
 
-        if let Some(rest) = raw_value.strip_prefix('(') {
-            let Some(close_idx) = rest.find(')') else {
-                return Err(SelectorParseError::MalformedTypeAnnotation(
-                    raw_value.to_string(),
-                ));
-            };
-            let annotation = &rest[..close_idx];
-            let body = &rest[close_idx + 1..];
-            if body.is_empty() {
-                return Err(SelectorParseError::EmptyPattern);
-            }
-            let match_type = match annotation {
-                "glob" => MatchType::Glob,
-                "exact" => MatchType::Exact,
-                "regex" => MatchType::Regex,
-                other => {
-                    return Err(SelectorParseError::UnknownTypeAnnotation(other.to_string()));
+        // Only treat the value as annotated when it begins with EXACTLY one
+        // of `(glob)`, `(exact)`, `(regex)`. Any other `(`-prefixed value
+        // (e.g. `"(foo"`, `"(glob)"` with empty body) falls through to the
+        // default-inference branch so legitimate literals starting with `(`
+        // stay expressible.
+        for (prefix, match_type) in [
+            ("(glob)", MatchType::Glob),
+            ("(exact)", MatchType::Exact),
+            ("(regex)", MatchType::Regex),
+        ] {
+            if let Some(body) = raw_value.strip_prefix(prefix) {
+                if body.is_empty() {
+                    return Err(SelectorParseError::EmptyPattern);
                 }
-            };
-            return Ok(FieldPattern {
-                raw: body.to_string(),
-                match_type,
-            });
+                return Ok(FieldPattern {
+                    raw: body.to_string(),
+                    match_type,
+                });
+            }
         }
 
         let match_type = if is_path_like_field(field_name) {
@@ -232,21 +217,21 @@ mod tests {
     }
 
     #[test]
-    fn unknown_annotation_is_error() {
-        let err = FieldPattern::parse("x", "(unknown)foo").unwrap_err();
-        assert_eq!(
-            err,
-            SelectorParseError::UnknownTypeAnnotation("unknown".to_string())
-        );
-    }
+    fn non_annotation_parenthesised_value_is_literal() {
+        // F-0003 fix — only exact `(glob)`, `(exact)`, `(regex)` prefixes
+        // count as type annotations. Everything else is a regular value
+        // and falls through to default-inference.
+        let fp = FieldPattern::parse("x", "(unknown)foo").unwrap();
+        assert_eq!(fp.match_type, MatchType::Exact);
+        assert_eq!(fp.raw, "(unknown)foo");
 
-    #[test]
-    fn malformed_annotation_missing_close_paren_is_error() {
-        let err = FieldPattern::parse("x", "(globfoo").unwrap_err();
-        assert_eq!(
-            err,
-            SelectorParseError::MalformedTypeAnnotation("(globfoo".to_string())
-        );
+        let fp = FieldPattern::parse("x", "(globfoo").unwrap();
+        assert_eq!(fp.match_type, MatchType::Exact);
+        assert_eq!(fp.raw, "(globfoo");
+
+        let fp = FieldPattern::parse("tool", "(foo").unwrap();
+        assert_eq!(fp.match_type, MatchType::Exact);
+        assert_eq!(fp.raw, "(foo");
     }
 
     #[test]
