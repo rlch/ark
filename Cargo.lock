@@ -504,7 +504,9 @@ dependencies = [
 name = "ark-scene"
 version = "0.1.0"
 dependencies = [
+ "ark-mux-zellij",
  "ark-types",
+ "async-trait",
  "blake3",
  "facet",
  "facet-kdl",
@@ -518,6 +520,7 @@ dependencies = [
  "strsim 0.11.1",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

@@ -36,8 +36,16 @@ use crate::rhai::{Engine, Program, RhaiScope, compile_in_scope};
 use miette::{NamedSource, SourceSpan};
 
 // Tier 4 — layout lowering to zellij KDL (T-034..T-040) and mode
-// pre-rendering (T-045) will add `compile::layout` + `compile::modes`
-// submodules here and re-export their entry points.
+// pre-rendering (T-045). Re-exported so downstream callers can write
+// `use ark_scene::compile::{compile_layout_kdl, compile_modes}`.
+pub mod layout;
+pub mod modes;
+
+pub use layout::{
+    compile_layout_kdl, compile_layout_kdl_with_terminal, write_layout_artifact,
+    write_layout_artifact_in,
+};
+pub use modes::{compile_modes, write_mode_artifacts, write_mode_artifacts_in};
 
 /// Upper bound on the source length of any single Rhai expression (T-024).
 pub const MAX_EXPR_LEN: usize = 4096;

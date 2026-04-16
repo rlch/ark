@@ -51,6 +51,12 @@ ark-types = { path = "../types" }
 # T-025: serde_json backs the `AgentEvent -> rhai::Map` conversion in
 # `build_event_scope` (serialize variant, walk Value, build Dynamic).
 serde_json = { workspace = true }
+# T-041..T-046: reconciler drives `zellij action override-layout` via the
+# mux crate's `CommandExecutor` trait (so tests can substitute
+# `StubExecutor`). Uses tokio for debounce (T-043) + async dispatch.
+ark-mux-zellij = { path = "../mux/zellij" }
+tokio = { workspace = true }
+async-trait = { workspace = true }
 
 [dev-dependencies]
 # T-007: `SceneId::from_file` round-trip test needs a real on-disk file.

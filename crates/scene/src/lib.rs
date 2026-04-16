@@ -46,5 +46,5 @@ pub mod view;
 // `TabHandle`) — compile-time inference from `ViewMeta::render_mode`
 // lands in T-090's derive macro.
 pub mod handle_types;
-// T-041..T-044 + T-046: reconciler + mode switching via override-layout
-// will land `pub mod reconciler;` here.
+// T-041..T-044 + T-046: reconciler + mode switching via override-layout.
+pub mod reconciler;
