@@ -67,6 +67,14 @@ pub mod engine_resolution;
 pub use engine_resolution::{
     DEFAULT_ENGINE_NAME, default_engine_launch, resolve_engine, shipped_engine,
 };
+
+// T-ACP.5 / T-ACP.5b: permission dispatcher with the Zed 5-tier
+// precedence + timeout + late-response handling.
+pub mod permission;
+pub use permission::{
+    PENDING_REQUEST_CAPACITY, PERMISSION_TIMEOUT_EVENT, PermissionDispatcher, TIMEOUT_OPTION_ID,
+    Tier1Outcome, evaluate_tier1, spawn_request_watcher,
+};
 pub use orchestration::{
     SupervisorMode, finalize_state, outcome_exit_code, run_supervisor, run_supervisor_with,
 };
