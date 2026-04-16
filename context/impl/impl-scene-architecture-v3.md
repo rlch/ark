@@ -19,7 +19,7 @@ Two design sessions produced this document. Every decision below is locked unles
 3. **Zellij is a rendering backend, not a vocabulary source.** Ark owns the DSL; zellij is a compile target.
 4. **Extensions are the universal abstraction.** Views, intents, events, agents — all provided by extensions. No shipped-vs-user distinction in format or API.
 5. **Composition over inheritance.** `include` only; no `extends`. Flat-first.
-6. **One expression language.** CEL everywhere. Minijinja is dead.
+6. **One expression language.** Rhai expression-only mode everywhere. CEL + Minijinja both dead.
 
 ---
 
@@ -92,10 +92,10 @@ scene "dev" {
 
 | Attr | Type | Description |
 |---|---|---|
-| `cwd` | string (CEL) | Working directory; inherited by panes |
+| `cwd` | string (Rhai interp) | Working directory; inherited by panes |
 | `name` | string | Display name in tab bar (defaults to handle) |
 | `focus` | bool | Initial focus; exactly one per layout |
-| `when` | string (CEL) | Conditional existence (see reconciler) |
+| `when` | string (Rhai predicate) | Conditional existence (see reconciler) |
 
 ### Sizing — spans
 
@@ -139,7 +139,7 @@ mode "review" {
 
 ### Conditional rendering (when=)
 
-`when="<CEL>"` on tabs and panes. Condition false at eval = node omitted from rendered layout. Condition true = node included.
+`when="<Rhai>"` on tabs and panes. Condition false at eval = node omitted from rendered layout. Condition true = node included.
 
 Reconciler (see below) handles transitions: re-renders desired layout → override-layout. Zellij converges.
 
@@ -161,7 +161,7 @@ Scene KDL = desired state. Ark reconciles zellij toward it.
 ### Mechanism
 
 ```
-CEL context changes (event fires, agent state updates)
+Rhai scope changes (event fires, agent state updates)
     ↓
 re-evaluate all when= predicates
     ↓
@@ -308,7 +308,7 @@ on ark.acp.permission_requested tool=write_file when="!starts_with(payload.input
 
 - Field names from event variant fields (facet SHAPE validates).
 - Default match: glob for path-like, exact for strings. Override via `(glob)`, `(exact)`, `(regex)`.
-- `when="<CEL>"` — bare CEL expression, no braces. Same context as op args.
+- `when="<Rhai>"` — bare Rhai expression, no braces. Same scope as op args. KDL raw string (`#"..."#`) required when body contains `"`.
 
 ### Selector-captured locals
 
@@ -318,7 +318,7 @@ Selector field patterns bind as locals in the op body:
 on ark.acp.tool_call tool=edit_file {
     set_status text="editing: {tool}"                 // {tool} = captured local
     nvim.open_at_line @editor
-        path="{payload.input.file_path}"              // not captured → full CEL path
+        path="{payload.input.file_path}"              // not captured → full Rhai path access
 }
 ```
 
@@ -360,7 +360,7 @@ bind "Ctrl c"      { acp.cancel }
 
 ## Interpolation
 
-`{...}` = CEL expression. Always. No minijinja anywhere.
+`{...}` = Rhai expression. Always. No minijinja anywhere. No CEL anywhere.
 
 ### Two scopes
 
@@ -371,9 +371,10 @@ bind "Ctrl c"      { acp.cancel }
 
 ### Rules
 
-- `{expr}` in string → evaluate CEL, substitute.
-- `when="expr"` → bare CEL, no braces (it's always CEL).
-- Zero holes → verbatim string, no CEL.
+- `{expr}` in string → evaluate Rhai, substitute.
+- `when="expr"` → bare Rhai expression, no braces (it's always Rhai).
+- Zero holes → verbatim string, no Rhai eval.
+- Rhai strings use double quotes. Single quotes = `char` in Rhai → `'planning'` is a lex error. Use KDL raw strings `#"..."#` when predicate body contains `"`.
 - Single-hole whole-value (`"{expr}"`) → typed pass-through.
 - Mixed (`"text {expr} more"`) → coerce to string, concat.
 
@@ -688,7 +689,7 @@ Every ark construct has a confirmed zellij compile target.
 | `pane @h { shell }` | `pane name="h" { command "env" "ARK_HANDLE=h" "$SHELL" }` |
 | `pane @h { <plugin-alias> }` | `pane { plugin location="<resolved>" }` |
 | `pane @h overlay pos=P size=WxH` | `floating_panes { pane name="h" x y width height }` |
-| `when="<CEL>"` | dead-branch elim + override-layout on transition |
+| `when="<Rhai>"` | dead-branch elim + override-layout on transition |
 | `mode "name"` + `use_mode` | override-layout --retain-existing-terminal-panes |
 | `focus @h` | `action focus-pane-id <id>` (pane) / `action go-to-tab <idx>` (tab) |
 | `close @h` | `action close-pane --pane-id <id>` / `action close-tab` |
@@ -708,8 +709,8 @@ Every ark construct has a confirmed zellij compile target.
 | R5 (keybinds) | Update: `bind` keyword, zellij notation |
 | R6 (plugins) | REMOVE: `plugin` keyword dead. Views replace. ZellijView trait. |
 | R7 (ops) | Update: new op vocabulary, typed handle targets, `acp.*` sub-namespace |
-| R8 (CEL) | Update: `when=` bare CEL; `{expr}` in strings; drop `if=` |
-| R9 (templating) | REWRITE: kill minijinja; CEL in two scopes (spawn + event) |
+| R8 (expression language) | REWRITE: Rhai expression-only mode (`rhai` crate, `Engine::new_raw` + symbol disables); `when=` bare Rhai; `{expr}` in strings; drop `if=`; CEL + minijinja deleted |
+| R9 (templating) | REWRITE: kill minijinja; Rhai in two scopes (spawn + event) |
 | R10 (extensions) | REWRITE: unified format; 3 delivery modes; code-generated manifest; CommandView/ZellijView traits; opt-in fragments |
 | R11 (composition) | REWRITE: drop `extends`; `include` only; flat namespace |
 | R14 (hot reload) | Update: reconciler via override-layout; debounce; drift tolerance |

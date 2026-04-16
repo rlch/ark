@@ -42,7 +42,7 @@ The ephemeral per-agent supervisor process. Forked from the `ark spawn` CLI call
   4. Sets up logging (tracing → `supervisor.log`)
   5. Loads config (figment-layered per cavekit-config — `config.toml` at `$XDG_CONFIG_HOME/ark/`)
   6. **Resolves scene path** via `resolve_scene_path()` (plan T-8.0 precedence: `--scene` flag → `ARK_SCENE` env → `./.ark/scene.kdl` → `$XDG_CONFIG_HOME/<appname>/scenes/default.kdl` → built-in default)
-  7. **Compiles scene** per `cavekit-scene.md` pipeline: parse → resolve extensions → merge fragments → validate (CEL compile, template check, intent registry) → render layout KDL → build subscriber set + lifecycle manifest + intent registry. Compile error = abort spawn with miette diagnostic; parent CLI surfaces exit-code + stderr.
+  7. **Compiles scene** per `cavekit-scene.md` pipeline: parse → resolve extensions → merge fragments → validate (Rhai compile, template check, intent registry) → render layout KDL → build subscriber set + lifecycle manifest + intent registry. Compile error = abort spawn with miette diagnostic; parent CLI surfaces exit-code + stderr.
   8. **Writes rendered zellij layout** to `${XDG_RUNTIME_DIR}/ark/layouts/{id}-scene.kdl`; injects `plugin "ark-bus" { source "shipped:ark-bus"; mount "hidden" }` if scene has any keybinds / zellij-event subscribers / `subscribes` forwarding per scene R5/R6.
   9. **Engine resolution** via `AgentSpec` chain (scene R17: `--engine` flag → scene `engine { }` → scene `use "engine-*"` → `config.toml` `engines.<name>` → hardcoded `claude --acp`). v0.1/v0.2: resolved engine instantiated via legacy factory (ClaudeCodeEngine). v0.3+: engine launch spec handed to ACP client.
   10. Calls `mux.ensure_session(spec.session).await?`

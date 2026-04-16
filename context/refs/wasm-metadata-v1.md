@@ -47,7 +47,7 @@ permissive read + strict write.
 | Bound                              | Value       | Why                                 |
 |------------------------------------|-------------|-------------------------------------|
 | Custom-section payload, max bytes  | 65 536      | Keeps `ark ext inspect` fast — any extension whose metadata exceeds 64 KiB is likely misusing the manifest (embedding README text, etc.) and should move that out of band. |
-| Single field (string node), max   | 4 096       | Per-field cap on values the manifest embeds (e.g. intent schemas). Consistent with CEL expression length bound (R8). |
+| Single field (string node), max   | 4 096       | Per-field cap on values the manifest embeds (e.g. intent schemas). Consistent with Rhai expression length bound (R8). |
 | `requires` list length             | 64          | A single extension shouldn't transitively require more than 64 peers; deeper ladders indicate a packaging mistake. |
 | `intents` list length              | 256         | Loose bound — practical extensions ship <32; the cap exists to keep the scene compile-time symbol table sized reasonably. |
 | `events` list length               | 256         | Same rationale as `intents`. |

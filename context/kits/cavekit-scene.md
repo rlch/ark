@@ -513,6 +513,12 @@ CompiledScene
 
 ## Changelog
 
+### 2026-04-16 — Rhai expression-only mode (supersedes CEL)
+
+- **Affected:** R3 (when= attr), R4 (reactions), R7 (op interpolation), R8 (expression language — rewritten), R12 (error codes).
+- **Summary:** Swapped expression engine from CEL (`cel-interpreter`) to Rhai (`rhai` crate) in expression-only mode (`Engine::new_raw` + symbol disables for `fn`/loops/assignment = non-TC). Rationale: better Rust-native syntax (method-chain form `xs.len()` vs `size(xs)`; `if/else` expression replaces `?:`), more active crate, built-in resource limits (`set_max_operations`, memory caps), ergonomic custom-fn registration. Cost: Rhai strings are double-quoted — predicates containing string literals require KDL raw strings (`when=#"agent.phase == "review""#`); `ark scene fmt` auto-promotes plain → raw when body contains `"`. Single-quoted strings unsupported (Rhai uses `'x'` for `char`); raw-string rule is the mitigation.
+- **Commits:** design-only; no code commits (pre-implementation)
+
 ### 2026-04-16 — v3 Convergence
 
 - **Affected:** R1–R17 (all), plus 3 new requirements (R6 Views, R9 Reconciler, R17 Rust DX)

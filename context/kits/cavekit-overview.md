@@ -49,7 +49,7 @@ Legacy vocabulary for reference:
 | Hook sidecar + IPC | cavekit-hook-ipc.md | 5 | APPROVED | `ark-hook` binary, control socket protocol for picker→host. Expanded for scene ark-bus: `ark-hook intent` + `ark-hook emit` subcommands route keybind/event dispatch through the existing socket. |
 | Testing strategy | cavekit-testing.md | 5 | APPROVED | Contract tests, fixtures, e2e, CI matrix |
 | Distribution | cavekit-distribution.md | 4 | APPROVED | cargo-dist, homebrew, install flow, wasm embedding. Ark ships its own zellij — the release tarballs, brew formula, and binstall payload each carry a pinned zellij binary alongside `ark`, so `$PATH` lookup is only a dev-mode fallback (`ARK_USE_SYSTEM_ZELLIJ=1` opts into the system copy). Pins `agent-client-protocol` crate version. |
-| Scene + Extensions (v3) | cavekit-scene.md | 17 (R1-R17) | CONVERGED | v3 redesign: ark-native layout DSL (row/col/span/@handle/mode/when=), views replace plugins, CEL-only (minijinja dead), extensions unified (3 delivery modes: compiled-in/subprocess/zellij-wasm), agent=extension capability (ACP not privileged), reconciler via override-layout, composition via include-only, code-generated manifest via Rust derives. See cavekit-scene.md changelog 2026-04-16. Build site needs regeneration (`/ck:map`). |
+| Scene + Extensions (v3) | cavekit-scene.md | 17 (R1-R17) | CONVERGED | v3 redesign: ark-native layout DSL (row/col/span/@handle/mode/when=), views replace plugins, Rhai expression-only mode (CEL + minijinja both dead, 2026-04-16), extensions unified (3 delivery modes: compiled-in/subprocess/zellij-wasm), agent=extension capability (ACP not privileged), reconciler via override-layout, composition via include-only, code-generated manifest via Rust derives. See cavekit-scene.md changelog 2026-04-16. Build site needs regeneration (`/ck:map`). |
 
 ## Cross-Reference Map
 
@@ -115,7 +115,7 @@ Explicitly deferred to v2+:
 - Remote agents (ssh)
 - Multi-user / team features
 - Windows support
-- User-defined CEL functions, Rhai/Lua scripting
+- User-defined helper functions beyond the bundled set, full Lua/Rhai-scripting scene blocks
 - Chord sequences (vim-style `<leader>ff`)
 - Multi-version same-ext loading
 - Intents-as-ACP-tools (ark does not expose its intent surface as callable tools to the agent; revisit post-v1)
