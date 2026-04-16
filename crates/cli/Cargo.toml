@@ -84,6 +84,9 @@ ark-mux-zellij = { path = "../mux/zellij" }
 # AcpClient::spawn.
 acp-client = { path = "../acp-client" }
 clap = { workspace = true }
+facet = { workspace = true }
+kdl = { workspace = true }
+miette = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }

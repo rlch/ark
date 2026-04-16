@@ -29,6 +29,7 @@ pub mod plugin;
 pub mod plugin_reactions;
 pub mod reactions;
 pub mod reload;
+pub mod schema;
 pub mod selector;
 pub mod scope;
 pub mod suggest;

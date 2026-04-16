@@ -2,12 +2,13 @@
 //!
 //! T-12.1 (cavekit-scene R13). Houses the scene lifecycle commands:
 //!
-//! * [`check`]   — validate scene KDL files
-//! * [`fmt`]     — auto-format scene KDL files
-//! * [`dry_run`] — simulate event dispatch without side-effects
-//! * [`graph`]   — render attribution tree (extensions, plugins, reactions, keybinds)
-//! * [`explain`] — trace resolution of a specific ref (intent, keybind, plugin, reaction, ext)
-//! * [`reload`]  — hot-reload scene via supervisor control socket
+//! * [`check`]       — validate scene KDL files
+//! * [`fmt`]         — auto-format scene KDL files
+//! * [`schema_dump`] — emit scene-grammar schema from facet SHAPE
+//! * [`dry_run`]     — simulate event dispatch without side-effects
+//! * [`graph`]       — render attribution tree (extensions, plugins, reactions, keybinds)
+//! * [`explain`]     — trace resolution of a specific ref (intent, keybind, plugin, reaction, ext)
+//! * [`reload`]      — hot-reload scene via supervisor control socket
 
 use clap::{Args, Subcommand};
 
@@ -20,6 +21,7 @@ pub mod explain;
 pub mod fmt;
 pub mod graph;
 pub mod reload;
+pub mod schema_dump;
 
 /// Top-level `ark scene` flags + subcommand dispatch.
 #[derive(Debug, Args)]
@@ -33,6 +35,7 @@ pub mod reload;
                   ark scene dry-run --event 'Started'\n  \
                   ark scene graph\n  \
                   ark scene explain intent:ark.core.close_tab\n  \
+                  ark scene schema-dump\n  \
                   ark scene reload"
 )]
 pub struct SceneArgs {
@@ -48,6 +51,8 @@ pub enum SceneCommand {
     Check(check::CheckArgs),
     /// Canonical-format scene files (idempotent).
     Fmt(fmt::FmtArgs),
+    /// Emit scene-grammar schema from facet SHAPE reflection.
+    SchemaDump(schema_dump::SchemaDumpArgs),
     /// Simulate one event fire against the current scene; print matching ops.
     DryRun(dry_run::DryRunArgs),
     /// Render attribution tree of extensions, plugins, reactions, keybinds, intents.
@@ -63,6 +68,7 @@ pub fn run(args: SceneArgs, ctx: &Ctx) -> Result<(), CliError> {
     match args.command {
         SceneCommand::Check(a) => check::run(a, ctx),
         SceneCommand::Fmt(a) => fmt::run(a, ctx),
+        SceneCommand::SchemaDump(a) => schema_dump::run(a, ctx),
         SceneCommand::DryRun(a) => dry_run::run(a, ctx),
         SceneCommand::Graph(a) => graph::run(a, ctx),
         SceneCommand::Explain(a) => explain::run(a, ctx),
