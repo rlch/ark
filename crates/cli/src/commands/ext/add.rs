@@ -1,6 +1,18 @@
 //! `ark ext add` — install an extension from a source.
 //!
-//! T-12.9 (cavekit-scene R13). Three source forms:
+//! T-12.9 (cavekit-scene R13) shipped install. T-13.1 / T-13.2
+//! (cavekit-scene R10, v0.5) layer publisher-trust on top — see
+//! [`super::trust`]. Every install derives a [`Publisher`] from the
+//! source (github user / url host / local path), checks it against
+//! the on-disk trust file, and either:
+//!
+//! * skips the prompt (publisher already trusted), or
+//! * prompts the operator on stdin, or
+//! * emits an audit-log entry when `--accept-all` is in effect.
+//!
+//! [`Publisher`]: super::trust::Publisher
+//!
+//! Three source forms:
 //!
 //! * `path:<dir>`          — recursive copy of a local directory.
 //! * `url:<https-tarball>` — download `.tar.gz` / `.tgz` via `ureq`,
@@ -70,7 +82,9 @@ pub struct AddArgs {
     #[arg(required = true, value_name = "SOURCE")]
     pub source: String,
 
-    /// Skip confirmation prompt (for CI).
+    /// Skip the publisher-trust prompt (for CI). Each bypass is
+    /// recorded as a line in
+    /// `${XDG_DATA_HOME}/ark/extension-audit.log` (T-13.2).
     #[arg(long = "accept-all")]
     pub accept_all: bool,
 }
@@ -150,6 +164,45 @@ pub fn run(args: AddArgs, _ctx: &Ctx) -> Result<(), CliError> {
     let source = parse_source(&args.source).map_err(|reason| CliError::Generic {
         reason: format!("ext/add: {reason}"),
     })?;
+
+    // T-13.1 / T-13.2: publisher trust gate. Resolve the source's
+    // publisher, check it against the on-disk trust file, and either
+    // skip the prompt (already trusted), prompt stdin (interactive),
+    // or emit an audit log entry (--accept-all CI path).
+    let publisher = super::trust::derive_publisher(&source);
+    if !super::trust::is_trusted(&publisher) {
+        if args.accept_all {
+            // T-13.2: non-interactive path. Record the bypass and
+            // persist the trust so subsequent installs in the same
+            // CI context don't re-log.
+            if let Err(e) =
+                super::trust::append_audit(&publisher, &source.as_specifier())
+            {
+                eprintln!("ark ext add: audit log write failed: {e}");
+            }
+            if let Err(e) = super::trust::save_trust(&publisher) {
+                eprintln!("ark ext add: persisting trust failed: {e}");
+            }
+            eprintln!(
+                "warning: --accept-all bypassed trust prompt for publisher `{}`",
+                publisher.display()
+            );
+        } else {
+            // T-13.1: interactive prompt.
+            let accepted = super::trust::prompt_trust(&publisher);
+            if !accepted {
+                return Err(CliError::Generic {
+                    reason: format!(
+                        "ext/add: publisher `{}` was not trusted; install aborted",
+                        publisher.display()
+                    ),
+                });
+            }
+            if let Err(e) = super::trust::save_trust(&publisher) {
+                eprintln!("ark ext add: persisting trust failed: {e}");
+            }
+        }
+    }
 
     let xdg_data_home = resolve_xdg_data_home().map_err(|reason| CliError::Generic {
         reason: format!("ext/add: {reason}"),
@@ -802,16 +855,26 @@ extension {{
 
     #[test]
     fn xdg_data_home_honours_env_when_set() {
-        // Duplicates Ctx's path resolver logic; caller-side test
-        // without mutating process env.
+        // Duplicates Ctx's path resolver logic. Env mutation is
+        // serialised through `ENV_LOCK` — any test touching process
+        // env must acquire it so that parallel `cargo test` doesn't
+        // race (T-13.1 introduced a second `run`-dispatching test
+        // which forces the discipline).
+        let _lock = crate::test_lock::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = TempDir::new().unwrap();
         let ns = tmp.path().join("ns");
+        let prior = std::env::var_os("XDG_DATA_HOME");
         unsafe {
             std::env::set_var("XDG_DATA_HOME", &ns);
         }
         let got = resolve_xdg_data_home().unwrap();
         unsafe {
-            std::env::remove_var("XDG_DATA_HOME");
+            match prior {
+                Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+                None => std::env::remove_var("XDG_DATA_HOME"),
+            }
         }
         assert_eq!(got, ns);
     }
@@ -824,18 +887,22 @@ extension {{
         let src = work.path().join("src");
         write_ext(&src, "run-smoke");
         let xdg = work.path().join("xdg");
+        let xdg_cfg = work.path().join("xdg-cfg");
         fs::create_dir_all(&xdg).unwrap();
+        fs::create_dir_all(&xdg_cfg).unwrap();
 
-        // Isolate the test via `XDG_DATA_HOME`. Other tests that touch
-        // the same env var are serialised through the `ENV_LOCK` in
-        // `crate::test_lock`; this test is conservative and serialises
-        // too.
+        // Isolate the test via `XDG_DATA_HOME` (install root + audit
+        // log) and `XDG_CONFIG_HOME` (trust file, T-13.1). Other tests
+        // that touch the same env vars serialise through the
+        // `ENV_LOCK` in `crate::test_lock`.
         let _lock = crate::test_lock::ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let prior = std::env::var_os("XDG_DATA_HOME");
+        let prior_data = std::env::var_os("XDG_DATA_HOME");
+        let prior_cfg = std::env::var_os("XDG_CONFIG_HOME");
         unsafe {
             std::env::set_var("XDG_DATA_HOME", &xdg);
+            std::env::set_var("XDG_CONFIG_HOME", &xdg_cfg);
         }
 
         let args = AddArgs {
@@ -846,9 +913,13 @@ extension {{
         let result = run(args, &ctx);
 
         unsafe {
-            match prior {
+            match prior_data {
                 Some(v) => std::env::set_var("XDG_DATA_HOME", v),
                 None => std::env::remove_var("XDG_DATA_HOME"),
+            }
+            match prior_cfg {
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
             }
         }
 
@@ -856,6 +927,96 @@ extension {{
         let installed = xdg.join("ark/extensions/run-smoke");
         assert!(installed.join("extension.kdl").is_file());
         assert!(installed.join(".ark-install").is_file());
+        // T-13.2: `--accept-all` must drop a line into the audit log.
+        let audit = xdg.join("ark/extension-audit.log");
+        assert!(audit.is_file(), "audit log should exist");
+        let audit_text = fs::read_to_string(&audit).unwrap();
+        assert!(audit_text.contains("accept-all"));
+        assert!(audit_text.contains(&format!("publisher=path:{}", src.display())));
+        // T-13.1: the trust file should now list this publisher.
+        let trust = xdg_cfg.join("ark/extension-trust.kdl");
+        assert!(trust.is_file(), "trust file should exist");
+        let trust_text = fs::read_to_string(&trust).unwrap();
+        assert!(trust_text.contains(&format!("path:{}", src.display())));
+    }
+
+    // T-13.1: a second `--accept-all` install for the same publisher
+    // must skip the audit log (already trusted, no bypass needed) and
+    // must not duplicate the trust entry.
+    #[test]
+    fn run_skips_audit_when_publisher_already_trusted() {
+        let work = TempDir::new().unwrap();
+        let src_a = work.path().join("src-a");
+        let src_b = work.path().join("src-b");
+        write_ext(&src_a, "first");
+        write_ext(&src_b, "second");
+        let xdg = work.path().join("xdg");
+        let xdg_cfg = work.path().join("xdg-cfg");
+        fs::create_dir_all(&xdg).unwrap();
+        fs::create_dir_all(&xdg_cfg).unwrap();
+
+        let _lock = crate::test_lock::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prior_data = std::env::var_os("XDG_DATA_HOME");
+        let prior_cfg = std::env::var_os("XDG_CONFIG_HOME");
+        unsafe {
+            std::env::set_var("XDG_DATA_HOME", &xdg);
+            std::env::set_var("XDG_CONFIG_HOME", &xdg_cfg);
+        }
+
+        // Pre-seed the trust file with both `path:<src-a>` and
+        // `path:<src-b>` — each Source::Path publisher key is the
+        // full path, so we need both entries for the second install
+        // to also be trusted.
+        let trust_path = xdg_cfg.join("ark/extension-trust.kdl");
+        fs::create_dir_all(trust_path.parent().unwrap()).unwrap();
+        fs::write(
+            &trust_path,
+            format!(
+                "publisher \"path:{}\"\npublisher \"path:{}\"\n",
+                src_a.display(),
+                src_b.display()
+            ),
+        )
+        .unwrap();
+
+        let ctx = Ctx::default();
+        let r1 = run(
+            AddArgs {
+                source: format!("path:{}", src_a.display()),
+                accept_all: true,
+            },
+            &ctx,
+        );
+        let r2 = run(
+            AddArgs {
+                source: format!("path:{}", src_b.display()),
+                accept_all: true,
+            },
+            &ctx,
+        );
+
+        unsafe {
+            match prior_data {
+                Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+                None => std::env::remove_var("XDG_DATA_HOME"),
+            }
+            match prior_cfg {
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+        }
+
+        r1.expect("first install");
+        r2.expect("second install");
+
+        // Audit log should not exist (publishers were pre-trusted).
+        let audit = xdg.join("ark/extension-audit.log");
+        assert!(
+            !audit.exists(),
+            "pre-trusted publisher must not write audit log"
+        );
     }
 
     // --- github subprocess (network-dependent, ignored by default) ---

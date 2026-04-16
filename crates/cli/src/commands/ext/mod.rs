@@ -28,6 +28,7 @@ pub mod info;
 pub mod inspect;
 pub mod list;
 pub mod remove;
+pub mod trust;
 pub mod update;
 
 /// Top-level `ark ext` flags + subcommand dispatch.
