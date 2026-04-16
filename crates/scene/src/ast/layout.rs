@@ -141,9 +141,10 @@ pub struct TabNode {
     pub name: Option<String>,
 
     /// Initial focus for the session (R3 `focus` attr). Stored as a raw
-    /// string because facet-kdl 0.42 does not coerce KDL boolean literals
-    /// to `Option<bool>`; post-parse validation coerces `"true"` / `"false"`
-    /// in T-036. Exactly one focused tab per layout validated at compile.
+    /// string; accepts both `focus=true` (KDL boolean literal) and
+    /// `focus="true"` (string) — the parser normalizes booleans to
+    /// strings in a pre-parse pass. Exactly one focused tab per layout
+    /// validated at compile (T-036).
     #[facet(kdl::property, default)]
     pub focus: Option<String>,
 

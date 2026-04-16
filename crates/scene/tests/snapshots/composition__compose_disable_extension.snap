@@ -1,0 +1,13 @@
+---
+source: crates/scene/tests/composition.rs
+expression: format_result(&result)
+---
+layouts: 1
+  tabs: 1
+    tab @main
+modes: 0
+reactions: 0
+binds: 0
+uses: 1
+  use "git-status"
+disabled: git-status

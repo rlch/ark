@@ -117,10 +117,10 @@ pub struct SpawnOp {
     pub handle: Handle,
     /// `Some` when the caller wrote `spawn @h overlay pos=… size=… { … }`;
     /// `None` for tiled spawns.
-    #[facet(opaque)]
+    #[facet(opaque, default)]
     pub overlay: Option<OverlayAttrs>,
     /// Single view child node (the pane content, required per R3).
-    #[facet(opaque)]
+    #[facet(opaque, default)]
     pub view: ViewRef,
     /// Optional per-op Rhai guard (note: `SpawnOp` carries its own
     /// `when` because R7 already calls out overlay vs tiled modes —
@@ -182,7 +182,7 @@ pub struct EmitOp {
     pub event_name: String,
     /// Opaque KDL payload block preserved verbatim; Rhai interpolation
     /// happens at dispatch time, not at parse time.
-    #[facet(opaque)]
+    #[facet(opaque, default)]
     pub payload: Option<KdlDocument>,
     /// Optional per-op Rhai guard.
     #[facet(kdl::property, default)]

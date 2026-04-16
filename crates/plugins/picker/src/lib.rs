@@ -127,7 +127,7 @@ pub const SIDECAR_SCENE_KDL: &str = include_str!("../scene.kdl");
 /// static `ark_ext_metadata()` entry point the scene registry picks
 /// up at link time.
 pub fn picker_metadata() -> ark_ext_metadata::ExtensionMetadata {
-    use ark_ext_metadata::{ConfigSchema, EventDecl, IntentDecl, StringNode};
+    use ark_ext_metadata::{CapabilitySet, ConfigSchema, EventDecl, IntentDecl, StringNode};
     ark_ext_metadata::ExtensionMetadata {
         name: StringNode::new(EXTENSION_NAME),
         version: StringNode::new(env!("CARGO_PKG_VERSION")),
@@ -159,11 +159,9 @@ pub fn picker_metadata() -> ark_ext_metadata::ExtensionMetadata {
                 payload_schema: StringNode::new("{}"),
             },
         ],
+        views: vec![],
         config: ConfigSchema::default(),
-        capabilities: vec![
-            StringNode::new("ui.plugin"),
-            StringNode::new("ui.keybind"),
-        ],
+        capabilities: CapabilitySet::from_strs(&["ui.plugin", "ui.keybind"]),
     }
 }
 

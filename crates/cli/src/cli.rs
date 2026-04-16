@@ -19,6 +19,9 @@ use crate::commands::Commands;
 /// The top-level ark CLI.
 ///
 /// Examples:
+///   ark                          # launch default session
+///   ark --scene myproject        # launch with named scene
+///   ark --session work           # attach-or-create named session
 ///   ark spawn --orchestrator cavekit --cwd . -- claude --resume
 ///   ark list
 ///   ark kill myfeat
@@ -33,16 +36,36 @@ use crate::commands::Commands;
     about = "ark — orchestrate agent sessions in zellij",
     long_about = "ark — orchestrate agent sessions in zellij.\n\
                   \n\
-                  The six top-level subcommands cover the user-facing\n\
-                  lifecycle: spawn, list, kill, doctor, config, pane.\n\
+                  Bare `ark` launches the default session.\n\
+                  Use `--scene` to pick a scene by name or path,\n\
+                  and `--session` to attach or create a named\n\
+                  zellij session.\n\
+                  \n\
+                  Subcommands cover the full lifecycle:\n\
+                  spawn, list, kill, doctor, config, pane.\n\
                   Run `ark <cmd> --help` for per-command examples.",
     max_term_width = 80,
     term_width = 80,
     propagate_version = true
 )]
 pub struct Cli {
+    /// Scene name or path.
+    ///
+    /// A bare name is resolved via the scene search path
+    /// (`$ARK_CONFIG_DIR/scenes/<name>.kdl`). A path containing
+    /// `/` or `.kdl` is used verbatim.
+    #[arg(long, value_name = "NAME_OR_PATH", global = true)]
+    pub scene: Option<String>,
+
+    /// Zellij session name (attach-or-create).
+    ///
+    /// When inside zellij (`$ZELLIJ` set), switches to the named
+    /// session. When outside, creates a new session with this name.
+    #[arg(long, value_name = "NAME", global = true)]
+    pub session: Option<String>,
+
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 }
 
 impl Cli {
@@ -94,7 +117,7 @@ mod tests {
         ])
         .expect("parse");
         match cli.command {
-            Commands::Spawn(args) => {
+            Some(Commands::Spawn(args)) => {
                 assert_eq!(args.orchestrator, OrchestratorChoice::Cavekit);
                 assert_eq!(args.cmd, vec!["claude", "--resume"]);
             }
@@ -105,14 +128,14 @@ mod tests {
     #[test]
     fn parses_list_subcommand_no_id() {
         let cli = Cli::try_parse_from(["ark", "list"]).expect("parse");
-        assert!(matches!(cli.command, Commands::List(_)));
+        assert!(matches!(cli.command, Some(Commands::List(_))));
     }
 
     #[test]
     fn parses_list_subcommand_with_id() {
         let cli = Cli::try_parse_from(["ark", "list", "myfeat"]).expect("parse");
         match cli.command {
-            Commands::List(args) => assert_eq!(args.id.as_deref(), Some("myfeat")),
+            Some(Commands::List(args)) => assert_eq!(args.id.as_deref(), Some("myfeat")),
             other => panic!("expected List, got {other:?}"),
         }
     }
@@ -121,7 +144,7 @@ mod tests {
     fn parses_kill_subcommand() {
         let cli = Cli::try_parse_from(["ark", "kill", "myfeat", "--force"]).expect("parse");
         match cli.command {
-            Commands::Kill(args) => {
+            Some(Commands::Kill(args)) => {
                 assert_eq!(args.id, "myfeat");
                 assert!(args.force);
             }
@@ -133,7 +156,7 @@ mod tests {
     fn parses_doctor_subcommand() {
         let cli = Cli::try_parse_from(["ark", "doctor", "--fix"]).expect("parse");
         match cli.command {
-            Commands::Doctor(args) => assert!(args.fix),
+            Some(Commands::Doctor(args)) => assert!(args.fix),
             other => panic!("expected Doctor, got {other:?}"),
         }
     }
@@ -142,7 +165,7 @@ mod tests {
     fn parses_config_show_subcommand() {
         let cli = Cli::try_parse_from(["ark", "config", "show"]).expect("parse");
         match cli.command {
-            Commands::Config(args) => assert!(matches!(args.command, ConfigCommand::Show)),
+            Some(Commands::Config(args)) => assert!(matches!(args.command, ConfigCommand::Show)),
             other => panic!("expected Config, got {other:?}"),
         }
     }
@@ -151,7 +174,7 @@ mod tests {
     fn parses_pane_diff_subcommand() {
         let cli = Cli::try_parse_from(["ark", "pane", "diff", "--cwd", "."]).expect("parse");
         match cli.command {
-            Commands::Pane(args) => assert!(matches!(args.command, PaneCommand::Diff(_))),
+            Some(Commands::Pane(args)) => assert!(matches!(args.command, PaneCommand::Diff(_))),
             other => panic!("expected Pane, got {other:?}"),
         }
     }
@@ -160,7 +183,7 @@ mod tests {
     fn parses_pane_log_subcommand() {
         let cli = Cli::try_parse_from(["ark", "pane", "log", "--id", "myfeat"]).expect("parse");
         match cli.command {
-            Commands::Pane(args) => match args.command {
+            Some(Commands::Pane(args)) => match args.command {
                 PaneCommand::Log(l) => assert_eq!(l.id, "myfeat"),
                 other => panic!("expected Log, got {other:?}"),
             },
@@ -178,18 +201,42 @@ mod tests {
         );
     }
 
+    /// T-115: bare `ark` (no subcommand) now parses successfully
+    /// with `command: None`, triggering the default session launch.
     #[test]
-    fn missing_subcommand_errors() {
-        let err = Cli::try_parse_from(["ark"]).expect_err("missing");
-        let s = err.to_string();
-        assert!(
-            s.contains("subcommand")
-                || s.contains("required")
-                || s.contains("spawn")
-                || s.contains("USAGE")
-                || s.contains("Usage"),
-            "unexpected error text: {s}"
-        );
+    fn bare_ark_parses_with_no_subcommand() {
+        let cli = Cli::try_parse_from(["ark"]).expect("bare ark should parse");
+        assert!(cli.command.is_none());
+        assert!(cli.scene.is_none());
+        assert!(cli.session.is_none());
+    }
+
+    /// T-116: `--scene` flag is captured at the root level.
+    #[test]
+    fn scene_flag_captured() {
+        let cli = Cli::try_parse_from(["ark", "--scene", "myproject"]).expect("parse");
+        assert_eq!(cli.scene.as_deref(), Some("myproject"));
+        assert!(cli.command.is_none());
+    }
+
+    /// T-117: `--session` flag is captured at the root level.
+    #[test]
+    fn session_flag_captured() {
+        let cli = Cli::try_parse_from(["ark", "--session", "work"]).expect("parse");
+        assert_eq!(cli.session.as_deref(), Some("work"));
+        assert!(cli.command.is_none());
+    }
+
+    /// T-116 + T-117: both flags together.
+    #[test]
+    fn scene_and_session_flags_together() {
+        let cli = Cli::try_parse_from([
+            "ark", "--scene", "myproject", "--session", "work",
+        ])
+        .expect("parse");
+        assert_eq!(cli.scene.as_deref(), Some("myproject"));
+        assert_eq!(cli.session.as_deref(), Some("work"));
+        assert!(cli.command.is_none());
     }
 
     #[test]

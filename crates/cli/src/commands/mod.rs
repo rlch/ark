@@ -16,6 +16,7 @@ pub mod config;
 pub mod doctor;
 pub mod ext;
 pub mod kill;
+pub mod launch;
 pub mod list;
 pub mod pane;
 pub mod scene;

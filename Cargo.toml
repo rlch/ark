@@ -32,6 +32,9 @@ members = [
     "crates/ark-ext-metadata-types",
     # T-10.1 + T-10.3: plugin-side helper + search-path resolver (R10).
     "crates/ark-ext-metadata",
+    # T-089: `#[derive(Extension)]` proc macro — generates
+    # `inventory::submit!(ExtensionMeta { … })` from struct attributes.
+    "crates/ark-ext-derive",
     # T-ACP.7: `crates/engines/*` is gone — the legacy
     # `ark-engines-claude-code` crate was retired and replaced by
     # `ark-supervisor::engine_stub` + `acp-client` (ACP wire
@@ -125,6 +128,12 @@ wasmparser = "0.246"
 # compile time. Cargo-style range syntax (`>= 1.2, < 2.0`) ships in
 # `semver::VersionReq`.
 semver = "1"
+
+# T-089 (scene): `inventory` provides zero-config distributed collection
+# of `ExtensionMeta` values. The `#[derive(Extension)]` proc macro emits
+# `inventory::submit!` calls; the scene compiler iterates them via
+# `inventory::iter::<ExtensionMeta>`. Linker-based, no codegen.
+inventory = "0.3"
 
 # T-10.2 dev (scene): `wat` constructs `(module (@custom "ark.metadata"
 # "<kdl>"))` test fixtures so the wasm-meta reader can be exercised

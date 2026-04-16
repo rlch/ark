@@ -38,6 +38,8 @@ pub mod interp;
 // Layout + mode lowering (T-034..T-040, T-045) will add
 // `compile::layout` and `compile::modes` submodules.
 pub mod compile;
+// T-074: include path resolution + fragment splicing (composition).
+pub mod compose;
 // T-025: scope builders for spawn / event contexts.
 pub mod context;
 // T-026 + T-027 + T-028..T-031: view registry + primitives.
@@ -46,5 +48,29 @@ pub mod view;
 // `TabHandle`) — compile-time inference from `ViewMeta::render_mode`
 // lands in T-090's derive macro.
 pub mod handle_types;
+// T-078: namespace enforcement — `<owner>.<name>` for intents/events.
+pub mod namespace;
+// T-079: load-order enforcement (reaction additive, bind last-wins,
+// clear-reactions / clear-bind / disable-extension merge semantics).
+pub mod load_order;
 // T-041..T-044 + T-046: reconciler + mode switching via override-layout.
 pub mod reconciler;
+// T-047..T-055: intent registry + op dispatch surface (R7).
+pub mod intent;
+// T-048..T-051: core op vocabulary implementations.
+pub mod ops;
+// T-056..T-060: reaction registry + selector matching.
+pub mod reactions;
+// T-064: chord parsing (R5.2 — `bind` chord grammar).
+pub mod chord;
+// T-094: extension activation registry — `use "<ext>"` symbol table.
+pub mod ext;
+// T-110 + T-111: embedded default scene + user override resolution.
+pub mod default_scene;
+// T-112: file-shape detection — normalizes bare-layout files into
+// `scene "default" { … }` before the typed parse pass.
+pub mod shape;
+// T-113: scene path resolver — pure function for scene file discovery.
+pub mod resolve_path;
+// T-127 + T-129: scene reload op + re-entry guard.
+pub mod reload;

@@ -545,6 +545,20 @@ pub enum SceneError {
         op: String,
     },
 
+    /// Multiple extensions declare ACP capability (T-104). The scene
+    /// compiler cannot disambiguate which agent to launch. The user
+    /// must deactivate all but one.
+    #[error("multiple extensions declare ACP capability: {}", extensions.join(", "))]
+    #[diagnostic(
+        code = "acp/multiple-agents",
+        severity(Error),
+        help("Only one extension may declare `capabilities {{ agent {{ speaks \"acp\" }} }}`. Remove the `use` directive for all but one of the listed extensions.")
+    )]
+    AcpMultipleAgents {
+        /// Names of the conflicting extensions.
+        extensions: Vec<String>,
+    },
+
     /// An `emit`-op chain exceeded the scene's cascade-depth cap
     /// (R4.10 / T-062). Runtime-only — no scene span. The dispatcher
     /// drops the offending event and logs this diagnostic.
@@ -580,6 +594,79 @@ pub enum SceneError {
         /// Span of the offending chord string.
         #[label("not a valid chord")]
         span: SourceSpan,
+    },
+
+    /// An `include "<path>"` target could not be found or read.
+    #[error("include `{target}` not found: {reason}")]
+    #[diagnostic(
+        code = "scene/include-not-found",
+        severity(Error),
+        help("Include paths are resolved relative to the scene file. Check the path exists and is readable.")
+    )]
+    IncludeNotFound {
+        /// The raw include target as authored.
+        target: String,
+        /// OS-level error detail.
+        reason: String,
+    },
+
+    /// An `include` chain revisited a file already on the include stack,
+    /// forming a cycle (R11 — conflicts = compile error).
+    #[error("include cycle detected: `{target}` already on include stack")]
+    #[diagnostic(
+        code = "scene/include-cycle",
+        severity(Error),
+        help("Include chains must be acyclic. The include stack at the point of cycle detection: {}", stack.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(" → "))
+    )]
+    IncludeCycle {
+        /// The include target that caused the cycle.
+        target: String,
+        /// Ordered include stack (root → … → current) at the point of detection.
+        stack: Vec<std::path::PathBuf>,
+    },
+
+    /// An included fragment failed to parse.
+    #[error("included fragment `{target}` has parse errors: {message}")]
+    #[diagnostic(
+        code = "scene/include-parse",
+        severity(Error),
+        help("Fragments contain scene body nodes (layout, on, bind, etc.) without the `scene \"name\" {{ }}` wrapper.")
+    )]
+    IncludeFragmentParse {
+        /// The include target path.
+        target: String,
+        /// Underlying parse error detail.
+        message: String,
+    },
+
+    /// Duplicate `@handle` across included fragments (R11 — no merge, conflicts = error).
+    #[error("handle `@{handle}` defined in both `{first}` and `{second}`")]
+    #[diagnostic(
+        code = "scene/include-handle-clash",
+        severity(Error),
+        help("Include splices fragments verbatim with no merge. Rename one of the conflicting handles.")
+    )]
+    IncludeHandleClash {
+        /// The duplicated handle name.
+        handle: String,
+        /// File that first defined the handle.
+        first: String,
+        /// File that redefined the handle.
+        second: String,
+    },
+
+    /// An `acp.permit` op referenced a `request_id` that is not in the
+    /// pending permission set — either already resolved, expired, or
+    /// never registered (T-108).
+    #[error("permission request `{request_id}` not found")]
+    #[diagnostic(
+        code = "acp/permission-not-found",
+        severity(Error),
+        help("The request may have already been resolved by another reaction, timed out, or never existed. Check the `request_id` value matches the one from the `ark.acp.permission_requested` event.")
+    )]
+    PermissionNotFound {
+        /// The `request_id` that could not be correlated.
+        request_id: String,
     },
 }
 
@@ -897,5 +984,13 @@ mod tests {
             span: (5, 7).into(),
         };
         assert_code(&err, "scene/invalid-chord");
+    }
+
+    #[test]
+    fn permission_not_found_code() {
+        let err = SceneError::PermissionNotFound {
+            request_id: "req-42".into(),
+        };
+        assert_code(&err, "acp/permission-not-found");
     }
 }

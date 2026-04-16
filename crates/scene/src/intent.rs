@@ -169,6 +169,34 @@ pub trait MuxHandle: Send + Sync + std::fmt::Debug {
     fn pipe(&self, from: &Handle, to: &Handle, payload: &str) -> Result<(), String>;
 }
 
+/// Narrow trait surface for the ACP client handle.
+///
+/// The concrete implementation lives in `crates/acp-client/` (T-ACP.2).
+/// Keeping the trait here means Tier-5/ACP ops compile + test against a
+/// mock without pulling the full acp-client crate into the scene dep
+/// graph.
+///
+/// Methods return `Result<(), String>` for consistency with [`MuxHandle`].
+/// The `permit` method takes a raw `outcome` string (`"allow"` /
+/// `"reject_once"` / `"reject_always"`) — the op validates the enum
+/// membership; the trait just forwards.
+#[async_trait]
+pub trait AcpHandle: Send + Sync + std::fmt::Debug {
+    /// Send a prompt to the active ACP session.
+    async fn prompt(&self, text: &str) -> Result<(), String>;
+
+    /// Cancel the in-flight ACP turn. Implementations should block up
+    /// to ~5 s for the agent to acknowledge `stopReason: cancelled`.
+    async fn cancel(&self) -> Result<(), String>;
+
+    /// Respond to an open `session/request_permission` with the given
+    /// outcome (`"allow"` / `"reject_once"` / `"reject_always"`).
+    async fn permit(&self, request_id: &str, outcome: &str) -> Result<(), String>;
+
+    /// Set the ACP session mode (e.g. `"plan"`, `"edit"`).
+    async fn set_mode(&self, mode: &str) -> Result<(), String>;
+}
+
 /// Event-bus trait surface used by `emit` + `set_status`.
 ///
 /// Tier-7's `ark-bus` plugin implements the real bus; Tier-5 tests pass
@@ -239,6 +267,10 @@ pub struct IntentContext {
     /// Event bus handle. `None` in tests; `emit` + `set_status` are
     /// noops with a `tracing::warn!` when absent.
     pub bus: Option<Arc<dyn EventBus>>,
+
+    /// ACP client handle. `None` when no ACP-capable extension is
+    /// active; `acp.*` ops warn + no-op per T-106.
+    pub acp: Option<Arc<dyn AcpHandle>>,
 }
 
 impl IntentContext {
@@ -251,6 +283,7 @@ impl IntentContext {
             handle_type_hint: None,
             mux: None,
             bus: None,
+            acp: None,
         }
     }
 
@@ -263,6 +296,12 @@ impl IntentContext {
     /// Builder: attach an event bus handle.
     pub fn with_bus(mut self, bus: Arc<dyn EventBus>) -> Self {
         self.bus = Some(bus);
+        self
+    }
+
+    /// Builder: attach an ACP client handle.
+    pub fn with_acp(mut self, acp: Arc<dyn AcpHandle>) -> Self {
+        self.acp = Some(acp);
         self
     }
 
@@ -496,7 +535,7 @@ pub(crate) fn strict_map(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::sync::Mutex;
@@ -594,6 +633,38 @@ mod tests {
         }
         fn pipe(&self, f: &Handle, t: &Handle, payload: &str) -> Result<(), String> {
             self.check(format!("pipe({},{},{payload})", f.raw(), t.raw()))
+        }
+    }
+
+    /// Mock ACP handle that records every call.
+    #[derive(Debug, Default)]
+    pub(crate) struct MockAcp {
+        pub calls: Mutex<Vec<String>>,
+    }
+
+    impl MockAcp {
+        pub(crate) fn take_calls(&self) -> Vec<String> {
+            std::mem::take(&mut *self.calls.lock().expect("poisoned"))
+        }
+    }
+
+    #[async_trait]
+    impl AcpHandle for MockAcp {
+        async fn prompt(&self, text: &str) -> Result<(), String> {
+            self.calls.lock().expect("poisoned").push(format!("prompt({text})"));
+            Ok(())
+        }
+        async fn cancel(&self) -> Result<(), String> {
+            self.calls.lock().expect("poisoned").push("cancel()".to_string());
+            Ok(())
+        }
+        async fn permit(&self, request_id: &str, outcome: &str) -> Result<(), String> {
+            self.calls.lock().expect("poisoned").push(format!("permit({request_id},{outcome})"));
+            Ok(())
+        }
+        async fn set_mode(&self, mode: &str) -> Result<(), String> {
+            self.calls.lock().expect("poisoned").push(format!("set_mode({mode})"));
+            Ok(())
         }
     }
 

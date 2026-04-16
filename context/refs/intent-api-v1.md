@@ -1,6 +1,6 @@
 ---
 created: "2026-04-16"
-last_edited: "2026-04-16"
+last_edited: "2026-04-17"
 status: frozen — v1.0
 ---
 
@@ -20,11 +20,12 @@ status: frozen — v1.0
 
 ## Scope
 
-v1.0 freezes **17 ops across 6 subject groups** under the
-`ark.core.*` namespace. Four of those are ACP-interaction ops
-(`prompt`, `acp_cancel`, `acp_permit`, `set_mode`); the other 13 are
-the "classic" scene ops. This document covers all 17 — they share one
-compatibility contract and one freeze event.
+v1.0 freezes **18 ops across 5 subject groups** under the
+`ark.core.*` and `ark.acp.*` namespaces. Four of those are
+ACP-interaction ops (`acp.prompt`, `acp.cancel`, `acp.permit`,
+`acp.set_mode`); the other 14 are the "classic" scene ops. This
+document covers all 18 — they share one compatibility contract and
+one freeze event.
 
 Extensions contribute ops under their own namespace (e.g.
 `my-ext.do_thing`); extension-authored ops are NOT subject to this
@@ -36,240 +37,217 @@ compiler rejects extension registrations that land inside the reserved
 
 | Group     | Op                           | KDL verb          | Idempotency                    |
 |-----------|------------------------------|-------------------|--------------------------------|
-| tabs      | `ark.core.open_tab`          | `open_tab`        | if-absent-focus-else-create    |
-| tabs      | `ark.core.close_tab`         | `close_tab`       | idempotent-noop-on-absent      |
-| tabs      | `ark.core.rename_tab`        | `rename_tab`      | idempotent-noop-on-absent      |
-| tabs      | `ark.core.focus_tab`         | `focus_tab`       | idempotent-noop-on-absent      |
-| panes     | `ark.core.split_pane`        | `split_pane`      | always-side-effect             |
-| panes     | `ark.core.close_pane`        | `close_pane`      | idempotent-noop-on-absent      |
-| plugins   | `ark.core.mount_plugin`      | `mount_plugin`    | launch-or-focus                |
-| plugins   | `ark.core.unmount_plugin`    | `unmount_plugin`  | idempotent-noop-on-absent      |
+| panes     | `ark.core.focus`             | `focus`           | noop on absent handle          |
+| panes     | `ark.core.close`             | `close`           | noop on absent handle          |
+| panes     | `ark.core.rename`            | `rename`          | noop on absent handle          |
+| panes     | `ark.core.resize`            | `resize`          | noop on absent handle          |
+| panes     | `ark.core.move`              | `move`            | noop on absent handle          |
+| panes     | `ark.core.pin`               | `pin`             | noop on absent handle          |
+| panes     | `ark.core.unpin`             | `unpin`           | noop on absent handle          |
+| spawn     | `ark.core.spawn`             | `spawn`           | check-then-create-else-focus   |
+| spawn     | `ark.core.new_tab`           | `new_tab`         | check-then-create-else-focus   |
 | messaging | `ark.core.pipe`              | `pipe`            | always-side-effect             |
 | messaging | `ark.core.emit`              | `emit`            | always-side-effect             |
 | messaging | `ark.core.set_status`        | `set_status`      | always-side-effect             |
 | control   | `ark.core.exec`              | `exec`            | always-side-effect             |
-| control   | `ark.core.reload_scene`      | `reload_scene`    | idempotent-noop-on-absent      |
-| acp       | `ark.core.prompt`            | `prompt`          | always-side-effect             |
-| acp       | `ark.core.acp_cancel`        | `acp_cancel`      | always-side-effect             |
-| acp       | `ark.core.acp_permit`        | `acp_permit`      | always-side-effect             |
-| acp       | `ark.core.set_mode`          | `set_mode`        | always-side-effect             |
+| control   | `ark.core.reload_scene`      | `reload_scene`    | noop when no reloader          |
+| acp       | `ark.acp.prompt`             | `acp.prompt`      | always-side-effect             |
+| acp       | `ark.acp.cancel`             | `acp.cancel`      | always-side-effect             |
+| acp       | `ark.acp.permit`             | `acp.permit`      | always-side-effect             |
+| acp       | `ark.acp.set_mode`           | `acp.set_mode`    | always-side-effect             |
 
-Scene authors write the short KDL verb (`open_tab`). The registry
-dispatches through the fully-qualified `ark.core.*` name; both forms
-are frozen.
+Scene authors write the KDL verb. The registry dispatches through the
+fully-qualified `ark.core.*` / `ark.acp.*` name; both forms are frozen.
+The canonical list is `CORE_OP_NAMES` in `crates/scene/src/ops/mod.rs`.
 
 ## Op schemas
 
 Each entry lists the KDL shape, every arg (type + required/optional),
-the return value, and side effects. Defaults and enum values come
-straight from the `<Op>Args` struct's `#[derive(Facet)]` definition.
+the return value, and side effects. Schemas are derived from the
+dispatch implementations in `crates/scene/src/ops/`.
 
-### `ark.core.open_tab`
+### Pane / tab ops (T-048)
+
+#### `ark.core.focus`
 
 ```kdl
-open_tab name=<str> [layout=<str>] [focus=<bool>]
+focus "@handle"
 ```
 
-| Arg      | Type    | Req | Notes                                                   |
-|----------|---------|-----|---------------------------------------------------------|
-| `name`   | string  | yes | Tab name. Matched against existing tabs first.          |
-| `layout` | string  | no  | Zellij layout name to apply when CREATING a new tab.    |
-| `focus`  | bool    | no  | Focus tab after create/focus. Default: true (R7).       |
+Polymorphic (tab or pane). Handle-type resolution from
+`IntentContext::handle_type_hint`. **Idempotent:** noop on absent handle.
+**Returns:** `IntentValue::None`.
 
-**Returns:** `None`. **Side effects:** creates or focuses a tab.
-
-### `ark.core.close_tab`
+#### `ark.core.close`
 
 ```kdl
-close_tab (name=<str> | index=<int>)
+close "@handle"
 ```
 
-Exactly one of `name=` / `index=` required. **Returns:** `None`.
+Polymorphic. **Idempotent:** noop on absent handle.
+**Returns:** `IntentValue::None`.
 
-### `ark.core.rename_tab`
+#### `ark.core.rename`
 
 ```kdl
-rename_tab (name=<str> | index=<int>) to=<str>
+rename "@handle" to="<name>"
 ```
 
-Exactly one of `name=` / `index=`. `to=` required. **Returns:** `None`.
+Tab-only at compile time. `to=` required.
+**Returns:** `IntentValue::None`.
 
-### `ark.core.focus_tab`
+#### `ark.core.resize`
 
 ```kdl
-focus_tab (name=<str> | index=<int>)
+resize "@handle" direction="<up|down|left|right>" by="<inc|dec>"
 ```
 
-Exactly one of `name=` / `index=`. **Returns:** `None`.
+Pane-only. Both `direction=` and `by=` required.
+**Returns:** `IntentValue::None`.
 
-### `ark.core.split_pane`
+#### `ark.core.move`
 
 ```kdl
-split_pane into=<str> side=<"left"|"right"|"up"|"down"> [size=<str>] {
-    command "<shell-cmd>"?
-    cwd "<path>"?
+move "@handle" to="<anchor>"
+```
+
+Pane-only. `to=` required. **Returns:** `IntentValue::None`.
+
+#### `ark.core.pin`
+
+```kdl
+pin "@handle"
+```
+
+Overlay pane. **Idempotent:** noop on absent handle.
+**Returns:** `IntentValue::None`.
+
+#### `ark.core.unpin`
+
+```kdl
+unpin "@handle"
+```
+
+Overlay pane. **Idempotent:** noop on absent handle.
+**Returns:** `IntentValue::None`.
+
+### Spawn ops (T-049)
+
+#### `ark.core.spawn`
+
+```kdl
+spawn "@handle" ["overlay" pos="…" size="…"] { <view> }
+```
+
+Create a pane. If handle already live, focuses existing pane instead
+(check-then-create-else-focus, T-055). `overlay` keyword is a bare
+positional. **Returns:** `IntentValue::None`.
+
+#### `ark.core.new_tab`
+
+```kdl
+new_tab "@handle" [name="…"] [cwd="…"]
+```
+
+Create a tab. Same check-then-create-else-focus policy as `spawn`.
+**Returns:** `IntentValue::None`.
+
+### Messaging ops (T-050)
+
+#### `ark.core.pipe`
+
+```kdl
+pipe from="@handle" to="@handle" payload="<str>"
+```
+
+All three properties required. Always side-effect.
+**Returns:** `IntentValue::None`.
+
+#### `ark.core.emit`
+
+```kdl
+emit "<event-name>" {
+    <key> "<value>"*
 }
 ```
 
-| Arg       | Type    | Req | Notes                                                 |
-|-----------|---------|-----|-------------------------------------------------------|
-| `into`    | string  | yes | Cross-referenced against declared `layout { tab … }`. |
-| `side`    | enum    | yes | One of `left`, `right`, `up`, `down`.                 |
-| `size`    | string  | no  | Percent (`"50%"`) or cell count (`"40"`).             |
-| `command` | child   | no  | Shell command positional arg on a `command` child.    |
-| `cwd`     | child   | no  | Working directory on a `cwd` child.                   |
+Positional event name required. Children block is converted to a JSON
+object payload. **Returns:** `IntentValue::None`. **Side effects:**
+publishes `UserEvent { name, payload, source }` on the bus.
 
-**Returns:** `None`. **Side effects:** creates a new pane.
-
-### `ark.core.close_pane`
+#### `ark.core.set_status`
 
 ```kdl
-close_pane (id=<str> | selector=<str>)
+set_status text="<str>" [severity="<str>"] [ttl_ms=<int>]
 ```
 
-Exactly one of `id=` / `selector=`. **Returns:** `None`.
+`text=` required. Routes through `EventBus::push_status`.
+**Returns:** `IntentValue::None`.
 
-### `ark.core.mount_plugin`
+### Control ops (T-051)
+
+#### `ark.core.exec`
 
 ```kdl
-mount_plugin name=<str> [at=<str>] [into=<str>]
+exec script="<str>" [shell="<str>"] [timeout_ms=<int>]
 ```
 
-| Arg    | Type   | Req | Notes                                                      |
-|--------|--------|-----|------------------------------------------------------------|
-| `name` | string | yes | Cross-referenced against `plugin "<name>" { }` blocks.     |
-| `at`   | string | no  | Override declared mount target (status-bar/floating/…).    |
-| `into` | string | no  | Named pane slot.                                           |
+| Arg          | Type   | Req | Default   | Notes                              |
+|--------------|--------|-----|-----------|------------------------------------|
+| `script`     | string | yes |           | Shell script to execute.           |
+| `shell`      | string | no  | `"sh"`    | Shell interpreter.                 |
+| `timeout_ms` | u64    | no  | `30_000`  | Exceeding surfaces as `op/failed`. |
 
-**Returns:** `None`. **Side effects:** delegates to zellij
-`launch-or-focus-plugin`.
+**Returns:** `IntentValue::Integer(exit_code)`.
+**Side effects:** spawns via `tokio::process::Command`.
 
-### `ark.core.unmount_plugin`
-
-```kdl
-unmount_plugin name=<str>
-```
-
-**Returns:** `None`.
-
-### `ark.core.pipe`
-
-```kdl
-pipe plugin=<str> [severity=<str>] [name=<str>] {
-    text "<content>"   OR
-    json "<content>"
-}
-```
-
-Exactly one of `text` / `json` child required. `severity` must be one
-of `info`, `warn`, `error`, `debug` when present. **Returns:** `None`.
-
-### `ark.core.emit`
-
-```kdl
-emit "<user-event-name>" {
-    json "<payload-json>"?
-}
-```
-
-| Arg    | Type   | Req | Notes                                          |
-|--------|--------|-----|------------------------------------------------|
-| `name` | string | yes | Positional arg. Dotted, namespaced form.       |
-| `json` | child  | no  | JSON string. Missing ⇒ payload is JSON `null`. |
-
-**Returns:** the parsed payload `Value`. **Side effects:** publishes
-`AgentEvent::UserEvent { name, payload, source: "scene" }` on the
-bus.
-
-### `ark.core.set_status`
-
-```kdl
-set_status text=<str> [severity=<str>] [ttl_ms=<int>]
-```
-
-Sugar over `pipe plugin="ark-status"`. `severity` enum matches `pipe`.
-**Returns:** `None`.
-
-### `ark.core.exec`
-
-```kdl
-exec script=<str> [shell=<str>] [timeout_ms=<int>] [cwd=<str>] {
-    env {
-        var name="<NAME>" value="<VALUE>"*
-    }?
-}
-```
-
-| Arg          | Type   | Req | Default         | Notes                                   |
-|--------------|--------|-----|-----------------|-----------------------------------------|
-| `script`     | string | yes |                 | Runtime-template-rendered before exec.  |
-| `shell`      | string | no  | `"sh"`          | Shell interpreter.                      |
-| `timeout_ms` | u64    | no  | `30_000`        | Exceeding surfaces as `op/failed`.      |
-| `cwd`        | string | no  | process cwd     | Working directory.                      |
-| `env`        | block  | no  | empty           | `var name="X" value="Y"` entries.       |
-
-**Returns:**
-
-```json
-{
-    "exit_code": <i32>,
-    "success":   <bool>,
-    "stdout":    "<utf8-lossy>",
-    "stderr":    "<utf8-lossy>"
-}
-```
-
-**Side effects:** spawns a subprocess via `tokio::process::Command`.
-
-### `ark.core.reload_scene`
+#### `ark.core.reload_scene`
 
 ```kdl
 reload_scene
 ```
 
-No args. Single-slot re-entry guard + turn-inflight gate (R14). Returns
-a JSON object describing the applied/queued/dropped outcome (see
-`crates/scene/src/reload.rs::ReloadOutcome`). The op lowers a
-scene re-parse through the installed `SceneReloader`.
+No args. Stub in Tier 5 (logs + returns `None`); wired to supervisor
+`SceneReloader` in Tier 14 (T-083). **Returns:** `IntentValue::None`.
 
-### `ark.core.prompt`
+### ACP ops (T-105)
 
-```kdl
-prompt text=<str>
-```
-
-ACP op #14. Runtime-template-rendered `text`. Returns
-`{ "jsonrpc_id": "<str>", "session_id": "<str>" }`. Response lands
-asynchronously on the `ark.acp.*` event stream.
-
-### `ark.core.acp_cancel`
+#### `ark.acp.prompt`
 
 ```kdl
-acp_cancel
+acp.prompt text="<str>"
 ```
 
-ACP op #15. No args. 5-second dispatch timeout. **Returns:** `None`.
+`text=` required. Noop when no ACP extension is active (T-106).
+**Returns:** `IntentValue::None`.
 
-### `ark.core.acp_permit`
+#### `ark.acp.cancel`
 
 ```kdl
-acp_permit request_id=<str> outcome=<"selected"|"cancelled"> [option_id=<str>]
+acp.cancel
 ```
 
-ACP op #16. `outcome="selected"` requires `option_id=`;
-`outcome="cancelled"` forbids it. Unknown `request_id` (resolved,
-timed out, or never issued) is silently dropped with a debug log —
-scene reactions fanning out to multiple response paths must not
-surface spurious `op/failed` diagnostics per T-ACP.5b.
+No args. Noop when no ACP extension active.
+**Returns:** `IntentValue::None`.
 
-### `ark.core.set_mode`
+#### `ark.acp.permit`
 
 ```kdl
-set_mode mode=<str>
+acp.permit request_id="<str>" outcome="<allow|reject_once|reject_always>"
 ```
 
-ACP op #17. `mode` is scope-checked at scene compile time against the
-engine's advertised `AgentCapabilities::modes`. **Returns:** `None`.
+Both properties required. `outcome` validated against
+`["allow", "reject_once", "reject_always"]`.
+**Returns:** `IntentValue::None`.
+
+#### `ark.acp.set_mode`
+
+```kdl
+acp.set_mode mode="<str>"
+```
+
+`mode=` required. Noop when no ACP extension active.
+**Returns:** `IntentValue::None`.
 
 ## Shared error shapes
 
@@ -367,7 +345,7 @@ deprecation warnings through.
 | Artifact                               | Purpose                                    |
 |----------------------------------------|--------------------------------------------|
 | `crates/scene/src/ops/mod.rs`          | `CORE_OP_NAMES`, `register_core_ops`.       |
-| `crates/scene/src/ops/{tabs,panes,plugins,messaging,control,acp}.rs` | Per-op typed args + dispatch.        |
+| `crates/scene/src/ops/{panes,spawn,messaging,control,acp}.rs` | Per-op typed args + dispatch.        |
 | `crates/scene/src/intent.rs`           | `Intent` trait, `IntentRegistry`, error types. |
 | `crates/scene/src/v1_strict.rs`        | `--v1-strict` validator. |
 | `context/refs/wasm-metadata-v1.md`     | Companion doc: extension metadata wire shape. |

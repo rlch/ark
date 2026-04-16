@@ -1,16 +1,18 @@
 //! `ark scene fmt` — canonical-format scene files.
 //!
-//! T-12.3 (cavekit-scene R13). Ark-specific node ordering:
+//! T-119 (cavekit-scene R13). Ark-specific node ordering:
 //! extends/include/use → layout → plugin → on → keybind. Idempotent.
 //!
 //! Node ordering convention for top-level children of `scene { }`:
 //!
 //! 1. `extends` / `include` / `use` — composition / activation nodes
 //! 2. `layout` — structural layout
-//! 3. `plugin` — plugin lifecycle blocks
-//! 4. `on` — reaction declarations
-//! 5. `keybind` — keybind declarations
-//! 6. `engine` / `clear-reactions` / `clear-keybind` / `disable-plugin` — misc
+//! 3. `mode` — alternate whole-tab layouts
+//! 4. `plugin` — plugin lifecycle blocks
+//! 5. `on` — reaction declarations
+//! 6. `keybind` / `bind` — keybind declarations
+//! 7. `engine` — engine config
+//! 8. `clear-*` / `disable-*` — removal / override nodes
 //!
 //! Unknown nodes are preserved at the end. The formatter operates on
 //! raw KDL (no scene-grammar validation) so it can format files that
@@ -20,7 +22,8 @@ use std::path::PathBuf;
 
 use clap::Args;
 
-use ark_scene::path::{ResolvedScene, resolve_scene_path_from_env};
+use ark_scene_v3::default_scene::DEFAULT_SCENE_KDL;
+use ark_scene_v3::resolve_path::{resolve_scene_path, SceneSource};
 
 use crate::ctx::Ctx;
 use crate::error::CliError;
@@ -42,12 +45,14 @@ fn node_priority(name: &str) -> u8 {
     match name {
         "extends" | "include" | "use" => 0,
         "layout" => 1,
-        "plugin" => 2,
-        "on" => 3,
-        "keybind" => 4,
-        "engine" => 5,
-        "clear-reactions" | "clear-keybind" | "clear-keybinds" | "disable-plugin" | "disable-plugins" => 6,
-        _ => 7, // unknown nodes go last
+        "mode" => 2,
+        "plugin" => 3,
+        "on" => 4,
+        "keybind" | "bind" => 5,
+        "engine" => 6,
+        "clear-reactions" | "clear-keybind" | "clear-keybinds"
+        | "clear-bind" | "disable-extension" | "disable-plugin" | "disable-plugins" => 7,
+        _ => 8, // unknown nodes go last
     }
 }
 
@@ -86,28 +91,27 @@ pub fn run(args: FmtArgs, _ctx: &Ctx) -> Result<(), CliError> {
                 reason: format!("scene fmt: {} needs formatting", path.display()),
             })
         }
+    } else if args.path.is_some() {
+        // Explicit path: write back to file.
+        std::fs::write(&path, &formatted).map_err(|e| CliError::Generic {
+            reason: format!("cannot write {}: {e}", path.display()),
+        })?;
+        eprintln!("scene fmt: {}", path.display());
+        Ok(())
     } else {
-        // For built-in scenes or when no path was given, just print to stdout.
-        if args.path.is_some() {
-            std::fs::write(&path, &formatted).map_err(|e| CliError::Generic {
-                reason: format!("cannot write {}: {e}", path.display()),
-            })?;
-            eprintln!("scene fmt: {}", path.display());
-        } else {
-            // No explicit path means we resolved the default. If it's a real
-            // file, write back; if it's built-in, print to stdout.
-            let cwd = std::env::current_dir().unwrap_or_default();
-            match resolve_scene_path_from_env(None, &cwd) {
-                ResolvedScene::Path(p) => {
-                    std::fs::write(&p, &formatted).map_err(|e| CliError::Generic {
-                        reason: format!("cannot write {}: {e}", p.display()),
-                    })?;
-                    eprintln!("scene fmt: {}", p.display());
-                }
-                _ => {
-                    // Built-in or named — just print to stdout.
-                    print!("{formatted}");
-                }
+        // No explicit path: resolved via T-113. Write back if it's a
+        // real file; print to stdout if it's the built-in default.
+        let resolved = resolve_default_scene_source();
+        match resolved {
+            Some(p) => {
+                std::fs::write(&p, &formatted).map_err(|e| CliError::Generic {
+                    reason: format!("cannot write {}: {e}", p.display()),
+                })?;
+                eprintln!("scene fmt: {}", p.display());
+            }
+            None => {
+                // Built-in — just print to stdout.
+                print!("{formatted}");
             }
         }
         Ok(())
@@ -125,21 +129,61 @@ fn resolve_input(args: &FmtArgs) -> Result<(PathBuf, String), CliError> {
         let cwd = std::env::current_dir().map_err(|e| CliError::Generic {
             reason: format!("cannot determine cwd: {e}"),
         })?;
-        match resolve_scene_path_from_env(None, &cwd) {
-            ResolvedScene::Named(name) => Err(CliError::Generic {
-                reason: format!(
-                    "scene `{name}` resolved by name; pass an explicit path to format"
-                ),
-            }),
-            ResolvedScene::Path(p) => {
+        let env_scene = std::env::var("ARK_SCENE").ok();
+        let xdg_config = xdg_config_dir();
+        match resolve_scene_path(
+            None,
+            env_scene.as_deref(),
+            None,
+            xdg_config.as_deref(),
+            &cwd,
+        ) {
+            SceneSource::Flag(p)
+            | SceneSource::EnvVar(p)
+            | SceneSource::ProjectLocal(p)
+            | SceneSource::UserConfig(p) => {
                 let src = std::fs::read_to_string(&p).map_err(|e| CliError::Generic {
                     reason: format!("cannot read {}: {e}", p.display()),
                 })?;
                 Ok((p, src))
             }
-            ResolvedScene::BuiltIn(src) => {
-                Ok((PathBuf::from("<built-in>"), src.to_string()))
+            SceneSource::BuiltIn => {
+                Ok((PathBuf::from("<built-in>"), DEFAULT_SCENE_KDL.to_string()))
             }
         }
     }
+}
+
+/// If the default scene resolves to a real file path (not built-in),
+/// return that path. Used by the write-back logic.
+fn resolve_default_scene_source() -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    let env_scene = std::env::var("ARK_SCENE").ok();
+    let xdg_config = xdg_config_dir();
+    match resolve_scene_path(
+        None,
+        env_scene.as_deref(),
+        None,
+        xdg_config.as_deref(),
+        &cwd,
+    ) {
+        SceneSource::Flag(p)
+        | SceneSource::EnvVar(p)
+        | SceneSource::ProjectLocal(p)
+        | SceneSource::UserConfig(p) => Some(p),
+        SceneSource::BuiltIn => None,
+    }
+}
+
+/// Best-effort XDG config dir using `$XDG_CONFIG_HOME` or `~/.config`.
+fn xdg_config_dir() -> Option<PathBuf> {
+    if let Ok(v) = std::env::var("XDG_CONFIG_HOME") {
+        if !v.is_empty() {
+            return Some(PathBuf::from(v));
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return Some(PathBuf::from(home).join(".config"));
+    }
+    None
 }

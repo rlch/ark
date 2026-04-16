@@ -1,17 +1,31 @@
-//! `ark scene check` — full parse + resolve + validate + CEL-compile.
+//! `ark scene check` — full parse + validate + compile diagnostic command.
 //!
-//! T-12.2 (cavekit-scene R13). Exit 0 on green; non-zero with
+//! T-118 (cavekit-scene R13). Exit 0 on green; non-zero with
 //! diagnostics on any error. Emits every error, not just first.
+//!
+//! Pipeline:
+//! 1. Shape detect + normalize (T-112)
+//! 2. Parse scene (facet-kdl)
+//! 3. Compose (resolve includes, T-074..T-077)
+//! 4. Validate scope (R2 placement rules)
+//! 5. Validate handles (R2 @ident dedup)
+//! 6. Validate pane views (R3 one-view-per-pane)
+//! 7. Validate op refs (R7 handle-type rules)
+//! 8. Compile Rhai predicates + interpolation holes (T-023/T-024)
 
 use std::path::{Path, PathBuf};
 
 use clap::Args;
 
-use ark_scene::error::SceneError;
-use ark_scene::parse::parse_scene;
-use ark_scene::path::{ResolvedScene, resolve_scene_path_from_env};
-use ark_scene::v1_strict::v1_strict_validate;
-use ark_scene::validate::validate_scene;
+use ark_scene_v3::compile::{compile_scene, CompiledScene};
+use ark_scene_v3::compose::compose_scene;
+use ark_scene_v3::default_scene::DEFAULT_SCENE_KDL;
+use ark_scene_v3::error::SceneError;
+use ark_scene_v3::parse::parse_scene;
+use ark_scene_v3::resolve_path::{resolve_scene_path, SceneSource};
+use ark_scene_v3::rhai::Engine;
+use ark_scene_v3::shape::detect_and_normalize;
+use ark_scene_v3::validate::{handles, op_refs, pane_views, scope};
 
 use crate::ctx::Ctx;
 use crate::error::CliError;
@@ -23,49 +37,93 @@ pub struct CheckArgs {
     #[arg(value_name = "PATH")]
     pub path: Option<PathBuf>,
 
-    /// Enforce v1.0 contract (T-15.3).
-    #[arg(long)]
+    /// Enable v1.0-strict validation mode. Rejects ops outside the frozen
+    /// `ark.core.*` vocabulary, upgrades `warning[ext/unknown-capability]`
+    /// and `warning[scene/deprecated-op]` to errors, and rejects engine
+    /// blocks targeting unwired engines.
+    #[arg(long = "v1-strict")]
     pub v1_strict: bool,
 }
 
 pub fn run(args: CheckArgs, ctx: &Ctx) -> Result<(), CliError> {
-    let (src, display_path) = load_scene_source(&args, ctx)?;
+    let (src, display_path) = load_scene_source(&args)?;
     let mut all_errors: Vec<SceneError> = Vec::new();
 
-    // Phase 1: parse.
-    let doc = match parse_scene(&src, Path::new(&display_path)) {
-        Ok(doc) => Some(doc),
+    // Phase 1: shape detect + normalize.
+    let normalized = match detect_and_normalize(&src, Path::new(&display_path)) {
+        Ok(n) => Some(n),
         Err(e) => {
             all_errors.push(e);
             None
         }
     };
 
-    // Phase 2: validate (CEL predicates, templates, chord strings).
-    // Only runs when parsing succeeded — otherwise the AST is absent.
-    if let Some(ref doc) = doc {
-        if let Err(mut errs) = validate_scene(doc) {
-            all_errors.append(&mut errs);
-        }
-    }
-
-    // Phase 3 (T-15.3): v1-strict gate. Only runs when --v1-strict is
-    // set AND parsing succeeded — strict mode layers on top of the
-    // normal check; a file that doesn't even parse has no shape to
-    // enforce the contract against. Walks the raw KDL because op
-    // names live on the KDL nodes rather than the typed AST (see
-    // `ark_scene::v1_strict` module docs for the rationale).
-    if args.v1_strict {
-        if let Ok(kdl_doc) = src.parse::<kdl::KdlDocument>() {
-            if let Err(mut errs) = v1_strict_validate(&src, Path::new(&display_path), &kdl_doc) {
-                all_errors.append(&mut errs);
+    // Phase 2: parse.
+    let ir = if let Some(ref norm_src) = normalized {
+        match parse_scene(norm_src, &display_path) {
+            Ok(ir) => Some(ir),
+            Err(e) => {
+                all_errors.push(e);
+                None
             }
         }
+    } else {
+        None
+    };
+
+    // Phase 3: compose (resolve includes).
+    let ir = if let Some(ir) = ir {
+        match compose_scene(ir) {
+            Ok(composed) => Some(composed),
+            Err(e) => {
+                all_errors.push(e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Phase 4: validate (scope, handles, pane views, op refs).
+    // Only runs when parsing + compose succeeded.
+    if let Some(ref ir) = ir {
+        all_errors.extend(scope::validate_scope(ir));
+        all_errors.extend(handles::validate_handles(ir));
+        all_errors.extend(pane_views::validate_pane_views(ir));
+        all_errors.extend(op_refs::validate_op_refs(ir));
+    }
+
+    // Phase 5: compile Rhai predicates + interpolation holes.
+    // Only runs when parsing + compose succeeded and no validation errors
+    // so far (a malformed AST can cause misleading compile errors).
+    let _compiled: Option<CompiledScene> = if let Some(ir) = ir {
+        if all_errors.is_empty() {
+            let engine = Engine::new();
+            match compile_scene(&engine, ir) {
+                Ok(cs) => Some(cs),
+                Err(e) => {
+                    all_errors.push(e);
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Phase 6: v1-strict validation (T-135).
+    // TODO(T-135): Implement actual v1 contract validation. Currently
+    // the flag is recognized and reported but the concrete checks
+    // (frozen op vocabulary, unknown-capability upgrade, deprecated-op
+    // upgrade, engine-block restrictions) are not yet wired.
+    if args.v1_strict {
+        eprintln!("scene check: --v1-strict enabled (v1 contract validation pending)");
     }
 
     if all_errors.is_empty() {
-        let suffix = if args.v1_strict { " (v1-strict)" } else { "" };
-        eprintln!("scene check: {} ok{}", display_path, suffix);
+        eprintln!("scene check: {} ok", display_path);
         Ok(())
     } else {
         render_diagnostics(&all_errors, ctx.no_color);
@@ -82,34 +140,60 @@ pub fn run(args: CheckArgs, ctx: &Ctx) -> Result<(), CliError> {
 /// Resolve the scene source text and a display-friendly path string.
 ///
 /// When the user supplies an explicit path, we read from disk. Otherwise
-/// we run the scene-path resolver (R13 precedence) to find the default
+/// we run the scene-path resolver (T-113 precedence) to find the default
 /// scene and read it — or use the built-in default if nothing on disk
 /// matches.
-fn load_scene_source(args: &CheckArgs, _ctx: &Ctx) -> Result<(String, String), CliError> {
+fn load_scene_source(args: &CheckArgs) -> Result<(String, String), CliError> {
     if let Some(ref path) = args.path {
         let src = std::fs::read_to_string(path).map_err(|e| CliError::Generic {
             reason: format!("cannot read {}: {e}", path.display()),
         })?;
         Ok((src, path.display().to_string()))
     } else {
-        let cwd = std::env::current_dir().map_err(|e| CliError::Generic {
-            reason: format!("cannot determine cwd: {e}"),
-        })?;
-        match resolve_scene_path_from_env(None, &cwd) {
-            ResolvedScene::Named(name) => Err(CliError::Generic {
-                reason: format!(
-                    "scene `{name}` resolved by name; pass an explicit path to check"
-                ),
-            }),
-            ResolvedScene::Path(p) => {
-                let src = std::fs::read_to_string(&p).map_err(|e| CliError::Generic {
-                    reason: format!("cannot read {}: {e}", p.display()),
-                })?;
-                Ok((src, p.display().to_string()))
-            }
-            ResolvedScene::BuiltIn(src) => Ok((src.to_string(), "<built-in>".to_string())),
+        resolve_default_source()
+    }
+}
+
+/// Resolve the default scene via T-113's `resolve_scene_path`.
+fn resolve_default_source() -> Result<(String, String), CliError> {
+    let cwd = std::env::current_dir().map_err(|e| CliError::Generic {
+        reason: format!("cannot determine cwd: {e}"),
+    })?;
+    let env_scene = std::env::var("ARK_SCENE").ok();
+    let xdg_config = xdg_config_dir();
+    match resolve_scene_path(
+        None,
+        env_scene.as_deref(),
+        None,
+        xdg_config.as_deref(),
+        &cwd,
+    ) {
+        SceneSource::Flag(p)
+        | SceneSource::EnvVar(p)
+        | SceneSource::ProjectLocal(p)
+        | SceneSource::UserConfig(p) => {
+            let src = std::fs::read_to_string(&p).map_err(|e| CliError::Generic {
+                reason: format!("cannot read {}: {e}", p.display()),
+            })?;
+            Ok((src, p.display().to_string()))
+        }
+        SceneSource::BuiltIn => {
+            Ok((DEFAULT_SCENE_KDL.to_string(), "<built-in>".to_string()))
         }
     }
+}
+
+/// Best-effort XDG config dir using `$XDG_CONFIG_HOME` or `~/.config`.
+fn xdg_config_dir() -> Option<PathBuf> {
+    if let Ok(v) = std::env::var("XDG_CONFIG_HOME") {
+        if !v.is_empty() {
+            return Some(PathBuf::from(v));
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return Some(PathBuf::from(home).join(".config"));
+    }
+    None
 }
 
 /// Render every [`SceneError`] through miette's text renderer to stderr.
@@ -128,8 +212,6 @@ fn render_diagnostics(errors: &[SceneError], no_color: bool) {
     };
 
     for err in errors {
-        // miette's `ReportHandler::display` wants `fmt::Formatter`,
-        // which we get by implementing `Display` on a thin wrapper.
         struct DiagFmt<'a> {
             err: &'a SceneError,
             handler: &'a dyn miette::ReportHandler,

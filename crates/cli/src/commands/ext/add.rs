@@ -788,7 +788,7 @@ extension {{
     /// which injects a raw closure rather than round-tripping caps
     /// through the on-disk KDL.
     fn meta_with_caps(name: &str, version: &str, caps: &[&str]) -> ExtensionMetadata {
-        use ark_ext_metadata::{ConfigSchema, StringNode};
+        use ark_ext_metadata::{CapabilitySet, ConfigSchema, StringNode};
         ExtensionMetadata {
             name: StringNode::new(name),
             version: StringNode::new(version),
@@ -797,8 +797,9 @@ extension {{
             requires: vec![],
             intents: vec![],
             events: vec![],
+            views: vec![],
             config: ConfigSchema::default(),
-            capabilities: caps.iter().map(|c| StringNode::new(*c)).collect(),
+            capabilities: CapabilitySet::from_strs(caps),
         }
     }
 

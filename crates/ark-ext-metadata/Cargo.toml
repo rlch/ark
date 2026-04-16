@@ -16,6 +16,10 @@ rust-version.workspace = true
 ark-ext-metadata-types = { path = "../ark-ext-metadata-types" }
 facet = { workspace = true }
 facet-kdl = { workspace = true }
+strsim = { workspace = true }
+# T-098: wasmparser walks the wasm payload stream to find the
+# `ark.metadata` custom section embedded by extension authors.
+wasmparser = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

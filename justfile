@@ -70,6 +70,14 @@ e2e:
 fmt:
     cargo fmt --all
 
+# Start docs dev server (Starlight/Astro).
+docs-dev:
+    cd website && npm run dev
+
+# Build docs site.
+docs-build:
+    cd website && npm run build
+
 # Format check (CI).
 fmt-check:
     cargo fmt --all -- --check

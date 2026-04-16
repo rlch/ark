@@ -8,14 +8,12 @@
 //! * [`spawn`]     — `spawn` (tiled + overlay), `new_tab`
 //! * [`messaging`] — `pipe`, `emit`, `set_status`
 //! * [`control`]   — `exec`, `reload_scene`
+//! * [`acp`]       — `acp.prompt`, `acp.cancel`, `acp.permit`,
+//!                   `acp.set_mode`
 //!
 //! Each op is a zero-sized struct implementing [`crate::intent::Intent`];
 //! they're registered into an [`crate::intent::IntentRegistry`] via
 //! [`register_core_ops`].
-//!
-//! ACP ops (`acp.prompt`, `acp.cancel`, `acp.permit`, `acp.set_mode`)
-//! land in Tier-ACP once the ACP client handle wires into
-//! [`crate::intent::IntentContext`].
 //!
 //! # Idempotency matrix (T-055)
 //!
@@ -35,6 +33,7 @@
 //! | `exec`        | always side-effect                   |
 //! | `reload_scene`| noop when no reloader installed      |
 
+pub mod acp;
 pub mod control;
 pub mod messaging;
 pub mod panes;
@@ -69,6 +68,11 @@ pub const CORE_OP_NAMES: &[&str] = &[
     // Control
     "ark.core.exec",
     "ark.core.reload_scene",
+    // ACP (T-105)
+    "ark.acp.prompt",
+    "ark.acp.cancel",
+    "ark.acp.permit",
+    "ark.acp.set_mode",
 ];
 
 /// Register every `ark.core.*` op into `registry`.
@@ -100,6 +104,12 @@ pub fn register_core_ops(registry: &mut IntentRegistry) {
         "ark.core.reload_scene",
         Arc::new(control::ReloadSceneOp),
     );
+
+    // ACP (T-105)
+    registry.register("ark.acp.prompt", Arc::new(acp::AcpPromptOp));
+    registry.register("ark.acp.cancel", Arc::new(acp::AcpCancelOp));
+    registry.register("ark.acp.permit", Arc::new(acp::AcpPermitOp));
+    registry.register("ark.acp.set_mode", Arc::new(acp::AcpSetModeOp));
 }
 
 #[cfg(test)]
@@ -114,11 +124,11 @@ mod tests {
     }
 
     #[test]
-    fn core_op_names_all_ark_core_prefixed() {
+    fn core_op_names_all_ark_prefixed() {
         for name in CORE_OP_NAMES {
             assert!(
-                name.starts_with("ark.core."),
-                "op {name:?} is not ark.core.* prefixed"
+                name.starts_with("ark.core.") || name.starts_with("ark.acp."),
+                "op {name:?} is not ark.core.* or ark.acp.* prefixed"
             );
         }
     }

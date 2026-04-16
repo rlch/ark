@@ -397,7 +397,7 @@ mod tests {
     // -- validate_extension_namespace -----------------------------------
 
     use ark_ext_metadata_types::{
-        ConfigSchema, EventDecl, ExtensionMetadata, IntentDecl, StringNode,
+        CapabilitySet, ConfigSchema, EventDecl, ExtensionMetadata, IntentDecl, StringNode,
     };
 
     fn meta_with(intents: Vec<&str>, events: Vec<&str>) -> ExtensionMetadata {
@@ -421,8 +421,9 @@ mod tests {
                     payload_schema: StringNode::new("{}"),
                 })
                 .collect(),
+            views: vec![],
             config: ConfigSchema::default(),
-            capabilities: vec![],
+            capabilities: CapabilitySet::default(),
         }
     }
 

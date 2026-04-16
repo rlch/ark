@@ -1,0 +1,11 @@
+---
+source: crates/scene/tests/composition.rs
+expression: format_result(&result)
+---
+layouts: 0
+modes: 0
+reactions: 0
+binds: 2
+  bind "Alt n"
+  bind "Alt x"
+uses: 0

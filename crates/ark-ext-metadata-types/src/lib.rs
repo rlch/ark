@@ -130,32 +130,17 @@ pub struct ExtensionMetadata {
     #[facet(kdl::child, default)]
     pub config: ConfigSchema,
 
-    /// Requested capabilities — T-13.3 declared-caps surface (v0.4).
-    ///
-    /// v0.4 capability vocabulary (task T-13.3 in
-    /// `build-site-scene.md`): values MUST come from
-    /// [`ALLOWED_CAPABILITIES`] — `exec`, `fs-read`, `fs-write`, `pipe`,
-    /// `network`, `hook`. Empty vec = "no special capabilities". The
-    /// scene compiler reads this list off `ExtensionMetadata::SHAPE`
-    /// (facet reflection) at ext inspection time (`ark ext inspect`,
-    /// `ark ext info`) and, at v0.4, surfaces unknown values as a
-    /// `warning[ext/unknown-capability]` rather than hard-failing —
-    /// this keeps the vocabulary extensible for post-v0.4 cap additions
-    /// without breaking R16 rule #3 (receivers MUST ignore unknown
-    /// fields, and by extension unknown cap names).
-    ///
-    /// Historical note: earlier drafts used dotted leaf names
-    /// (`ui.keybind`, `intents.provide`). The T-13.3 pass flattened
-    /// the vocabulary to the six-name list above to match the Chrome-
-    /// extension analog (install-time disclosure, then per-cap trust
-    /// prompt in T-13.4). Any leftover drafts using the old dotted
-    /// names are intentionally still parseable — the warning surface
-    /// catches them at inspection without breaking the file.
-    ///
-    /// On-disk each entry renders as an `item "<capability>"` node —
-    /// facet-kdl 0.42 hard-codes the sequence item name.
+    /// Views the extension contributes. Each `ViewDecl` maps a named
+    /// slot to a renderer the extension provides. The scene compiler
+    /// validates `pane @h { view "<ext>.<view>" }` references against
+    /// declared views at compile time.
     #[facet(kdl::children, default)]
-    pub capabilities: Vec<StringNode>,
+    pub views: Vec<ViewDecl>,
+
+    /// Requested capabilities — T-13.3 declared-caps surface (v0.4).
+    /// See [`CapabilitySet`] for the vocabulary and semantics.
+    #[facet(kdl::child, default)]
+    pub capabilities: CapabilitySet,
 }
 
 /// v0.4 capability vocabulary (T-13.3 in `build-site-scene.md`).
@@ -187,21 +172,141 @@ pub const ALLOWED_CAPABILITIES: &[&str] = &[
     "pipe",
     "network",
     "hook",
+    "agent",
 ];
+
+/// Structured agent capability declaration (T-102).
+///
+/// Extensions that speak a conversational protocol (e.g. ACP) declare
+/// an `agent` child inside their `capabilities` block:
+///
+/// ```kdl
+/// capabilities {
+///     agent {
+///         speaks "acp"
+///         launch {
+///             command "claude"
+///             args "--acp"
+///         }
+///     }
+/// }
+/// ```
+///
+/// The scene compiler reads this via the [`CapabilitySet::agent`] field
+/// and, when an `acp.*` op is dispatched, uses the [`LaunchSpec`] to
+/// start the agent subprocess.
+#[derive(Facet, Debug, Clone)]
+pub struct AgentCapability {
+    /// Protocol the agent speaks (e.g. `"acp"`). The scene compiler
+    /// validates this against a known-protocol list; unknown protocols
+    /// surface as `warning[ext/unknown-protocol]`.
+    #[facet(kdl::child)]
+    pub speaks: StringNode,
+
+    /// How to launch the agent subprocess. See [`LaunchSpec`].
+    #[facet(kdl::child)]
+    pub launch: LaunchSpec,
+}
+
+/// Subprocess launch specification for an agent-capable extension
+/// (T-102).
+///
+/// Serialised as a `launch { command "…"; args "…" "…" }` child node
+/// inside the [`AgentCapability`] block. The scene runtime uses these
+/// fields verbatim as `argv[0]` + `argv[1..]` when spawning the agent
+/// process.
+#[derive(Facet, Debug, Clone)]
+pub struct LaunchSpec {
+    /// Executable name or path (`argv[0]`). Resolved via `$PATH` at
+    /// spawn time.
+    #[facet(kdl::child)]
+    pub command: StringNode,
+
+    /// Additional command-line arguments (`argv[1..]`). Rendered as
+    /// repeated `item "arg"` children inside the `args` node —
+    /// facet-kdl 0.42's sequence convention.
+    #[facet(kdl::children, default)]
+    pub args: Vec<StringNode>,
+}
 
 impl ExtensionMetadata {
     /// Return the declared-capabilities list as plain `&str` slices.
     ///
-    /// Thin wrapper over [`Self::capabilities`] that peels the
-    /// [`StringNode`] wrapper so call sites (`ark ext inspect`,
-    /// `ark ext info`, scene compiler cap-disclosure) can iterate
-    /// without pattern-matching on the wrapper. T-13.3 spec text
-    /// says "read at ext inspection via facet SHAPE" — in practice
-    /// that means this helper: the outer SHAPE traversal lands on
-    /// `capabilities`, and this method gives a trivial view of the
-    /// underlying strings.
+    /// Delegates to [`CapabilitySet::names`].
     pub fn capability_names(&self) -> impl Iterator<Item = &str> {
-        self.capabilities.iter().map(|n| n.value.as_str())
+        self.capabilities.names()
+    }
+
+    /// Return `true` iff every declared capability is a member of
+    /// [`ALLOWED_CAPABILITIES`].
+    ///
+    /// Delegates to [`CapabilitySet::are_all_known`].
+    pub fn capabilities_are_all_known(&self) -> bool {
+        self.capabilities.are_all_known()
+    }
+
+    /// Return the capabilities the ext declares that are NOT in the
+    /// v0.4 [`ALLOWED_CAPABILITIES`] vocabulary.
+    ///
+    /// Delegates to [`CapabilitySet::unknown`].
+    pub fn unknown_capabilities(&self) -> Vec<&str> {
+        self.capabilities.unknown()
+    }
+
+    /// Return the structured [`AgentCapability`] if the extension
+    /// declared one (T-102).
+    ///
+    /// Delegates to [`CapabilitySet::agent_capability`].
+    pub fn agent_capability(&self) -> Option<&AgentCapability> {
+        self.capabilities.agent_capability()
+    }
+}
+
+/// Set of declared capabilities for an extension (T-13.3).
+///
+/// v0.4 capability vocabulary: values MUST come from
+/// [`ALLOWED_CAPABILITIES`] — `exec`, `fs-read`, `fs-write`, `pipe`,
+/// `network`, `hook`. Empty set = "no special capabilities". The
+/// scene compiler reads this via facet SHAPE reflection at ext
+/// inspection time (`ark ext inspect`, `ark ext info`) and, at v0.4,
+/// surfaces unknown values as `warning[ext/unknown-capability]`
+/// rather than hard-failing — keeping the vocabulary extensible for
+/// post-v0.4 cap additions without breaking R16 rule #3.
+///
+/// On-disk each entry renders as an `item "<capability>"` child node
+/// inside a `capabilities { … }` parent node.
+#[derive(Facet, Debug, Clone, Default)]
+pub struct CapabilitySet {
+    /// Individual capability entries. Empty = no special capabilities.
+    #[facet(kdl::children, default)]
+    pub entries: Vec<StringNode>,
+
+    /// Structured agent capability (T-102). Present when the extension
+    /// declares `capabilities { agent { speaks "acp"; launch { … } } }`.
+    /// `None` = no agent capability. When set, the `"agent"` string
+    /// SHOULD also appear in [`entries`] for backward-compat with code
+    /// that only checks flat cap names.
+    #[facet(kdl::child, default)]
+    pub agent: Option<AgentCapability>,
+}
+
+impl CapabilitySet {
+    /// Construct a [`CapabilitySet`] from string slices.
+    pub fn from_strs(caps: &[&str]) -> Self {
+        Self {
+            entries: caps.iter().map(|c| StringNode::new(*c)).collect(),
+            agent: None,
+        }
+    }
+
+    /// Return the declared-capabilities list as plain `&str` slices.
+    ///
+    /// Peels the [`StringNode`] wrapper so call sites
+    /// (`ark ext inspect`, `ark ext info`, scene compiler
+    /// cap-disclosure) can iterate without pattern-matching on the
+    /// wrapper.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.entries.iter().map(|n| n.value.as_str())
     }
 
     /// Return `true` iff every declared capability is a member of
@@ -209,25 +314,26 @@ impl ExtensionMetadata {
     ///
     /// At v0.4 (T-13.3) this is **advisory**: unknown cap names are
     /// still accepted by the parser; the caller decides whether to
-    /// warn (inspection-time default) or reject (strict install-path
-    /// in T-13.4 / T-13.5). The method itself is a pure check over
-    /// [`Self::capabilities`].
-    pub fn capabilities_are_all_known(&self) -> bool {
-        self.capability_names()
-            .all(|c| ALLOWED_CAPABILITIES.contains(&c))
+    /// warn or reject.
+    pub fn are_all_known(&self) -> bool {
+        self.names().all(|c| ALLOWED_CAPABILITIES.contains(&c))
     }
 
-    /// Return the capabilities the ext declares that are NOT in the
-    /// v0.4 [`ALLOWED_CAPABILITIES`] vocabulary.
+    /// Return the capabilities that are NOT in the v0.4
+    /// [`ALLOWED_CAPABILITIES`] vocabulary.
     ///
-    /// Used by `ark ext inspect` + `ark ext info` to surface
-    /// `warning[ext/unknown-capability]` one entry per unknown name.
     /// Order preserves the manifest's declared order so diagnostic
     /// output is stable across runs.
-    pub fn unknown_capabilities(&self) -> Vec<&str> {
-        self.capability_names()
+    pub fn unknown(&self) -> Vec<&str> {
+        self.names()
             .filter(|c| !ALLOWED_CAPABILITIES.contains(c))
             .collect()
+    }
+
+    /// Return a reference to the structured [`AgentCapability`] if
+    /// the extension declared one.
+    pub fn agent_capability(&self) -> Option<&AgentCapability> {
+        self.agent.as_ref()
     }
 }
 
@@ -299,6 +405,31 @@ pub struct EventDecl {
     pub payload_schema: StringNode,
 }
 
+/// Declaration of a view an extension contributes. Each view maps a
+/// named slot in the scene layout to a renderer provided by the
+/// extension. Serialised as `view "<name>" { component "<component>" }`.
+///
+/// Views let extensions surface UI panes — e.g. a "git-status" sidebar
+/// or "ai-chat" panel — that the scene file can mount via
+/// `pane @handle { view "<ext>.<view>" }`. The scene compiler validates
+/// view references against the union of all installed extensions'
+/// declared views at compile time.
+#[derive(Facet, Debug, Clone)]
+pub struct ViewDecl {
+    /// Fully-qualified view name (`<ext-name>.<view>`). Scene uses
+    /// namespaced form; unprefixed name in an extension's sidecar is
+    /// auto-prefixed by the scene merger (R11). KDL-side is the
+    /// node's first positional argument: `view "name" { … }`.
+    #[facet(kdl::argument)]
+    pub name: String,
+
+    /// Component identifier the extension registers for this view.
+    /// The runtime resolves this to the extension's view renderer at
+    /// mount time. KDL-side is a child node: `component "<id>"`.
+    #[facet(kdl::child)]
+    pub component: StringNode,
+}
+
 /// Declarative config schema for an extension.
 ///
 /// v0.1 shape: flat list of fields, each with a name + type-name +
@@ -342,6 +473,144 @@ pub struct ConfigField {
     pub default: Option<StringNode>,
 }
 
+/// Lightweight registration record submitted via `inventory::submit!`
+/// by the `#[derive(Extension)]` proc macro (T-089).
+///
+/// This is intentionally simpler than [`ExtensionMetadata`] — it holds
+/// only the scalar fields that `#[extension(…)]` attributes provide.
+/// The scene compiler collects all submitted `ExtensionMeta` values at
+/// startup and can inflate them into full [`ExtensionMetadata`] when
+/// needed (intents, events, views, config, and capabilities are
+/// declared separately by the extension runtime, not at derive time).
+///
+/// `module_path` captures `module_path!()` at the derive site so the
+/// scene compiler can group all registrations from the same crate into
+/// a single logical extension (one crate = one extension convention).
+pub struct ExtensionMeta {
+    /// Extension name — must match the search-path directory name per
+    /// R10's "first match wins" rule.
+    pub name: &'static str,
+
+    /// Semver version of the extension.
+    pub version: &'static str,
+
+    /// Human-readable description shown in `ark ext list` / `ark ext info`.
+    pub description: &'static str,
+
+    /// Supported ark-protocol semver range (e.g. `">=0.1, <1.0"`).
+    /// Empty string = "no constraint".
+    pub ark_range: &'static str,
+
+    /// `module_path!()` captured at the derive site. Used by the scene
+    /// compiler to group all registrations from the same crate.
+    pub module_path: &'static str,
+}
+
+inventory::collect!(ExtensionMeta);
+
+/// Lightweight registration record submitted via `inventory::submit!`
+/// by the `#[derive(View)]` proc macro (T-090).
+///
+/// Each `#[derive(View)]` struct produces one `ViewRegistration` that the
+/// scene compiler collects at startup to discover all compiled-in views
+/// without manual wiring. The struct captures only the static scalar
+/// fields the derive can stamp; richer metadata (render mode, config
+/// schema from facet SHAPE) is resolved later by the view registry
+/// builder.
+///
+/// `module_path` captures `module_path!()` at the derive site so the
+/// scene compiler can group the view with its owning extension crate.
+pub struct ViewRegistration {
+    /// View name as written in scene source (e.g. `"edit"`, `"git-status"`).
+    pub name: &'static str,
+
+    /// Component identifier — the Rust struct's type name. The runtime
+    /// resolves this to the extension's view renderer at mount time.
+    pub component: &'static str,
+
+    /// Human-readable description shown in `ark ext info`. Empty string
+    /// if the derive attribute omitted `description`.
+    pub description: &'static str,
+
+    /// `module_path!()` captured at the derive site. Used by the scene
+    /// compiler to associate the view with its owning extension crate.
+    pub module_path: &'static str,
+}
+
+inventory::collect!(ViewRegistration);
+
+/// Scope of an intent registration (T-092).
+///
+/// `Global` intents are available regardless of which view is focused;
+/// `Targeted` intents are scoped to a specific view (the `impl ViewStruct`
+/// they were defined on). v1 always emits `Global`; location-based scope
+/// detection is deferred to a follow-up task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntentScope {
+    /// Intent is available globally — not scoped to any particular view.
+    Global,
+    /// Intent is scoped to a specific view.
+    Targeted,
+}
+
+/// Lightweight registration record submitted via `inventory::submit!`
+/// by the `#[ark_intent]` attribute macro (T-092).
+///
+/// Each decorated method produces one `IntentMeta` entry. The scene
+/// compiler collects all submitted values at startup and merges them
+/// with the extension's declared [`IntentDecl`] list from
+/// `extension.kdl`. `module_path` captures `module_path!()` at the
+/// macro-expansion site so the compiler can attribute the intent to
+/// the correct extension crate.
+pub struct IntentMeta {
+    /// Kebab-case intent name (e.g. `"open-file"`). Derived from the
+    /// method name (snake_case -> kebab-case) unless overridden via
+    /// `#[ark_intent(name = "custom-name")]`.
+    pub name: &'static str,
+
+    /// `module_path!()` captured at the attribute-macro expansion site.
+    /// Used by the scene compiler to group intent registrations by crate.
+    pub module_path: &'static str,
+
+    /// Whether this intent is global or targeted to a specific view.
+    /// v1 always sets [`IntentScope::Global`]; location-based detection
+    /// is deferred.
+    pub scope: IntentScope,
+}
+
+inventory::collect!(IntentMeta);
+
+/// Lightweight registration record submitted via `inventory::submit!`
+/// by the `#[derive(Event)]` proc macro (T-091).
+///
+/// Each struct annotated with `#[derive(Event)]` produces one
+/// `EventMeta` entry. The event name is auto-derived from the struct
+/// name via snake_case conversion (e.g. `FileEdited` → `file_edited`),
+/// or overridden with `#[event(name = "custom-name")]`.
+///
+/// At emit time the runtime auto-namespaces the event name by the
+/// owning extension's name, so `file_edited` from extension `editor`
+/// becomes `editor.file_edited` on the bus.
+///
+/// `module_path` captures `module_path!()` at the derive site so the
+/// scene compiler can associate the event with its owning extension
+/// crate (same grouping convention as [`ExtensionMeta::module_path`]).
+pub struct EventMeta {
+    /// Event name — snake_case identifier derived from the struct name
+    /// or overridden via `#[event(name = "…")]`.
+    pub name: &'static str,
+
+    /// Rust type name of the payload struct (`core::any::type_name`
+    /// captured at monomorphisation time via `type_name::<T>()`).
+    pub payload_type: &'static str,
+
+    /// `module_path!()` captured at the derive site. Used by the scene
+    /// compiler to associate the event with its owning extension crate.
+    pub module_path: &'static str,
+}
+
+inventory::collect!(EventMeta);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,8 +631,9 @@ mod tests {
             requires: vec![],
             intents: vec![],
             events: vec![],
+            views: vec![],
             config: ConfigSchema::default(),
-            capabilities: vec![],
+            capabilities: CapabilitySet::default(),
         };
         let doc = ExtensionManifest::new(m);
         assert_eq!(doc.extension.name.value, "a");
@@ -385,6 +655,10 @@ mod tests {
                 name: "demo.greeted".into(),
                 payload_schema: StringNode::new("{\"type\":\"object\"}"),
             }],
+            views: vec![ViewDecl {
+                name: "demo.panel".into(),
+                component: StringNode::new("DemoPanel"),
+            }],
             config: ConfigSchema {
                 fields: vec![ConfigField {
                     name: "greeting".into(),
@@ -393,10 +667,13 @@ mod tests {
                     default: Some(StringNode::new("hi")),
                 }],
             },
-            capabilities: vec![StringNode::new("exec")],
+            capabilities: CapabilitySet::from_strs(&["exec"]),
         };
         assert_eq!(m.name.value, "demo");
         assert_eq!(m.intents.len(), 1);
+        assert_eq!(m.views.len(), 1);
+        assert_eq!(m.views[0].name, "demo.panel");
+        assert_eq!(m.views[0].component.value, "DemoPanel");
         assert_eq!(
             m.config.fields[0].default.as_ref().map(|n| n.value.as_str()),
             Some("hi")
@@ -416,20 +693,21 @@ mod tests {
             requires: vec![],
             intents: vec![],
             events: vec![],
+            views: vec![],
             config: ConfigSchema::default(),
-            capabilities: caps.iter().map(|c| StringNode::new(*c)).collect(),
+            capabilities: CapabilitySet::from_strs(caps),
         }
     }
 
     #[test]
     fn allowed_capabilities_is_the_v04_vocabulary() {
         // Reaffirms the T-13.3 "Values from {exec, fs-read, fs-write,
-        // pipe, network, hook}" spec text. Adding a value requires a
-        // MINOR version bump + corresponding scene-compiler warning
-        // surface; dropping one is MAJOR.
+        // pipe, network, hook}" spec text plus T-102 `agent`. Adding a
+        // value requires a MINOR version bump + corresponding
+        // scene-compiler warning surface; dropping one is MAJOR.
         assert_eq!(
             ALLOWED_CAPABILITIES,
-            &["exec", "fs-read", "fs-write", "pipe", "network", "hook"]
+            &["exec", "fs-read", "fs-write", "pipe", "network", "hook", "agent"]
         );
     }
 
@@ -531,5 +809,162 @@ mod tests {
         assert_eq!(names, Vec::from(ALLOWED_CAPABILITIES));
         assert!(m.capabilities_are_all_known());
         assert!(m.unknown_capabilities().is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // T-088: ViewDecl
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn view_decl_stores_name_and_component() {
+        let v = ViewDecl {
+            name: "ext.sidebar".into(),
+            component: StringNode::new("SidebarView"),
+        };
+        assert_eq!(v.name, "ext.sidebar");
+        assert_eq!(v.component.value, "SidebarView");
+    }
+
+    #[test]
+    fn views_field_is_present_on_shape() {
+        use facet::Facet;
+        let shape = ExtensionMetadata::SHAPE;
+        let debug_repr = format!("{shape:?}");
+        assert!(
+            debug_repr.contains("views"),
+            "expected `views` field on ExtensionMetadata SHAPE, got:\n{debug_repr}"
+        );
+    }
+
+    #[test]
+    fn metadata_with_views_accessible() {
+        let m = ExtensionMetadata {
+            name: StringNode::new("viewer"),
+            version: StringNode::new("1.0.0"),
+            ark_range: StringNode::default(),
+            zellij_range: StringNode::default(),
+            requires: vec![],
+            intents: vec![],
+            events: vec![],
+            views: vec![
+                ViewDecl {
+                    name: "viewer.main".into(),
+                    component: StringNode::new("MainPanel"),
+                },
+                ViewDecl {
+                    name: "viewer.sidebar".into(),
+                    component: StringNode::new("SidePanel"),
+                },
+            ],
+            config: ConfigSchema::default(),
+            capabilities: CapabilitySet::default(),
+        };
+        assert_eq!(m.views.len(), 2);
+        assert_eq!(m.views[0].name, "viewer.main");
+        assert_eq!(m.views[1].component.value, "SidePanel");
+    }
+
+    // -----------------------------------------------------------------
+    // T-088: CapabilitySet
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn capability_set_default_is_empty() {
+        let cs = CapabilitySet::default();
+        assert_eq!(cs.names().count(), 0);
+        assert!(cs.are_all_known());
+        assert!(cs.unknown().is_empty());
+    }
+
+    #[test]
+    fn capability_set_from_strs_round_trips() {
+        let cs = CapabilitySet::from_strs(&["exec", "hook"]);
+        let names: Vec<&str> = cs.names().collect();
+        assert_eq!(names, vec!["exec", "hook"]);
+    }
+
+    #[test]
+    fn capability_set_unknown_detection() {
+        let cs = CapabilitySet::from_strs(&["exec", "magic"]);
+        assert!(!cs.are_all_known());
+        assert_eq!(cs.unknown(), vec!["magic"]);
+    }
+
+    // -----------------------------------------------------------------
+    // T-102: AgentCapability + LaunchSpec
+    // -----------------------------------------------------------------
+
+    /// Helper: build an [`AgentCapability`] with the given protocol and
+    /// launch command/args.
+    fn agent_cap(speaks: &str, command: &str, args: &[&str]) -> AgentCapability {
+        AgentCapability {
+            speaks: StringNode::new(speaks),
+            launch: LaunchSpec {
+                command: StringNode::new(command),
+                args: args.iter().map(|a| StringNode::new(*a)).collect(),
+            },
+        }
+    }
+
+    #[test]
+    fn agent_capability_stores_speaks_and_launch() {
+        let ac = agent_cap("acp", "claude", &["--acp"]);
+        assert_eq!(ac.speaks.value, "acp");
+        assert_eq!(ac.launch.command.value, "claude");
+        assert_eq!(ac.launch.args.len(), 1);
+        assert_eq!(ac.launch.args[0].value, "--acp");
+    }
+
+    #[test]
+    fn capability_set_with_agent() {
+        let cs = CapabilitySet {
+            entries: vec![StringNode::new("agent")],
+            agent: Some(agent_cap("acp", "claude", &["--acp"])),
+        };
+        assert!(cs.agent_capability().is_some());
+        let ac = cs.agent_capability().unwrap();
+        assert_eq!(ac.speaks.value, "acp");
+        assert_eq!(ac.launch.command.value, "claude");
+    }
+
+    #[test]
+    fn capability_set_without_agent() {
+        let cs = CapabilitySet::from_strs(&["exec"]);
+        assert!(cs.agent_capability().is_none());
+    }
+
+    #[test]
+    fn extension_metadata_agent_capability_delegates() {
+        let m = ExtensionMetadata {
+            name: StringNode::new("claude-code"),
+            version: StringNode::new("0.1.0"),
+            ark_range: StringNode::default(),
+            zellij_range: StringNode::default(),
+            requires: vec![],
+            intents: vec![],
+            events: vec![],
+            views: vec![],
+            config: ConfigSchema::default(),
+            capabilities: CapabilitySet {
+                entries: vec![StringNode::new("agent")],
+                agent: Some(agent_cap("acp", "claude", &["--acp"])),
+            },
+        };
+        let ac = m.agent_capability().unwrap();
+        assert_eq!(ac.speaks.value, "acp");
+        assert_eq!(ac.launch.command.value, "claude");
+        assert_eq!(ac.launch.args[0].value, "--acp");
+    }
+
+    #[test]
+    fn launch_spec_with_multiple_args() {
+        let ac = agent_cap("acp", "claude", &["--acp", "--verbose", "--model=opus"]);
+        assert_eq!(ac.launch.args.len(), 3);
+        assert_eq!(ac.launch.args[2].value, "--model=opus");
+    }
+
+    #[test]
+    fn agent_is_in_allowed_capabilities() {
+        assert!(ALLOWED_CAPABILITIES.contains(&"agent"));
     }
 }

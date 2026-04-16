@@ -538,6 +538,12 @@ fn selector_from_kdl_node(
             }
             Some(ident) => {
                 let field_name = ident.value().to_string();
+                // `when` is the Rhai guard predicate, not a selector
+                // field — skip it so it doesn't pollute the field-
+                // pattern map and cause false negatives in matching.
+                if field_name == "when" {
+                    continue;
+                }
                 let raw_value = entry
                     .value()
                     .as_string()

@@ -423,7 +423,10 @@ scene "s" {
         let src = r#"
 scene "s" {
     layout {
-        tab "@main" { pane "@a" pane "@b" }
+        tab "@main" {
+            pane "@a"
+            pane "@b"
+        }
     }
     on "FileEdited" { pipe from="@a" to="@ghost" payload="x" }
 }

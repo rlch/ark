@@ -852,6 +852,83 @@ fn picker_plugin_kdl_snippet(path: &Path) -> String {
     )
 }
 
+// --- T-126: default scene parse + extension resolution ---------------
+
+/// T-126 check 1: verify the built-in default scene parses without errors.
+///
+/// Uses `ark_scene_v3::default_scene::parse_default_scene()` to exercise
+/// the same parse path as `ark launch` / `ark scene check`. A parse failure
+/// here means the binary ships a broken default scene — hard fail.
+fn check_default_scene() -> CheckResult {
+    match ark_scene_v3::default_scene::parse_default_scene() {
+        Ok(ir) => CheckResult::ok(
+            "default-scene",
+            format!("built-in default scene `{}` parses ok", ir.scene.name),
+        ),
+        Err(e) => CheckResult::fail(
+            "default-scene",
+            format!("built-in default scene failed to parse: {e}"),
+        ),
+    }
+}
+
+/// T-126 check 2: verify installed extensions resolve via the search path.
+///
+/// Enumerates every extension visible to `ark ext list` (project, user,
+/// system tiers) and verifies each directory carries a parseable
+/// `extension.kdl`. Reports the count of resolved extensions. When every
+/// installed extension fails to parse, the check degrades to Warn (not
+/// Fail) since extensions are optional for basic operation.
+fn check_extensions_resolve() -> CheckResult {
+    let xdg_data_home = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from);
+    let system_dirs: Vec<PathBuf> = vec![PathBuf::from("/usr/share/ark/extensions")];
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    let rows = crate::commands::ext::list::enumerate_extensions(
+        &cwd,
+        xdg_data_home.as_deref(),
+        &system_dirs.iter().map(|p| p.as_path()).collect::<Vec<_>>(),
+    );
+
+    if rows.is_empty() {
+        return CheckResult::ok(
+            "extensions",
+            "no extensions installed (none required)",
+        );
+    }
+
+    let total = rows.len();
+    let errors: Vec<&str> = rows
+        .iter()
+        .filter(|r| r.error.is_some())
+        .map(|r| r.name.as_str())
+        .collect();
+
+    if errors.is_empty() {
+        CheckResult::ok(
+            "extensions",
+            format!("{total} extension(s) resolve and parse ok"),
+        )
+    } else if errors.len() == total {
+        CheckResult::warn(
+            "extensions",
+            format!(
+                "all {total} extension(s) failed to parse: {}",
+                errors.join(", ")
+            ),
+        )
+    } else {
+        CheckResult::warn(
+            "extensions",
+            format!(
+                "{}/{total} extension(s) failed to parse: {}",
+                errors.len(),
+                errors.join(", ")
+            ),
+        )
+    }
+}
+
 // --- rendering ----------------------------------------------------
 
 fn glyph(st: Status, no_color: bool) -> &'static str {
@@ -1010,6 +1087,9 @@ pub(crate) fn run_all(ctx: &Ctx) -> Vec<CheckResult> {
     rs.push(check_editor());
     rs.push(check_status_plugin_installed(ctx));
     rs.push(check_picker_plugin_installed(ctx));
+    // T-126: scene + extension health checks.
+    rs.push(check_default_scene());
+    rs.push(check_extensions_resolve());
     rs.extend(check_orphan_sockets(&layout));
     rs.extend(check_stale_locks(&layout));
     rs.extend(check_dangling_worktrees(&layout));
@@ -2031,5 +2111,80 @@ mod tests {
             s.contains("Add to ~/.config/zellij/config.kdl"),
             "snippet must include config.kdl hint: {s}"
         );
+    }
+
+    // ---- T-126: default scene parse check ----
+
+    #[test]
+    fn check_default_scene_succeeds() {
+        // The built-in default scene must always parse — this is a
+        // compile-time guarantee via `include_str!`.
+        let r = check_default_scene();
+        assert_eq!(r.status, Status::Ok, "{r:?}");
+        assert!(r.message.contains("default"), "{r:?}");
+    }
+
+    // ---- T-126: extensions resolve check ----
+
+    #[test]
+    fn check_extensions_resolve_empty_is_ok() {
+        // When no extensions are installed, the check should still succeed.
+        // We can't easily isolate XDG_DATA_HOME here without the env lock,
+        // but we can at least verify the function doesn't panic.
+        let r = check_extensions_resolve();
+        // Either "no extensions installed" (Ok) or some system exts found.
+        assert_ne!(r.status, Status::Fail, "{r:?}");
+    }
+
+    #[test]
+    fn check_extensions_resolve_discovers_installed_extensions() {
+        // Seed a project-local extension and verify enumerate_extensions
+        // discovers it. The manifest may or may not parse successfully
+        // depending on the facet-kdl version's CapabilitySet handling,
+        // but the extension must be FOUND in the enumeration.
+        let tmp = tempfile::Builder::new()
+            .prefix("arkd-t126-ext-ok")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let ext_dir = tmp.path().join(".ark/extensions/demo");
+        fs::create_dir_all(&ext_dir).unwrap();
+        fs::write(
+            ext_dir.join("extension.kdl"),
+            "extension {\n    \
+                 name \"demo\"\n    \
+                 version \"0.1.0\"\n    \
+                 ark-range \">=0.1\"\n    \
+                 zellij-range \"\"\n    \
+                 config { }\n\
+             }\n",
+        )
+        .unwrap();
+
+        let rows = crate::commands::ext::list::enumerate_extensions(
+            tmp.path(),
+            None,
+            &[],
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "demo");
+    }
+
+    #[test]
+    fn check_extensions_resolve_with_broken_extension() {
+        let tmp = tempfile::Builder::new()
+            .prefix("arkd-t126-ext-bad")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let ext_dir = tmp.path().join(".ark/extensions/broken");
+        fs::create_dir_all(&ext_dir).unwrap();
+        fs::write(ext_dir.join("extension.kdl"), "not { valid { kdl {").unwrap();
+
+        let rows = crate::commands::ext::list::enumerate_extensions(
+            tmp.path(),
+            None,
+            &[],
+        );
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].error.is_some(), "broken ext should surface error");
     }
 }

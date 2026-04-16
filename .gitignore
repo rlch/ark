@@ -3,3 +3,8 @@
 **/*.rs.bk
 *.swp
 .DS_Store
+
+# Docs site
+website/node_modules
+website/dist
+website/.astro

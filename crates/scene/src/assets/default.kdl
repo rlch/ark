@@ -1,0 +1,14 @@
+scene "default" {
+    layout {
+        tab "@main" cwd="{cwd}" focus="true" {
+            col {
+                pane "@shell" {
+                    shell
+                }
+                pane "@status" cells="1" {
+                    status
+                }
+            }
+        }
+    }
+}

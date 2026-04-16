@@ -287,7 +287,7 @@ pub fn emit_cap_warnings(warnings: &[CapWarning]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_ext_metadata_types::{ConfigSchema, StringNode};
+    use ark_ext_metadata_types::{CapabilitySet, ConfigSchema, StringNode};
     use tempfile::TempDir;
 
     fn meta_with(name: &str, version: &str, caps: &[&str]) -> ExtensionMetadata {
@@ -299,8 +299,9 @@ mod tests {
             requires: vec![],
             intents: vec![],
             events: vec![],
+            views: vec![],
             config: ConfigSchema::default(),
-            capabilities: caps.iter().map(|c| StringNode::new(*c)).collect(),
+            capabilities: CapabilitySet::from_strs(caps),
         }
     }
 

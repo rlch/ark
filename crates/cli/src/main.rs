@@ -18,6 +18,7 @@
 //! used by subcommands is built after parse succeeds.
 
 use ark_cli::{Cli, Ctx, detect_no_color};
+use ark_cli::commands::launch;
 use clap::FromArgMatches;
 use tracing_subscriber::EnvFilter;
 
@@ -64,7 +65,11 @@ fn main() {
         .with_writer(std::io::stderr)
         .try_init();
 
-    if let Err(err) = cli.command.run(&ctx) {
+    let result = match cli.command {
+        Some(cmd) => cmd.run(&ctx),
+        None => launch::run(cli.scene.as_deref(), cli.session.as_deref(), &ctx),
+    };
+    if let Err(err) = result {
         eprintln!("ark: {err}");
         std::process::exit(err.code());
     }

@@ -25,11 +25,14 @@
 #![deny(missing_docs)]
 
 pub use ark_ext_metadata_types::{
-    ConfigField, ConfigSchema, EventDecl, ExtensionManifest, ExtensionMetadata, IntentDecl,
-    StringNode,
+    CapabilitySet, ConfigField, ConfigSchema, EventDecl, ExtensionManifest, ExtensionMeta,
+    ExtensionMetadata, IntentDecl, StringNode, ViewDecl,
 };
 
 pub mod search_path;
+// T-098: read `ExtensionMetadata` from a wasm binary's `ark.metadata`
+// custom section.
+pub mod wasm_meta;
 
 /// Serialize an [`ExtensionMetadata`] to KDL bytes.
 ///
@@ -61,11 +64,16 @@ pub fn extension_metadata_kdl_string(
 ) -> Result<String, KdlEmitError> {
     let doc = ExtensionManifest::new(meta.clone());
     let raw = facet_kdl::to_string(&doc).map_err(|e| KdlEmitError(format!("{e}")))?;
-    strip_root_wrapper(&raw).ok_or_else(|| {
+    let stripped = strip_root_wrapper(&raw).ok_or_else(|| {
         KdlEmitError(format!(
             "facet-kdl emitted unexpected root wrapper: {raw:?}"
         ))
-    })
+    })?;
+    // facet-kdl 0.42 serialises `Option<T>` child nodes as
+    // `field #null` when the value is `None`. The deserialiser then
+    // fails because it tries to inflate the struct from `#null`.
+    // Strip those lines so `None` options round-trip correctly.
+    Ok(strip_null_children(&stripped))
 }
 
 /// Parse KDL bytes back into an [`ExtensionMetadata`].
@@ -160,6 +168,28 @@ fn dedent_block(s: &str) -> String {
         .join("\n")
 }
 
+/// Strip lines that consist of `<field> #null` — facet-kdl 0.42
+/// emits these for `Option<T>` child nodes when the value is `None`.
+/// The parser cannot round-trip them (it attempts to inflate the
+/// struct from `#null` and fails on the first required field), so we
+/// elide them from the serialised output.
+fn strip_null_children(kdl: &str) -> String {
+    kdl.lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            // Match `<ident> #null` with no braces or other content.
+            !trimmed
+                .strip_suffix("#null")
+                .map(|prefix| {
+                    let p = prefix.trim_end();
+                    !p.is_empty() && p.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                })
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Error returned when emitting an [`ExtensionMetadata`] as KDL.
 ///
 /// Carries the underlying facet-kdl serializer message as a plain
@@ -225,7 +255,7 @@ impl std::error::Error for KdlParseError {}
 ///
 /// ```
 /// use ark_ext_metadata::{
-///     register_extension, ConfigSchema, ExtensionMetadata, StringNode,
+///     register_extension, CapabilitySet, ConfigSchema, ExtensionMetadata, StringNode,
 /// };
 ///
 /// fn build_metadata() -> ExtensionMetadata {
@@ -237,8 +267,9 @@ impl std::error::Error for KdlParseError {}
 ///         requires: vec![],
 ///         intents: vec![],
 ///         events: vec![],
+///         views: vec![],
 ///         config: ConfigSchema::default(),
-///         capabilities: vec![],
+///         capabilities: CapabilitySet::default(),
 ///     }
 /// }
 ///
@@ -284,7 +315,11 @@ mod tests {
                     default: None,
                 }],
             },
-            capabilities: vec![StringNode::new("intents.provide")],
+            views: vec![ViewDecl {
+                name: "roundtrip.main".into(),
+                component: StringNode::new("MainView"),
+            }],
+            capabilities: CapabilitySet::from_strs(&["exec"]),
         }
     }
 
@@ -341,7 +376,9 @@ mod tests {
             "other@^0.1",
             "roundtrip.hello",
             "roundtrip.greeted",
-            "intents.provide",
+            "roundtrip.main",
+            "MainView",
+            "exec",
             "who",
         ] {
             assert!(
@@ -359,7 +396,7 @@ mod tests {
         //! itself is used via macro-namespace lookup; the `use` below
         //! is required for the lookup but reports spuriously as unused.
 
-        use crate::{ConfigSchema, ExtensionMetadata, StringNode, register_extension};
+        use crate::{CapabilitySet, ConfigSchema, ExtensionMetadata, StringNode, register_extension};
 
         /// Builder consumed by the macro below.
         pub fn build() -> ExtensionMetadata {
@@ -371,8 +408,9 @@ mod tests {
                 requires: vec![],
                 intents: vec![],
                 events: vec![],
+                views: vec![],
                 config: ConfigSchema::default(),
-                capabilities: vec![],
+                capabilities: CapabilitySet::default(),
             }
         }
 

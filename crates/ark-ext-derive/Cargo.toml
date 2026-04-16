@@ -1,0 +1,27 @@
+[package]
+name = "ark-ext-derive"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# T-089 (cavekit-scene R10): `#[derive(Extension)]` proc macro.
+#
+# Generates `inventory::submit!(ExtensionMeta { … })` from
+# `#[extension(name = "…", version = "…")]` attributes on a struct.
+# Auto-groups all derives in the same crate via `module_path!()`.
+# One crate = one extension convention.
+#
+# This is a proc-macro crate — it can ONLY export procedural macros.
+# The generated code references types from `ark-ext-metadata-types`
+# via fully-qualified paths emitted in the token stream.
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"

@@ -1,0 +1,11 @@
+---
+source: crates/scene/tests/composition.rs
+expression: format_result(&result)
+---
+layouts: 0
+modes: 0
+reactions: 2
+  on "<none>"
+  on "<none>"
+binds: 0
+uses: 0

@@ -1,0 +1,17 @@
+---
+source: crates/scene/tests/composition.rs
+expression: format_result(&result)
+---
+layouts: 1
+  tabs: 1
+    tab @editor
+modes: 0
+reactions: 3
+  on "<none>"
+  on "<none>"
+  on "<none>"
+binds: 2
+  bind "Alt n"
+  bind "Ctrl s"
+uses: 1
+  use "lsp"

@@ -649,7 +649,7 @@ extension {{
         // StringNode wrapper and return the raw strings so update_one
         // can diff old vs new sets without reaching into the metadata
         // types directly.
-        use ark_ext_metadata::{ConfigSchema, StringNode};
+        use ark_ext_metadata::{CapabilitySet, ConfigSchema, StringNode};
         let meta = ExtensionMetadata {
             name: StringNode::new("picker"),
             version: StringNode::new("1.2"),
@@ -658,8 +658,9 @@ extension {{
             requires: vec![],
             intents: vec![],
             events: vec![],
+            views: vec![],
             config: ConfigSchema::default(),
-            capabilities: vec![StringNode::new("exec"), StringNode::new("pipe")],
+            capabilities: CapabilitySet::from_strs(&["exec", "pipe"]),
         };
         let got = capabilities_of(&Some(meta));
         assert_eq!(got, vec!["exec".to_string(), "pipe".to_string()]);

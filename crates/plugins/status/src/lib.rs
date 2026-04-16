@@ -77,7 +77,7 @@ pub const SIDECAR_SCENE_KDL: &str = include_str!("../scene.kdl");
 /// the scene compiler validate `on "UserEvent:status.*"` selectors
 /// against the known-event set.
 pub fn status_metadata() -> ark_ext_metadata::ExtensionMetadata {
-    use ark_ext_metadata::{ConfigSchema, EventDecl, StringNode};
+    use ark_ext_metadata::{CapabilitySet, ConfigSchema, EventDecl, StringNode};
     ark_ext_metadata::ExtensionMetadata {
         name: StringNode::new(EXTENSION_NAME),
         version: StringNode::new(env!("CARGO_PKG_VERSION")),
@@ -91,8 +91,9 @@ pub fn status_metadata() -> ark_ext_metadata::ExtensionMetadata {
                 payload_schema: StringNode::new("{}"),
             },
         ],
+        views: vec![],
         config: ConfigSchema::default(),
-        capabilities: vec![StringNode::new("ui.status-bar")],
+        capabilities: CapabilitySet::from_strs(&["ui.status-bar"]),
     }
 }
 

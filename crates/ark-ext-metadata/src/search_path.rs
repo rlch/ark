@@ -109,6 +109,106 @@ fn is_extension_dir(path: &Path) -> bool {
     path.is_dir() && path.join("extension.kdl").is_file()
 }
 
+/// Collect the names of all available extensions across every search tier.
+///
+/// Walks the same precedence order as [`resolve_extension_path`] but
+/// returns every extension name found rather than stopping at the first
+/// match for a single name. Deduplication preserves first-seen order
+/// (project-local shadows user-installed, etc.). Built-in names are
+/// appended last.
+///
+/// Used by [`suggest_extensions`] to build the candidate set for
+/// Jaro-Winkler similarity matching.
+fn collect_available_extensions(
+    cwd: &Path,
+    xdg_data_home: Option<&Path>,
+    system_dirs: &[&Path],
+    builtin: &[&str],
+) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut names = Vec::new();
+
+    let mut scan_dir = |dir: &Path| {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                if is_extension_dir(&entry.path()) {
+                    if let Some(name) = entry.file_name().to_str() {
+                        if seen.insert(name.to_owned()) {
+                            names.push(name.to_owned());
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    // 1. Project-local
+    scan_dir(&cwd.join(".ark/extensions"));
+
+    // 2. User-installed
+    if let Some(xdg) = xdg_data_home {
+        scan_dir(&xdg.join("ark/extensions"));
+    }
+
+    // 3. System-installed
+    for sys in system_dirs {
+        scan_dir(sys);
+    }
+
+    // 4. Built-in
+    for &b in builtin {
+        if seen.insert(b.to_owned()) {
+            names.push(b.to_owned());
+        }
+    }
+
+    names
+}
+
+/// Suggest similarly-named extensions when a lookup by name fails.
+///
+/// Scans every search tier (project-local, user-installed,
+/// system-installed, built-in) to discover available extension names,
+/// then returns up to 3 candidates sorted by descending Jaro-Winkler
+/// similarity with a threshold of 0.75. Returns an empty `Vec` when
+/// no candidate meets the threshold.
+///
+/// Intended to power "did you mean?" diagnostics in the scene compiler
+/// and CLI when [`resolve_extension_path`] returns `None`.
+pub fn suggest_extensions(
+    name: &str,
+    cwd: &Path,
+    xdg_data_home: Option<&Path>,
+    system_dirs: &[&Path],
+    builtin: &[&str],
+) -> Vec<String> {
+    let available = collect_available_extensions(cwd, xdg_data_home, system_dirs, builtin);
+    let candidates: Vec<&str> = available.iter().map(|s| s.as_str()).collect();
+
+    let threshold = 0.75;
+    let max = 3;
+
+    let mut scored: Vec<(f64, &str)> = candidates
+        .iter()
+        .filter_map(|&c| {
+            let sim = strsim::jaro_winkler(name, c);
+            if sim >= threshold {
+                Some((sim, c))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    scored.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.1.cmp(b.1))
+    });
+
+    scored.into_iter().take(max).map(|(_, c)| c.to_owned()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,5 +362,123 @@ mod tests {
             ExtensionPath::File(p) => assert!(p.starts_with(sys_b.path())),
             other => panic!("expected File, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // T-093: suggest_extensions (Jaro-Winkler "did you mean?" support)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn suggest_finds_similar_names() {
+        let cwd = TempDir::new().unwrap();
+        make_ext(cwd.path(), ".ark/extensions/git-status");
+        make_ext(cwd.path(), ".ark/extensions/git-stash");
+        make_ext(cwd.path(), ".ark/extensions/file-picker");
+
+        let suggestions = suggest_extensions(
+            "git-statsu", // typo for "git-status"
+            cwd.path(),
+            None,
+            &[],
+            &[],
+        );
+        assert!(
+            suggestions.contains(&"git-status".to_owned()),
+            "expected git-status in suggestions, got: {suggestions:?}"
+        );
+    }
+
+    #[test]
+    fn suggest_returns_empty_for_no_similar() {
+        let cwd = TempDir::new().unwrap();
+        make_ext(cwd.path(), ".ark/extensions/git-status");
+
+        let suggestions = suggest_extensions(
+            "zzzzzzz",
+            cwd.path(),
+            None,
+            &[],
+            &[],
+        );
+        assert!(suggestions.is_empty());
+    }
+
+    #[test]
+    fn suggest_includes_builtins() {
+        let cwd = TempDir::new().unwrap();
+
+        let suggestions = suggest_extensions(
+            "statsu", // typo for "status"
+            cwd.path(),
+            None,
+            &[],
+            &["status", "picker"],
+        );
+        assert!(
+            suggestions.contains(&"status".to_owned()),
+            "expected status in suggestions, got: {suggestions:?}"
+        );
+    }
+
+    #[test]
+    fn suggest_limits_to_three() {
+        let cwd = TempDir::new().unwrap();
+        // Create many similarly-named extensions.
+        for i in 0..6 {
+            make_ext(cwd.path(), &format!(".ark/extensions/demo-{i}"));
+        }
+
+        let suggestions = suggest_extensions(
+            "demo-0",
+            cwd.path(),
+            None,
+            &[],
+            &[],
+        );
+        assert!(suggestions.len() <= 3, "expected at most 3, got {}", suggestions.len());
+    }
+
+    #[test]
+    fn suggest_scans_all_tiers() {
+        let cwd = TempDir::new().unwrap();
+        let xdg = TempDir::new().unwrap();
+        let sys = TempDir::new().unwrap();
+
+        make_ext(cwd.path(), ".ark/extensions/git-status");
+        make_ext(xdg.path(), "ark/extensions/git-stash");
+        make_ext(sys.path(), "git-stage");
+
+        let suggestions = suggest_extensions(
+            "git-statsu",
+            cwd.path(),
+            Some(xdg.path()),
+            &[sys.path()],
+            &[],
+        );
+        // At minimum git-status and git-stash should be close enough.
+        assert!(
+            suggestions.contains(&"git-status".to_owned()),
+            "expected git-status in suggestions, got: {suggestions:?}"
+        );
+    }
+
+    #[test]
+    fn suggest_deduplicates_across_tiers() {
+        let cwd = TempDir::new().unwrap();
+        let sys = TempDir::new().unwrap();
+
+        // Same name present in two tiers.
+        make_ext(cwd.path(), ".ark/extensions/git-status");
+        make_ext(sys.path(), "git-status");
+
+        let suggestions = suggest_extensions(
+            "git-statsu",
+            cwd.path(),
+            None,
+            &[sys.path()],
+            &[],
+        );
+        let count = suggestions.iter().filter(|s| *s == "git-status").count();
+        assert_eq!(count, 1, "git-status should appear once, got: {suggestions:?}");
     }
 }

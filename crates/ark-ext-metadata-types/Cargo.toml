@@ -24,3 +24,7 @@ facet = { workspace = true }
 # module in scope when it expands. No parsing / serializing happens in
 # this crate; the runtime round-trip helpers live in `ark-ext-metadata`.
 facet-kdl = { workspace = true }
+# T-089: `inventory` backs the `ExtensionMeta` collection. The
+# `inventory::collect!` call lives next to the struct definition;
+# `inventory::submit!` calls are emitted by `ark-ext-derive`.
+inventory = { workspace = true }
