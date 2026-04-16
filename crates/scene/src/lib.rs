@@ -27,3 +27,13 @@ pub mod ast;
 pub mod cache;
 pub mod suggest;
 pub mod validate;
+
+// T-019..T-021: Rhai expression engine wrapper. Stubbed in this
+// packet; replaced by the parallel T-019 packet's full implementation.
+pub mod rhai;
+// T-022: `{Rhai}` brace-hole interpolation.
+pub mod interp;
+// T-023 + T-024: `when="<Rhai>"` + full-scene compile pass.
+pub mod compile;
+// T-025: scope builders for spawn / event contexts.
+pub mod context;

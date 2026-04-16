@@ -42,6 +42,15 @@ strsim = { workspace = true }
 # T-001: error enum derive for `SceneError` (T-006). Pairs with
 # `miette::Diagnostic` impls per variant.
 thiserror = { workspace = true }
+# T-025: AgentEvent + snapshot types for the event-scope builder
+# (`build_event_scope`). Round-tripped through serde_json to populate the
+# `event` / `payload` bindings in the Rhai scope; swapped for a direct
+# facet SHAPE walk once the supervisor exposes concrete AgentSnapshot /
+# SessionSnapshot types.
+ark-types = { path = "../types" }
+# T-025: serde_json backs the `AgentEvent -> rhai::Map` conversion in
+# `build_event_scope` (serialize variant, walk Value, build Dynamic).
+serde_json = { workspace = true }
 
 [dev-dependencies]
 # T-007: `SceneId::from_file` round-trip test needs a real on-disk file.
