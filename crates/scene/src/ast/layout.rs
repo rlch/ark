@@ -18,6 +18,7 @@
 //! the `ViewRegistry` happens in T-026+.
 
 use facet::Facet;
+use facet_kdl as kdl;
 use ::kdl::KdlDocument;
 
 // ---------------------------------------------------------------------------
@@ -122,31 +123,41 @@ pub enum HandleParseError {
 #[derive(Facet, Debug, Clone)]
 pub struct TabNode {
     /// Identity key for reconciler match + op targeting (R3 — `@handle`
-    /// required on every tab).
-    pub handle: Handle,
+    /// required on every tab). Stored as a raw string (e.g. `"@main"`)
+    /// because facet-kdl cannot auto-construct [`Handle`]; post-parse
+    /// validation via `Handle::new` happens in T-014.
+    #[facet(kdl::argument)]
+    pub handle: String,
 
     /// Working directory for panes in this tab (R3 `cwd` attr). Raw
     /// string; Rhai holes expanded at spawn in T-022 / T-024.
+    #[facet(kdl::property, default)]
     pub cwd: Option<String>,
 
     /// Display name in the tab bar (R3 `name` attr). Defaults to the
     /// handle identifier when absent. Raw string; Rhai interpolation
     /// applied at spawn.
+    #[facet(kdl::property, default)]
     pub name: Option<String>,
 
-    /// Initial focus for the session (R3 `focus` attr). Exactly one
-    /// focused tab per layout is validated in T-036.
-    pub focus: Option<bool>,
+    /// Initial focus for the session (R3 `focus` attr). Stored as a raw
+    /// string because facet-kdl 0.42 does not coerce KDL boolean literals
+    /// to `Option<bool>`; post-parse validation coerces `"true"` / `"false"`
+    /// in T-036. Exactly one focused tab per layout validated at compile.
+    #[facet(kdl::property, default)]
+    pub focus: Option<String>,
 
     /// Conditional-existence predicate (R3 `when=` on tab). Raw Rhai
     /// source; compiled in T-023, evaluated by the reconciler on
     /// context change to include / exclude this tab from the rendered
     /// layout.
+    #[facet(kdl::property, default)]
     pub when: Option<String>,
 
     /// Nested `row` / `col` / `pane` children. Heterogeneous body kept
     /// in source order so the compiler can render zellij-compatible
     /// split direction nesting verbatim.
+    #[facet(kdl::children, default)]
     pub body: Vec<LayoutChild>,
 }
 
@@ -160,10 +171,13 @@ pub struct TabNode {
 #[repr(u8)]
 pub enum LayoutChild {
     /// Horizontal split container.
+    #[facet(rename = "row")]
     Row(RowNode),
     /// Vertical split container.
+    #[facet(rename = "col")]
     Col(ColNode),
     /// Leaf pane running a view.
+    #[facet(rename = "pane")]
     Pane(PaneNode),
 }
 
@@ -181,16 +195,29 @@ pub enum LayoutChild {
 #[derive(Facet, Debug, Clone)]
 pub struct RowNode {
     /// Nested `row` / `col` / `pane` children in source order.
+    #[facet(kdl::children, default)]
     pub body: Vec<LayoutChild>,
 
     /// Optional `when=` predicate for conditional inclusion (R3 `when=`
     /// legal on rows / cols). Raw Rhai source; compiled in T-023.
+    #[facet(kdl::property, default)]
     pub when: Option<String>,
 
-    /// Sizing attributes (`span`, `cells`, `min`, `max`) when this row
-    /// is a sized sibling inside a parent container. Only one of
-    /// `span` / `cells` is normally set — T-036 validates.
-    pub sizing: SizingAttrs,
+    /// Relative weight within the parent container (R3 `span=N`).
+    #[facet(kdl::property, default)]
+    pub span: Option<u32>,
+
+    /// Fixed size in cells (R3 `cells=N`).
+    #[facet(kdl::property, default)]
+    pub cells: Option<u32>,
+
+    /// Lower bound in cells (R3 `min=N`).
+    #[facet(kdl::property, default)]
+    pub min: Option<u32>,
+
+    /// Upper bound in cells (R3 `max=N`).
+    #[facet(kdl::property, default)]
+    pub max: Option<u32>,
 }
 
 /// `col { row|col|pane … }` — vertical split container (R3).
@@ -201,16 +228,29 @@ pub struct RowNode {
 #[derive(Facet, Debug, Clone)]
 pub struct ColNode {
     /// Nested `row` / `col` / `pane` children in source order.
+    #[facet(kdl::children, default)]
     pub body: Vec<LayoutChild>,
 
     /// Optional `when=` predicate for conditional inclusion (R3 `when=`
     /// legal on rows / cols). Raw Rhai source; compiled in T-023.
+    #[facet(kdl::property, default)]
     pub when: Option<String>,
 
-    /// Sizing attributes (`span`, `cells`, `min`, `max`) when this col
-    /// is a sized sibling inside a parent container. Only one of
-    /// `span` / `cells` is normally set — T-036 validates.
-    pub sizing: SizingAttrs,
+    /// Relative weight within the parent container (R3 `span=N`).
+    #[facet(kdl::property, default)]
+    pub span: Option<u32>,
+
+    /// Fixed size in cells (R3 `cells=N`).
+    #[facet(kdl::property, default)]
+    pub cells: Option<u32>,
+
+    /// Lower bound in cells (R3 `min=N`).
+    #[facet(kdl::property, default)]
+    pub min: Option<u32>,
+
+    /// Upper bound in cells (R3 `max=N`).
+    #[facet(kdl::property, default)]
+    pub max: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -225,31 +265,40 @@ pub struct ColNode {
 #[derive(Facet, Debug, Clone)]
 pub struct PaneNode {
     /// Identity key for reconciler match + op targeting (R3 — `@handle`
-    /// required on every pane).
-    pub handle: Handle,
+    /// required on every pane). Stored as a raw string (e.g. `"@main"`)
+    /// because facet-kdl cannot auto-construct [`Handle`]; post-parse
+    /// validation via `Handle::new` happens in T-014.
+    #[facet(kdl::argument)]
+    pub handle: String,
 
-    /// Sizing attributes (`span`, `cells`, `min`, `max`) when this pane
-    /// is a sized sibling of other panes / splits inside a parent
-    /// container. T-036 validates that `span` and `cells` aren't both
-    /// set.
-    pub sizing: SizingAttrs,
+    /// Relative weight within the parent container (R3 `span=N`).
+    #[facet(kdl::property, default)]
+    pub span: Option<u32>,
 
-    /// Overlay (floating-pane) attributes (R3 — `pane @h overlay pos=…
-    /// size=…`). `None` = tiled pane (the default). `Some` = floating
-    /// pane; inner strings are raw and parsed / validated in T-037.
-    pub overlay: Option<OverlayAttrs>,
+    /// Fixed size in cells (R3 `cells=N`).
+    #[facet(kdl::property, default)]
+    pub cells: Option<u32>,
+
+    /// Lower bound in cells (R3 `min=N`).
+    #[facet(kdl::property, default)]
+    pub min: Option<u32>,
+
+    /// Upper bound in cells (R3 `max=N`).
+    #[facet(kdl::property, default)]
+    pub max: Option<u32>,
 
     /// Optional `when=` predicate for conditional inclusion (R3 `when=`
     /// legal on panes). Raw Rhai source; compiled in T-023.
+    #[facet(kdl::property, default)]
     pub when: Option<String>,
 
     /// The view that fills this pane (R6 views). Exactly one view per
     /// pane; zero or multiple view child nodes = compile error (R3).
-    /// Marked `#[facet(opaque)]` because `ViewRef` holds a foreign
-    /// `kdl::KdlDocument` and the facet `SHAPE` only needs to announce
-    /// the field's existence — full tracing happens in T-026+ against
-    /// each view's own facet schema.
-    #[facet(opaque)]
+    /// Defaults to an empty `ViewRef` during facet-kdl deserialization
+    /// because `ViewRef` holds a foreign `kdl::KdlDocument` that facet
+    /// cannot derive; the real view is populated by T-026+ post-parse
+    /// resolution against the view registry.
+    #[facet(opaque, default)]
     pub view: ViewRef,
 }
 
@@ -269,16 +318,20 @@ pub struct OverlayAttrs {
     /// Anchor position: one of `top-right`, `top-left`, `bottom-right`,
     /// `bottom-left`, `center`, or an explicit `X%xY%` / cell form.
     /// Raw string here; parsed in T-037.
+    #[facet(kdl::property)]
     pub pos: String,
 
     /// Overlay dimensions: `WxH` in cells or `W%xH%` in percent of tab.
     /// Raw string here; parsed in T-037.
+    #[facet(kdl::property)]
     pub size: String,
 
     /// `sticky=true` survives tab switch (compiles to zellij
-    /// `pinned=true`). Optional because overlays default to
-    /// non-sticky.
-    pub sticky: Option<bool>,
+    /// `pinned=true`). Stored as raw string — facet-kdl 0.42 does not
+    /// coerce KDL boolean literals to `Option<bool>`. Post-parse
+    /// validation in T-037.
+    #[facet(kdl::property, default)]
+    pub sticky: Option<String>,
 }
 
 /// Sizing attributes shared by `row`, `col`, and `pane` siblings (R3).
@@ -320,7 +373,7 @@ pub struct SizingAttrs {
 /// type that does not implement `Facet`. It is a plain field type the
 /// T-011 parser materializes manually from the pane's single view child
 /// node.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ViewRef {
     /// View alias as written in the scene source (e.g. `command`,
     /// `shell`, `status`, `nvim`). Resolution goes through the view
@@ -333,6 +386,9 @@ pub struct ViewRef {
     /// facet `SHAPE`).
     pub config_block: Option<KdlDocument>,
 }
+
+// Note: Default is derived; facet-kdl uses it for `#[facet(opaque, default)]`
+// fields during deserialization. The real view is populated post-parse.
 
 // ---------------------------------------------------------------------------
 // Tests — handle validation matrix

@@ -6,13 +6,15 @@
 //! is deferred to the compile pass (T-052 / T-053).
 
 use facet::Facet;
+use facet_kdl as kdl;
 use ::kdl::KdlDocument;
 
-// FIXME T-004: `Handle`, `OverlayAttrs`, and `ViewRef` should be imported from
-// `crate::ast::layout` (defined by T-004). T-004 has not landed yet, so the
-// types below are forward placeholders that will be swapped to the real
-// definitions in a Tier 1 integration task.
+// Handle fields are stored as String so facet-kdl can deserialize them
+// directly from KDL arguments. Post-parse validation via Handle::new
+// happens in a later pass (T-014).
 type Handle = String;
+// OverlayAttrs and ViewRef hold foreign `kdl::KdlDocument` and are marked
+// `#[facet(opaque)]` on the fields that use them.
 type OverlayAttrs = KdlDocument;
 type ViewRef = KdlDocument;
 
@@ -20,8 +22,10 @@ type ViewRef = KdlDocument;
 #[derive(Facet, Debug, Clone)]
 pub struct FocusOp {
     /// Target handle; compiler resolves tab-vs-pane from declaration (R7).
+    #[facet(kdl::argument)]
     pub handle: Handle,
     /// Optional per-op Rhai guard (R4.5 — `when=` legal on every op node).
+    #[facet(kdl::property, default)]
     pub when: Option<String>,
 }
 
@@ -29,8 +33,10 @@ pub struct FocusOp {
 #[derive(Facet, Debug, Clone)]
 pub struct CloseOp {
     /// Target handle; tab or pane (compiler-resolved).
+    #[facet(kdl::argument)]
     pub handle: Handle,
     /// Optional per-op Rhai guard.
+    #[facet(kdl::property, default)]
     pub when: Option<String>,
 }
 
@@ -38,10 +44,13 @@ pub struct CloseOp {
 #[derive(Facet, Debug, Clone)]
 pub struct RenameOp {
     /// Target tab handle.
+    #[facet(kdl::argument)]
     pub handle: Handle,
     /// New display name (may contain `{Rhai}` interpolation holes).
+    #[facet(kdl::property)]
     pub to: String,
     /// Optional per-op Rhai guard.
+    #[facet(kdl::property, default)]
     pub when: Option<String>,
 }
 
@@ -49,13 +58,17 @@ pub struct RenameOp {
 #[derive(Facet, Debug, Clone)]
 pub struct ResizeOp {
     /// Target pane handle.
+    #[facet(kdl::argument)]
     pub handle: Handle,
     /// Raw direction string (`"up"` / `"down"` / `"left"` / `"right"`);
     /// validated against the R7 set at T-052.
+    #[facet(kdl::property)]
     pub direction: String,
     /// Raw magnitude string (`"inc"` / `"dec"`); validated at T-052.
+    #[facet(kdl::property)]
     pub by: String,
     /// Optional per-op Rhai guard.
+    #[facet(kdl::property, default)]
     pub when: Option<String>,
 }
 
@@ -63,10 +76,13 @@ pub struct ResizeOp {
 #[derive(Facet, Debug, Clone)]
 pub struct MoveOp {
     /// Target pane handle.
+    #[facet(kdl::argument)]
     pub handle: Handle,
     /// Raw anchor string (`"top-right"`, `"center"`, …); validated at T-052.
+    #[facet(kdl::property)]
     pub to: String,
     /// Optional per-op Rhai guard.
+    #[facet(kdl::property, default)]
     pub when: Option<String>,
 }
 
@@ -74,8 +90,10 @@ pub struct MoveOp {
 #[derive(Facet, Debug, Clone)]
 pub struct PinOp {
     /// Target overlay pane handle.
+    #[facet(kdl::argument)]
     pub handle: Handle,
     /// Optional per-op Rhai guard.
+    #[facet(kdl::property, default)]
     pub when: Option<String>,
 }
 
@@ -83,8 +101,10 @@ pub struct PinOp {
 #[derive(Facet, Debug, Clone)]
 pub struct UnpinOp {
     /// Target overlay pane handle.
+    #[facet(kdl::argument)]
     pub handle: Handle,
     /// Optional per-op Rhai guard.
+    #[facet(kdl::property, default)]
     pub when: Option<String>,
 }
 
@@ -93,6 +113,7 @@ pub struct UnpinOp {
 #[derive(Facet, Debug, Clone)]
 pub struct SpawnOp {
     /// Handle of the newly spawned pane.
+    #[facet(kdl::argument)]
     pub handle: Handle,
     /// `Some` when the caller wrote `spawn @h overlay pos=… size=… { … }`;
     /// `None` for tiled spawns.
@@ -104,6 +125,7 @@ pub struct SpawnOp {
     /// Optional per-op Rhai guard (note: `SpawnOp` carries its own
     /// `when` because R7 already calls out overlay vs tiled modes —
     /// the guard still applies uniformly).
+    #[facet(kdl::property, default)]
     pub when: Option<String>,
 }
 
@@ -111,12 +133,16 @@ pub struct SpawnOp {
 #[derive(Facet, Debug, Clone)]
 pub struct NewTabOp {
     /// Handle of the new tab.
+    #[facet(kdl::argument)]
     pub handle: Handle,
     /// Optional display name (defaults to handle in the reconciler).
+    #[facet(kdl::property, default)]
     pub name: Option<String>,
     /// Optional working directory for child panes (Rhai-interpolated).
+    #[facet(kdl::property, default)]
     pub cwd: Option<String>,
     /// Optional per-op Rhai guard.
+    #[facet(kdl::property, default)]
     pub when: Option<String>,
 }
 
@@ -124,8 +150,10 @@ pub struct NewTabOp {
 #[derive(Facet, Debug, Clone)]
 pub struct UseModeOp {
     /// Mode name (e.g. `"review"`; `"default"` reverts to the base layout).
+    #[facet(kdl::argument)]
     pub mode: String,
     /// Optional per-op Rhai guard.
+    #[facet(kdl::property, default)]
     pub when: Option<String>,
 }
 
@@ -133,12 +161,16 @@ pub struct UseModeOp {
 #[derive(Facet, Debug, Clone)]
 pub struct PipeOp {
     /// Source pane handle.
+    #[facet(kdl::property)]
     pub from: Handle,
     /// Destination pane handle.
+    #[facet(kdl::property)]
     pub to: Handle,
     /// Payload string (may contain `{Rhai}` interpolation holes).
+    #[facet(kdl::property)]
     pub payload: String,
     /// Optional per-op Rhai guard.
+    #[facet(kdl::property, default)]
     pub when: Option<String>,
 }
 
@@ -146,12 +178,14 @@ pub struct PipeOp {
 #[derive(Facet, Debug, Clone)]
 pub struct EmitOp {
     /// Fully-qualified event name (e.g. `"user.my_event"`).
+    #[facet(kdl::argument)]
     pub event_name: String,
     /// Opaque KDL payload block preserved verbatim; Rhai interpolation
     /// happens at dispatch time, not at parse time.
     #[facet(opaque)]
     pub payload: Option<KdlDocument>,
     /// Optional per-op Rhai guard.
+    #[facet(kdl::property, default)]
     pub when: Option<String>,
 }
 
@@ -159,12 +193,16 @@ pub struct EmitOp {
 #[derive(Facet, Debug, Clone)]
 pub struct SetStatusOp {
     /// Status text (Rhai-interpolated).
+    #[facet(kdl::property)]
     pub text: String,
     /// Optional severity level (`"info"` / `"success"` / `"warn"` / `"error"`).
+    #[facet(kdl::property, default)]
     pub severity: Option<String>,
     /// Optional time-to-live in milliseconds; `None` = persistent.
+    #[facet(kdl::property, default)]
     pub ttl_ms: Option<u64>,
     /// Optional per-op Rhai guard.
+    #[facet(kdl::property, default)]
     pub when: Option<String>,
 }
 
@@ -172,8 +210,10 @@ pub struct SetStatusOp {
 #[derive(Facet, Debug, Clone)]
 pub struct AcpPromptOp {
     /// Prompt body (Rhai-interpolated).
+    #[facet(kdl::property)]
     pub text: String,
     /// Optional per-op Rhai guard.
+    #[facet(kdl::property, default)]
     pub when: Option<String>,
 }
 
@@ -181,6 +221,7 @@ pub struct AcpPromptOp {
 #[derive(Facet, Debug, Clone)]
 pub struct AcpCancelOp {
     /// Optional per-op Rhai guard.
+    #[facet(kdl::property, default)]
     pub when: Option<String>,
 }
 
@@ -188,11 +229,14 @@ pub struct AcpCancelOp {
 #[derive(Facet, Debug, Clone)]
 pub struct AcpPermitOp {
     /// ACP request id to respond to.
+    #[facet(kdl::property)]
     pub request_id: String,
     /// Raw outcome string (`"allow"` / `"reject_once"` / `"reject_always"`);
     /// validated against the R7 set at T-052.
+    #[facet(kdl::property)]
     pub outcome: String,
     /// Optional per-op Rhai guard.
+    #[facet(kdl::property, default)]
     pub when: Option<String>,
 }
 
@@ -200,8 +244,10 @@ pub struct AcpPermitOp {
 #[derive(Facet, Debug, Clone)]
 pub struct AcpSetModeOp {
     /// Mode name (protocol-defined; ark passes through).
+    #[facet(kdl::property)]
     pub mode: String,
     /// Optional per-op Rhai guard.
+    #[facet(kdl::property, default)]
     pub when: Option<String>,
 }
 
@@ -209,12 +255,16 @@ pub struct AcpSetModeOp {
 #[derive(Facet, Debug, Clone)]
 pub struct ExecOp {
     /// Script body (Rhai-interpolated).
+    #[facet(kdl::property)]
     pub script: String,
     /// Optional shell binary override (defaults to `$SHELL`).
+    #[facet(kdl::property, default)]
     pub shell: Option<String>,
     /// Optional timeout in milliseconds.
+    #[facet(kdl::property, default)]
     pub timeout_ms: Option<u64>,
     /// Optional per-op Rhai guard.
+    #[facet(kdl::property, default)]
     pub when: Option<String>,
 }
 
@@ -222,6 +272,7 @@ pub struct ExecOp {
 #[derive(Facet, Debug, Clone)]
 pub struct ReloadSceneOp {
     /// Optional per-op Rhai guard.
+    #[facet(kdl::property, default)]
     pub when: Option<String>,
 }
 
@@ -233,42 +284,61 @@ pub struct ReloadSceneOp {
 #[repr(u8)]
 pub enum OpNode {
     /// `focus @handle` op.
+    #[facet(rename = "focus")]
     Focus(FocusOp),
     /// `close @handle` op.
+    #[facet(rename = "close")]
     Close(CloseOp),
     /// `rename @handle to="name"` op.
+    #[facet(rename = "rename")]
     Rename(RenameOp),
     /// `resize @handle direction=<dir> by=<inc|dec>` op.
+    #[facet(rename = "resize")]
     Resize(ResizeOp),
     /// `move @handle to=<anchor>` op.
+    #[facet(rename = "move")]
     Move(MoveOp),
     /// `pin @handle` op.
+    #[facet(rename = "pin")]
     Pin(PinOp),
     /// `unpin @handle` op.
+    #[facet(rename = "unpin")]
     Unpin(UnpinOp),
     /// `spawn @handle [overlay …] { <view> }` op.
+    #[facet(rename = "spawn")]
     Spawn(SpawnOp),
     /// `new_tab @handle …` op.
+    #[facet(rename = "new_tab")]
     NewTab(NewTabOp),
     /// `use_mode "name"` op.
+    #[facet(rename = "use_mode")]
     UseMode(UseModeOp),
     /// `pipe from=@h to=@h payload=…` op.
+    #[facet(rename = "pipe")]
     Pipe(PipeOp),
     /// `emit "<event>" { … }` op.
+    #[facet(rename = "emit")]
     Emit(EmitOp),
     /// `set_status …` op.
+    #[facet(rename = "set_status")]
     SetStatus(SetStatusOp),
     /// `acp.prompt text=…` op.
+    #[facet(rename = "acp.prompt")]
     AcpPrompt(AcpPromptOp),
     /// `acp.cancel` op.
+    #[facet(rename = "acp.cancel")]
     AcpCancel(AcpCancelOp),
     /// `acp.permit …` op.
+    #[facet(rename = "acp.permit")]
     AcpPermit(AcpPermitOp),
     /// `acp.set_mode mode=…` op.
+    #[facet(rename = "acp.set_mode")]
     AcpSetMode(AcpSetModeOp),
     /// `exec script=…` op.
+    #[facet(rename = "exec")]
     Exec(ExecOp),
     /// `reload_scene` op.
+    #[facet(rename = "reload_scene")]
     ReloadScene(ReloadSceneOp),
     /// Catch-all for unknown verbs — preserves the raw verb + args so
     /// T-053 can surface `error[scene/unknown-op]` with suggestions.

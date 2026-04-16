@@ -17,8 +17,10 @@
 
 pub mod error;
 pub mod id;
+pub mod parse;
 
 pub use error::{Result, SceneError};
 pub use id::SceneId;
+pub use parse::{parse_scene, SceneIR};
 
 pub mod ast;

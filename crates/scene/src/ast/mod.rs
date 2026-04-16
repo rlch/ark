@@ -27,6 +27,20 @@ use crate::ast::layout::TabNode;
 use crate::ast::ops::OpNode;
 use crate::ast::selector::EventSelector;
 
+/// Top-level scene document wrapper.
+///
+/// A scene file (R1) contains exactly one `scene "<name>" { … }` node. This
+/// struct collects it as a single `kdl::child` so the root of the KDL document
+/// has the expected shape for `facet_kdl::from_str`. Multiple top-level
+/// `scene` nodes = parse error (facet-kdl rejects duplicates on a single
+/// `kdl::child` field).
+#[derive(Facet, Debug, Clone)]
+pub struct SceneDoc {
+    /// The one-and-only `scene` node at the top of the file.
+    #[facet(kdl::child)]
+    pub scene: SceneNode,
+}
+
 /// Top-level `scene "<name>" { … }` node — the single root of every scene
 /// file per R1.1.
 ///
@@ -229,19 +243,18 @@ pub struct DisableExtensionNode {
 mod tests {
     use super::*;
 
-    /// Smoke test: minimal `scene "x" { }` parses through facet-kdl.
-    /// Exercises the scene-node derive macro (name argument, empty body) per
-    /// the T-003 acceptance criterion. Richer body-level coverage lands with
-    /// T-011's fixture suite once T-004 / T-005 / T-009 populate the real
-    /// child types.
+    /// Smoke test: minimal `scene "x" { }` parses through facet-kdl via
+    /// the `SceneDoc` wrapper. Exercises the scene-node derive macro (name
+    /// argument, empty body) per the T-003 acceptance criterion. Re-enabled
+    /// by T-011 which added the `SceneDoc` wrapper + `parse_scene` entry
+    /// point.
     #[test]
-    #[ignore = "T-011 wires parse_scene entry point; facet-kdl expects a document wrapper over SceneNode"]
     fn parses_minimal_empty_scene() {
         let kdl = r#"scene "x" { }"#;
-        let parsed =
-            facet_kdl::from_str::<SceneNode>(kdl).expect("minimal empty scene should parse");
-        assert_eq!(parsed.name, "x");
-        assert!(parsed.max_cascade_depth.is_none());
-        assert!(parsed.body.is_empty());
+        let doc =
+            facet_kdl::from_str::<SceneDoc>(kdl).expect("minimal empty scene should parse");
+        assert_eq!(doc.scene.name, "x");
+        assert!(doc.scene.max_cascade_depth.is_none());
+        assert!(doc.scene.body.is_empty());
     }
 }
