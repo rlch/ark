@@ -427,6 +427,92 @@ mod tests {
         providers::{Format, Toml},
     };
 
+    // ----- T-ACP.5b: permission timeout + engines map -----------------
+
+    #[test]
+    fn acp_section_defaults_to_five_minute_timeout() {
+        let s = AcpSection::default();
+        assert_eq!(
+            s.permission_timeout_ms,
+            DEFAULT_ACP_PERMISSION_TIMEOUT_MS
+        );
+        assert_eq!(s.permission_timeout_ms, 300_000);
+    }
+
+    #[test]
+    fn acp_section_accepts_zero_for_disable() {
+        Jail::expect_with(|jail| {
+            jail.create_file(
+                "c.toml",
+                r#"
+                [acp]
+                permission_timeout_ms = 0
+                "#,
+            )?;
+            let cfg: Config = Figment::new()
+                .merge(Toml::file(jail.directory().join("c.toml")))
+                .extract()
+                .expect("parse");
+            assert_eq!(cfg.acp.permission_timeout_ms, 0);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn engines_map_parses_with_multiple_entries() {
+        Jail::expect_with(|jail| {
+            jail.create_file(
+                "c.toml",
+                r#"
+                [engines.claude]
+                command = "claude"
+                args = ["--acp"]
+
+                [engines.codex]
+                command = "codex"
+                args = ["--acp", "--verbose"]
+
+                [engines.codex.env]
+                MY_KEY = "value"
+                "#,
+            )?;
+            let cfg: Config = Figment::new()
+                .merge(Toml::file(jail.directory().join("c.toml")))
+                .extract()
+                .expect("parse");
+            assert_eq!(cfg.engines.len(), 2);
+            let claude = cfg.engines.get("claude").expect("claude defined");
+            assert_eq!(claude.command, "claude");
+            assert_eq!(claude.args, vec!["--acp".to_string()]);
+            let codex = cfg.engines.get("codex").expect("codex defined");
+            assert_eq!(codex.command, "codex");
+            assert_eq!(codex.args, vec!["--acp".to_string(), "--verbose".to_string()]);
+            assert_eq!(
+                codex.env.get("MY_KEY").map(|s| s.as_str()),
+                Some("value")
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn unknown_key_in_acp_rejected() {
+        Jail::expect_with(|jail| {
+            jail.create_file(
+                "c.toml",
+                r#"
+                [acp]
+                permisson_timeout_ms = 42
+                "#,
+            )?;
+            let res: Result<Config, _> = Figment::new()
+                .merge(Toml::file(jail.directory().join("c.toml")))
+                .extract();
+            assert!(res.is_err(), "typo in [acp] must error; got {res:?}");
+            Ok(())
+        });
+    }
+
     #[test]
     fn defaults_match_kit_r3() {
         let cfg = Config::defaults();

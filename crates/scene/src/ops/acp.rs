@@ -269,11 +269,25 @@ impl Intent for PermitOp {
                 ));
             }
         };
-        client
-            .permit(&args.acp_permit.request_id, outcome)
-            .await
-            .map_err(|e| lift_acp_error(Self::NAME, e))?;
-        Ok(None)
+        // T-ACP.5b: drop late responses silently. When the timeout
+        // pump (or a prior picker response) has already resolved
+        // the request, the ACP client returns
+        // [`AcpError::UnknownPermissionRequest`]. Scene reactions
+        // fanning out to multiple response paths would otherwise
+        // surface spurious `op/failed` diagnostics; the spec calls
+        // for a debug-log drop instead.
+        match client.permit(&args.acp_permit.request_id, outcome).await {
+            Ok(()) => Ok(None),
+            Err(AcpError::UnknownPermissionRequest(id)) => {
+                tracing::debug!(
+                    target: "scene::ops::acp",
+                    request_id = %id,
+                    "acp_permit dropped — request already resolved (timeout or earlier response)"
+                );
+                Ok(None)
+            }
+            Err(e) => Err(lift_acp_error(Self::NAME, e)),
+        }
     }
 }
 
