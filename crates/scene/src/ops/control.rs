@@ -254,17 +254,76 @@ impl Intent for ReloadSceneOp {
     async fn dispatch(
         &self,
         _args: Self::Args,
-        _ctx: &IntentContext,
+        ctx: &IntentContext,
     ) -> Result<Option<IntentValue>, IntentError> {
-        // TODO(T-5.x): call `ctx.supervisor.reload_scene()` once
-        // `SupervisorHandle` is replaced with the real facade. The real
-        // implementation must honor the turn-inflight guard per R14.
-        tracing::info!(
-            target = "scene::ops",
-            op = Self::NAME,
-            "reload_scene (stub: awaiting real supervisor handle)"
-        );
-        Ok(None)
+        // T-11.1: drive the reload through the supervisor handle's
+        // installed SceneReloader, honoring the re-entry guard +
+        // turn-inflight gate.
+        let reloader = match ctx.supervisor.reloader() {
+            Some(r) => r,
+            None => {
+                // No reloader installed — scene-less agent or test
+                // stub. Log and return Ok(None) to match the
+                // idempotent-noop-on-absent contract.
+                tracing::info!(
+                    target: "scene::ops",
+                    op = Self::NAME,
+                    "reload_scene: no reloader installed (scene-less agent?)"
+                );
+                return Ok(None);
+            }
+        };
+
+        let supervisor = ctx.supervisor.clone();
+        let outcome =
+            reloader.reload(move || supervisor.any_turn_inflight());
+
+        match &outcome {
+            crate::reload::ReloadOutcome::Applied { diff } => {
+                tracing::info!(
+                    target: "scene::ops",
+                    op = Self::NAME,
+                    old_reactions = diff.old_reaction_count,
+                    new_reactions = diff.new_reaction_count,
+                    "reload_scene: applied"
+                );
+                Ok(Some(serde_json::json!({
+                    "status": "applied",
+                    "old_reactions": diff.old_reaction_count,
+                    "new_reactions": diff.new_reaction_count,
+                    "old_keybinds": diff.old_keybind_count,
+                    "new_keybinds": diff.new_keybind_count,
+                    "old_plugins": diff.old_plugin_count,
+                    "new_plugins": diff.new_plugin_count,
+                })))
+            }
+            crate::reload::ReloadOutcome::ReentryDropped => {
+                tracing::debug!(
+                    target: "scene::ops",
+                    op = Self::NAME,
+                    "reload_scene: dropped (re-entry guard)"
+                );
+                Ok(None)
+            }
+            crate::reload::ReloadOutcome::Queued { pending_sessions } => {
+                tracing::info!(
+                    target: "scene::ops",
+                    op = Self::NAME,
+                    pending_sessions,
+                    "reload_scene: queued (turns in-flight)"
+                );
+                Ok(Some(serde_json::json!({
+                    "status": "queued",
+                    "pending_sessions": pending_sessions,
+                })))
+            }
+            crate::reload::ReloadOutcome::Failed { error } => {
+                Err(IntentError::failed(
+                    Self::NAME,
+                    format!("reload_scene: {error}").into(),
+                ))
+            }
+        }
     }
 }
 

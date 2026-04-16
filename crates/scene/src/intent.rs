@@ -251,10 +251,71 @@ impl EventBus {
 /// supervisor state (`reload_scene`, lifecycle probes, ACP routing)
 /// take this handle.
 ///
+/// T-11.1: adds [`any_turn_inflight`](SupervisorHandle::any_turn_inflight)
+/// and [`scene_reloader`](SupervisorHandle::scene_reloader) for the
+/// hot-reload gate. The real supervisor will replace the placeholder
+/// inner fields with live ACP session state and a wired
+/// [`crate::reload::SceneReloader`].
+///
 /// TODO(T-5.x): replace with the real supervisor handle once
 /// `crates/supervisor/` exposes a public `SupervisorHandle` facade.
 #[derive(Debug, Default)]
-pub struct SupervisorHandle;
+pub struct SupervisorHandle {
+    /// T-ACP.2c stub: number of ACP sessions with in-flight
+    /// `session/prompt` turns. `None` = ACP not active / not wired.
+    /// The real supervisor sets this from the ACP client's session
+    /// tracker.
+    inflight_count: std::sync::Mutex<Option<usize>>,
+
+    /// T-11.1: optional scene reloader. Wired by the supervisor at
+    /// boot when a scene path is configured.
+    reloader: std::sync::Mutex<Option<Arc<crate::reload::SceneReloader>>>,
+}
+
+impl SupervisorHandle {
+    /// Construct a new placeholder handle (no ACP sessions, no
+    /// reloader).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// T-ACP.2c: check whether any ACP session has a `session/prompt`
+    /// awaiting response. Returns `Some(n)` where `n` is the count
+    /// of sessions with in-flight turns, or `None` when the ACP
+    /// subsystem is not wired.
+    ///
+    /// Used by the turn-inflight gate in
+    /// [`crate::reload::SceneReloader::reload`].
+    pub fn any_turn_inflight(&self) -> Option<usize> {
+        self.inflight_count
+            .lock()
+            .expect("inflight mutex poisoned")
+            .clone()
+    }
+
+    /// Test helper: set the in-flight turn count.
+    pub fn set_inflight_count(&self, count: Option<usize>) {
+        let mut guard = self.inflight_count.lock().expect("inflight mutex poisoned");
+        *guard = count;
+    }
+
+    /// T-11.1: install the scene reloader. Called by the supervisor
+    /// once the scene is compiled and the reloader is constructed.
+    pub fn set_reloader(&self, reloader: Arc<crate::reload::SceneReloader>) {
+        let mut guard = self.reloader.lock().expect("reloader mutex poisoned");
+        *guard = Some(reloader);
+    }
+
+    /// T-11.1: access the installed scene reloader. Returns `None`
+    /// when no reloader has been installed (scene-less agents, test
+    /// stubs).
+    pub fn reloader(&self) -> Option<Arc<crate::reload::SceneReloader>> {
+        self.reloader
+            .lock()
+            .expect("reloader mutex poisoned")
+            .clone()
+    }
+}
 
 /// Handle used by the ACP-interaction core ops (T-ACP.2b) to drive
 /// `session/prompt`, `session/cancel`, `session/set_mode`, and
@@ -425,7 +486,7 @@ impl IntentContext {
         Self {
             mux: Arc::new(MuxPlaceholder),
             bus: Arc::new(EventBus::default()),
-            supervisor: Arc::new(SupervisorHandle),
+            supervisor: Arc::new(SupervisorHandle::new()),
             acp: Arc::new(AcpClientHandle::new()),
             scene_id,
             origin: ReactionOrigin::default(),
