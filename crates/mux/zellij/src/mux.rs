@@ -114,7 +114,7 @@ impl ZellijMux {
     }
 
     /// R6 — fail fast when zellij is absent or too old. Called from
-    /// `ark doctor` and `ark spawn`; not part of the `Multiplexer` trait.
+    /// `ark doctor` and `ark spawn`.
     pub async fn preflight(&self) -> anyhow::Result<()> {
         let output = self.executor.run("zellij", &["--version"]).await.map_err(|e| {
             anyhow!(
@@ -174,9 +174,8 @@ pub(crate) fn parse_zellij_version(line: &str) -> anyhow::Result<(u32, u32, u32)
     ))
 }
 
-/// Inherent method surface mirroring the former `Multiplexer` trait (deleted
-/// alongside the `ark-core::multiplexer` module). See cavekit-mux-zellij.md
-/// for the contract each method fulfils.
+/// Core method surface. See cavekit-mux-zellij.md for the contract each
+/// method fulfils.
 impl ZellijMux {
     pub fn kind(&self) -> &'static str {
         "zellij"

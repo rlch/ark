@@ -16,7 +16,7 @@
 //!   (cavekit-types-state-events.md R7).
 //! - `orchestrator` — `Orchestrator` trait + `World` capability bag
 //!   (cavekit-architecture.md R2 + R3). `World.mux` is
-//!   `Arc<ark_mux_zellij::ZellijMux>` (concrete — there is no mux trait).
+//!   `Arc<ark_mux_zellij::ZellijMux>` (concrete).
 //! - `socket_paths` — agents-socket-dir + per-agent path helpers
 //!   (cavekit-hook-ipc.md R4).
 //! - `status_writer` — atomic `status.json` writer/reader

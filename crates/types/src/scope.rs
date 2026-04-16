@@ -8,7 +8,7 @@ pub const ENGINES_V1: &[&str] = &["claude-code"];
 /// Orchestrators shipped in v1.
 pub const ORCHESTRATORS_V1: &[&str] = &["cavekit", "claude-code"];
 
-/// Multiplexers shipped in v1.
+/// Mux backends shipped in v1.
 pub const MUX_V1: &[&str] = &["zellij"];
 
 /// True if the slug names a v1 engine.

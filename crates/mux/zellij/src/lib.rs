@@ -1,10 +1,10 @@
 //! Zellij integration backend for ark.
 //!
 //! Hosts `ZellijMux` — ark's concrete integration with the zellij terminal
-//! multiplexer. See `cavekit-mux-zellij.md` for the full spec. There is no
-//! generic `Multiplexer` trait: downstream callers use `ZellijMux` directly,
-//! and tests use the [`ZellijMux::for_test`] constructor (gated behind the
-//! `test-support` cargo feature) to inject a [`executor::StubExecutor`].
+//! multiplexer. See `cavekit-mux-zellij.md` for the full spec. Downstream
+//! callers use `ZellijMux` directly, and tests use the [`ZellijMux::for_test`]
+//! constructor (gated behind the `test-support` cargo feature) to inject a
+//! [`executor::StubExecutor`].
 //!
 //! Modules:
 //! - [`executor`] — `CommandExecutor` abstraction over `tokio::process`.

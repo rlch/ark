@@ -18,10 +18,9 @@ use crate::config::Config;
 
 /// Capabilities passed to `Orchestrator::run`.
 ///
-/// See cavekit-architecture.md R3. `mux` is `Arc<ZellijMux>` concrete: the
-/// prior `Multiplexer` trait was deleted in the mux tight-coupling revision
-/// (Wave B). Consumers call inherent methods on `ZellijMux` directly; tests
-/// use `ZellijMux::for_test(...)` to inject a scripted `StubExecutor`.
+/// See cavekit-architecture.md R3. `mux` is `Arc<ZellijMux>` concrete.
+/// Consumers call inherent methods on `ZellijMux` directly; tests use
+/// `ZellijMux::for_test(...)` to inject a scripted `StubExecutor`.
 #[non_exhaustive]
 pub struct World {
     pub spec: AgentSpec,

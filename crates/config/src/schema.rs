@@ -110,7 +110,7 @@ pub struct Config {
     pub engine: EngineSection,
     /// Orchestrator-specific configuration.
     pub orchestrator: OrchestratorSection,
-    /// Multiplexer-specific configuration.
+    /// Mux-specific configuration (zellij).
     pub mux: MuxSection,
     /// Repeatable hook definitions. Empty by default — users opt in.
     #[serde(default)]
