@@ -63,6 +63,26 @@ pub enum SupervisorError {
         /// `config.engines` + the shipped defaults).
         known: Vec<String>,
     },
+
+    /// Scene contains BOTH an inline `engine { }` block AND a
+    /// `use "engine-*"` extension — R17 intra-scene mutual exclusion.
+    ///
+    /// T-ACP.4b: surfaced by
+    /// [`crate::engine_resolution::resolve_engine`] whenever the scene
+    /// document carries a `SceneNode.engine` AND `resolved_uses`
+    /// contains an extension whose name matches the `engine-*`
+    /// convention. The scene compile pipeline is the canonical home
+    /// for this error (see
+    /// [`ark_scene::error::SceneError::EngineConflict`]); surfacing it
+    /// in the resolver is a defense-in-depth fallback for callers that
+    /// skipped the compile-pass check.
+    #[error(
+        "scene declares both an inline `engine` block and a `use \"{use_name}\"` engine extension — pick one"
+    )]
+    EngineConflict {
+        /// Name of the conflicting `use` target.
+        use_name: String,
+    },
 }
 
 // ---------------------------------------------------------------- engines ----

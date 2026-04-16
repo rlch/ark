@@ -146,6 +146,21 @@ pub fn compile_scene_for_runtime(
 
     let doc = parse_scene_src(&src, &source)?;
 
+    // T-ACP.4b: enforce intra-scene mutual exclusion between inline
+    // `engine { }` and `use "engine-*"` extensions. Runs before the
+    // CEL walk so the `scene/engine-conflict` diagnostic surfaces
+    // even when the scene also has broken CEL.
+    if let Err(err) = ark_scene::engine::ensure_no_engine_conflict(
+        &doc.scene,
+        &source.display(),
+        &src,
+    ) {
+        return Err(anyhow::anyhow!(
+            "scene `{}` failed validation:\n- {err}",
+            source.display()
+        ));
+    }
+
     // T-2.6: CEL + template validation. Collect every diagnostic the
     // single-pass walk produces and render them as a single error
     // message so the operator sees the full picture.

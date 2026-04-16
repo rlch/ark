@@ -31,7 +31,49 @@
 
 use std::collections::BTreeMap;
 
-use crate::ast::EngineNode;
+use crate::ast::{EngineNode, SceneNode};
+use crate::error::SceneError;
+use miette::{NamedSource, SourceSpan};
+
+/// Name-convention prefix for extension cartridges that contribute an
+/// engine (R17 rung 3). `use "engine-<slug>"` in a scene that ALSO
+/// carries an inline `engine { }` block trips the intra-scene
+/// mutual-exclusion rule.
+pub const ENGINE_EXTENSION_PREFIX: &str = "engine-";
+
+/// Enforce the R17 intra-scene mutual-exclusion rule between the
+/// inline `engine { }` block and any `use "engine-*"` extension
+/// declaration (T-ACP.4b).
+///
+/// Spans attach at `(0, 0)` because the typed AST does not yet
+/// preserve per-node source offsets; the miette renderer still fires
+/// the diagnostic + help text under the `scene/engine-conflict` code.
+/// When the AST grows span fields (TODO), the labels here sharpen
+/// onto the exact `engine { }` + `use "…"` nodes.
+#[allow(clippy::result_large_err)]
+pub fn ensure_no_engine_conflict(
+    scene: &SceneNode,
+    source_name: &str,
+    source_text: &str,
+) -> Result<(), SceneError> {
+    if scene.engine.is_none() {
+        return Ok(());
+    }
+    let Some(conflict) = scene
+        .uses
+        .iter()
+        .find(|u| u.name.starts_with(ENGINE_EXTENSION_PREFIX))
+    else {
+        return Ok(());
+    };
+    let zero: SourceSpan = (0, 0).into();
+    Err(SceneError::EngineConflict {
+        use_name: conflict.name.clone(),
+        src: NamedSource::new(source_name.to_string(), source_text.to_string()),
+        engine_at: zero,
+        use_at: zero,
+    })
+}
 
 /// Lowered, runtime-ready ACP engine launch spec.
 ///
@@ -297,6 +339,72 @@ scene "s" {
              facet-kdl's child-routing changed and the field name needs \
              a rename or grammar adjustment"
         );
+    }
+
+    // -- T-ACP.4b: intra-scene mutual exclusion -------------------
+
+    #[test]
+    fn ensure_no_engine_conflict_allows_scene_with_only_inline() {
+        let src = r#"
+scene "s" {
+    engine {
+        command "claude"
+    }
+}
+"#;
+        let doc = parse_scene(src, &p()).expect("parse");
+        ensure_no_engine_conflict(&doc.scene, "test.kdl", src)
+            .expect("no conflict — only inline engine");
+    }
+
+    #[test]
+    fn ensure_no_engine_conflict_allows_scene_with_only_engine_ext() {
+        let src = r#"
+scene "s" {
+    use "engine-codex"
+}
+"#;
+        let doc = parse_scene(src, &p()).expect("parse");
+        ensure_no_engine_conflict(&doc.scene, "test.kdl", src)
+            .expect("no conflict — only use");
+    }
+
+    #[test]
+    fn ensure_no_engine_conflict_rejects_both_inline_and_ext() {
+        let src = r#"
+scene "s" {
+    engine {
+        command "my-engine"
+    }
+    use "engine-claude"
+}
+"#;
+        let doc = parse_scene(src, &p()).expect("parse");
+        let err = ensure_no_engine_conflict(&doc.scene, "test.kdl", src)
+            .expect_err("must reject");
+        match err {
+            crate::error::SceneError::EngineConflict { use_name, .. } => {
+                assert_eq!(use_name, "engine-claude");
+            }
+            other => panic!("expected EngineConflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ensure_no_engine_conflict_ignores_non_engine_prefixed_use() {
+        // `use "ark-bus"` is not an engine extension — no conflict
+        // even when the scene also declares an inline engine block.
+        let src = r#"
+scene "s" {
+    engine {
+        command "my-engine"
+    }
+    use "ark-bus"
+}
+"#;
+        let doc = parse_scene(src, &p()).expect("parse");
+        ensure_no_engine_conflict(&doc.scene, "test.kdl", src)
+            .expect("non-engine use does not conflict");
     }
 
     #[test]
