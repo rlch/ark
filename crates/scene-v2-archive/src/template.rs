@@ -90,7 +90,7 @@ fn strict_env() -> Environment<'static> {
 ///
 /// # Example
 /// ```
-/// # use ark_scene::template::{compile_time_render, LayoutVars};
+/// # use ark_scene_v2_archive::template::{compile_time_render, LayoutVars};
 /// let vars = LayoutVars {
 ///     cwd: "/tmp/work".into(),
 ///     agent_cmd: "claude".into(),

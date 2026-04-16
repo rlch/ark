@@ -284,7 +284,7 @@ dependencies = [
  "ark-orchestrators-cavekit",
  "ark-orchestrators-claude-code",
  "ark-pane",
- "ark-scene",
+ "ark-scene-v2-archive",
  "ark-supervisor",
  "ark-test-fixtures",
  "ark-types",
@@ -332,7 +332,7 @@ dependencies = [
  "anyhow",
  "ark-config",
  "ark-mux-zellij",
- "ark-scene",
+ "ark-scene-v2-archive",
  "ark-test-fixtures",
  "ark-types",
  "async-trait",
@@ -488,7 +488,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ark-scene"
+name = "ark-scene-v2-archive"
 version = "0.1.0"
 dependencies = [
  "acp-client",
@@ -532,7 +532,7 @@ dependencies = [
  "ark-mux-zellij",
  "ark-orchestrators-cavekit",
  "ark-orchestrators-claude-code",
- "ark-scene",
+ "ark-scene-v2-archive",
  "ark-types",
  "async-trait",
  "chrono",

@@ -60,7 +60,7 @@ pub const MAX_SUGGESTIONS: usize = 3;
 /// the candidate string, so output is deterministic across runs.
 ///
 /// ```
-/// use ark_scene::suggest::suggest_similar;
+/// use ark_scene_v2_archive::suggest::suggest_similar;
 /// let hits = suggest_similar("keybnd", &["extends", "keybind", "engine"]);
 /// assert_eq!(hits, vec!["keybind"]);
 /// ```

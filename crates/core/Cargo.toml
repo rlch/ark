@@ -13,7 +13,7 @@ ark-config = { path = "../config" }
 # T-5.3: ReactionDispatcher consumer reads the compiled ReactionRegistry
 # + selector matcher from ark-scene. Scene depends only on ark-types so
 # this path stays acyclic.
-ark-scene = { path = "../scene" }
+ark-scene = { path = "../scene-v2-archive", package = "ark-scene-v2-archive" }
 ark-test-fixtures = { path = "../test-fixtures" }
 # `test-support` is enabled unconditionally so the publicly-exported
 # `orchestrator_contract_suite` can construct a scripted `ZellijMux`. The

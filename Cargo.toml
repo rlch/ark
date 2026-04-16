@@ -12,7 +12,11 @@ members = [
     "crates/core",
     "crates/hook",
     "crates/pane",
-    "crates/scene",
+    # Frozen v2 scene crate. Archived 2026-04-16 during v3 redraw; renamed
+    # to ark-scene-v2-archive so T-001 can claim the ark-scene name.
+    # Dependents alias back via `package = "ark-scene-v2-archive"` until
+    # they migrate. Delete once all dependents drop v2 imports.
+    "crates/scene-v2-archive",
     "crates/supervisor",
     "crates/test-fixtures",
     "crates/types",

@@ -55,7 +55,7 @@ One scene file = one composed configuration for one `ark` session.
 
 **Structure:**
 - [ ] Layout body contains only `tab @handle { … }` nodes. No bare panes/rows/cols at root.
-- [ ] `tab @handle` attributes: `cwd` (string, CEL), `name` (string), `focus` (bool, exactly one per layout), `when` (CEL).
+- [ ] `tab @handle` attributes: `cwd` (string, Rhai interp), `name` (string), `focus` (bool, exactly one per layout), `when` (Rhai predicate).
 - [ ] `row { … }` = horizontal split. `col { … }` = vertical split. Compile to zellij `pane split_direction="horizontal"/"vertical"`.
 - [ ] `pane @handle` = leaf node. Must contain exactly one view child node (the content). Compile error if zero or >1.
 
@@ -85,14 +85,15 @@ One scene file = one composed configuration for one `ark` session.
 
 ### R4: Reactions (`on` blocks)
 
-**Description:** A reaction is an event selector + optional CEL predicate + ordered op list.
+**Description:** A reaction is an event selector + optional Rhai predicate + ordered op list.
 
 **Acceptance Criteria:**
 - [ ] Selector syntax: `on <EventKind> field=pattern … { ops }`. Event kind is a bare identifier; field patterns are KDL properties.
 - [ ] Field names validated against `AgentEvent` variant fields via facet SHAPE. Unknown field = `error[scene/unknown-event-field]` with suggestions.
 - [ ] Field pattern default match types: glob for path-like, exact for strings/enums. Override via `(glob)`, `(exact)`, `(regex)` type annotations.
-- [ ] `when="<CEL>"` attribute on `on` block: evaluated per fire; false = skip reaction.
-- [ ] `when="<CEL>"` also legal on individual op nodes inside the body — per-op guards.
+- [ ] `when="<Rhai>"` attribute on `on` block: evaluated per fire; false = skip reaction.
+- [ ] `when="<Rhai>"` also legal on individual op nodes inside the body — per-op guards.
+- [ ] Predicates containing string literals MUST use KDL raw strings (`when=#"agent.phase == "review""#`) because Rhai uses double quotes. Formatter (`ark scene fmt`) auto-converts plain → raw when predicate body contains `"`.
 - [ ] **Selector-captured locals:** field patterns bind as locals in the op body. `path="**/*.md"` matching `src/README.md` → `{path}` evaluates to `"src/README.md"` in op args.
 - [ ] **UserEvent payload hybrid access:** for UserEvent, bare field names route into `payload`. Reserved top-level keys: `name`, `source`, `payload`. `payload.` prefix available as explicit escape hatch.
 - [ ] Multiple `on` blocks with overlapping selectors each run; no silent dedup.
@@ -172,23 +173,51 @@ One scene file = one composed configuration for one `ark` session.
 **General:**
 - [ ] Each op has a KDL schema (facet SHAPE). `ark scene check` validates.
 - [ ] Unknown op = `error[scene/unknown-op]` with "did you mean …?" suggestions.
-- [ ] All op string attrs support `{CEL}` interpolation (see R9).
+- [ ] All op string attrs support `{Rhai}` interpolation (see R8).
 - [ ] Handle type mismatches = compile error: `error[scene/handle-type-mismatch]`.
 
-### R8: Expression language (CEL)
+### R8: Expression language (Rhai expression-only mode)
 
-**Description:** `when=` predicates and `{expr}` interpolation use CEL via `cel-interpreter` crate.
+**Description:** `when=` predicates and `{expr}` interpolation use Rhai via the `rhai` crate in expression-only mode (non-Turing-complete: no `fn`, no `while`/`for`/`loop`, no assignment).
 
 **Acceptance Criteria:**
-- [ ] CEL expressions parsed once at scene-compile time, stored as AST.
-- [ ] `when="<CEL>"` — bare expression, no braces. Always CEL.
-- [ ] `{<CEL>}` in string values — brace-delimited interpolation holes. Each hole is a CEL expression.
-- [ ] Two evaluation scopes:
-  - **Spawn context** (layout values): bindings `cwd`, `id`, `name`, env vars. Rendered once at spawn.
-  - **Event context** (reaction/bind ops): bindings `event`, `payload`, `agent`, `session` + selector-captured locals. Rendered per fire.
-- [ ] Compiler enforces scope: layout can't see `event`; reactions can't see `cwd`. Mismatch = `error[cel/scope-mismatch]`.
-- [ ] CEL stdlib + custom functions: `glob(str, pattern)`, `starts_with`, `ends_with`, `contains`, `size`, `matches` (RE2-backed).
+
+**Engine config:**
+- [ ] Engine built with `Engine::new_raw()` (no auto stdlib). Ark-owned helpers registered explicitly.
+- [ ] Symbols disabled: `fn`, `while`, `for`, `loop`, `return`, `break`, `continue`, `=`, `+=`, `-=`, `*=`, `/=`, `%=`, `**=`, `<<=`, `>>=`, `&=`, `|=`, `^=`, `import`, `export`.
+- [ ] Resource limits set: `set_max_expr_depths(32, 32)`, `set_max_operations(10_000)`, `set_max_string_size(4096)`, `set_max_array_size(256)`, `set_max_map_size(256)`.
+- [ ] Predicates compiled via `engine.compile_expression(src)` (expression-only parse), cached as `AST` per unique source string; re-used across evaluations.
+
+**Syntax:**
+- [ ] `when="<Rhai>"` — bare expression, no braces. Always a Rhai expression returning `bool`.
+- [ ] `{<Rhai>}` in string values — brace-delimited interpolation holes. Each hole is a Rhai expression; result coerced to string.
+- [ ] Zero holes → verbatim string, no Rhai eval.
+- [ ] Single-hole whole-value (`"{expr}"`) → typed pass-through (preserves `i64`/`bool`/etc. for typed op attrs).
+- [ ] Mixed (`"text {expr} more"`) → coerce hole to string, concat.
+- [ ] String literals inside Rhai predicates use double quotes (Rhai native). Single quotes are `char` literals in Rhai and will reject multi-char content — use raw KDL strings (`#"..."#`) for `when=` attrs containing `"`.
+
+**Scopes:**
+- [ ] Two evaluation scopes, enforced at compile:
+  - **Spawn context** (layout values): bindings `cwd` (string), `id` (string), `name` (string), `env` (map of env vars). Rendered once at spawn.
+  - **Event context** (reaction/bind ops): bindings `event` (map), `payload` (map), `agent` (map with `phase`, etc.), `session` (map) + selector-captured locals. Rendered per fire.
+- [ ] Compile-time scope enforcement: layout can't see `event`; reactions can't see `cwd`. Mismatch = `error[scene/rhai-scope-mismatch]` with expected vs actual bindings.
+
+**Registered helper functions (ark-owned):**
+- [ ] `glob(path, pattern)` — RE2-flavored glob match; used under-the-hood for selector field patterns too.
+- [ ] `matches(str, regex)` — regex match (RE2-backed; no backrefs).
+- [ ] `basename(path)` / `dirname(path)` — path components.
+- [ ] Rhai built-in string methods available as-is: `starts_with`, `ends_with`, `contains`, `len`, `to_upper`, `to_lower`, `trim`, `replace`, `split`.
+- [ ] Rhai built-in array methods available: `len`, `contains`, `index_of`, `is_empty`.
+- [ ] Rhai built-in `if { } else { }` expression form usable anywhere (replaces ternary).
+
+**Diagnostics:**
+- [ ] Parse errors surface via `miette::Diagnostic` with scene file + line/col + caret at the offending Rhai token (Rhai `Position` mapped back onto the containing KDL attribute span).
+- [ ] Runtime errors (nil access, type mismatch, operation-limit exceeded) log `error[scene/rhai-eval]` with expression source + scope snapshot; reaction/op skipped; session continues.
+- [ ] Operation-limit overrun = `error[scene/rhai-oom]`; treat as programmer error, not recoverable state.
+
+**Cleanup:**
 - [ ] No minijinja anywhere. `validate_kdl()` brace scanner deleted.
+- [ ] No CEL anywhere. `cel-interpreter` dep removed.
 
 ### R9: Reconciler
 
@@ -197,7 +226,7 @@ One scene file = one composed configuration for one `ark` session.
 **Acceptance Criteria:**
 
 **Mechanism:**
-- [ ] When `when=` predicate inputs change (CEL context update), re-evaluate all predicates.
+- [ ] When `when=` predicate inputs change (Rhai scope update), re-evaluate all predicates.
 - [ ] Render complete desired layout KDL (include/exclude panes+tabs based on truth values).
 - [ ] Issue `zellij action override-layout <path> --retain-existing-terminal-panes --retain-existing-plugin-panes`.
 - [ ] Zellij reconciles: retains panes matched by `invoked_with()` (command + args), creates missing, closes extras.
@@ -282,7 +311,7 @@ One scene file = one composed configuration for one `ark` session.
 **Description:** Every compile-time and runtime error surfaces via `miette`.
 
 **Acceptance Criteria:**
-- [ ] Error codes namespaced: `scene/*`, `ext/*`, `op/*`, `cel/*`, `acp/*`.
+- [ ] Error codes namespaced: `scene/*`, `ext/*`, `op/*`, `acp/*`. Rhai errors nest under `scene/rhai-*` (`scene/rhai-scope-mismatch`, `scene/rhai-eval`, `scene/rhai-oom`).
 - [ ] All errors implement `miette::Diagnostic` with `code()`, `severity()`, `help()`, `labels()`.
 - [ ] Every AST node retains origin span; included fragment contributions track source file + line.
 - [ ] `ark scene check` exits non-zero on any error, prints every diagnostic.
@@ -391,13 +420,13 @@ scene.kdl (source)
 SceneIR { uses, includes, layout_ast, modes, reactions, keybinds }
     ↓ resolve extensions (scan dirs, read manifests, register views/intents/events)
     ↓ splice includes (verbatim insertion)
-    ↓ validate (schema, refs, CEL compile, handle types, view resolution)
+    ↓ validate (schema, refs, Rhai compile, handle types, view resolution)
 CompiledScene
     ↓ evaluate when= predicates (spawn context)
     ↓ render desired layout KDL (with env ARK_HANDLE wrapper)
     ↓ split
 ├── layout KDL → ${XDG_RUNTIME_DIR}/ark/layouts/{id}-scene.kdl (for zellij --layout)
-├── subscriber registry → one per `on` block (selector + CEL + ops)
+├── subscriber registry → one per `on` block (selector + Rhai predicate + ops)
 ├── keybinds → injected into layout KDL keybinds { } block
 └── mode layouts → pre-rendered KDL per mode (for use_mode → override-layout)
 ```
@@ -416,11 +445,11 @@ CompiledScene
 1. `AgentEvent` broadcasts on bus.
 2. Lookup reactions by `EventKind` → candidates.
 3. For each: evaluate field patterns + `when=` with context (`event`, `payload`, `agent`, `session`, captured locals). False = skip.
-4. For each surviving reaction: render `{CEL}` holes in op args; dispatch ops through intent registry.
+4. For each surviving reaction: render `{Rhai}` holes in op args; dispatch ops through intent registry.
 
 ### At runtime — reconciliation
 
-1. CEL context changes (event updates `agent.phase`, etc.).
+1. Rhai scope changes (event updates `agent.phase`, etc.).
 2. Re-evaluate all `when=` predicates.
 3. If any truth value flipped: render new desired layout → override-layout (debounced 200ms).
 4. Zellij converges: retains matched panes, creates missing, closes extras.
@@ -437,7 +466,8 @@ CompiledScene
 - **Multi-pane overlay containers** — single-pane overlay attr for v1.
 - **`agent { }` scene-root block** — removed. Agent = extension.
 - **`plugin { }` keyword** — removed. Views replace.
-- **Minijinja** — removed. CEL everywhere.
+- **Minijinja** — removed. Rhai everywhere.
+- **CEL** — removed. Rhai expression-only mode replaces it (2026-04-16 revision; see changelog).
 - **`ark spawn` verb** — removed. Bare `ark` = default session.
 
 ## Cross-References
@@ -456,7 +486,7 @@ CompiledScene
 |---|---|---|
 | KDL version | 2.0 | Stable, future-proof |
 | Parse stack | `facet` + `facet-kdl` + `kdl` 6.5 (formatter) + `miette` | Active sponsorship; one derive covers parse/reflect/schema/LSP-hover |
-| Expression language | CEL only (`cel-interpreter`). Minijinja dead. | One language for `when=` + `{expr}` interpolation |
+| Expression language | Rhai expression-only mode (`rhai` crate). CEL + Minijinja dead. | One language for `when=` + `{expr}` interpolation; Rust-native syntax; `Engine::new_raw` + symbol disables guarantee non-TC |
 | View noun | "view" replaces "plugin" / "provider" | What fills a pane |
 | View rendering | Trait-based: `CommandView` / `ZellijView` | Type system determines render mode |
 | Pane handles | `@handle` required on all tabs + panes | Reconciler identity keys; compile-time validation |

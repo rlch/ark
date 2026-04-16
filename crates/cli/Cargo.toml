@@ -70,7 +70,7 @@ ark-pane = { path = "../pane" }
 ark-config = { path = "../config" }
 ark-core = { path = "../core" }
 ark-supervisor = { path = "../supervisor" }
-ark-scene = { path = "../scene" }
+ark-scene = { path = "../scene-v2-archive", package = "ark-scene-v2-archive" }
 # T-10.8 / T-10.9: `ark ext inspect` + `ark ext list` + `ark ext info`
 # read wasm cartridge metadata (via ark-scene::wasm_meta) and text
 # manifests (via ark-ext-metadata::parse_extension_metadata_kdl), then

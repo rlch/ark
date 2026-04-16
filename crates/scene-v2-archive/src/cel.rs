@@ -65,7 +65,7 @@ pub type Value = cel_interpreter::Value;
 ///
 /// # Example
 /// ```
-/// # use ark_scene::cel::compile;
+/// # use ark_scene_v2_archive::cel::compile;
 /// let prog = compile("1 + 1", "<inline>", 0).unwrap();
 /// assert!(format!("{prog:?}").contains("Program"));
 /// ```
@@ -133,7 +133,7 @@ pub fn eval(program: &Program, ctx: &Context<'_>) -> Result<Value, SceneError> {
 ///
 /// # Example
 /// ```
-/// # use ark_scene::cel::{compile, eval_bool};
+/// # use ark_scene_v2_archive::cel::{compile, eval_bool};
 /// # use cel_interpreter::Context;
 /// let prog = compile("1 < 2", "<inline>", 0).unwrap();
 /// assert_eq!(eval_bool(&prog, &Context::default()).unwrap(), true);
@@ -172,7 +172,7 @@ pub fn eval_bool(program: &Program, ctx: &Context<'_>) -> Result<bool, SceneErro
 ///
 /// # Example
 /// ```
-/// # use ark_scene::cel::{compile, eval_bool, register_custom_functions, Context};
+/// # use ark_scene_v2_archive::cel::{compile, eval_bool, register_custom_functions, Context};
 /// let mut ctx = Context::default();
 /// register_custom_functions(&mut ctx);
 /// let prog = compile(r#"glob("src/main.rs", "**/*.rs")"#, "expr", 0).unwrap();

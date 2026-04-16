@@ -26,10 +26,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ark_scene::error::SceneError;
-use ark_scene::extends::SceneSearchCtx;
-use ark_scene::merge::{ComposedScene, load_composition, merge_fragments};
-use ark_scene::parse::parse_scene;
+use ark_scene_v2_archive::error::SceneError;
+use ark_scene_v2_archive::extends::SceneSearchCtx;
+use ark_scene_v2_archive::merge::{ComposedScene, load_composition, merge_fragments};
+use ark_scene_v2_archive::parse::parse_scene;
 use miette::{Diagnostic, GraphicalReportHandler, GraphicalTheme};
 use tempfile::TempDir;
 

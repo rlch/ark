@@ -1,5 +1,5 @@
 [package]
-name = "ark-scene"
+name = "ark-scene-v2-archive"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

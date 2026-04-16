@@ -41,9 +41,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ark_scene::error::SceneError;
-use ark_scene::parse::parse_scene;
-use ark_scene::scope::check_scope;
+use ark_scene_v2_archive::error::SceneError;
+use ark_scene_v2_archive::parse::parse_scene;
+use ark_scene_v2_archive::scope::check_scope;
 use miette::{Diagnostic, GraphicalReportHandler, GraphicalTheme};
 
 /// Render a `SceneError` through miette's unicode-nocolor theme so
@@ -288,7 +288,7 @@ fn multiple_violations() {
 /// the scope pass already passes for these fixtures — the op-refs
 /// pass is a later compile-pipeline stage.
 fn assert_op_ref_fixture_snapshot(stem: &str) {
-    use ark_scene::ops::validate::validate_op_refs;
+    use ark_scene_v2_archive::ops::validate::validate_op_refs;
     let (src, path) = load_fixture(stem);
     let doc: kdl::KdlDocument = src.parse().expect("fixture parses as KDL");
     let errs = validate_op_refs(&src, &path, &doc)

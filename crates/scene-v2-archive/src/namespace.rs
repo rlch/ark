@@ -38,7 +38,7 @@
 //! # Examples
 //!
 //! ```
-//! use ark_scene::namespace::{rewrite_intent, NamespaceOrigin};
+//! use ark_scene_v2_archive::namespace::{rewrite_intent, NamespaceOrigin};
 //!
 //! // User-scene site: bare name → user.*
 //! assert_eq!(

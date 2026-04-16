@@ -1,5 +1,5 @@
 //! `gen-scene-schema` — emit a `scene.kdl-schema` file by walking facet SHAPE
-//! for every AST type in `ark_scene::ast`.
+//! for every AST type in `ark_scene_v2_archive::ast`.
 //!
 //! Phase A (this binary): structural schema — node names, argument count +
 //! types, property names + types, required/optional children. Drives editor
@@ -52,7 +52,7 @@ use std::path::PathBuf;
 
 use facet::{Def, Facet, Shape, Type, UserType};
 
-use ark_scene::ast::SceneDoc;
+use ark_scene_v2_archive::ast::SceneDoc;
 
 /// Result of walking the AST's SHAPE graph — one entry per user-defined
 /// struct reachable from `SceneDoc::SHAPE`, keyed by `type_identifier`.
@@ -549,7 +549,7 @@ mod tests {
     /// Unwrapping should peel `Option<Vec<T>>` down to `T`.
     #[test]
     fn unwrap_container_handles_option_of_vec() {
-        use ark_scene::ast::SceneNode;
+        use ark_scene_v2_archive::ast::SceneNode;
         // `SceneNode::ons` is `Vec<OnNode>` (plural, no Option).
         let fields = match &SceneNode::SHAPE.ty {
             Type::User(UserType::Struct(st)) => st.fields,
