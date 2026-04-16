@@ -130,15 +130,105 @@ pub struct ExtensionMetadata {
     #[facet(kdl::child, default)]
     pub config: ConfigSchema,
 
-    /// Requested capabilities — leaf capability names
-    /// (e.g. `ui.keybind`, `intents.provide`, `host.fs`). R10 calls out
-    /// the MCP-style object-of-objects shape; flattening here keeps the
-    /// manifest representation flat so new capabilities can be added
-    /// MINOR-safely (R16 rule #8). On-disk each entry renders as an
-    /// `item "capability.name"` node — facet-kdl 0.42 hard-codes the
-    /// sequence item name.
+    /// Requested capabilities — T-13.3 declared-caps surface (v0.4).
+    ///
+    /// v0.4 capability vocabulary (task T-13.3 in
+    /// `build-site-scene.md`): values MUST come from
+    /// [`ALLOWED_CAPABILITIES`] — `exec`, `fs-read`, `fs-write`, `pipe`,
+    /// `network`, `hook`. Empty vec = "no special capabilities". The
+    /// scene compiler reads this list off `ExtensionMetadata::SHAPE`
+    /// (facet reflection) at ext inspection time (`ark ext inspect`,
+    /// `ark ext info`) and, at v0.4, surfaces unknown values as a
+    /// `warning[ext/unknown-capability]` rather than hard-failing —
+    /// this keeps the vocabulary extensible for post-v0.4 cap additions
+    /// without breaking R16 rule #3 (receivers MUST ignore unknown
+    /// fields, and by extension unknown cap names).
+    ///
+    /// Historical note: earlier drafts used dotted leaf names
+    /// (`ui.keybind`, `intents.provide`). The T-13.3 pass flattened
+    /// the vocabulary to the six-name list above to match the Chrome-
+    /// extension analog (install-time disclosure, then per-cap trust
+    /// prompt in T-13.4). Any leftover drafts using the old dotted
+    /// names are intentionally still parseable — the warning surface
+    /// catches them at inspection without breaking the file.
+    ///
+    /// On-disk each entry renders as an `item "<capability>"` node —
+    /// facet-kdl 0.42 hard-codes the sequence item name.
     #[facet(kdl::children, default)]
     pub capabilities: Vec<StringNode>,
+}
+
+/// v0.4 capability vocabulary (T-13.3 in `build-site-scene.md`).
+///
+/// Declared-caps values MUST come from this list. Any other value is
+/// still parseable (see [`ExtensionMetadata::capabilities`] doc) but
+/// surfaces as a `warning[ext/unknown-capability]` at inspection time;
+/// the runtime-enforcement tier (v0.5+) will upgrade this to a hard
+/// rejection once the wasm host-function gate lands (T-13.6+).
+///
+/// # Meanings (documentation only, not enforced at v0.4)
+///
+/// | Value      | What it declares                                   |
+/// |------------|----------------------------------------------------|
+/// | `exec`     | Spawns subprocesses (scene `exec` op, argv form).  |
+/// | `fs-read`  | Reads files outside the ext's install directory.   |
+/// | `fs-write` | Writes files outside the ext's install directory.  |
+/// | `pipe`     | Emits pipe messages to other zellij panes/plugins. |
+/// | `network`  | Opens outbound TCP/UDP/HTTP sockets.               |
+/// | `hook`     | Registers scene reactions ([[hooks]] analog).      |
+///
+/// The cap set is fixed for v0.4 to keep the "Chrome-install-prompt"
+/// disclosure surface tight; post-v0.4 additions slot in MINOR via
+/// R16 rule #8 (flat manifest representation, append-only).
+pub const ALLOWED_CAPABILITIES: &[&str] = &[
+    "exec",
+    "fs-read",
+    "fs-write",
+    "pipe",
+    "network",
+    "hook",
+];
+
+impl ExtensionMetadata {
+    /// Return the declared-capabilities list as plain `&str` slices.
+    ///
+    /// Thin wrapper over [`Self::capabilities`] that peels the
+    /// [`StringNode`] wrapper so call sites (`ark ext inspect`,
+    /// `ark ext info`, scene compiler cap-disclosure) can iterate
+    /// without pattern-matching on the wrapper. T-13.3 spec text
+    /// says "read at ext inspection via facet SHAPE" — in practice
+    /// that means this helper: the outer SHAPE traversal lands on
+    /// `capabilities`, and this method gives a trivial view of the
+    /// underlying strings.
+    pub fn capability_names(&self) -> impl Iterator<Item = &str> {
+        self.capabilities.iter().map(|n| n.value.as_str())
+    }
+
+    /// Return `true` iff every declared capability is a member of
+    /// [`ALLOWED_CAPABILITIES`].
+    ///
+    /// At v0.4 (T-13.3) this is **advisory**: unknown cap names are
+    /// still accepted by the parser; the caller decides whether to
+    /// warn (inspection-time default) or reject (strict install-path
+    /// in T-13.4 / T-13.5). The method itself is a pure check over
+    /// [`Self::capabilities`].
+    pub fn capabilities_are_all_known(&self) -> bool {
+        self.capability_names()
+            .all(|c| ALLOWED_CAPABILITIES.contains(&c))
+    }
+
+    /// Return the capabilities the ext declares that are NOT in the
+    /// v0.4 [`ALLOWED_CAPABILITIES`] vocabulary.
+    ///
+    /// Used by `ark ext inspect` + `ark ext info` to surface
+    /// `warning[ext/unknown-capability]` one entry per unknown name.
+    /// Order preserves the manifest's declared order so diagnostic
+    /// output is stable across runs.
+    pub fn unknown_capabilities(&self) -> Vec<&str> {
+        self.capability_names()
+            .filter(|c| !ALLOWED_CAPABILITIES.contains(c))
+            .collect()
+    }
 }
 
 /// Wrapper around `String` so it can appear as a KDL child node body
@@ -303,7 +393,7 @@ mod tests {
                     default: Some(StringNode::new("hi")),
                 }],
             },
-            capabilities: vec![StringNode::new("intents.provide")],
+            capabilities: vec![StringNode::new("exec")],
         };
         assert_eq!(m.name.value, "demo");
         assert_eq!(m.intents.len(), 1);
@@ -311,5 +401,135 @@ mod tests {
             m.config.fields[0].default.as_ref().map(|n| n.value.as_str()),
             Some("hi")
         );
+    }
+
+    // -----------------------------------------------------------------
+    // T-13.3: declared-capabilities surface
+    // -----------------------------------------------------------------
+
+    fn meta_with_caps(caps: &[&str]) -> ExtensionMetadata {
+        ExtensionMetadata {
+            name: StringNode::new("caps-demo"),
+            version: StringNode::new("0.1.0"),
+            ark_range: StringNode::default(),
+            zellij_range: StringNode::default(),
+            requires: vec![],
+            intents: vec![],
+            events: vec![],
+            config: ConfigSchema::default(),
+            capabilities: caps.iter().map(|c| StringNode::new(*c)).collect(),
+        }
+    }
+
+    #[test]
+    fn allowed_capabilities_is_the_v04_vocabulary() {
+        // Reaffirms the T-13.3 "Values from {exec, fs-read, fs-write,
+        // pipe, network, hook}" spec text. Adding a value requires a
+        // MINOR version bump + corresponding scene-compiler warning
+        // surface; dropping one is MAJOR.
+        assert_eq!(
+            ALLOWED_CAPABILITIES,
+            &["exec", "fs-read", "fs-write", "pipe", "network", "hook"]
+        );
+    }
+
+    #[test]
+    fn capability_names_peels_string_node_wrapper() {
+        let m = meta_with_caps(&["exec", "network"]);
+        let names: Vec<&str> = m.capability_names().collect();
+        assert_eq!(names, vec!["exec", "network"]);
+    }
+
+    #[test]
+    fn empty_capabilities_means_no_special_caps() {
+        let m = meta_with_caps(&[]);
+        assert_eq!(m.capability_names().count(), 0);
+        assert!(m.capabilities_are_all_known());
+        assert!(m.unknown_capabilities().is_empty());
+    }
+
+    #[test]
+    fn capabilities_are_all_known_accepts_only_v04_vocab() {
+        let m = meta_with_caps(&["exec", "fs-read", "fs-write", "pipe", "network", "hook"]);
+        assert!(m.capabilities_are_all_known());
+        assert!(m.unknown_capabilities().is_empty());
+    }
+
+    #[test]
+    fn unknown_capabilities_surfaces_non_vocab_values() {
+        // Pre-T-13.3 drafts used dotted names like `ui.keybind`. The
+        // parser still accepts them (R16 rule #3), but the inspection
+        // surface must flag them so operators notice during the v0.4
+        // upgrade.
+        let m = meta_with_caps(&["exec", "ui.keybind", "host.fs"]);
+        assert!(!m.capabilities_are_all_known());
+        assert_eq!(m.unknown_capabilities(), vec!["ui.keybind", "host.fs"]);
+    }
+
+    /// Facet SHAPE reflection surfaces the `capabilities` field by
+    /// name — the very access path T-13.3's spec text calls out
+    /// ("read at ext inspection via facet SHAPE"). We don't iterate
+    /// the SHAPE tree here (that's facet's internal surface) but we
+    /// do prove the field name is present and maps to a struct-of-
+    /// fields shape so downstream SHAPE walkers (e.g. `ark scene
+    /// schema-dump`, `ark ext inspect`) can find it.
+    #[test]
+    fn capabilities_field_is_present_on_shape() {
+        use facet::Facet;
+        let shape = ExtensionMetadata::SHAPE;
+        let debug_repr = format!("{shape:?}");
+        assert!(
+            debug_repr.contains("capabilities"),
+            "expected `capabilities` field on ExtensionMetadata SHAPE, got:\n{debug_repr}"
+        );
+    }
+
+    /// Serialize: build an `ExtensionMetadata` with caps, wrap in
+    /// [`ExtensionManifest`], serialize via facet-kdl, confirm every
+    /// declared cap value appears in the emitted KDL text.
+    ///
+    /// Full re-parse round-trip of sequence fields is gated by a
+    /// facet-kdl 0.42 limitation (`Vec<T>` renders as `item` children
+    /// with a hard-coded name and the parser can't disambiguate
+    /// multiple `Vec<T>` fields by the singularised field-name alone
+    /// — documented in `ark-ext-metadata::round_trip_through_kdl_*`).
+    /// Once facet-kdl ships per-field `rename=` on sequence
+    /// serialisation (tracked as TODO post-v0.1 in that crate) the
+    /// assertion here can be strengthened to full-value round trip.
+    #[test]
+    fn capabilities_emit_every_value_in_kdl() {
+        let original = meta_with_caps(&["exec", "network", "hook"]);
+        let manifest = ExtensionManifest::new(original.clone());
+        let kdl_text = facet_kdl::to_string(&manifest).expect("serialize manifest");
+        for cap in ["exec", "network", "hook"] {
+            assert!(
+                kdl_text.contains(cap),
+                "expected cap `{cap}` in KDL output:\n{kdl_text}"
+            );
+        }
+    }
+
+    /// End-to-end T-13.3 exercise: build an `ExtensionMetadata` with
+    /// T-13.3 v0.4 vocabulary values, round-trip the capability
+    /// accessor surface (the API surface `ark ext inspect` /
+    /// `ark ext info` actually call), and confirm every declared cap
+    /// is iterated in order.
+    ///
+    /// Facet-kdl 0.42's `Vec<T>` children render as bare `item` nodes
+    /// regardless of field name (documented in
+    /// `ark-ext-metadata::round_trip_through_kdl_*`). Disambiguation
+    /// across sibling `Vec` fields (`requires`, `intents`, `events`,
+    /// `capabilities`) relies on facet-kdl's source-position ordering
+    /// during parse, which is a fragile surface to exercise from
+    /// outside. The consumer-side API — `capability_names`,
+    /// `capabilities_are_all_known`, `unknown_capabilities` — is the
+    /// T-13.3 SHAPE-read contract and is what we pin here.
+    #[test]
+    fn capabilities_consumer_surface_matches_v04_spec() {
+        let m = meta_with_caps(&ALLOWED_CAPABILITIES.iter().copied().collect::<Vec<_>>());
+        let names: Vec<&str> = m.capability_names().collect();
+        assert_eq!(names, Vec::from(ALLOWED_CAPABILITIES));
+        assert!(m.capabilities_are_all_known());
+        assert!(m.unknown_capabilities().is_empty());
     }
 }
