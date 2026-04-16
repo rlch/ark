@@ -57,6 +57,9 @@ serde_json = { workspace = true }
 ark-mux-zellij = { path = "../mux/zellij" }
 tokio = { workspace = true }
 async-trait = { workspace = true }
+# T-047..T-055: op dispatch logs through `tracing` (stubs + idempotency
+# noops still record a line so `ark scene explain` can trace reactions).
+tracing = { workspace = true }
 
 [dev-dependencies]
 # T-007: `SceneId::from_file` round-trip test needs a real on-disk file.

@@ -544,6 +544,43 @@ pub enum SceneError {
         /// The ACP op that was dispatched.
         op: String,
     },
+
+    /// An `emit`-op chain exceeded the scene's cascade-depth cap
+    /// (R4.10 / T-062). Runtime-only — no scene span. The dispatcher
+    /// drops the offending event and logs this diagnostic.
+    #[error("reaction cascade depth {depth} exceeded limit {limit}")]
+    #[diagnostic(
+        code = "scene/cascade-depth-exceeded",
+        severity(Error),
+        help("The default cascade depth is 4 — raise via `scene \"<name>\" max-cascade-depth=<N>`, or redesign the reaction graph so `emit` chains terminate before the limit.")
+    )]
+    CascadeDepthExceeded {
+        /// The depth of the chain that tripped the guard.
+        depth: u32,
+        /// The cap as configured on the scene (default 4).
+        limit: u32,
+    },
+
+    /// A `bind "<chord>"` chord string did not parse against the loose
+    /// grammar in `crate::chord` (T-064 / R5.2).
+    #[error("invalid key chord `{chord}`: {reason}")]
+    #[diagnostic(
+        code = "scene/invalid-chord",
+        severity(Error),
+        help("Chord grammar: `(Mod )*KEY` where Mod ∈ {{Ctrl, Alt, Shift, Super}} and KEY is alphanumeric or a known zellij special (`Tab`, `Enter`, `Esc`, `Space`, `F1`-`F12`, etc.).")
+    )]
+    InvalidChord {
+        /// The chord string as authored.
+        chord: String,
+        /// Human-readable failure (e.g. `"unknown modifier `Hyper`"`).
+        reason: String,
+        /// File containing the bind.
+        #[source_code]
+        src: NamedSource<String>,
+        /// Span of the offending chord string.
+        #[label("not a valid chord")]
+        span: SourceSpan,
+    },
 }
 
 #[cfg(test)]
@@ -840,5 +877,25 @@ mod tests {
             op: "acp.prompt".into(),
         };
         assert_code(&err, "acp/no-agent");
+    }
+
+    #[test]
+    fn cascade_depth_exceeded_code() {
+        let err = SceneError::CascadeDepthExceeded {
+            depth: 5,
+            limit: 4,
+        };
+        assert_code(&err, "scene/cascade-depth-exceeded");
+    }
+
+    #[test]
+    fn invalid_chord_code() {
+        let err = SceneError::InvalidChord {
+            chord: "Hyper p".into(),
+            reason: "unknown modifier `Hyper`".into(),
+            src: src("scene.kdl", "bind \"Hyper p\" { }"),
+            span: (5, 7).into(),
+        };
+        assert_code(&err, "scene/invalid-chord");
     }
 }
