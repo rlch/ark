@@ -18,6 +18,7 @@ pub mod ext;
 pub mod kill;
 pub mod list;
 pub mod pane;
+pub mod scene;
 pub mod spawn;
 
 use clap::Subcommand;
@@ -40,6 +41,8 @@ pub enum Commands {
     Pane(pane::PaneArgs),
     /// Inspect, list, and show info for ark extensions.
     Ext(ext::ExtArgs),
+    /// Manage and inspect scene files.
+    Scene(scene::SceneArgs),
 }
 
 impl Commands {
@@ -53,6 +56,7 @@ impl Commands {
             Commands::Config(args) => config::run(args, ctx),
             Commands::Pane(args) => pane::run(args, ctx),
             Commands::Ext(args) => ext::run(args, ctx),
+            Commands::Scene(args) => scene::run(args, ctx),
         }
     }
 }

@@ -23,9 +23,12 @@ use clap::{Args, Subcommand};
 use crate::ctx::Ctx;
 use crate::error::CliError;
 
+pub mod add;
 pub mod info;
 pub mod inspect;
 pub mod list;
+pub mod remove;
+pub mod update;
 
 /// Top-level `ark ext` flags + subcommand dispatch.
 #[derive(Debug, Args)]
@@ -53,6 +56,12 @@ pub enum ExtCommand {
     List(list::ListArgs),
     /// Show full metadata for a single installed extension.
     Info(info::InfoArgs),
+    /// Install an extension from a source.
+    Add(add::AddArgs),
+    /// Uninstall an extension.
+    Remove(remove::RemoveArgs),
+    /// Re-fetch an extension from its install source.
+    Update(update::UpdateArgs),
 }
 
 /// Dispatch an `ext` subcommand through its handler module.
@@ -61,5 +70,8 @@ pub fn run(args: ExtArgs, ctx: &Ctx) -> Result<(), CliError> {
         ExtCommand::Inspect(a) => inspect::run(a, ctx),
         ExtCommand::List(a) => list::run(a, ctx),
         ExtCommand::Info(a) => info::run(a, ctx),
+        ExtCommand::Add(a) => add::run(a, ctx),
+        ExtCommand::Remove(a) => remove::run(a, ctx),
+        ExtCommand::Update(a) => update::run(a, ctx),
     }
 }
