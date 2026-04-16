@@ -14,6 +14,18 @@
 //! Span preservation is handled by `facet-kdl` internally — each parsed node
 //! carries source spans through the derive macro, surfaced via miette
 //! diagnostics in T-006 / T-011. No manual span field is required.
+//!
+//! # Node-ordering semantics (R1.3 / T-016)
+//!
+//! The relative ordering of `use`, `include`, `layout`, `mode`,
+//! `clear-reactions`, `clear-bind`, and `disable-extension` nodes within a
+//! scene body is **semantically irrelevant** — the compiler processes them in
+//! a fixed order regardless of source position.
+//!
+//! **Exception**: `on` and `bind` nodes execute in **textual (source) order**.
+//! The parser preserves their relative positions in
+//! [`SceneNode::body`]`(Vec<SceneBodyNode>)` so the compile and runtime
+//! stages can honour this ordering guarantee.
 
 pub mod layout;
 pub mod ops;
