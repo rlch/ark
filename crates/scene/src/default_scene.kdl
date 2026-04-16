@@ -1,15 +1,26 @@
-// ark v0.1 built-in default scene.
+// ark built-in default scene — inline-plugin form.
 //
 // Used as the final fallback in `resolve_scene_path` (see `path.rs`)
 // when no user scene is supplied via --scene, ARK_SCENE,
 // ./.ark/scene.kdl, or $XDG_CONFIG_HOME/<appname>/scenes/default.kdl.
 //
 // Inline-declares the picker and status plugins rather than going
-// through `use "picker"` / `use "status"`. The `use` extension surface
-// ships at v0.3 (T-10.x); v0.1 systems must run without it. T-10.10
-// migrates this file to the `use` form once that surface is live;
-// inline declarations remain supported indefinitely (Rust-editions
-// precedent — old shapes never break).
+// through `use "picker"` / `use "status"`. Both forms compile to
+// equivalent runtime behaviour — the inline form stays parseable
+// indefinitely (Rust-editions / Neovim-Lua-shim convention).
+//
+// T-10.10 staged the `use`-form alternative in `default_scene_use_form.kdl`
+// and ships sidecar `scene.kdl` fragments alongside the picker + status
+// plugin crates (`register_extension!` contributes the metadata). The
+// scene compiler's built-in extension resolver is wired after T-10.10
+// — until then, THIS file is the authoritative binary-embedded default
+// so fresh installs boot without external state.
+//
+// On the first v0.3 run where the `use`-form registry becomes active
+// (future tier), ark emits a one-time `set_status severity=info` message
+// "default scene updated to use `use \"picker\"`" — never rewrites the
+// user's scene file. The toggle lives on the supervisor's state dir
+// as `seen_v03_migration`; see `crates/supervisor/src/lib.rs`.
 
 scene "default" {
     plugin "picker" {

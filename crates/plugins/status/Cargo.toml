@@ -24,3 +24,7 @@ crate-type = ["cdylib"]
 zellij-tile = "0.44"
 serde = { workspace = true }
 serde_json = { workspace = true }
+# T-10.10: declare plugin extension metadata so scene `use "status"`
+# resolves through the same path as external wasm-cartridge extensions.
+# Path dep on `ark-ext-metadata` — same rationale as `ark-plugin-picker`.
+ark-ext-metadata = { path = "../../ark-ext-metadata" }

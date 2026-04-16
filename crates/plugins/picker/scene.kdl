@@ -1,0 +1,17 @@
+// Picker extension sidecar scene (T-10.10).
+//
+// Contributed when a user scene declares `use "picker"`. Shipped as a
+// physical file next to the plugin wasm so off-box installations
+// (`${XDG_DATA_HOME}/ark/extensions/picker/`) pick it up identically
+// to the compiled-in path.
+//
+// Declares the zellij plugin lifecycle ark ships for the picker:
+// floating-mount summoned by a single user-event, dismissed on the
+// companion event.
+
+scene "picker-sidecar" {
+    plugin "picker" {
+        source "shipped:picker"
+        mount "floating"
+    }
+}

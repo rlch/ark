@@ -484,6 +484,7 @@ dependencies = [
 name = "ark-plugin-picker"
 version = "0.1.0"
 dependencies = [
+ "ark-ext-metadata",
  "libc",
  "nucleo-matcher",
  "serde",
@@ -495,6 +496,7 @@ dependencies = [
 name = "ark-plugin-status"
 version = "0.1.0"
 dependencies = [
+ "ark-ext-metadata",
  "serde",
  "serde_json",
  "zellij-tile",
@@ -536,10 +538,12 @@ dependencies = [
 name = "ark-supervisor"
 version = "0.1.0"
 dependencies = [
+ "acp-client",
  "anyhow",
  "ark-config",
  "ark-core",
  "ark-engines-claude-code",
+ "ark-ext-metadata-types",
  "ark-mux-zellij",
  "ark-orchestrators-cavekit",
  "ark-orchestrators-claude-code",

@@ -33,6 +33,13 @@ crate-type = ["cdylib"]
 #     so `default-features = false` drops the `std`-gated helpers and
 #     shaves a small amount of dead code.
 zellij-tile = "0.44"
+# T-10.10: declare plugin extension metadata so scene `use "picker"`
+# resolves through the same path as external wasm-cartridge extensions.
+# `ark-ext-metadata` expands `register_extension!` to a static builder
+# function — compiled-in, no wasm custom-section overhead on the host
+# side. Path dep keeps the plugin-side metadata shape symmetric with
+# the scene compiler's consumer types.
+ark-ext-metadata = { path = "../../ark-ext-metadata" }
 # nucleo-matcher (NOT fuzzy-matcher) is mandated by cavekit-plugin-picker R1:
 # faster, lighter wasm footprint, only transitively pulls in `memchr`. The
 # workspace already pins 0.3 so the picker shares a single version.

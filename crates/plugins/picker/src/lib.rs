@@ -97,6 +97,115 @@ pub use state::{
 /// and the ingestion filter (this plugin) share one source of truth.
 pub const PLUGIN_NAME: &str = "ark-picker";
 
+/// Extension name used by the scene `use "picker"` resolver (T-10.10).
+///
+/// Distinct from [`PLUGIN_NAME`] (`ark-picker`) — the zellij-side pipe
+/// target — because the scene-layer name drops the vendor prefix so
+/// user scenes can write idiomatic `use "picker"` / `keybind
+/// intent="picker.show"`.
+pub const EXTENSION_NAME: &str = "picker";
+
+/// Extension's range of supported ark versions — matches the workspace
+/// pre-v1.0 line. Widened once R16 wire-compat stabilises.
+pub const ARK_RANGE: &str = ">=0.1, <1.0";
+
+/// Sidecar scene fragment shipped alongside the picker plugin.
+///
+/// Embedded via `include_str!` so the fragment ships in the host
+/// binary's data section and the scene compiler's built-in resolver
+/// can consult it without touching the filesystem. Also lives as a
+/// physical `scene.kdl` next to this file so `cargo-dist`-style
+/// installers can copy it alongside the wasm cartridge for off-box
+/// consumption.
+pub const SIDECAR_SCENE_KDL: &str = include_str!("../scene.kdl");
+
+/// Build the [`ExtensionMetadata`] the scene compiler registers when it
+/// resolves `use "picker"`.
+///
+/// Separated from the `register_extension!` expansion so host tests
+/// can call `picker_metadata()` directly; the macro wraps it in a
+/// static `ark_ext_metadata()` entry point the scene registry picks
+/// up at link time.
+pub fn picker_metadata() -> ark_ext_metadata::ExtensionMetadata {
+    use ark_ext_metadata::{ConfigSchema, EventDecl, IntentDecl, StringNode};
+    ark_ext_metadata::ExtensionMetadata {
+        name: StringNode::new(EXTENSION_NAME),
+        version: StringNode::new(env!("CARGO_PKG_VERSION")),
+        ark_range: StringNode::new(ARK_RANGE),
+        zellij_range: StringNode::new(">=0.44, <0.45"),
+        requires: vec![],
+        // User-facing intents the picker emits via its pipe/keybind
+        // surface. Fully-qualified (`picker.*`) so the scene compiler
+        // registers them without applying the namespace rewrite a
+        // second time.
+        intents: vec![
+            IntentDecl {
+                name: "picker.show".into(),
+                args_schema: StringNode::new("{}"),
+            },
+            IntentDecl {
+                name: "picker.hide".into(),
+                args_schema: StringNode::new("{}"),
+            },
+        ],
+        // Events the picker emits on every session state change.
+        events: vec![
+            EventDecl {
+                name: "picker.picked".into(),
+                payload_schema: StringNode::new("{}"),
+            },
+            EventDecl {
+                name: "picker.dismissed".into(),
+                payload_schema: StringNode::new("{}"),
+            },
+        ],
+        config: ConfigSchema::default(),
+        capabilities: vec![
+            StringNode::new("ui.plugin"),
+            StringNode::new("ui.keybind"),
+        ],
+    }
+}
+
+ark_ext_metadata::register_extension!(picker_metadata);
+
+#[cfg(test)]
+mod ext_metadata_tests {
+    use super::*;
+
+    /// T-10.10: declared metadata has the right extension name + the
+    /// picker.show intent every scene-compiled keybind dispatches
+    /// through.
+    #[test]
+    fn picker_metadata_surface() {
+        let m = picker_metadata();
+        assert_eq!(m.name.value, "picker");
+        let intents: Vec<&str> =
+            m.intents.iter().map(|i| i.name.as_str()).collect();
+        assert!(intents.contains(&"picker.show"));
+        let events: Vec<&str> =
+            m.events.iter().map(|e| e.name.as_str()).collect();
+        assert!(events.contains(&"picker.picked"));
+    }
+
+    /// T-10.10: the sidecar `scene.kdl` shipped alongside the plugin
+    /// is a syntactically-valid scene fragment.
+    #[test]
+    fn sidecar_scene_contains_plugin_block() {
+        assert!(SIDECAR_SCENE_KDL.contains("plugin \"picker\""));
+        assert!(SIDECAR_SCENE_KDL.contains("mount \"floating\""));
+    }
+
+    /// T-10.10: the `register_extension!` macro expanded into a
+    /// reachable `ark_ext_metadata()` entry point, which the scene
+    /// compiler's built-in registry looks up by symbol name.
+    #[test]
+    fn register_extension_macro_produced_entry_point() {
+        let m = ark_ext_metadata();
+        assert_eq!(m.name.value, "picker");
+    }
+}
+
 /// Root plugin state.
 ///
 /// T-100 fills in the R2 state model: a [`PickerScreen`] discriminator, the

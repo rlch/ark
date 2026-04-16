@@ -1,0 +1,12 @@
+// Status extension sidecar scene (T-10.10).
+//
+// Contributed when a user scene declares `use "status"`. Declares the
+// zellij status-bar plugin lifecycle; status is pure consumption so
+// the mount fires eagerly on session spawn.
+
+scene "status-sidecar" {
+    plugin "status" {
+        source "shipped:status"
+        mount "status-bar"
+    }
+}

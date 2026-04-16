@@ -51,6 +51,85 @@ pub use fs_scan::{merge_fs_scan, resolve_state_dir, scan_state_dir};
 /// ingestion filter share a single source of truth.
 pub const PLUGIN_NAME: &str = "ark-status";
 
+/// Extension name used by the scene `use "status"` resolver (T-10.10).
+///
+/// Distinct from [`PLUGIN_NAME`] (`ark-status`) — the zellij-side
+/// pipe target — because the scene-layer name drops the vendor
+/// prefix so user scenes can write `use "status"` idiomatically.
+pub const EXTENSION_NAME: &str = "status";
+
+/// Extension's range of supported ark versions. Matches the workspace
+/// pre-v1.0 line.
+pub const ARK_RANGE: &str = ">=0.1, <1.0";
+
+/// Sidecar scene fragment shipped alongside the status plugin.
+///
+/// Embedded via `include_str!` so the fragment ships in the host
+/// binary's data section. Same rationale as picker — off-box
+/// installations drop the physical `scene.kdl` next to the wasm.
+pub const SIDECAR_SCENE_KDL: &str = include_str!("../scene.kdl");
+
+/// Build the [`ExtensionMetadata`] the scene compiler registers when
+/// it resolves `use "status"`.
+///
+/// Status is event-only — it consumes supervisor pipe messages and
+/// renders; no user-dispatched intents. Events advertised here let
+/// the scene compiler validate `on "UserEvent:status.*"` selectors
+/// against the known-event set.
+pub fn status_metadata() -> ark_ext_metadata::ExtensionMetadata {
+    use ark_ext_metadata::{ConfigSchema, EventDecl, StringNode};
+    ark_ext_metadata::ExtensionMetadata {
+        name: StringNode::new(EXTENSION_NAME),
+        version: StringNode::new(env!("CARGO_PKG_VERSION")),
+        ark_range: StringNode::new(ARK_RANGE),
+        zellij_range: StringNode::new(">=0.44, <0.45"),
+        requires: vec![],
+        intents: vec![],
+        events: vec![
+            EventDecl {
+                name: "status.updated".into(),
+                payload_schema: StringNode::new("{}"),
+            },
+        ],
+        config: ConfigSchema::default(),
+        capabilities: vec![StringNode::new("ui.status-bar")],
+    }
+}
+
+ark_ext_metadata::register_extension!(status_metadata);
+
+#[cfg(test)]
+mod ext_metadata_tests {
+    use super::*;
+
+    /// T-10.10: status ships no intents (pipe-driven only) and one
+    /// event (`status.updated`).
+    #[test]
+    fn status_metadata_surface() {
+        let m = status_metadata();
+        assert_eq!(m.name.value, "status");
+        assert!(m.intents.is_empty());
+        let events: Vec<&str> =
+            m.events.iter().map(|e| e.name.as_str()).collect();
+        assert!(events.contains(&"status.updated"));
+    }
+
+    /// T-10.10: the sidecar `scene.kdl` ships the status-bar mount.
+    #[test]
+    fn sidecar_scene_contains_plugin_block() {
+        assert!(SIDECAR_SCENE_KDL.contains("plugin \"status\""));
+        assert!(SIDECAR_SCENE_KDL.contains("mount \"status-bar\""));
+    }
+
+    /// T-10.10: the `register_extension!` macro expanded into a
+    /// reachable `ark_ext_metadata()` entry point.
+    #[test]
+    fn register_extension_macro_produced_entry_point() {
+        let m = ark_ext_metadata();
+        assert_eq!(m.name.value, "status");
+    }
+}
+
 /// Eviction TTL for done/crashed agents per cavekit-plugin-status R2
 /// ("Keep last 60 minutes … then evict"). Expressed in milliseconds so it
 /// composes with the epoch-ms timestamps on [`StatusSummary::updated_at`].
