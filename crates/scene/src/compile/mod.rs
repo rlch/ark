@@ -33,6 +33,7 @@ pub use writer::{scene_layout_path, write_scene_layout};
 use std::path::{Path, PathBuf};
 
 use crate::ast::{LayoutNode, SceneDoc, SceneNode};
+use crate::compat::preprocess_file_shape;
 use crate::error::SceneError;
 use crate::extends::{SceneSearchCtx, ensure_single_extends};
 use crate::id::SceneId;
@@ -60,11 +61,15 @@ pub fn compile_scene_file(
     })?;
     let scene_id = SceneId::from_bytes(scene_file.to_path_buf(), &bytes);
 
-    let src = std::str::from_utf8(&bytes).map_err(|e| SceneError::Grammar {
+    let raw_src = std::str::from_utf8(&bytes).map_err(|e| SceneError::Grammar {
         message: format!("scene `{}` is not valid utf-8: {e}", scene_file.display()),
         src: NamedSource::new(scene_file.display().to_string(), String::new()),
         at: (0, 0).into(),
     })?;
+
+    // T-14.1: R15 file-shape detection — auto-wrap legacy layout-only files.
+    let shape = preprocess_file_shape(raw_src, scene_file)?;
+    let src = shape.as_str();
 
     let mut doc: SceneDoc = facet_kdl::from_str(src).map_err(|e| SceneError::Parse {
         src: NamedSource::new(scene_file.display().to_string(), src.to_string()),
@@ -131,11 +136,15 @@ pub fn compile_scene_file_with_composition(
         at: (0, 0).into(),
     })?;
     let scene_id = SceneId::from_bytes(scene_file.to_path_buf(), &bytes);
-    let src = std::str::from_utf8(&bytes).map_err(|e| SceneError::Grammar {
+    let raw_src = std::str::from_utf8(&bytes).map_err(|e| SceneError::Grammar {
         message: format!("scene `{}` is not valid utf-8: {e}", scene_file.display()),
         src: NamedSource::new(scene_file.display().to_string(), String::new()),
         at: (0, 0).into(),
     })?;
+
+    // T-14.1: R15 file-shape detection — auto-wrap legacy layout-only files.
+    let shape = preprocess_file_shape(raw_src, scene_file)?;
+    let src = shape.as_str();
 
     // One-extends-per-scene check at the raw-KDL layer so duplicate
     // `extends` clauses surface as `scene/multiple-extends` rather

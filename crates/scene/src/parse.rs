@@ -36,6 +36,7 @@ use std::path::Path;
 use miette::{Diagnostic, NamedSource, SourceSpan};
 
 use crate::ast::SceneDoc;
+use crate::compat::preprocess_file_shape;
 use crate::error::SceneError;
 
 /// Scene intermediate representation.
@@ -71,9 +72,13 @@ pub type SceneIR = SceneDoc;
 // mid-event, and we fall back to (0, src.len().min(1)).
 #[allow(clippy::result_large_err)] // SceneError carries full NamedSource; matches facet_kdl::from_str.
 pub fn parse_scene(src: &str, path: &Path) -> Result<SceneIR, SceneError> {
-    match facet_kdl::from_str::<SceneDoc>(src) {
+    // T-14.1: R15 file-shape detection — auto-wrap legacy layout-only files.
+    let shape = preprocess_file_shape(src, path)?;
+    let effective_src = shape.as_str();
+
+    match facet_kdl::from_str::<SceneDoc>(effective_src) {
         Ok(doc) => Ok(doc),
-        Err(err) => Err(kdl_err_to_scene_error(err, src, path)),
+        Err(err) => Err(kdl_err_to_scene_error(err, effective_src, path)),
     }
 }
 

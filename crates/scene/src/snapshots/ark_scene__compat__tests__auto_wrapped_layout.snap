@@ -1,0 +1,11 @@
+---
+source: crates/scene/src/compat.rs
+expression: result.as_str()
+---
+scene "default" {
+layout {
+    tab "work" {
+        pane
+    }
+}
+}

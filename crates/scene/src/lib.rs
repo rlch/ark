@@ -8,6 +8,7 @@ pub mod ast;
 pub mod cel;
 pub mod chord;
 pub mod clear;
+pub mod compat;
 pub mod compile;
 pub mod config_schema;
 pub mod cycle;
