@@ -30,7 +30,10 @@ use ark_ext_metadata::parse_extension_metadata_kdl;
 use ark_ext_metadata_types::ExtensionMetadata;
 use clap::Args;
 
-use super::add::{InstallOutcome, Source, install_from_source, parse_source};
+use super::add::{
+    InstallOutcome, Source, decide_capability_disclosure,
+    install_from_source_with_cap_decision, parse_source,
+};
 use super::remove::resolve_xdg_data_home;
 use crate::ctx::Ctx;
 use crate::error::CliError;
@@ -205,44 +208,41 @@ pub fn update_one(
 
     // ---- Step 3: wipe + re-install ------------------------------------
     //
-    // `install_from_source` refuses when the target dir already exists
+    // `install_from_source*` refuses when the target dir already exists
     // (by design — prevents clobbers during `ark ext add`). Update
     // deliberately removes first, then reinstalls. A partial failure
     // between remove + reinstall leaves the extension uninstalled; the
     // user can retry `ark ext update <name>` once the remote is
     // reachable again.
+    //
+    // T-13.5: route the cap decision through
+    // [`decide_capability_disclosure`] so a version bump that adds
+    // caps triggers the same prompt / --accept-all path as a fresh
+    // install. The prior-version carry-forward logic inside that
+    // function means caps already trusted on the old version are auto-
+    // granted — only genuinely new caps require acceptance.
     fs::remove_dir_all(&install_dir)
         .map_err(|e| format!("removing old install at {}: {e}", install_dir.display()))?;
-    let outcome: InstallOutcome =
-        install_from_source(&source, extensions_root, accept_all)?;
+    let outcome: InstallOutcome = install_from_source_with_cap_decision(
+        &source,
+        extensions_root,
+        accept_all,
+        &|meta| decide_capability_disclosure(meta, accept_all),
+    )?;
 
-    // ---- Step 4: diff caps for T-13.5 hook ----------------------------
-    let new_caps = vec![]; // Placeholder: capability surface lands with T-13.3/4/5.
-    // Once `ExtensionMetadata::capabilities` exists, `capabilities_of`
-    // below will return the real set and this diff becomes meaningful.
-    // For now the list is always empty, so version-bump re-prompting is
-    // a no-op.
+    // ---- Step 4: diff caps for the summary line ----------------------
+    //
+    // The prompt path already happened inside install_from_source_*;
+    // the diff we report here is purely for the `updated X (version A
+    // -> B)` summary line. Shows "new capability: <cap>" for caps that
+    // are in the new manifest but weren't declared in the old one,
+    // independent of which version they were trusted under.
+    let new_caps = capabilities_of(&Some(outcome.metadata.clone()));
     let new_capabilities: Vec<String> = new_caps
         .iter()
         .filter(|cap: &&String| !old_caps.contains(cap))
         .cloned()
         .collect::<Vec<String>>();
-
-    // Version-bump re-prompt (stub). The real prompt routes through the
-    // trust-file module delivered by T-13.4; here we just surface the
-    // contract: unattended update + new-caps = hard error unless
-    // `--accept-all` is set.
-    if !accept_all
-        && !new_capabilities.is_empty()
-        && old_version != outcome.metadata.version.value
-    {
-        return Err(format!(
-            "version bump {old_version} -> {} introduces new capabilities ({}); \
-             re-run with --accept-all to confirm (trust-file prompt lands with T-13.4)",
-            outcome.metadata.version.value,
-            new_capabilities.join(", ")
-        ));
-    }
 
     Ok(UpdateOutcome {
         name: outcome.metadata.name.value.clone(),
@@ -325,12 +325,21 @@ fn read_installed_metadata(dir: &Path) -> Result<ExtensionMetadata, String> {
         .map_err(|e| format!("parsing {}: {e}", path.display()))
 }
 
-/// Extract the declared capability list from a manifest. v1 of the
-/// `ExtensionMetadata` struct does NOT yet carry `capabilities` (that
-/// lands in T-13.3), so this helper returns an empty vec today. Keeping
-/// the surface here lets the T-13.x tasks land a one-line change.
-fn capabilities_of(_metadata: &Option<ExtensionMetadata>) -> Vec<String> {
-    Vec::new()
+/// Extract the declared capability list from a manifest. T-13.3
+/// added the `capabilities: Vec<StringNode>` field; this helper peels
+/// the `StringNode` wrapper so the update-summary caller can diff
+/// raw cap names without reaching into the metadata types directly.
+///
+/// Returns an empty vec when the old manifest is absent (first-time
+/// bookkeeping on a legacy install without a stored old copy) so the
+/// diff treats every declared cap as new and surfaces them in the
+/// update summary — the install pipeline's cap decision still gates
+/// the actual acceptance.
+fn capabilities_of(metadata: &Option<ExtensionMetadata>) -> Vec<String> {
+    metadata
+        .as_ref()
+        .map(|m| m.capability_names().map(|s| s.to_string()).collect())
+        .unwrap_or_default()
 }
 
 /// Public helper for tests / scripts: parse a raw source string. Exposed
@@ -619,6 +628,97 @@ extension {{
             Err(CliError::NotFound { .. }) => { /* expected */ }
             other => panic!("expected NotFound, got {other:?}"),
         }
+    }
+
+    // ---- T-13.5: version-bump cap wiring through update_one --------------
+
+    #[test]
+    fn capabilities_of_returns_empty_for_absent_metadata() {
+        // capabilities_of is the diff helper surfaced in the update
+        // summary line. A None metadata (pre-install or legacy-missing
+        // manifest) should yield an empty vec so the diff treats
+        // every declared cap as "new" rather than panicking.
+        let got = capabilities_of(&None);
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn capabilities_of_reads_declared_caps_from_metadata() {
+        // With T-13.3 the `capabilities` field lands on
+        // ExtensionMetadata. capabilities_of must now peel the
+        // StringNode wrapper and return the raw strings so update_one
+        // can diff old vs new sets without reaching into the metadata
+        // types directly.
+        use ark_ext_metadata::{ConfigSchema, StringNode};
+        let meta = ExtensionMetadata {
+            name: StringNode::new("picker"),
+            version: StringNode::new("1.2"),
+            ark_range: StringNode::new(">=0.1"),
+            zellij_range: StringNode::default(),
+            requires: vec![],
+            intents: vec![],
+            events: vec![],
+            config: ConfigSchema::default(),
+            capabilities: vec![StringNode::new("exec"), StringNode::new("pipe")],
+        };
+        let got = capabilities_of(&Some(meta));
+        assert_eq!(got, vec!["exec".to_string(), "pipe".to_string()]);
+    }
+
+    #[test]
+    fn update_one_routes_cap_decision_via_accept_all() {
+        // update_one must hand the cap decision off to
+        // decide_capability_disclosure — the old T-12.10 stub returned
+        // a bogus "re-run with --accept-all" error even when
+        // --accept-all was set. This test proves the accept-all path
+        // now works end-to-end even though the sample manifest has
+        // no caps (facet-kdl 0.42 can't round-trip the caps Vec yet,
+        // so verifying the non-cap accept-all path is the strongest
+        // assertion we can make at this layer; the cap-diff surface
+        // itself is covered by the add.rs T-13.5 tests).
+        let work = TempDir::new().unwrap();
+        let src_dir = work.path().join("src/picker");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::write(
+            src_dir.join("extension.kdl"),
+            sample_manifest("picker", "0.2.0"),
+        )
+        .unwrap();
+        let extensions_root = work.path().join("xdg/ark/extensions");
+        seed_installed(
+            &extensions_root,
+            "picker",
+            "0.1.0",
+            &format!("path:{}", src_dir.display()),
+        );
+
+        // Isolate XDG_CONFIG_HOME so the cap decision (which reads
+        // `${XDG_CONFIG_HOME}/ark/extension-trust.kdl`) doesn't touch
+        // the real user's trust file.
+        let _lock = crate::test_lock::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let xdg_cfg = work.path().join("xdg-cfg");
+        fs::create_dir_all(&xdg_cfg).unwrap();
+        let prior_cfg = std::env::var_os("XDG_CONFIG_HOME");
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", &xdg_cfg);
+        }
+
+        let outcome = update_one(&extensions_root, "picker", true);
+
+        unsafe {
+            match prior_cfg {
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+        }
+
+        let outcome = outcome.expect("update should succeed");
+        assert_eq!(outcome.old_version, "0.1.0");
+        assert_eq!(outcome.new_version, "0.2.0");
+        // No caps in the sample manifest → empty diff.
+        assert!(outcome.new_capabilities.is_empty());
     }
 
     #[test]

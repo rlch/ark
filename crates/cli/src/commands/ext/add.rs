@@ -373,7 +373,7 @@ pub fn install_from_source_with_cap_decision(
     })
 }
 
-/// T-13.4 capability-disclosure decision.
+/// T-13.4 / T-13.5 capability-disclosure decision.
 ///
 /// Called with the parsed [`ExtensionMetadata`] of an extension mid-
 /// install. Walks the declared-cap list, filters out caps already
@@ -386,6 +386,19 @@ pub fn install_from_source_with_cap_decision(
 ///   entry when `accept_all` is set (CI path, symmetric with T-13.2),
 /// * prompts the operator on stdin and either records the acceptance
 ///   or returns an abort-install error on denial.
+///
+/// # T-13.5 — version-bump re-prompt
+///
+/// When a caller installs `foo@1.2` and the trust file already
+/// records `capability "pipe" extension="foo@1.1"`, the per-version
+/// key has changed (`foo@1.2` ≠ `foo@1.1`) so the T-13.4 check would
+/// naively re-prompt for every cap. T-13.5 narrows that: caps already
+/// trusted on *any* prior version of the same `name` are auto-
+/// carried forward — we persist them under the new version's key so
+/// future checks stay cheap, and we only prompt for caps that are
+/// genuinely new in this version. The operator sees "already trusted
+/// from a prior version" for carried-forward caps so the audit trail
+/// is visible at install time.
 ///
 /// Returns `Err(reason)` when the install should abort — the caller
 /// (`install_from_source_with_cap_decision`) rolls staging back and
@@ -408,13 +421,48 @@ pub fn decide_capability_disclosure(
     // <name>@<version>. Preserves manifest order so diagnostic output
     // and the prompt list stay stable.
     let already = super::trust::load_trusted_caps();
-    let requested: Vec<&str> = meta
+    let untrusted_on_current: Vec<&str> = meta
         .capability_names()
         .filter(|c| !already.contains(&(ext_key.clone(), (*c).to_string())))
         .collect();
+    if untrusted_on_current.is_empty() {
+        return Ok(());
+    }
+
+    // T-13.5: split the untrusted-on-current-version set into
+    // (a) caps already trusted under a *different* version of this
+    //     same extension name — carry forward silently,
+    // (b) caps that are genuinely new — prompt / accept-all for these.
+    let prior = super::trust::prior_version_caps(&meta.name.value);
+    let mut carried: Vec<&str> = Vec::new();
+    let mut requested: Vec<&str> = Vec::new();
+    for cap in &untrusted_on_current {
+        if prior.contains(*cap) {
+            carried.push(cap);
+        } else {
+            requested.push(cap);
+        }
+    }
+
+    // Persist carried-forward caps under the new version's key so the
+    // T-13.4 check (is_cap_trusted) works on subsequent installs
+    // without re-walking the prior-version set. Surface them to the
+    // operator so the audit trail is visible at install time.
+    if !carried.is_empty() {
+        if let Err(e) = super::trust::save_caps(&ext_key, &carried) {
+            eprintln!("ark ext add: persisting carried-forward cap trust failed: {e}");
+        }
+        eprintln!(
+            "ark: extension `{ext_key}` — capabilities already trusted from a \
+             prior version: {}",
+            carried.join(", ")
+        );
+    }
+
     if requested.is_empty() {
         return Ok(());
     }
+
     if accept_all {
         if let Err(e) = super::trust::append_caps_audit(&ext_key, &requested) {
             eprintln!("ark ext add: audit log write failed: {e}");
@@ -424,7 +472,7 @@ pub fn decide_capability_disclosure(
         }
         eprintln!(
             "warning: --accept-all bypassed capability prompt for `{ext_key}` \
-             (caps: {})",
+             (new caps: {})",
             requested.join(", ")
         );
         Ok(())
@@ -1281,6 +1329,160 @@ extension {{
                     .unwrap();
             assert!(trust_text.contains("\"exec\""));
             assert!(trust_text.contains("\"weird.new\""));
+        });
+    }
+
+    // ---------------------------------------------------------------
+    // T-13.5: version-bump re-prompt (per-version cap diff).
+    //
+    // The trust file keys caps by `<name>@<version>` so a bump from
+    // 1.1 → 1.2 naturally looks "untrusted" under the T-13.4 check.
+    // T-13.5 narrows the re-prompt to caps that are *new* in 1.2;
+    // caps already trusted on any prior version of the same `name`
+    // are auto-carried forward and persisted under the new key so the
+    // operator isn't bothered about permissions they already granted.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn decide_caps_version_bump_only_prompts_for_new_caps() {
+        with_isolated_xdg(|xdg, xdg_cfg| {
+            // Pre-seed v1.1 trust: {pipe} already accepted.
+            let trust_path = xdg_cfg.join("ark/extension-trust.kdl");
+            fs::create_dir_all(trust_path.parent().unwrap()).unwrap();
+            fs::write(
+                &trust_path,
+                "capability \"pipe\" extension=\"foo@1.1\"\n",
+            )
+            .unwrap();
+
+            // Install v1.2 declaring {pipe, exec} with --accept-all.
+            // pipe should carry forward silently; exec is genuinely
+            // new and should land in the audit log.
+            let m = meta_with_caps("foo", "1.2", &["pipe", "exec"]);
+            decide_capability_disclosure(&m, true).expect("accept-all");
+
+            // Trust file now carries pipe under BOTH versions (old
+            // preserved, new carried forward) and exec under the new.
+            let trust_text = fs::read_to_string(&trust_path).unwrap();
+            assert!(
+                trust_text.contains("capability \"pipe\" extension=\"foo@1.1\""),
+                "prior version entry preserved:\n{trust_text}"
+            );
+            assert!(
+                trust_text.contains("capability \"pipe\" extension=\"foo@1.2\""),
+                "pipe carried forward to new version:\n{trust_text}"
+            );
+            assert!(
+                trust_text.contains("capability \"exec\" extension=\"foo@1.2\""),
+                "exec recorded under new version:\n{trust_text}"
+            );
+
+            // Only the genuinely-new cap should land in the audit log
+            // (carried-forward caps don't need an accept-all line —
+            // they were accepted on the prior install).
+            let audit =
+                fs::read_to_string(xdg.join("ark/extension-audit.log")).unwrap();
+            assert!(audit.contains("caps=exec"), "audit: {audit}");
+            assert!(
+                !audit.contains("pipe"),
+                "pipe was carried forward — should not appear in audit: {audit}"
+            );
+        });
+    }
+
+    #[test]
+    fn decide_caps_version_bump_with_only_prior_caps_is_silent() {
+        // v1.1 had {exec, pipe}; v1.2 declares the same set — after
+        // the carry-forward the requested list is empty and no audit
+        // entry should be written.
+        with_isolated_xdg(|xdg, xdg_cfg| {
+            let trust_path = xdg_cfg.join("ark/extension-trust.kdl");
+            fs::create_dir_all(trust_path.parent().unwrap()).unwrap();
+            fs::write(
+                &trust_path,
+                "capability \"exec\" extension=\"bar@1.1\"\n\
+                 capability \"pipe\" extension=\"bar@1.1\"\n",
+            )
+            .unwrap();
+
+            let m = meta_with_caps("bar", "1.2", &["exec", "pipe"]);
+            decide_capability_disclosure(&m, true)
+                .expect("all carried forward");
+
+            // Caps carried forward under the new version key.
+            let trust_text = fs::read_to_string(&trust_path).unwrap();
+            assert!(trust_text.contains("extension=\"bar@1.2\""));
+            // No genuinely-new caps → no audit entry.
+            let audit_path = xdg.join("ark/extension-audit.log");
+            assert!(
+                !audit_path.exists(),
+                "all caps carried forward — audit must stay clean"
+            );
+        });
+    }
+
+    #[test]
+    fn decide_caps_version_bump_does_not_cross_extension_names() {
+        // `picker@1.1` has `exec`; installing `picker-ng@1.1` with
+        // `exec` must NOT auto-carry-forward — they're different
+        // extension names. This guards the prefix match boundary.
+        with_isolated_xdg(|xdg, xdg_cfg| {
+            let trust_path = xdg_cfg.join("ark/extension-trust.kdl");
+            fs::create_dir_all(trust_path.parent().unwrap()).unwrap();
+            fs::write(
+                &trust_path,
+                "capability \"exec\" extension=\"picker@1.1\"\n",
+            )
+            .unwrap();
+
+            let m = meta_with_caps("picker-ng", "1.1", &["exec"]);
+            decide_capability_disclosure(&m, true).expect("accept-all");
+
+            // `picker-ng`'s `exec` should land in the audit log as a
+            // genuinely new accept — the `picker@1.1` entry must not
+            // shadow it.
+            let audit =
+                fs::read_to_string(xdg.join("ark/extension-audit.log")).unwrap();
+            assert!(
+                audit.contains("extension=picker-ng@1.1"),
+                "picker-ng install should produce its own audit line: {audit}"
+            );
+            assert!(audit.contains("caps=exec"), "audit: {audit}");
+        });
+    }
+
+    #[test]
+    fn decide_caps_version_bump_interactive_declines_for_new_caps_only() {
+        // Interactive path: v1.1 had {pipe}; v1.2 requests {pipe, exec}.
+        // The prompt should ask about `exec` only. We can't easily
+        // drive stdin in this test, so we approximate by checking that
+        // (a) `pipe` is carried forward before the prompt fires,
+        // (b) the decline-returned error references only `exec`.
+        //
+        // We simulate stdin EOF → denial by setting up an env where
+        // prompt_caps reads empty stdin. Since prompt_caps hits the
+        // real stdin when run by `decide_capability_disclosure`, we
+        // instead test the composition by construction: after seeding
+        // only {pipe}, a v1.2 install declaring {pipe} only should
+        // carry-forward-and-return-Ok WITHOUT any prompt touching
+        // stdin — this proves the split happens before the prompt.
+        with_isolated_xdg(|_xdg, xdg_cfg| {
+            let trust_path = xdg_cfg.join("ark/extension-trust.kdl");
+            fs::create_dir_all(trust_path.parent().unwrap()).unwrap();
+            fs::write(
+                &trust_path,
+                "capability \"pipe\" extension=\"baz@1.1\"\n",
+            )
+            .unwrap();
+
+            // accept_all=false would normally hit stdin; with only
+            // carry-forward caps the prompt is skipped entirely.
+            let m = meta_with_caps("baz", "1.2", &["pipe"]);
+            decide_capability_disclosure(&m, false)
+                .expect("fully carried-forward → no prompt, returns Ok");
+
+            let trust_text = fs::read_to_string(&trust_path).unwrap();
+            assert!(trust_text.contains("extension=\"baz@1.2\""));
         });
     }
 

@@ -431,6 +431,35 @@ pub fn is_cap_trusted(ext_key: &str, capability: &str) -> bool {
     load_trusted_caps().contains(&(ext_key.to_string(), capability.to_string()))
 }
 
+/// Load every capability previously trusted for *any* version of
+/// `name`. Used by T-13.5 to compute the cap-diff on a version bump:
+/// installing `foo@1.2` after `foo@1.1` was trusted with `{pipe}`
+/// should only re-prompt for caps in `caps(1.2) \ caps(1.1)`.
+///
+/// The walk is name-scoped — the ext key format `<name>@<version>`
+/// makes the match a simple prefix check on `<name>@`. Returns the
+/// union across every version present in the trust file (typically
+/// one; N on a heavily-updated ext).
+pub fn prior_version_caps(name: &str) -> HashSet<String> {
+    let path = match trust_file_path() {
+        Ok(p) => p,
+        Err(_) => return HashSet::new(),
+    };
+    prior_version_caps_at(&path, name)
+}
+
+/// Test-friendly variant of [`prior_version_caps`].
+pub fn prior_version_caps_at(path: &Path, name: &str) -> HashSet<String> {
+    let prefix = format!("{name}@");
+    let mut out = HashSet::new();
+    for (ext_key, cap) in load_trusted_caps_at(path) {
+        if ext_key.starts_with(&prefix) {
+            out.insert(cap);
+        }
+    }
+    out
+}
+
 /// Persist every capability in `caps` as trusted for `ext_key`
 /// (produced by [`ext_version_key`]).
 ///
@@ -879,5 +908,53 @@ capability "pipe" extension="ok@0.1"
         let mut input = std::io::Cursor::new(b"");
         let mut out = Vec::new();
         assert!(!prompt_caps_from("x@1", &["exec"], &mut input, &mut out));
+    }
+
+    // -----------------------------------------------------------------
+    // T-13.5: version-bump cap diff
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn prior_version_caps_returns_empty_for_missing_file() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("trust.kdl");
+        assert!(prior_version_caps_at(&path, "picker").is_empty());
+    }
+
+    #[test]
+    fn prior_version_caps_unions_across_all_versions_of_name() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("trust.kdl");
+        fs::write(
+            &path,
+            "capability \"pipe\" extension=\"picker@0.1.0\"\n\
+             capability \"exec\" extension=\"picker@0.2.0\"\n\
+             capability \"network\" extension=\"other@0.1.0\"\n",
+        )
+        .unwrap();
+        let got = prior_version_caps_at(&path, "picker");
+        assert!(got.contains("pipe"));
+        assert!(got.contains("exec"));
+        // `other@0.1.0` must not leak into `picker`'s prior caps.
+        assert!(!got.contains("network"));
+        assert_eq!(got.len(), 2);
+    }
+
+    #[test]
+    fn prior_version_caps_name_scope_is_strict_prefix_at_at_sign() {
+        // Don't match `picker-ng@0.1` when searching for `picker` —
+        // the ext key is `<name>@<version>`, so the boundary is the
+        // `@` literal, not just any prefix.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("trust.kdl");
+        fs::write(
+            &path,
+            "capability \"exec\" extension=\"picker-ng@0.1.0\"\n\
+             capability \"pipe\" extension=\"picker@0.1.0\"\n",
+        )
+        .unwrap();
+        let got = prior_version_caps_at(&path, "picker");
+        assert!(got.contains("pipe"));
+        assert!(!got.contains("exec"), "picker-ng must not leak into picker");
     }
 }
