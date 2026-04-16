@@ -209,10 +209,29 @@ pub fn run(args: AddArgs, _ctx: &Ctx) -> Result<(), CliError> {
     })?;
     let extensions_root = xdg_data_home.join("ark/extensions");
 
-    let outcome = install_from_source(&source, &extensions_root, args.accept_all)
-        .map_err(|reason| CliError::Generic {
-            reason: format!("ext/add: {reason}"),
-        })?;
+    // T-13.4: install-time capability disclosure. After staging +
+    // metadata read, inspect `ExtensionMetadata::capabilities`; if
+    // non-empty and the (ext_key, cap) pair isn't already trusted,
+    // either prompt the operator or take the `--accept-all` bypass
+    // (with matching audit-log entry). Denying aborts the install and
+    // cleans up the staging dir. [`decide_capability_disclosure`]
+    // captures the actual policy so the install pipeline itself stays
+    // decision-agnostic and the policy is unit-testable without
+    // driving the full install pipeline.
+    let accept_all = args.accept_all;
+    let decide_caps = |meta: &ExtensionMetadata| -> Result<(), String> {
+        decide_capability_disclosure(meta, accept_all)
+    };
+
+    let outcome = install_from_source_with_cap_decision(
+        &source,
+        &extensions_root,
+        accept_all,
+        &decide_caps,
+    )
+    .map_err(|reason| CliError::Generic {
+        reason: format!("ext/add: {reason}"),
+    })?;
 
     println!(
         "installed extension `{}` (version {}) to {}",
@@ -235,10 +254,49 @@ pub struct InstallOutcome {
 
 /// End-to-end install: fetch source into a staging dir, verify
 /// metadata, rename into place, write `.ark-install`.
+///
+/// Backward-compat wrapper around
+/// [`install_from_source_with_cap_decision`]: passes a no-op cap
+/// decision closure that auto-accepts every declared capability.
+/// Production callers (the `run` dispatch above) go through the
+/// decision variant so T-13.4's cap-disclosure prompt runs; tests +
+/// internal callers that don't care about cap disclosure use this
+/// thin variant.
 pub fn install_from_source(
     source: &Source,
     extensions_root: &Path,
+    accept_all: bool,
+) -> Result<InstallOutcome, String> {
+    install_from_source_with_cap_decision(
+        source,
+        extensions_root,
+        accept_all,
+        &|_meta| Ok(()),
+    )
+}
+
+/// Full install pipeline with an injectable capability-disclosure
+/// decision closure (T-13.4).
+///
+/// Called with the staging dir's parsed [`ExtensionMetadata`] right
+/// after validation and right before the staging-to-final rename.
+/// Returning `Err` from the closure aborts the install and cleans up
+/// the staging dir — the error surfaces verbatim to the caller.
+///
+/// # Why a closure and not a flag
+///
+/// The cap decision is fundamentally interactive: it may prompt the
+/// operator, it may consult a trust file, it may write an audit-log
+/// entry. Encoding all of that via flags on this function would
+/// couple the install pipeline to the specific trust-surface shape.
+/// The closure keeps `install_from_source*` decision-free — the
+/// dispatch in [`run`] wires the trust module in, tests inject their
+/// own always-accept or always-deny closures.
+pub fn install_from_source_with_cap_decision(
+    source: &Source,
+    extensions_root: &Path,
     _accept_all: bool,
+    cap_decision: &dyn Fn(&ExtensionMetadata) -> Result<(), String>,
 ) -> Result<InstallOutcome, String> {
     fs::create_dir_all(extensions_root)
         .map_err(|e| format!("creating {}: {e}", extensions_root.display()))?;
@@ -286,6 +344,14 @@ pub fn install_from_source(
         ));
     }
 
+    // T-13.4: cap disclosure runs here, while the staging dir is
+    // still disposable. Denying the prompt rolls staging back so no
+    // partially-installed ext leaks into `ark ext list`.
+    if let Err(e) = cap_decision(&metadata) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(e);
+    }
+
     // Write `.ark-install` into the staging dir before the rename so
     // the file lands atomically with the rest of the extension.
     write_install_dotfile(&staging, source, &name).map_err(|e| {
@@ -305,6 +371,77 @@ pub fn install_from_source(
         metadata,
         install_dir: final_dir,
     })
+}
+
+/// T-13.4 capability-disclosure decision.
+///
+/// Called with the parsed [`ExtensionMetadata`] of an extension mid-
+/// install. Walks the declared-cap list, filters out caps already
+/// trusted for this `<name>@<version>`, then either:
+///
+/// * emits a `warning[ext/unknown-capability]`-style message for caps
+///   outside [`ark_ext_metadata_types::ALLOWED_CAPABILITIES`] and
+///   continues (T-13.3 "unknown caps are non-fatal"),
+/// * auto-accepts and records an `accept-all-caps` audit entry + trust
+///   entry when `accept_all` is set (CI path, symmetric with T-13.2),
+/// * prompts the operator on stdin and either records the acceptance
+///   or returns an abort-install error on denial.
+///
+/// Returns `Err(reason)` when the install should abort — the caller
+/// (`install_from_source_with_cap_decision`) rolls staging back and
+/// bubbles the reason up as a [`CliError::Generic`].
+pub fn decide_capability_disclosure(
+    meta: &ExtensionMetadata,
+    accept_all: bool,
+) -> Result<(), String> {
+    let ext_key =
+        super::trust::ext_version_key(&meta.name.value, &meta.version.value);
+    // Warn on unknown caps (T-13.3 vocabulary); still proceed — the
+    // v0.4 spec text explicitly keeps unknown names non-fatal.
+    for unknown in meta.unknown_capabilities() {
+        eprintln!(
+            "warning: extension `{ext_key}` declares unknown capability \
+             `{unknown}` (not in v0.4 vocabulary); accepting anyway"
+        );
+    }
+    // Filter to caps that aren't already trusted for THIS exact
+    // <name>@<version>. Preserves manifest order so diagnostic output
+    // and the prompt list stay stable.
+    let already = super::trust::load_trusted_caps();
+    let requested: Vec<&str> = meta
+        .capability_names()
+        .filter(|c| !already.contains(&(ext_key.clone(), (*c).to_string())))
+        .collect();
+    if requested.is_empty() {
+        return Ok(());
+    }
+    if accept_all {
+        if let Err(e) = super::trust::append_caps_audit(&ext_key, &requested) {
+            eprintln!("ark ext add: audit log write failed: {e}");
+        }
+        if let Err(e) = super::trust::save_caps(&ext_key, &requested) {
+            eprintln!("ark ext add: persisting cap trust failed: {e}");
+        }
+        eprintln!(
+            "warning: --accept-all bypassed capability prompt for `{ext_key}` \
+             (caps: {})",
+            requested.join(", ")
+        );
+        Ok(())
+    } else {
+        let accepted = super::trust::prompt_caps(&ext_key, &requested);
+        if !accepted {
+            return Err(format!(
+                "capabilities for `{ext_key}` ({}) were not accepted; \
+                 install aborted",
+                requested.join(", ")
+            ));
+        }
+        if let Err(e) = super::trust::save_caps(&ext_key, &requested) {
+            eprintln!("ark ext add: persisting cap trust failed: {e}");
+        }
+        Ok(())
+    }
 }
 
 /// Resolve `${XDG_DATA_HOME}` honouring the same fallback chain as
@@ -590,6 +727,31 @@ extension {{
     fn write_ext(dir: &Path, name: &str) {
         fs::create_dir_all(dir).unwrap();
         fs::write(dir.join("extension.kdl"), sample_manifest(name)).unwrap();
+    }
+
+    /// Build an [`ExtensionMetadata`] in-memory for T-13.4 decision
+    /// tests. We deliberately avoid serialising through facet-kdl +
+    /// re-parsing because facet-kdl 0.42 can't disambiguate `Vec`
+    /// fields on the parse side — see
+    /// `ark_ext_metadata::round_trip_through_kdl_*` for the upstream
+    /// limitation. Tests of the decision policy itself work against
+    /// the struct directly; the `install_from_source` pipeline is
+    /// exercised through `install_aborts_when_cap_decision_denies`
+    /// which injects a raw closure rather than round-tripping caps
+    /// through the on-disk KDL.
+    fn meta_with_caps(name: &str, version: &str, caps: &[&str]) -> ExtensionMetadata {
+        use ark_ext_metadata::{ConfigSchema, StringNode};
+        ExtensionMetadata {
+            name: StringNode::new(name),
+            version: StringNode::new(version),
+            ark_range: StringNode::new(">=0.1"),
+            zellij_range: StringNode::default(),
+            requires: vec![],
+            intents: vec![],
+            events: vec![],
+            config: ConfigSchema::default(),
+            capabilities: caps.iter().map(|c| StringNode::new(*c)).collect(),
+        }
     }
 
     // --- parse_source ---
@@ -938,6 +1100,224 @@ extension {{
         assert!(trust.is_file(), "trust file should exist");
         let trust_text = fs::read_to_string(&trust).unwrap();
         assert!(trust_text.contains(&format!("path:{}", src.display())));
+    }
+
+    // ---------------------------------------------------------------
+    // T-13.4: capability disclosure + trust-file persistence.
+    //
+    // Tests of the decision *policy* construct `ExtensionMetadata`
+    // programmatically (see `meta_with_caps`) and exercise
+    // `decide_capability_disclosure` directly; facet-kdl 0.42 can't
+    // round-trip the `capabilities` Vec back from KDL so driving the
+    // full `run` pipeline with cap-bearing on-disk manifests isn't
+    // viable for v0.4 (tracked upstream by `ark_ext_metadata`'s
+    // round-trip comment). The `install_from_source_with_cap_decision`
+    // injection point is covered by `install_aborts_when_cap_decision_denies`
+    // which proves the staging-rollback behaviour without relying on
+    // on-disk KDL caps.
+    // ---------------------------------------------------------------
+
+    /// Smoke test for the fixture helper itself — if the `exec`/`pipe`
+    /// caps don't survive `meta_with_caps`, every downstream test is
+    /// vacuous.
+    #[test]
+    fn meta_with_caps_round_trips_in_memory() {
+        let m = meta_with_caps("fixture", "0.1.0", &["exec", "pipe"]);
+        let names: Vec<&str> = m.capability_names().collect();
+        assert_eq!(names, vec!["exec", "pipe"]);
+        assert_eq!(m.name.value, "fixture");
+        assert_eq!(m.version.value, "0.1.0");
+    }
+
+    /// Shared scaffolding for T-13.4 decision-policy tests: install
+    /// isolated `XDG_DATA_HOME` / `XDG_CONFIG_HOME` vars so the policy
+    /// reads/writes its own trust file + audit log, run the supplied
+    /// body, then restore prior env. Uses the same `ENV_LOCK` the
+    /// T-13.1 tests do so parallel `cargo test` doesn't race.
+    fn with_isolated_xdg<R>(f: impl FnOnce(&Path, &Path) -> R) -> R {
+        let work = TempDir::new().unwrap();
+        let xdg = work.path().join("xdg");
+        let xdg_cfg = work.path().join("xdg-cfg");
+        fs::create_dir_all(&xdg).unwrap();
+        fs::create_dir_all(&xdg_cfg).unwrap();
+
+        let _lock = crate::test_lock::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prior_data = std::env::var_os("XDG_DATA_HOME");
+        let prior_cfg = std::env::var_os("XDG_CONFIG_HOME");
+        unsafe {
+            std::env::set_var("XDG_DATA_HOME", &xdg);
+            std::env::set_var("XDG_CONFIG_HOME", &xdg_cfg);
+        }
+
+        let out = f(&xdg, &xdg_cfg);
+
+        unsafe {
+            match prior_data {
+                Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+                None => std::env::remove_var("XDG_DATA_HOME"),
+            }
+            match prior_cfg {
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn decide_caps_accept_all_records_trust_and_audit() {
+        with_isolated_xdg(|xdg, xdg_cfg| {
+            let m = meta_with_caps("cap-auto", "0.1.0", &["exec", "pipe"]);
+            decide_capability_disclosure(&m, true).expect("accept-all");
+
+            let trust_text =
+                fs::read_to_string(xdg_cfg.join("ark/extension-trust.kdl"))
+                    .expect("trust file written");
+            assert!(
+                trust_text
+                    .contains("capability \"exec\" extension=\"cap-auto@0.1.0\""),
+                "missing exec cap:\n{trust_text}"
+            );
+            assert!(
+                trust_text
+                    .contains("capability \"pipe\" extension=\"cap-auto@0.1.0\""),
+                "missing pipe cap:\n{trust_text}"
+            );
+
+            let audit =
+                fs::read_to_string(xdg.join("ark/extension-audit.log")).unwrap();
+            assert!(audit.contains("accept-all-caps"));
+            assert!(audit.contains("extension=cap-auto@0.1.0"));
+            assert!(audit.contains("caps=exec,pipe"));
+        });
+    }
+
+    #[test]
+    fn decide_caps_empty_list_is_noop() {
+        with_isolated_xdg(|xdg, xdg_cfg| {
+            let m = meta_with_caps("bare", "0.1.0", &[]);
+            decide_capability_disclosure(&m, true).expect("empty caps ok");
+
+            let trust_path = xdg_cfg.join("ark/extension-trust.kdl");
+            if trust_path.exists() {
+                let text = fs::read_to_string(&trust_path).unwrap();
+                assert!(
+                    !text.contains("capability "),
+                    "no caps declared — trust file should carry no capability nodes: {text}"
+                );
+            }
+            let audit_path = xdg.join("ark/extension-audit.log");
+            assert!(
+                !audit_path.exists(),
+                "empty cap list should not produce audit output"
+            );
+        });
+    }
+
+    #[test]
+    fn decide_caps_skips_already_trusted_entries() {
+        with_isolated_xdg(|xdg, xdg_cfg| {
+            // Pre-seed the trust file so `exec` is already accepted
+            // for `pre-trusted@0.1.0`. Only the new cap (`pipe`) should
+            // trigger the `accept-all-caps` audit line.
+            let trust_path = xdg_cfg.join("ark/extension-trust.kdl");
+            fs::create_dir_all(trust_path.parent().unwrap()).unwrap();
+            fs::write(
+                &trust_path,
+                "capability \"exec\" extension=\"pre-trusted@0.1.0\"\n",
+            )
+            .unwrap();
+
+            let m =
+                meta_with_caps("pre-trusted", "0.1.0", &["exec", "pipe"]);
+            decide_capability_disclosure(&m, true).expect("accept-all");
+
+            let audit =
+                fs::read_to_string(xdg.join("ark/extension-audit.log")).unwrap();
+            // `exec` already trusted → must not re-appear on the audit
+            // line. The line for `pipe` should still exist.
+            assert!(audit.contains("caps=pipe"), "audit: {audit}");
+            assert!(!audit.contains("caps=exec"), "audit: {audit}");
+        });
+    }
+
+    #[test]
+    fn decide_caps_fully_trusted_is_silent() {
+        with_isolated_xdg(|xdg, xdg_cfg| {
+            let trust_path = xdg_cfg.join("ark/extension-trust.kdl");
+            fs::create_dir_all(trust_path.parent().unwrap()).unwrap();
+            fs::write(
+                &trust_path,
+                "capability \"exec\" extension=\"full@0.1.0\"\n\
+                 capability \"pipe\" extension=\"full@0.1.0\"\n",
+            )
+            .unwrap();
+
+            let m = meta_with_caps("full", "0.1.0", &["exec", "pipe"]);
+            decide_capability_disclosure(&m, true).expect("all pre-trusted");
+
+            // No new audit entries — every cap already trusted.
+            let audit_path = xdg.join("ark/extension-audit.log");
+            assert!(
+                !audit_path.exists(),
+                "fully-trusted caps must not emit audit events"
+            );
+        });
+    }
+
+    #[test]
+    fn decide_caps_unknown_vocab_still_persists() {
+        // T-13.3 keeps unknown caps non-fatal; the decision path
+        // should warn (stderr, not asserted on here) but still persist
+        // the unknown cap as trusted so T-13.5 version-bump logic can
+        // reason about the full declared set.
+        with_isolated_xdg(|_xdg, xdg_cfg| {
+            let m = meta_with_caps("mixed", "0.1.0", &["exec", "weird.new"]);
+            decide_capability_disclosure(&m, true).expect("accept-all");
+            let trust_text =
+                fs::read_to_string(xdg_cfg.join("ark/extension-trust.kdl"))
+                    .unwrap();
+            assert!(trust_text.contains("\"exec\""));
+            assert!(trust_text.contains("\"weird.new\""));
+        });
+    }
+
+    #[test]
+    fn install_aborts_when_cap_decision_denies() {
+        // Drive `install_from_source_with_cap_decision` directly with
+        // a closure that denies — simulates the interactive `n`
+        // response path. The staging dir must be cleaned up (no
+        // half-installed ext visible to `ext list`).
+        let work = TempDir::new().unwrap();
+        let src = work.path().join("src");
+        write_ext(&src, "deny-me");
+        let extensions_root = work.path().join("xdg/ark/extensions");
+
+        let source = Source::Path(src);
+        let err = install_from_source_with_cap_decision(
+            &source,
+            &extensions_root,
+            false,
+            &|_meta| Err("user declined caps".to_string()),
+        )
+        .unwrap_err();
+        assert!(err.contains("user declined caps"), "{err}");
+
+        // Neither the final install dir nor any staging residue
+        // should remain.
+        assert!(!extensions_root.join("deny-me").exists());
+        if extensions_root.exists() {
+            let leftover: Vec<_> = fs::read_dir(&extensions_root)
+                .unwrap()
+                .flatten()
+                .collect();
+            assert!(
+                leftover.is_empty(),
+                "expected clean extensions root after denial"
+            );
+        }
     }
 
     // T-13.1: a second `--accept-all` install for the same publisher
