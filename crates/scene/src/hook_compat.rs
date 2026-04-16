@@ -1,4 +1,5 @@
-//! Legacy `[[hooks]]` TOML → synthetic scene fragment compat layer (T-5.7).
+//! Legacy `[[hooks]]` TOML → synthetic scene fragment compat layer
+//! (T-5.7 + T-14.3).
 //!
 //! Pre-T-5 ark shipped hook execution as a dedicated `hook_dispatcher`
 //! consumer task that subscribed to the supervisor broadcast bus and
@@ -8,6 +9,22 @@
 //! users, this module compiles each `[[hooks]]` TOML entry into the
 //! equivalent scene reaction so the new dispatcher can run it through
 //! the same pipeline as user-authored reactions.
+//!
+//! ## Entry points
+//!
+//! * [`hooks_to_scene_fragment`] — render `[[hooks]]` as a KDL
+//!   fragment (document-body shape).
+//! * [`append_hook_shim`] (T-14.3) — splice the fragment inside an
+//!   existing scene source's `scene "<name>" { … }` body, preserving
+//!   user reactions. This is the scene-text-level compat shim:
+//!   existing hooks keep firing without the user migrating their
+//!   scene file at all.
+//! * [`build_hook_registry`] / [`extend_registry_with_hooks`] (T-5.7) —
+//!   populate a [`ReactionRegistry`] directly (bypasses AST merge).
+//!   The supervisor uses this at boot because the full compile
+//!   pipeline doesn't currently receive the `Config` struct; wiring
+//!   [`append_hook_shim`] into `compile_scene_file` is follow-up
+//!   work tracked alongside T-14.3.
 //!
 //! ## Mapping table
 //!
@@ -152,6 +169,107 @@ pub fn hooks_to_scene_fragment(hooks: &[HookEntry]) -> String {
         }
     }
     out
+}
+
+/// T-14.3: Append the synthetic hook-shim fragment to a scene's
+/// source text so existing `[[hooks]]` TOML entries keep firing
+/// without any scene migration.
+///
+/// Returns `src` verbatim when `hooks` is empty. Otherwise, locates
+/// the top-level `scene "<name>" { … }` node and appends one
+/// synthetic `on` child per hook+event-kind pair inside its body —
+/// after every user-authored child. Per build-site-scene.md T-14.3
+/// ("Appended to user scene at compile"), the shim always lands
+/// after user contributions so explicit user reactions override
+/// whatever the shim contributes (the R11 clear-reactions /
+/// last-writer-wins semantics).
+///
+/// When the source does not contain a `scene` node (auto-wrap cases
+/// handled elsewhere, or an extension fragment with no scene root),
+/// the function returns `src` unchanged — the caller has already
+/// pre-processed the file shape via [`crate::compat::preprocess_file_shape`]
+/// upstream, and a missing scene node at this layer is not the
+/// shim's problem to handle.
+///
+/// Parse failure on the input returns `src` verbatim: the shim's
+/// job is zero-migration for valid hook configs, so a malformed
+/// scene file should surface its own parse error downstream rather
+/// than being masked by this layer.
+///
+/// # Ordering note
+///
+/// Because the shim appends at the TAIL of the scene body, any
+/// user reaction authored AFTER the shim-synthesised `on` block
+/// would win the merge. In practice that doesn't happen: scene
+/// files are authored standalone, the shim runs at compile, and
+/// the appended block is invisible to the author. If a user scene
+/// declares `on "Started" { … }` and the hook config also targets
+/// Started, the R11 merge semantics give the user's explicit
+/// reaction precedence — exactly the "user overrides win" semantics
+/// the T-14.3 spec text calls out.
+pub fn append_hook_shim(src: &str, hooks: &[HookEntry]) -> String {
+    if hooks.is_empty() {
+        return src.to_string();
+    }
+    let fragment = hooks_to_scene_fragment(hooks);
+    if fragment.is_empty() {
+        return src.to_string();
+    }
+
+    // Parse as raw KDL (not facet) so we can locate the scene node
+    // and mutate its body without round-tripping through the typed
+    // AST (which drops comments, attribute ordering, etc.).
+    let mut doc: ::kdl::KdlDocument = match src.parse() {
+        Ok(d) => d,
+        Err(_) => return src.to_string(),
+    };
+
+    // Locate the `scene` node — there is at most one per file per
+    // R1. `nodes_mut` walks top-level children.
+    let scene_idx = doc
+        .nodes()
+        .iter()
+        .position(|n| n.name().value() == "scene");
+    let Some(scene_idx) = scene_idx else {
+        return src.to_string();
+    };
+
+    // Parse the shim fragment (which is a KDL document body) to get
+    // the synthetic `on` nodes as `KdlNode`s.
+    let frag_doc: ::kdl::KdlDocument = match fragment.parse() {
+        Ok(d) => d,
+        Err(_) => {
+            // Malformed fragment means hook_compat produced invalid
+            // KDL — a programmer error, not a user-config error.
+            // Surface it loudly rather than silently swallowing it.
+            panic!(
+                "hook_compat::append_hook_shim: synthesised fragment failed to parse:\n{fragment}"
+            );
+        }
+    };
+    let frag_nodes: Vec<::kdl::KdlNode> = frag_doc.nodes().iter().cloned().collect();
+
+    // Ensure the scene node has a body to append to. Scenes can
+    // legally have no body (`scene "bare"`), in which case we add
+    // an empty children block before appending.
+    let scene_node = doc
+        .nodes_mut()
+        .get_mut(scene_idx)
+        .expect("scene_idx verified above");
+    if scene_node.children().is_none() {
+        scene_node.ensure_children();
+    }
+    let body = scene_node
+        .children_mut()
+        .as_mut()
+        .expect("ensure_children populates body");
+
+    for node in frag_nodes {
+        body.nodes_mut().push(node);
+    }
+
+    doc.autoformat();
+    doc.to_string()
 }
 
 /// Build a [`ReactionRegistry`] whose entries correspond to the legacy
@@ -583,6 +701,136 @@ mod tests {
             entries[0].predicate.is_some(),
             "orchestrator filter must compile to a CEL predicate"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // T-14.3 — `append_hook_shim` integration tests
+    // -----------------------------------------------------------------
+
+    /// Empty hooks slice leaves the scene source untouched.
+    #[test]
+    fn append_hook_shim_empty_hooks_is_noop() {
+        let src = "scene \"x\" {\n    layout { pane }\n}\n";
+        let out = append_hook_shim(src, &[]);
+        assert_eq!(out, src);
+    }
+
+    /// Two `[[hooks]]` entries → two synthetic `on` reactions
+    /// appended inside the scene body. Round-trips through
+    /// [`parse_scene`] and every appended reaction has the selector
+    /// the hook declared.
+    #[test]
+    fn append_hook_shim_two_hooks_yields_two_reactions() {
+        let src = r#"scene "hooks-two" {
+    layout { pane }
+}
+"#;
+        let hooks = vec![
+            HookEntry::new("", vec!["echo".into(), "one".into()], vec!["started".into()], vec![], vec![]),
+            HookEntry::new("", vec!["echo".into(), "two".into()], vec!["done".into()], vec![], vec![]),
+        ];
+        let out = append_hook_shim(src, &hooks);
+        let doc = parse_scene(&out, std::path::Path::new("shimmed.kdl"))
+            .expect("shimmed scene re-parses cleanly");
+        let selectors: Vec<&str> = doc.scene.ons.iter().map(|n| n.selector.as_str()).collect();
+        assert!(
+            selectors.contains(&"Started"),
+            "expected Started reaction, got selectors: {selectors:?}"
+        );
+        assert!(
+            selectors.contains(&"Done"),
+            "expected Done reaction, got selectors: {selectors:?}"
+        );
+        assert_eq!(doc.scene.ons.len(), 2, "exactly one reaction per hook");
+    }
+
+    /// User's own `on` reactions stay in the scene AND the shim
+    /// reactions land after them (tail-append), preserving the
+    /// T-14.3 "user overrides win" ordering contract.
+    #[test]
+    fn append_hook_shim_appends_after_user_reactions() {
+        let src = r#"scene "mixed" {
+    layout { pane }
+    on "Started" {
+        exec script="user-first"
+    }
+}
+"#;
+        let hook = HookEntry::new(
+            "",
+            vec!["echo".into(), "shim".into()],
+            vec!["started".into()],
+            vec![],
+            vec![],
+        );
+        let out = append_hook_shim(src, std::slice::from_ref(&hook));
+        let doc = parse_scene(&out, std::path::Path::new("mixed.kdl"))
+            .expect("shimmed scene re-parses cleanly");
+        // Two reactions on Started: the user's first, the shim's last.
+        assert_eq!(doc.scene.ons.len(), 2);
+        // Ordering: textual-order within a scene file means the
+        // shim-injected reaction comes after the user's.
+        // Position in the source is preserved by `KdlDocument`.
+        let user_pos = out.find("user-first").expect("user reaction retained");
+        let shim_pos = out.find("echo shim").expect("shim reaction appended");
+        assert!(
+            user_pos < shim_pos,
+            "shim must append AFTER user reaction (user={user_pos}, shim={shim_pos}):\n{out}"
+        );
+    }
+
+    /// A scene with no body (`scene "bare"`) still gets a body
+    /// populated with the shim's reactions — `ensure_children`
+    /// covers the empty-body edge case.
+    #[test]
+    fn append_hook_shim_populates_bodyless_scene() {
+        let src = "scene \"bare\"\n";
+        let hook = HookEntry::new(
+            "",
+            vec!["echo".into(), "x".into()],
+            vec!["started".into()],
+            vec![],
+            vec![],
+        );
+        let out = append_hook_shim(src, std::slice::from_ref(&hook));
+        let doc = parse_scene(&out, std::path::Path::new("bare.kdl"))
+            .expect("shimmed bare scene re-parses");
+        assert_eq!(doc.scene.ons.len(), 1);
+        assert_eq!(doc.scene.ons[0].selector, "Started");
+    }
+
+    /// Input with no `scene` node at all returns verbatim — the
+    /// shim is not responsible for wrapping layout-only files
+    /// (that's `preprocess_file_shape`'s job upstream).
+    #[test]
+    fn append_hook_shim_no_scene_node_returns_verbatim() {
+        let src = "layout { pane }\n";
+        let hook = HookEntry::new(
+            "",
+            vec!["echo".into(), "x".into()],
+            vec!["started".into()],
+            vec![],
+            vec![],
+        );
+        let out = append_hook_shim(src, std::slice::from_ref(&hook));
+        assert_eq!(out, src);
+    }
+
+    /// Malformed input (raw-KDL parse fail) returns verbatim so
+    /// downstream parse errors surface with their original miette
+    /// spans intact rather than being masked by this layer.
+    #[test]
+    fn append_hook_shim_malformed_input_returns_verbatim() {
+        let src = "scene \"unterminated";
+        let hook = HookEntry::new(
+            "true",
+            vec![],
+            vec!["started".into()],
+            vec![],
+            vec![],
+        );
+        let out = append_hook_shim(src, std::slice::from_ref(&hook));
+        assert_eq!(out, src);
     }
 
     /// `extend_registry_with_hooks` appends to an existing registry
