@@ -982,8 +982,13 @@ fn strip_ansi(s: &str) -> String {
 /// 6. Launch zellij via `build_zellij_command` (F-511). The child
 ///    process is detached via `Command::spawn()` so the parent
 ///    (likely running inside zellij itself) is not blocked.
-/// 7. Supervisor fork is STILL stubbed — the real `ark-supervisor`
-///    binary lands under T-062 / T-069.
+/// 7. Fork supervisor (W-3): create `pipe(2)`-based ready handshake,
+///    call `ark_supervisor::daemonize`. Grandchild builds a single-
+///    threaded tokio runtime and calls `supervisor_main(spec, config,
+///    Some(ReadyWriter))`, exiting with `outcome_exit_code(outcome)`.
+///    Parent closes the write end, polls the read end via
+///    `wait_for_ready` with a 5 s timeout, and cleans up agent state
+///    on timeout/failure (F-528 invariant).
 /// 8. Print `spawned {id} -> Ctrl+o w to switch`.
 pub fn run(args: SpawnArgs, ctx: &Ctx) -> Result<(), CliError> {
     let orchestrator = resolve_orchestrator(args.orchestrator, &args.cwd);
@@ -1143,7 +1148,13 @@ pub fn run(args: SpawnArgs, ctx: &Ctx) -> Result<(), CliError> {
                     }
                 };
 
-                let outcome = runtime.block_on(ark_supervisor::run_supervisor(
+                // W-3: route the grandchild through `supervisor_main`
+                // (the W-1 bootstrap wrapper) so the pre-ready error
+                // path is logged consistently and the ReadyWriter is
+                // owned by a single helper. `supervisor_main` wraps
+                // `run_supervisor` with readiness-signal ownership +
+                // structured error logging (see bootstrap.rs).
+                let outcome = runtime.block_on(ark_supervisor::supervisor_main(
                     spec,
                     ark_supervisor::SupervisorMode::Daemon,
                     config,
