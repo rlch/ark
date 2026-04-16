@@ -237,6 +237,20 @@ pub fn resolve_use(
         )?;
     }
 
+    // 2b. T-13.6 declare-only capability enforcement: cross-check the
+    // extension's declared caps against the on-disk trust file. Every
+    // declared cap that isn't trusted for THIS `<name>@<version>`
+    // surfaces as a `warning[ext/untrusted-capability]` via tracing —
+    // the scene continues to compile (no hard rejection), mirroring
+    // the v0.4 spec text that keeps caps declarative-only until the
+    // v0.5+ wasm host-function gate lands. Callers that want the
+    // structured warning list (e.g. CLI `ark scene check`) should
+    // invoke [`crate::cap_check::check_extension_caps_default`]
+    // directly instead of relying on the tracing side effect.
+    let cap_warnings =
+        crate::cap_check::check_extension_caps_default(&metadata);
+    crate::cap_check::emit_cap_warnings(&cap_warnings);
+
     // 3. Namespace intents + events.
     let intents = metadata
         .intents

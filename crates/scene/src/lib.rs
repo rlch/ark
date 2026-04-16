@@ -5,6 +5,7 @@
 //! `context/kits/cavekit-scene.md` (R1–R17) for the full spec.
 
 pub mod ast;
+pub mod cap_check;
 pub mod cel;
 pub mod chord;
 pub mod clear;
