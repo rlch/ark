@@ -69,6 +69,60 @@ match wins:
 Rules 1 + 2 surface a name (caller resolves to a path). Rules 3 + 4
 require the file to exist on disk. Rule 5 is always available.
 
+## ACP engine resolution (R17)
+
+Every `ark spawn` resolves exactly one ACP engine launch spec,
+walking these rungs in order and taking the first match:
+
+1. `--engine NAME` CLI flag
+2. Scene `engine { }` block
+3. `use "engine-*"` extension with an `agent { engine { speaks "acp" } }`
+   capability
+4. `[engines.<name>]` in `config.toml` (keyed by `defaults.engine`)
+5. Hardcoded default: `claude --acp`
+
+A scene with both an inline `engine { }` block AND a `use
+"engine-*"` extension trips `error[scene/engine-conflict]` (R17).
+
+### Shipped engine launch specs (T-ACP.8)
+
+Three engine names resolve without any `[engines.<name>]` block in
+config — they ship baked into the supervisor:
+
+| name         | argv                  |
+|--------------|-----------------------|
+| `claude`     | `claude --acp`        |
+| `codex`      | `codex --acp`         |
+| `gemini-cli` | `gemini --acp`        |
+
+Override the argv by adding an `[engines.<name>]` block to
+`config.toml`:
+
+```toml
+[engines.claude]
+command = "claude"
+args    = ["--acp", "--verbose"]
+
+[engines.claude.env]
+ANTHROPIC_API_KEY = "…"
+```
+
+Or declare an engine inline in a scene:
+
+```kdl
+scene "custom" {
+    engine {
+        name    "claude"
+        command "claude"
+        args    "--acp"
+        env {
+            ANTHROPIC_MODEL "claude-opus-4-5"
+        }
+    }
+    # …
+}
+```
+
 ## Spec
 
 `../../context/kits/cavekit-scene.md` (R1–R17) is authoritative.

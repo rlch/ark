@@ -664,6 +664,11 @@ mod tests {
             "[orchestrator.claude_code]",
             "[mux.zellij]",
             "[[hooks]]",
+            // T-ACP.5b + T-ACP.8: [acp] + engine launch specs.
+            "[acp]",
+            "[engines.claude]",
+            "[engines.codex]",
+            "[engines.gemini-cli]",
         ] {
             assert!(
                 TEMPLATE_CONFIG_TOML.contains(section),
