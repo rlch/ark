@@ -1,0 +1,5 @@
+scene "keys" {
+    bind "Alt q" {
+        close "@x"
+    }
+}

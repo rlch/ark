@@ -1,0 +1,28 @@
+scene "everything" {
+    include "shared.kdl"
+    layout {
+        tab "@main" focus="true" {
+            row {
+                pane "@editor" span=2
+                pane "@term"
+            }
+        }
+        tab "@logs" {
+            pane "@log_view"
+        }
+    }
+    mode "review" {
+        tab "@review" {
+            pane "@diff"
+        }
+    }
+    on "AgentReady" {
+        focus "@editor"
+    }
+    bind "Alt q" {
+        close "@term"
+    }
+    clear-reactions event="FileEdited"
+    clear-bind "Alt x"
+    disable-extension "old-plugin"
+}

@@ -1,0 +1,3 @@
+scene "clear" {
+    clear-reactions event="FileEdited"
+}

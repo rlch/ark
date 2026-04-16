@@ -1,0 +1,13 @@
+scene "deep" {
+    layout {
+        tab "@main" {
+            col {
+                row {
+                    pane "@a"
+                    pane "@b"
+                }
+                pane "@c"
+            }
+        }
+    }
+}

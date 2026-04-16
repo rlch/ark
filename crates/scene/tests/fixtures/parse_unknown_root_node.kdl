@@ -1,0 +1,4 @@
+// Unknown node at scene root — facet-kdl dispatch cannot match this.
+scene "x" {
+    foobar "something"
+}

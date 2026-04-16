@@ -1,0 +1,12 @@
+scene "mode-clash" {
+    layout {
+        tab "@editor" {
+            pane "@code"
+        }
+    }
+    mode "review" {
+        tab "@editor" {
+            pane "@diff"
+        }
+    }
+}

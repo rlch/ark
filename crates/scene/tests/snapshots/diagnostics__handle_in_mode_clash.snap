@@ -1,0 +1,15 @@
+---
+source: crates/scene/tests/diagnostics.rs
+expression: render_errors(&errs)
+---
+scene/handle-clash
+
+  × handle `@editor` declared more than once
+   ╭─[handle_in_mode_clash.kdl:1:1]
+ 1 │ scene "mode-clash" {
+   · ▲▲
+   · │╰── duplicate here
+   · ╰── first declared here
+ 2 │     layout {
+   ╰────
+  help: Handles are flat-namespaced across tabs and panes. Rename one of the occurrences so the reconciler can tell them apart.

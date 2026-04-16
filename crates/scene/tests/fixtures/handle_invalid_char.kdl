@@ -1,0 +1,7 @@
+scene "bad-char" {
+    layout {
+        tab "@foo/bar" {
+            pane "@ok"
+        }
+    }
+}

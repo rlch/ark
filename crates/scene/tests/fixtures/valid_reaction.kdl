@@ -1,0 +1,5 @@
+scene "reactive" {
+    on "FileEdited" when="true" {
+        close "@x"
+    }
+}

@@ -1,0 +1,7 @@
+scene "no-at" {
+    layout {
+        tab "main" {
+            pane "editor"
+        }
+    }
+}

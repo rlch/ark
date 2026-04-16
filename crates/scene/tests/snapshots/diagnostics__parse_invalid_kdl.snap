@@ -1,0 +1,14 @@
+---
+source: crates/scene/tests/diagnostics.rs
+expression: render_errors(&errs)
+---
+scene/parse
+
+  × scene file is not valid KDL: Failed to parse KDL document
+   ╭─[parse_invalid_kdl.kdl:2:24]
+ 1 │ // Broken KDL syntax — unclosed braces / invalid tokens.
+ 2 │ this is not valid kdl {{{
+   ·                        ┬
+   ·                        ╰── here
+   ╰────
+  help: KDL 2.0 syntax error — see the caret below. Run `ark scene fmt` on a known-good reference to compare shapes.

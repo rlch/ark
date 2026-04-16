@@ -1,0 +1,2 @@
+// Broken KDL syntax — unclosed braces / invalid tokens.
+this is not valid kdl {{{

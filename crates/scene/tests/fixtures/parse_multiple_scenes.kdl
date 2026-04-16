@@ -1,0 +1,5 @@
+// Two scene nodes — facet-kdl rejects duplicate `kdl::child` fields.
+scene "a" {
+}
+scene "b" {
+}

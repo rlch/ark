@@ -1,0 +1,3 @@
+scene "composed" {
+    include "base.kdl"
+}

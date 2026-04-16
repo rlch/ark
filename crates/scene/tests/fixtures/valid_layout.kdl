@@ -1,0 +1,8 @@
+scene "dev" {
+    layout {
+        tab "@main" {
+            pane "@editor" span=2
+            pane "@term"
+        }
+    }
+}

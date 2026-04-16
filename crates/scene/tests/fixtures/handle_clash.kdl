@@ -1,0 +1,7 @@
+scene "clash" {
+    layout {
+        tab "@shell" {
+            pane "@shell"
+        }
+    }
+}

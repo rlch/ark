@@ -1,0 +1,10 @@
+scene "multi-err" {
+    layout {
+        tab "" {
+            pane "no-at"
+        }
+        tab "@dup" {
+            pane "@dup"
+        }
+    }
+}

@@ -1,0 +1,12 @@
+scene "modes" {
+    layout {
+        tab "@main" {
+            pane "@editor"
+        }
+    }
+    mode "review" {
+        tab "@review_tab" {
+            pane "@diff"
+        }
+    }
+}

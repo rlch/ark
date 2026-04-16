@@ -1,0 +1,11 @@
+---
+source: crates/scene/tests/diagnostics.rs
+expression: render_errors(&errs)
+---
+scene/parse
+
+  × scene file is not valid KDL: missing field `scene` in type `SceneDoc`
+   ╭─[parse_empty_file.kdl:2:1]
+ 1 │ // Empty file — no scene node present.
+   ╰────
+  help: KDL 2.0 syntax error — see the caret below. Run `ark scene fmt` on a known-good reference to compare shapes.

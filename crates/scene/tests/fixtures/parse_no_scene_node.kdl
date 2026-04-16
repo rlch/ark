@@ -1,0 +1,4 @@
+// No scene node — just a bare layout at root.
+// Should fail: facet-kdl expects a `scene` child on SceneDoc.
+layout {
+}

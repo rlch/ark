@@ -1,0 +1,14 @@
+---
+source: crates/scene/tests/diagnostics.rs
+expression: render_errors(&errs)
+---
+scene/parse
+
+  × scene file is not valid KDL: missing field `scene` in type `SceneDoc`
+   ╭─[parse_no_scene_node.kdl:3:1]
+ 2 │     // Should fail: facet-kdl expects a `scene` child on SceneDoc.
+ 3 │ ╭─▶ layout {
+ 4 │ ├─▶ }
+   · ╰──── here
+   ╰────
+  help: KDL 2.0 syntax error — see the caret below. Run `ark scene fmt` on a known-good reference to compare shapes.

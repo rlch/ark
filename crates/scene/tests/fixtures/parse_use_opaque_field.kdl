@@ -1,0 +1,6 @@
+// `use` node triggers facet-kdl error because `config_block` is an opaque
+// field that facet-kdl cannot auto-deserialize. This documents the current
+// parse behaviour until T-096 lands manual post-parse population.
+scene "ext" {
+    use "status"
+}

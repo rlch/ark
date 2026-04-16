@@ -1,0 +1,11 @@
+// NOTE: `use` with config_block is an opaque field that facet-kdl cannot
+// auto-deserialize — post-parse population is deferred to T-096. This
+// fixture tests `use` without a config block, which facet-kdl handles
+// because `config_block` is `Option` + `#[facet(opaque)]`.
+//
+// Currently blocked: facet-kdl requires the opaque field to be present.
+// This fixture is a parse-error case until T-096 lands the manual
+// post-parse population path.
+scene "ext" {
+    include "status-fragment.kdl"
+}
