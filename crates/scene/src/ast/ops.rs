@@ -6,7 +6,7 @@
 //! is deferred to the compile pass (T-052 / T-053).
 
 use facet::Facet;
-use kdl::KdlDocument;
+use ::kdl::KdlDocument;
 
 // FIXME T-004: `Handle`, `OverlayAttrs`, and `ViewRef` should be imported from
 // `crate::ast::layout` (defined by T-004). T-004 has not landed yet, so the
