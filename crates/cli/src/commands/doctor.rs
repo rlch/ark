@@ -258,6 +258,119 @@ fn check_claude() -> CheckResult {
     }
 }
 
+/// T-ACP.6: verify the shipped default ACP engine (`claude --acp`)
+/// can complete a JSON-RPC `initialize` round-trip inside one
+/// second.
+///
+/// Classified as a Warn — not Fail — when:
+///
+///   * the binary is missing (already surfaced by `check_claude`;
+///     this check degrades to Warn so we don't double-fail), or
+///   * the handshake times out (likely the bundled claude version
+///     doesn't yet speak `--acp`).
+///
+/// Classified as Fail when:
+///
+///   * the subprocess spawn itself errors with anything other than
+///     "binary missing" (permission denied, ENOENT on stdin/stdout
+///     handles, etc.),
+///   * the engine rejects `--acp` (prints an error + exits) inside
+///     the window.
+///
+/// Fail triggers the `PreflightFail` exit code so `ark doctor` in
+/// CI can pin on it; the message string includes an actionable
+/// remediation ("update to claude >= X").
+fn check_acp() -> CheckResult {
+    use acp_client::{AcpClient, EngineLaunch};
+    use std::time::Duration;
+
+    if which("claude").is_none() {
+        // `check_claude` already surfaced this as Fail; degrade to
+        // Warn here so the doctor run doesn't fail twice for the
+        // same cause.
+        return CheckResult::warn(
+            "acp",
+            "skipped — `claude` binary missing (see previous check)",
+        );
+    }
+
+    let launch = EngineLaunch {
+        name: "claude".into(),
+        command: "claude".into(),
+        args: vec!["--acp".into()],
+        env: Default::default(),
+        cwd: None,
+    };
+
+    // Single-thread runtime — AcpClient spawns its own I/O thread
+    // internally, so doctor only needs an executor to drive the
+    // async `spawn()` future.
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            return CheckResult::fail("acp", format!("runtime build failed: {e}"));
+        }
+    };
+    let start = std::time::Instant::now();
+    let spawn_result = rt.block_on(async move {
+        tokio::time::timeout(Duration::from_millis(1000), AcpClient::spawn(launch)).await
+    });
+    let elapsed = start.elapsed();
+
+    match spawn_result {
+        Ok(Ok(client)) => {
+            // Drop the client explicitly so the engine subprocess
+            // is torn down before we return. AcpClient's Drop
+            // handles the join + kill.
+            drop(client);
+            CheckResult::ok(
+                "acp",
+                format!(
+                    "claude --acp initialize ok in {}ms",
+                    elapsed.as_millis()
+                ),
+            )
+        }
+        Ok(Err(err)) => {
+            let msg = err.to_string();
+            let lower = msg.to_lowercase();
+            if lower.contains("not found") || lower.contains("no such file") {
+                CheckResult::fail(
+                    "acp",
+                    format!(
+                        "`claude --acp` spawn failed: {msg} — ensure claude CLI is installed and on PATH"
+                    ),
+                )
+            } else if lower.contains("unrecognized")
+                || lower.contains("unknown option")
+                || lower.contains("invalid")
+            {
+                CheckResult::fail(
+                    "acp",
+                    format!(
+                        "claude rejected `--acp`: {msg} — update to a claude version with ACP support"
+                    ),
+                )
+            } else {
+                CheckResult::fail(
+                    "acp",
+                    format!(
+                        "ACP handshake failed after {}ms: {msg}",
+                        elapsed.as_millis()
+                    ),
+                )
+            }
+        }
+        Err(_elapsed_err) => CheckResult::warn(
+            "acp",
+            "ACP initialize timed out after 1s — engine may need update".to_string(),
+        ),
+    }
+}
+
 /// F-520: `delta` is the preferred renderer for `ark pane diff`.
 /// Absence is NOT fatal — diff falls back to plain rendering —
 /// so we emit Warn, not Fail, when the binary is missing.
@@ -887,6 +1000,8 @@ pub(crate) fn run_all(ctx: &Ctx) -> Vec<CheckResult> {
     let mut rs = Vec::new();
     rs.push(check_zellij());
     rs.push(check_claude());
+    // T-ACP.6: probe the shipped default ACP engine (`claude --acp`).
+    rs.push(check_acp());
     rs.push(check_delta_binary());
     rs.push(check_runtime_dir(ctx));
     rs.push(check_state_dir(ctx));
