@@ -1,6 +1,6 @@
 ---
 created: "2026-04-14"
-last_edited: "2026-04-15T04:00:00Z"
+last_edited: "2026-04-16"
 ---
 
 # Implementation Overview
@@ -20,6 +20,8 @@ Build site: context/plans/build-site.md (134 tasks, 7 tiers).
 | 6 | 26 | 26 | ✅ COMPLETE (post-gate, 15 findings fixed across 8 cycles) |
 
 **Overall: 134/134 tasks done (100%) · 279 ark-cli tests + workspace green · ALL TIERS COMPLETE**
+
+**Phase 7 (supervisor wiring): ✅ COMPLETE** — all 8 shipped tasks landed (W-1, W-2, W-3, W-4, W-8, W-9; W-5/W-6/W-7 dropped). `ark spawn` now properly forks the supervisor with pipe-inheritance ready-signal handshake. See `impl-supervisor-wiring.md` for task-by-task SHAs.
 
 Tier 6 landed 2026-04-15 across 16 build commits + 8 codex gate cycles. Build order: testing fixtures (T-110–T-113), contract suites (T-114/T-115/T-116), per-crate unit coverage (T-117–T-125), mock-claude (T-126), e2e scenarios (T-127/T-128), CI workflow (T-129), build orchestration (T-130), wasm release profile (T-131), CI size delta (T-132), cargo-dist (T-133), homebrew/binstall (T-134), standalone wasm assets (T-135). Gate fixed F-700 through F-714 (workflow_dispatch tag handling, flaky test, status plugin permission split, build.rs incremental, --no-detach state cleanup, doctor exit-code, dead-code warnings, manifest mtimes, brew tap owner). TIER_6_START_REF = 314cfbf → final HEAD = fef98dd.
 
@@ -51,7 +53,7 @@ Deferrals from T-087 spawn (noted in commit bodies, picked up in Tier 5/6): supe
 | orchestrator-cavekit | 9 | T-075-T-083 complete (detect + run + 5 watchers + build-site extractor + done resolver) | (pending) |
 | orchestrator-claude-code | 2 | T-073 detect + T-074 run DONE | (pending) |
 | supervisor | 13 | all 22 supervisor/lifecycle/socket tasks — daemonize, lock, socket, commands, signals, orchestration, kill, crash, auto-close, audit log | (impl-supervisor.md pending) |
-| supervisor-wiring (Phase 7) | 6 | W-1 ready_writer param, W-2 pipe handshake, W-3 daemonize fork in spawn, W-4 pipeline doc, W-8 e2e, W-9 tracking; F-740 (TracingInit clash) + F-741 (sun_path on macOS tempdir) fixed | impl-supervisor-wiring.md |
+| supervisor-wiring (Phase 7) | 6 | ✅ COMPLETE — W-1 ready_writer param (b39327c), W-2 pipe handshake (b39327c), W-3 daemonize fork in spawn (db43213), W-4 pipeline doc + `--no-detach` inline supervisor (db43213 + F-731 follow-up), W-8 e2e (af25e12, `crates/cli/tests/w8_spawn_integration.rs`), W-9 tracking (2026-04-16); W-5/W-6/W-7 dropped (no separate binary); F-740 (TracingInit clash) + F-741 (sun_path on macOS tempdir) fixed | impl-supervisor-wiring.md |
 | cli | 10 | TIER-4 COMPLETE (pre-gate) — T-084 scaffold, T-085 exit-codes, T-086 id-resolver, T-087 spawn (LIVE supervisor wired post W-3), T-088 list, T-089 kill, T-090 config, T-091 doctor, T-092 pane routing, T-093 env-vars | (pending) |
 | plugin-status | 5 | TIER-5 COMPLETE (pre-gate) — T-094 scaffold, T-095 ingest+cache, T-096 chip render, T-097 fs fallback, T-098 distribution | (pending) |
 | plugin-picker | 11 | TIER-5 COMPLETE (pre-gate) — T-099 scaffold, T-100 state model, T-101 bootstrap, T-102 list, T-103 detail, T-104 new-agent, T-105 kill/rename/forget, T-106 resurrect, T-107 switch_session, T-108 keymap+help, T-109 distribution | (pending) |

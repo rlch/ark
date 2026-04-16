@@ -1,6 +1,6 @@
 ---
 created: "2026-04-15"
-last_edited: "2026-04-15"
+last_edited: "2026-04-16"
 domain: supervisor-wiring
 ---
 
@@ -8,11 +8,27 @@ domain: supervisor-wiring
 
 ## Status
 
-**Complete.** Build site `context/plans/build-site-supervisor-wiring.md` lands W-1 → W-4, W-8, W-9 (W-5/W-6/W-7 dropped on discovery — no separate binary needed).
+**Phase 7 COMPLETE — all 8 shipped tasks landed.** `ark spawn` now properly forks the supervisor with a race-free pipe-inheritance ready-signal handshake. Build site `context/plans/build-site-supervisor-wiring.md` lands W-1 → W-4, W-8, W-9 (W-5/W-6/W-7 dropped on discovery — no separate binary needed).
+
+### Task-by-task shipping status
+
+| Task | Status | Commit | Notes |
+|------|--------|--------|-------|
+| W-1 | DONE | `b39327c` | `supervisor_main` bootstrap with ready-signal protocol (ready_writer param on `run_supervisor` / `run_supervisor_with`). |
+| W-2 | DONE | `b39327c` | `ReadyWriter` newtype + `create_ready_pipe` + `wait_for_ready` shipped alongside W-1 in the same commit; verified already-wired during Wave 2. |
+| W-3 | DONE | `db43213` | `ark spawn` fork routed through `supervisor_main` bootstrap with `daemonize` + pipe handshake. |
+| W-4 | DONE | `db43213` / follow-up | Pipeline ordering doc + Parent/Daemon branch `wait_for_ready` integration landed in W-3 commit; inline `--no-detach` supervisor added in the F-731 follow-up cycle. |
+| W-5 | DROPPED | n/a | No separate binary — in-process daemon model. |
+| W-6 | DROPPED | n/a | Same reason. |
+| W-7 | DROPPED | n/a | Same reason. |
+| W-8 | DONE | `af25e12` | E2E test `crates/cli/tests/w8_spawn_integration.rs` swept into the T-12.6/T-12.10 commit. |
+| W-9 | DONE | (this commit) | Impl tracking doc (this file) + impl-overview.md Phase 7 row flipped to COMPLETE. |
+
+Phase 7 complete — all 8 tasks shipped. `ark spawn` now properly forks the supervisor with ready-signal handshake.
 
 ## What was built
 
-### W-1: `supervisor_main` bootstrap helper
+### W-1: `supervisor_main` bootstrap helper — DONE (commit b39327c)
 
 Discovered the supervisor library had `run_supervisor(spec, mode, config) -> Result<Outcome>` already wired (T-069). Did NOT add a separate `supervisor_main` wrapper. Instead extended `run_supervisor` and `run_supervisor_with` with an `Option<ReadyWriter>` parameter so the existing R3 step 12 hook could call the writer's `write_ack()` directly.
 
@@ -20,7 +36,7 @@ Changed:
 - `crates/supervisor/src/orchestration.rs` — added `ready_writer: Option<ReadyWriter>` parameter to both `run_supervisor` and `run_supervisor_with`. Replaced the broken step-12 stdout-print (which never worked under daemonize because stdout was already redirected to `supervisor.log`) with `if let Some(writer) = ready_writer { ... writer.write_ack() }`.
 - The old `SupervisorMode` enum is now informational only — kept for backward compat (test callers reference it) but no longer drives any behaviour at step 12.
 
-### W-2: pipe-inheritance ready signal
+### W-2: pipe-inheritance ready signal — DONE (commit b39327c, verified Wave 2)
 
 **Mechanism choice:** **Pipe inheritance (Stevens APUE)** — see `context/plans/build-site-supervisor-wiring.md` "ready-signal protocol" for the A/B/C tradeoff. Confirmed via external research (`Agent` → general-purpose, 600-word survey). Real-world prior art: zellij's IPC bootstrap, wezterm-mux-server, alacritty daemon mode, Stevens APUE (Unix daemon canon since 1980s). Race-free, portable, ~40 lines with `nix`.
 
@@ -35,7 +51,7 @@ Changed:
 - `wait_for_ready_default` wraps with `READY_TIMEOUT_MS = 5000`.
 - 5 unit tests covering pipe creation + each of the 4 outcomes.
 
-### W-3: `ark spawn` forks the supervisor
+### W-3: `ark spawn` forks the supervisor — DONE (commit db43213)
 
 `crates/cli/src/commands/spawn.rs::run` — replaced the long-standing supervisor-stub branch (lines 821-824 of the pre-W-3 file) with a real fork:
 
@@ -46,7 +62,7 @@ Changed:
    - **Parent** branch: drop `wfd`; `wait_for_ready_default(rfd)`; on failure → `cleanup_agent_state` + return CliError.
 4. Continue to existing F-730 zellij launch paths (inside switch-session / outside pty / outside foreground).
 
-### W-4: pipeline ordering documented + inline supervisor for `--no-detach`
+### W-4: pipeline ordering documented + inline supervisor for `--no-detach` — DONE (commit db43213 + F-731 follow-up cycle)
 
 `spawn.rs` module-level doc comment describes the 6-step pipeline including the daemonize fork at step 4.
 
@@ -56,9 +72,9 @@ Required signature change: `run_supervisor` and `run_supervisor_with` now take `
 
 Pattern grounded in external research (zellij/wezterm/helix prior art, Stevens APUE job-control). Documented inline in `spawn.rs::run` for future readers.
 
-### W-8: end-to-end test
+### W-8: end-to-end test — DONE (commit af25e12, file at `crates/cli/tests/w8_spawn_integration.rs`)
 
-`crates/cli/tests/e2e.rs::scenario_spawn_supervisor_lives_then_dies`:
+`crates/cli/tests/w8_spawn_integration.rs` (originally drafted as `e2e.rs::scenario_spawn_supervisor_lives_then_dies`, landed as a dedicated integration-test binary):
 
 - Gated by `ARK_E2E=1` + `zellij` on PATH + `mock-claude` binary present.
 - Spawns `ark spawn --orchestrator claude-code --cwd <state> -- /bin/sleep 60`.
