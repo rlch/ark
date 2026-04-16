@@ -10,19 +10,19 @@ status: "DRAFT — regenerated from v3 cavekit"
 
 ## Why this exists
 
-`cavekit-scene.md` v3 (2026-04-16) is a full architectural redraw. Ark owns a native layout DSL (`row`/`col`/`@handle`/`span`/`cells`/`overlay`). Views replace plugins. CEL is the only expression language (minijinja removed). Extensions are unified (compiled-in / subprocess / zellij-wasm) with agent-as-capability (ACP, no `agent { }` block). Reconciler reconciles zellij toward desired state via `override-layout` + env `ARK_HANDLE` wrapper. Composition is `include`-only (no `extends`). CLI is redesigned around bare `ark`. Rust extension DX is code-generated from derives.
+`cavekit-scene.md` v3 (2026-04-16) is a full architectural redraw. Ark owns a native layout DSL (`row`/`col`/`@handle`/`span`/`cells`/`overlay`). Views replace plugins. Rhai (expression-only mode) is the only expression language (minijinja + CEL removed). Extensions are unified (compiled-in / subprocess / zellij-wasm) with agent-as-capability (ACP, no `agent { }` block). Reconciler reconciles zellij toward desired state via `override-layout` + env `ARK_HANDLE` wrapper. Composition is `include`-only (no `extends`). CLI is redesigned around bare `ark`. Rust extension DX is code-generated from derives.
 
 This site supersedes `archive-build-site-scene-v2.md` and maps every acceptance criterion in R1–R17 to at least one task.
 
 ## Stack decision (locked 2026-04-16)
 
-`facet` + `facet-kdl` for parse/reflect/schema; `kdl = 6.5` for formatter; `cel-interpreter` for CEL; `miette = 7` for diagnostics; `inventory` / `linkme` for compiled-in extension auto-registration; `interprocess = 2.4` for subprocess extension unix sockets; `notify` for file-watcher; `agent-client-protocol` for ACP; `wasmparser` + `wasm-metadata` for wasm custom-section emission.
+`facet` + `facet-kdl` for parse/reflect/schema; `kdl = 6.5` for formatter; `rhai = 1.19` for expression-only evaluator (non-TC config); `miette = 7` for diagnostics; `inventory` / `linkme` for compiled-in extension auto-registration; `interprocess = 2.4` for subprocess extension unix sockets; `notify` for file-watcher; `agent-client-protocol` for ACP; `wasmparser` + `wasm-metadata` for wasm custom-section emission.
 
 ## Milestone map
 
 | Milestone | Covers | Tasks |
 |---|---|---|
-| **v0.1 — Scene DSL + Reconciler** | Grammar, scope rules, layout DSL, CEL, views (primitives), reconciler via override-layout, env wrapper, default scene, reactions + binds on `AgentEvent` only, miette diagnostics, scene CLI (check/fmt/schema-dump). No extensions. No ACP. | Tiers 0–4 |
+| **v0.1 — Scene DSL + Reconciler** | Grammar, scope rules, layout DSL, Rhai (expression-only mode), views (primitives), reconciler via override-layout, env wrapper, default scene, reactions + binds on `AgentEvent` only, miette diagnostics, scene CLI (check/fmt/schema-dump). No extensions. No ACP. | Tiers 0–4 |
 | **v0.2 — Extensions** | Extension protocol (JSON-RPC over NDJSON stdio), code-generated manifest (derives + traits), CommandView / ZellijView, typed pane handles, view resolution through extension registry, 3 delivery modes, `ark ext add/list/info/inspect/remove`. | Tiers 4–6 |
 | **v0.3 — ACP + Composition** | ACP extension capability, `acp.*` sub-namespaced ops, permission dispatch, turn-inflight tracker, `include` + scene fragments, cross-extension wiring via events, default scene migrates to `use "status"`. | Tiers 5–7 |
 | **v0.4 — Hot reload + CLI polish** | `reload_scene` op + file-watcher, `ark scene reload`, scene graph / explain / dry-run, extension update flow, reload telemetry. | Tiers 6–8 |
@@ -34,12 +34,12 @@ This site supersedes `archive-build-site-scene-v2.md` and maps every acceptance 
 
 | Task | Title | Cavekit / criterion | blockedBy | Effort |
 |------|-------|---------------------|-----------|--------|
-| T-001 | New crate `crates/scene/` in workspace. Cargo.toml deps: `facet = "0"`, `facet-kdl = "0"`, `kdl = "6.5"`, `miette = { version = "7", features = ["fancy"] }`, `cel-interpreter = "0"`, `blake3 = "1"`, `globset`, `strsim`, `thiserror`. Delete `minijinja`, `knuffel`, `kdl-schema-check` from `Cargo.lock` consumption. Workspace re-exports as `ark_scene`. | R1 (parse stack) | none | S |
-| T-002 | Delete all minijinja + `validate_kdl` brace-scanner usage. Remove `minijinja` crate from all Cargo.tomls. Replace all template rendering sites with `todo!("cel rendering — T-024")` stubs. CI confirms no `minijinja::` import remains. | R8 (no minijinja anywhere) | none | S |
+| T-001 | New crate `crates/scene/` in workspace. Cargo.toml deps: `facet = "0"`, `facet-kdl = "0"`, `kdl = "6.5"`, `miette = { version = "7", features = ["fancy"] }`, `rhai = { version = "1.19", default-features = false, features = ["sync"] }`, `regex = "1"`, `blake3 = "1"`, `globset`, `strsim`, `thiserror`. Delete `minijinja`, `knuffel`, `kdl-schema-check` from `Cargo.lock` consumption. Workspace re-exports as `ark_scene`. | R1 (parse stack) | none | S |
+| T-002 | Delete all minijinja + `validate_kdl` brace-scanner usage. Remove `minijinja` crate (and any prior `cel-interpreter` dep if present) from all Cargo.tomls. Replace all template rendering sites with `todo!("rhai rendering — T-024")` stubs. CI confirms no `minijinja::` or `cel_interpreter::` imports remain. | R8 (no minijinja anywhere; no CEL anywhere) | none | S |
 | T-003 | Core AST node types in `crates/scene/src/ast/mod.rs`: `SceneNode`, `UseNode`, `IncludeNode`, `LayoutNode`, `ModeNode`, `OnNode`, `BindNode`, `ClearReactionsNode`, `ClearBindNode`, `DisableExtensionNode`. All `#[derive(Facet)]` with doc-comments per field. Spans propagate via facet-kdl. | R1 (single top-level scene node; scene-root body node set) | T-001 | M |
 | T-004 | Layout AST types in `crates/scene/src/ast/layout.rs`: `TabNode`, `RowNode`, `ColNode`, `PaneNode`, `OverlayAttrs`, `SizingAttrs (span/cells/min/max)`. All `#[derive(Facet)]`. Handle type `Handle(String)` with `@` prefix validation. | R2 (layout body structure); R3 (structure, sizing, overlay attrs) | T-001 | M |
 | T-005 | Op AST types in `crates/scene/src/ast/ops.rs`: one facet-derived struct per op (`FocusOp`, `CloseOp`, `RenameOp`, `ResizeOp`, `MoveOp`, `PinOp`, `UnpinOp`, `SpawnOp`, `NewTabOp`, `UseModeOp`, `PipeOp`, `EmitOp`, `SetStatusOp`, `AcpPromptOp`, `AcpCancelOp`, `AcpPermitOp`, `AcpSetModeOp`, `ExecOp`, `ReloadSceneOp`). | R7 (op vocabulary) | T-001 | M |
-| T-006 | Error hierarchy in `crates/scene/src/error.rs`: `SceneError` enum, `miette::Diagnostic` impl per variant. Codes: `scene/parse`, `scene/misplaced-node`, `scene/unknown-node`, `scene/unknown-view`, `scene/handle-clash`, `scene/handle-type-mismatch`, `scene/handle-missing`, `scene/unknown-event-field`, `scene/op-failed`, `scene/unknown-op`, `scene/ambiguous-file-shape`, `scene/empty-or-unknown`, `scene/engine-conflict`, `cel/parse`, `cel/scope-mismatch`, `cel/eval`, `ext/missing`, `ext/cycle`, `ext/crashed`, `ext/reserved-namespace`, `ext/bad-config`, `ext-proto/unsupported-version`, `ext-proto/capability-denied`, `op/unresolved-ref`, `op/handle-type-mismatch`, `acp/no-agent`. Every variant has `code()`, `severity()`, `help()`, `labels()`. | R12 (diagnostics namespaced, miette impl, per-code unit test infra) | T-001 | M |
+| T-006 | Error hierarchy in `crates/scene/src/error.rs`: `SceneError` enum, `miette::Diagnostic` impl per variant. Codes: `scene/parse`, `scene/misplaced-node`, `scene/unknown-node`, `scene/unknown-view`, `scene/handle-clash`, `scene/handle-type-mismatch`, `scene/handle-missing`, `scene/unknown-event-field`, `scene/op-failed`, `scene/unknown-op`, `scene/ambiguous-file-shape`, `scene/empty-or-unknown`, `scene/engine-conflict`, `scene/rhai-parse`, `scene/rhai-scope-mismatch`, `scene/rhai-eval`, `scene/rhai-oom`, `ext/missing`, `ext/cycle`, `ext/crashed`, `ext/reserved-namespace`, `ext/bad-config`, `ext-proto/unsupported-version`, `ext-proto/capability-denied`, `op/unresolved-ref`, `op/handle-type-mismatch`, `acp/no-agent`. Every variant has `code()`, `severity()`, `help()`, `labels()`. | R12 (diagnostics namespaced, miette impl, per-code unit test infra) | T-001 | M |
 | T-007 | `SceneId` type in `crates/scene/src/id.rs`: `SceneId { path: PathBuf, content_hash: blake3::Hash }`. Drives hot-reload delta detection + `ark scene explain` attribution. Display impl formats `<path>#<hash-prefix-8>`. Unit tests. | R14 (reload; identity for graph/explain) | T-001 | S |
 | T-008 | Add `UserEvent { name: String, source: String, payload: serde_json::Value }` variant to `AgentEvent` in `crates/types/src/event.rs`. Reserved payload top-level keys: `name`, `source`, `payload`. `source` canonical values: `"scene"`, `"ext:<name>"`, `"hook:<name>"`, `"core"`, `"acp"`. Update serde tag + event.rs tests + schema snapshot. | R4 (UserEvent hybrid payload access); R10 (events) | none | S |
 | T-009 | Reaction / bind shared grammar types in `crates/scene/src/ast/selector.rs`: `EventSelector { kind: String, field_patterns: BTreeMap<String, FieldPattern> }`, `FieldPattern { raw: String, match_type: MatchType }`, `MatchType { Glob, Exact, Regex }`. Parses `(glob)`, `(exact)`, `(regex)` type annotations. Default glob for path-like fields, exact for strings/enums. | R4 (field pattern default match types; type annotations) | T-001 | M |
@@ -62,17 +62,17 @@ This site supersedes `archive-build-site-scene-v2.md` and maps every acceptance 
 
 ---
 
-## Tier 2 — CEL + expression language
+## Tier 2 — Rhai + expression language
 
 | Task | Title | Cavekit / criterion | blockedBy | Effort |
 |------|-------|---------------------|-----------|--------|
-| T-019 | `crates/scene/src/cel.rs`: thin wrapper over `cel-interpreter`. `compile(expr: &str) -> Result<Program, SceneError>`, `eval(&Program, &Context) -> Result<Value, SceneError>`. CEL parse errors translated to `error[cel/parse]`; eval errors to `error[cel/eval]`. | R8 (CEL parsed once at compile time, stored as AST) | T-001, T-006 | M |
-| T-020 | Two-scope CEL type system. `CelScope::Spawn` bindings: `cwd`, `id`, `name`, env vars (reducible to string map). `CelScope::Event` bindings: `event`, `payload`, `agent`, `session`, plus selector-captured locals. Scope attached to each compiled `Program`; eval rejects mismatched context with `error[cel/scope-mismatch]`. | R8 (two evaluation scopes; compiler enforces scope) | T-019 | M |
-| T-021 | CEL stdlib + custom functions: `glob(str, pattern)` via `globset`, `starts_with`, `ends_with`, `contains`, `size`, `matches(str, regex)` via CEL canonical stdlib (RE2). Registered via `cel-interpreter::add_function`. Unit tests per function. | R8 (CEL stdlib + custom functions) | T-019 | S |
-| T-022 | `{CEL}` brace-hole interpolation in strings. `crates/scene/src/interp.rs`: `parse_interp(raw: &str) -> Vec<InterpSegment>` where `InterpSegment::Literal | Hole(Program)`. Single-hole whole-value → typed pass-through; multi-hole or mixed → coerce to string, concat. Zero holes → verbatim, no CEL invocation. | R8 (`{<CEL>}` in string values — brace-delimited holes) | T-019 | M |
-| T-023 | `when="<CEL>"` parse: bare expression, no braces. Attached to tabs, panes, rows, cols, and op nodes. Compiled at parse. | R8 (`when="<CEL>"` bare expression; R4 when= on `on` blocks and individual ops) | T-019 | M |
-| T-024 | Compile-pass CEL + interpolation validation: walk SceneIR; pre-compile every `when=` and every `{CEL}` hole in every string value. Scope resolved from context (layout → Spawn, `on`/`bind` → Event). Errors surface at `ark scene check`. Static guards: max expression length 4096 bytes, max AST depth 64. | R8 (compile-time CEL validation); R12 (compile errors at check time) | T-020, T-022, T-023 | M |
-| T-025 | Context builders: `build_spawn_context(cwd, id, name, env)` and `build_event_context(event: &AgentEvent, agent: &AgentSnapshot, session: &SessionSnapshot, locals: &BTreeMap)`. Event-context `event` object flat-maps variant fields onto `event.*` (k8s CEL idiom). Unit tests per `AgentEvent` variant. | R8 (two scopes); R4 (event/payload/agent/session bindings + captured locals) | T-020, T-008 | M |
+| T-019 | `crates/scene/src/rhai.rs`: thin wrapper over `rhai` crate in expression-only mode. Build shared `Engine` via `Engine::new_raw()`; disable symbols `fn`/`while`/`for`/`loop`/`return`/`break`/`continue`/`=` (and all compound assigns)/`import`/`export`; set `set_max_expr_depths(32, 32)`, `set_max_operations(10_000)`, `set_max_string_size(4096)`, `set_max_array_size(256)`, `set_max_map_size(256)`. API: `compile(src: &str) -> Result<AST, SceneError>` (uses `engine.compile_expression`), `eval_bool(&AST, &Scope) -> Result<bool, SceneError>`, `eval_value(&AST, &Scope) -> Result<Dynamic, SceneError>`. Rhai `ParseError` translated to `error[scene/rhai-parse]`; eval errors to `error[scene/rhai-eval]`; operation-limit breaches to `error[scene/rhai-oom]`. Rhai `Position` mapped onto containing KDL attribute span for miette diagnostics. | R8 (Rhai parsed once at compile, stored as AST; engine config; resource limits) | T-001, T-006 | M |
+| T-020 | Two-scope Rhai binding system. `RhaiScope::Spawn` bindings: `cwd: String`, `id: String`, `name: String`, `env: Map<String, String>`. `RhaiScope::Event` bindings: `event: Map`, `payload: Map`, `agent: Map`, `session: Map`, plus selector-captured locals. Scope kind attached to each compiled `AST`; eval rejects mismatched scope with `error[scene/rhai-scope-mismatch]` (lists expected vs actual bindings). Spawn scope uses `rhai::Scope::new()` prepopulated with spawn bindings; event scope similarly. | R8 (two evaluation scopes; compile-time scope enforcement) | T-019 | M |
+| T-021 | Rhai custom functions + stdlib surface: register ark-owned helpers via `Engine::register_fn` — `glob(path, pattern)` via `globset`, `matches(str, regex)` via `regex` crate (RE2 flavor, no backrefs), `basename(path)`, `dirname(path)`. Confirm Rhai built-in string methods usable in expression-only mode: `starts_with`, `ends_with`, `contains`, `len`, `to_upper`, `to_lower`, `trim`, `replace`, `split`. Confirm Rhai array methods: `len`, `contains`, `index_of`, `is_empty`. Unit tests per registered function + smoke tests for each built-in used in scene docs. | R8 (registered helper functions + Rhai built-ins list) | T-019 | S |
+| T-022 | `{Rhai}` brace-hole interpolation in strings. `crates/scene/src/interp.rs`: `parse_interp(raw: &str) -> Vec<InterpSegment>` where `InterpSegment::Literal(String) \| Hole(AST)`. Single-hole whole-value (`"{expr}"`) → typed pass-through (preserve `i64`/`bool`/`f64` for typed op attrs). Multi-hole or mixed (`"text {expr} more"`) → coerce hole to string via `.to_string()`, concat. Zero holes → verbatim string, no Rhai invocation. | R8 (`{<Rhai>}` in string values — brace-delimited holes; single-hole typed pass-through; multi-hole concat; zero-hole verbatim) | T-019 | M |
+| T-023 | `when="<Rhai>"` parse: bare expression, no braces. Attached to tabs, panes, rows, cols, and op nodes. Compiled at parse via `compile_expression`. Detect KDL raw-string vs plain-string form — no semantic difference, just enable users to embed `"` in predicates. `ark scene fmt` MUST promote plain → raw when body contains `"`. | R8 (`when="<Rhai>"` bare expression; raw-string rule for embedded quotes); R4 (when= on `on` blocks and individual ops) | T-019 | M |
+| T-024 | Compile-pass Rhai + interpolation validation: walk SceneIR; pre-compile every `when=` and every `{Rhai}` hole in every string value. Scope resolved from AST context (layout → Spawn, `on`/`bind` → Event). Errors surface at `ark scene check`. Static guards: max expression length 4096 bytes (redundant with engine limit, enforced earlier for better diag). | R8 (compile-time Rhai validation); R12 (compile errors at check time) | T-020, T-022, T-023 | M |
+| T-025 | Scope builders: `build_spawn_scope(cwd, id, name, env)` and `build_event_scope(event: &AgentEvent, agent: &AgentSnapshot, session: &SessionSnapshot, locals: &BTreeMap)`. Event-scope `event` map flat-maps variant fields onto `event.*` (same idiom as prior k8s CEL design). Conversion `AgentEvent → rhai::Map` via facet SHAPE traversal. Unit tests per `AgentEvent` variant. | R8 (two scopes); R4 (event/payload/agent/session bindings + captured locals) | T-020, T-008 | M |
 
 ---
 
@@ -99,10 +99,10 @@ This site supersedes `archive-build-site-scene-v2.md` and maps every acceptance 
 | T-035 | Row/col split compilation: `row { }` → zellij `pane split_direction="horizontal"`; `col { }` → `split_direction="vertical"`. Nesting preserved. | R3 (row = horizontal split; col = vertical split; zellij mapping) | T-034 | M |
 | T-036 | Span/cells/min/max sizing compilation. `span=N` → normalize siblings to 100% then emit `size="N%"`; `cells=N` → `size=N`; `min=N` / `max=N` → size bounds. Unit tests for normalization (3 siblings with span 1/2/3 → 16.6%/33.3%/50%). | R3 (span=N normalize to 100%; cells=N fixed; min/max bounds) | T-034 | M |
 | T-037 | Overlay compilation: `pane @x overlay pos=<P> size=<WxH> sticky=<bool>` → zellij `floating_panes { pane name="x" x=… y=… width=… height=… pinned=<sticky> }`. Parse `pos` values (`top-right`, `top-left`, `bottom-right`, `bottom-left`, `center`, `X%xY%`); parse `size` (`WxH` cells or `W%xH%` percentage). Anchor position math computed against terminal size. | R3 (overlays — pos values, size values, sticky, zellij floating_panes mapping) | T-034 | M |
-| T-038 | Tab attribute compilation: `cwd` (CEL spawn context evaluated), `name` (fallback to handle), `focus` (exactly one per layout, error if !=1), `when` (compile-time evaluation of spawn-scope CEL; runtime handled via reconciler). | R3 (tab attrs); R9 (when= triggers re-render) | T-034, T-025 | M |
+| T-038 | Tab attribute compilation: `cwd` (spawn-scope Rhai interp evaluated), `name` (fallback to handle), `focus` (exactly one per layout, error if !=1), `when` (spawn-scope Rhai predicate; runtime handled via reconciler). | R3 (tab attrs); R9 (when= triggers re-render) | T-034, T-025 | M |
 | T-039 | Env `ARK_HANDLE=@<handle>` wrapper applied to every `CommandView` pane. Transparent — pane process has extra env var but runs normally. Used as identity key for override-layout matching. Unit test: two shell panes with different handles produce different `command`/`args` tuples. | R3 (env wrapper for pane identity); R9 (env wrapper ensures no ambiguity) | T-028, T-029 | S |
 | T-040 | Rendered layout writer: write compiled KDL to `${XDG_RUNTIME_DIR}/ark/layouts/{id}-scene.kdl`. Validate output parses via `kdl::KdlDocument::parse` before handoff. Extension enforcement (`.kdl`). 0600 perms. | R3 (rendered output written to layout path; parses before handoff) | T-034 | S |
-| T-041 | `crates/scene/src/reconciler.rs` module scaffold: `Reconciler { scene: CompiledScene, last_context: CelContext, zellij: Arc<ZellijMux> }`. Methods: `reconcile(new_context) -> Result<()>` (re-eval predicates, render, emit override-layout), `reconcile_mode(mode_name)`, `render_desired_layout_kdl`. Placeholder; full logic in T-042+. | R9 (reconciler mechanism) | T-034, T-040 | M |
+| T-041 | `crates/scene/src/reconciler.rs` module scaffold: `Reconciler { scene: CompiledScene, last_scope: RhaiScope, zellij: Arc<ZellijMux> }`. Methods: `reconcile(new_scope) -> Result<()>` (re-eval predicates, render, emit override-layout), `reconcile_mode(mode_name)`, `render_desired_layout_kdl`. Placeholder; full logic in T-042+. | R9 (reconciler mechanism) | T-034, T-040 | M |
 | T-042 | Reconciler: `reconcile()` re-evaluates all `when=` predicates with new context, renders complete desired layout KDL (include/exclude based on truth values), invokes `zellij action override-layout <path> --retain-existing-terminal-panes --retain-existing-plugin-panes`. | R9 (re-evaluate predicates; render desired layout; issue override-layout) | T-041 | M |
 | T-043 | Reconciler debounce: 200ms debounce on `when=` input changes (tokio `Instant` + `Sleep`); coalesce rapid transitions. Applied to both predicate-change triggers and file-edit triggers. | R9 (debounced 200ms); R14 (file-watcher debounce 200ms) | T-042 | S |
 | T-044 | Reconciler drift tolerance: user-initiated changes (manual pane close, add tab via keybind) tolerated — reconciler only forces convergence on `when=` transitions and mode switches. Document in module doc. Integration test: manually close a pane via `zellij action close-pane`, reconciler does NOT recreate on next tick. | R9 (drift tolerance) | T-042 | M |
@@ -122,7 +122,7 @@ This site supersedes `archive-build-site-scene-v2.md` and maps every acceptance 
 | T-051 | Control ops: `exec script shell timeout_ms` runs shell script (tokio::process), captures stdout/stderr, respects timeout; `reload_scene` (stub — wired in T-083). | R7 (control ops: exec, reload_scene) | T-047 | M |
 | T-052 | Op reference validation at scene compile: walk `on`/`bind` bodies; validate `@handle` refs resolve to declared tabs/panes; validate handle type matches op (focus/close polymorphic; rename tab-only; resize/move/pin/unpin pane-only). Error `op/unresolved-ref` or `op/handle-type-mismatch` with span. | R7 (handle type mismatches = compile error); R2 (handle type validation) | T-047, T-014 | M |
 | T-053 | Op schema validation via facet SHAPE: each op's Args struct has a reflected KDL schema. `ark scene check` validates op node kdl against schema. Unknown op = `error[scene/unknown-op]` with suggestions. | R7 (each op has KDL schema; unknown op = error with suggestions) | T-047, T-015 | M |
-| T-054 | Op arg interpolation at dispatch: render every string arg with event-context CEL holes (T-022). Unit test: `exec script="cargo test {payload.filter}"` resolves at fire time. | R7 (all op string attrs support `{CEL}` interpolation) | T-047, T-022 | S |
+| T-054 | Op arg interpolation at dispatch: render every string arg with event-scope Rhai holes (T-022). Unit test: `exec script="cargo test {payload.filter}"` resolves at fire time. | R7 (all op string attrs support `{Rhai}` interpolation) | T-047, T-022 | S |
 | T-055 | Op idempotency + fail-fast policy. `focus/close/rename/resize/move/pin/unpin/reload_scene` idempotent-noop-on-absent; `spawn/new_tab` if-absent-create-else-focus; `pipe/emit/exec/set_status` always side-effect. Fail-fast: op failure logs `error[scene/op-failed]` with reaction origin + op kind + error; remaining ops in that reaction skipped; event loop continues. | R4 (op failure logs error, remaining ops skipped, loop continues) | T-048, T-049, T-050, T-051 | S |
 
 ---
@@ -131,11 +131,11 @@ This site supersedes `archive-build-site-scene-v2.md` and maps every acceptance 
 
 | Task | Title | Cavekit / criterion | blockedBy | Effort |
 |------|-------|---------------------|-----------|--------|
-| T-056 | `crates/scene/src/reactions.rs`: `ReactionRegistry` with primary index by `EventKind`; secondary index for `UserEvent` by namespaced `name`. Entry: `{selector, predicate: Option<Program>, ops: Vec<CompiledOp>, origin: ReactionOrigin}`. Populated at scene compile. | R4 (selector + predicate + ordered op list) | T-047, T-019 | M |
+| T-056 | `crates/scene/src/reactions.rs`: `ReactionRegistry` with primary index by `EventKind`; secondary index for `UserEvent` by namespaced `name`. Entry: `{selector, predicate: Option<rhai::AST>, ops: Vec<CompiledOp>, origin: ReactionOrigin}`. Populated at scene compile. | R4 (selector + predicate + ordered op list) | T-047, T-019 | M |
 | T-057 | Event field validation against `AgentEvent` variant fields via facet SHAPE. Walk each reaction's selector; verify each field name exists on the target variant. Unknown field → `error[scene/unknown-event-field]` with suggestions. | R4 (field names validated against AgentEvent via facet SHAPE; unknown field = error) | T-056, T-008 | M |
-| T-058 | Selector-captured locals: field patterns bind as locals in op body CEL context. `on FileEdited path="**/*.md"` matching `src/README.md` → `{path}` evaluates to `"src/README.md"`. Implemented by capturing match groups at match time, injecting into event-context builder. | R4 (selector-captured locals bind as locals in op body) | T-056, T-025 | M |
+| T-058 | Selector-captured locals: field patterns bind as locals in op body Rhai scope. `on FileEdited path="**/*.md"` matching `src/README.md` → `{path}` evaluates to `"src/README.md"`. Implemented by capturing match groups at match time, injecting into event-scope builder. | R4 (selector-captured locals bind as locals in op body) | T-056, T-025 | M |
 | T-059 | UserEvent payload hybrid access: for UserEvent selectors, bare field names route into `payload` lookup. Reserved top-level keys: `name`, `source`, `payload`. `payload.X` prefix as explicit escape hatch. Tested: `on ark.acp.tool_call tool=Bash` and `on ark.acp.tool_call payload.tool=Bash` equivalent; `name=X` and `source=X` bypass payload. | R4 (UserEvent payload hybrid access; reserved top-level keys) | T-056 | M |
-| T-060 | `when="<CEL>"` evaluation per fire on both `on` block and individual ops inside. False = skip (reaction root) or skip single op (op-level guard). | R4 (when= on `on` block per-fire; when= on individual ops per-op guards) | T-056, T-023 | S |
+| T-060 | `when="<Rhai>"` evaluation per fire on both `on` block and individual ops inside. False = skip (reaction root) or skip single op (op-level guard). | R4 (when= on `on` block per-fire; when= on individual ops per-op guards) | T-056, T-023 | S |
 | T-061 | `ReactionDispatcher` consumer task in supervisor: subscribes to `broadcast<AgentEvent>`, looks up reactions by event kind (+ name for UserEvent), filters by selector field patterns + `when=` predicate, dispatches matching op list in textual order. Integrates with existing supervisor consumer set (replaces any prior `hook_dispatcher`). | R4 (reactions runtime); Supervisor R3 (event bus wiring) | T-056, T-058, T-059, T-060, T-055 | L |
 | T-062 | Cascade depth bounding: per-event-chain counter incremented on `emit` op; exceeds bound → `error[scene/cascade-depth-exceeded]` log + drop. Default 4; configurable via `scene "<name>" max-cascade-depth=<N>`. | R4 (emit op cascade depth bounded at 4, configurable) | T-061, T-050 | S |
 | T-063 | Overlapping selectors: multiple `on` blocks with matching selectors each run (no dedup). Document semantics; unit test multiple-match case. | R4 (multiple on blocks with overlapping selectors each run) | T-061 | S |
@@ -242,9 +242,9 @@ This site supersedes `archive-build-site-scene-v2.md` and maps every acceptance 
 | T-115 | Bare `ark` launches default session: resolves default scene via T-113, compiles, spawns. No subcommand. Remove `ark spawn` verb entirely. | R13 (bare ark = default session; no ark spawn) | T-113 | M |
 | T-116 | `ark --scene <name-or-path>` flag: name resolves via scene-search-path; path used verbatim. | R13 (ark --scene) | T-113 | S |
 | T-117 | `ark --session <name>` flag: attach-or-create named zellij session. Integrates with `$ZELLIJ` detection (inside = switch-session; outside = new session). | R13 (ark --session) | T-115 | M |
-| T-118 | `ark scene check [path]` subcommand in `crates/cli/src/commands/scene/check.rs`: full parse + resolve-extensions + validate + CEL-compile + schema-check. Exit 0 on green; non-zero with every diagnostic printed. | R13 (ark scene check); R12 (check exits non-zero on any error; prints every diagnostic) | T-024, T-057 | M |
+| T-118 | `ark scene check [path]` subcommand in `crates/cli/src/commands/scene/check.rs`: full parse + resolve-extensions + validate + Rhai-compile + schema-check. Exit 0 on green; non-zero with every diagnostic printed. | R13 (ark scene check); R12 (check exits non-zero on any error; prints every diagnostic) | T-024, T-057 | M |
 | T-119 | `ark scene fmt [path]`: canonical format using `kdl` 6.5 formatter + ark-specific node ordering (use/include → layout → mode → on → bind). Idempotent. `--check` flag for CI. Preserves relative order of `on`/`bind` (per R1 exception). | R13 (ark scene fmt); R1 (fmt preserves relative order of on/bind) | T-016 | M |
-| T-120 | `ark scene dry-run --event '<selector>' [--payload <json>]`: simulate event fire against current scene; print resolved op list per matching reaction without side effects. Shares reaction registry + CEL eval with runtime. | R13 (ark scene dry-run) | T-061 | M |
+| T-120 | `ark scene dry-run --event '<selector>' [--payload <json>]`: simulate event fire against current scene; print resolved op list per matching reaction without side effects. Shares reaction registry + Rhai eval with runtime. | R13 (ark scene dry-run) | T-061 | M |
 | T-121 | `ark scene graph [path]`: attribution tree of extensions, views, reactions, keybinds. Each leaf tagged with origin file:line. Default ASCII-tree; `--format json` for scripts. | R13 (ark scene graph text tree: extensions, views, reactions, keybinds) | T-094 | L |
 | T-122 | `ark scene explain <ref>`: refs `intent:<name>`, `bind:<chord>`, `view:<name>`, `reaction:<event>`. Prints definition file:line, overrides, final resolution. | R13 (ark scene explain) | T-121 | M |
 | T-123 | `ark scene reload --session <name>`: sends `ReloadScene` message to supervisor via control socket. Handler invokes `reload_scene` op (T-126). | R13 (ark scene reload); R14 (CLI reload enters reconcile path) | T-126 | S |
@@ -328,7 +328,7 @@ Every acceptance criterion in R1–R17 mapped to at least one task.
 | # | Criterion | Task(s) | Status |
 |---|---|---|---|
 | R3.1 | Layout body contains only tab @handle nodes; no bare panes/rows/cols at root | T-013, T-034 | COVERED |
-| R3.2 | Tab attrs: cwd (CEL), name, focus (exactly one), when (CEL) | T-038 | COVERED |
+| R3.2 | Tab attrs: cwd (Rhai interp), name, focus (exactly one), when (Rhai predicate) | T-038 | COVERED |
 | R3.3 | row = horizontal split; col = vertical split; zellij mapping | T-035 | COVERED |
 | R3.4 | pane @handle = leaf; must contain exactly one view child; 0 or >1 = error | T-032 | COVERED |
 | R3.5 | span=N relative weight; siblings normalize to 100%; compiles to size="N%" | T-036 | COVERED |
@@ -352,8 +352,8 @@ Every acceptance criterion in R1–R17 mapped to at least one task.
 | R4.1 | Selector syntax: on EventKind field=pattern { ops } | T-009, T-056 | COVERED |
 | R4.2 | Field names validated against AgentEvent variant fields via facet SHAPE | T-057 | COVERED |
 | R4.3 | Field pattern default match types (glob for path-like, exact for strings); (glob)/(exact)/(regex) overrides | T-009 | COVERED |
-| R4.4 | when="<CEL>" on `on` block per fire | T-060, T-023 | COVERED |
-| R4.5 | when="<CEL>" on individual op nodes (per-op guards) | T-060 | COVERED |
+| R4.4 | when="<Rhai>" on `on` block per fire | T-060, T-023 | COVERED |
+| R4.5 | when="<Rhai>" on individual op nodes (per-op guards) | T-060 | COVERED |
 | R4.6 | Selector-captured locals bind in op body | T-058 | COVERED |
 | R4.7 | UserEvent payload hybrid access; reserved keys (name/source/payload) | T-059, T-008 | COVERED |
 | R4.8 | Multiple overlapping on blocks each run; no silent dedup | T-063 | COVERED |
@@ -411,20 +411,21 @@ Every acceptance criterion in R1–R17 mapped to at least one task.
 | R7.21 | reload_scene re-parse + reconcile | T-051, T-127 | COVERED |
 | R7.22 | Each op has KDL schema (facet SHAPE); ark scene check validates | T-053 | COVERED |
 | R7.23 | Unknown op = error[scene/unknown-op] with suggestions | T-053, T-015 | COVERED |
-| R7.24 | All op string attrs support {CEL} interpolation | T-054 | COVERED |
+| R7.24 | All op string attrs support {Rhai} interpolation | T-054 | COVERED |
 | R7.25 | Handle type mismatches = compile error | T-052 | COVERED |
 | R7.26 | Extensions register additional namespaced intents | T-047, T-092 | COVERED |
 
-### R8 — Expression language (CEL)
+### R8 — Expression language (Rhai expression-only mode)
 
 | # | Criterion | Task(s) | Status |
 |---|---|---|---|
-| R8.1 | CEL expressions parsed once at compile; stored as AST | T-019 | COVERED |
-| R8.2 | when="<CEL>" bare expression, no braces | T-023 | COVERED |
-| R8.3 | {<CEL>} in string values — brace-delimited interpolation holes | T-022 | COVERED |
-| R8.4 | Two evaluation scopes: spawn context / event context | T-020, T-025 | COVERED |
-| R8.5 | Compiler enforces scope; mismatch = error[cel/scope-mismatch] | T-020, T-024 | COVERED |
-| R8.6 | CEL stdlib + custom functions (glob/starts_with/ends_with/contains/size/matches) | T-021 | COVERED |
+| R8.1 | Rhai expressions parsed once at compile; stored as `rhai::AST` | T-019 | COVERED |
+| R8.2 | when="<Rhai>" bare expression, no braces; KDL raw strings for predicates containing `"` | T-023 | COVERED |
+| R8.3 | {<Rhai>} in string values — brace-delimited interpolation holes | T-022 | COVERED |
+| R8.4 | Two evaluation scopes: spawn scope / event scope | T-020, T-025 | COVERED |
+| R8.5 | Compiler enforces scope; mismatch = error[scene/rhai-scope-mismatch] | T-020, T-024 | COVERED |
+| R8.8 | Engine non-TC: `Engine::new_raw` + symbol disables (fn/loops/assignment) + resource limits (ops/depth/sizes) | T-019 | COVERED |
+| R8.6 | Rhai custom helpers (glob/matches/basename/dirname) + Rhai built-in methods (starts_with/ends_with/contains/len) | T-021 | COVERED |
 | R8.7 | No minijinja; validate_kdl brace scanner deleted | T-002 | COVERED |
 
 ### R9 — Reconciler
@@ -487,7 +488,7 @@ Every acceptance criterion in R1–R17 mapped to at least one task.
 
 | # | Criterion | Task(s) | Status |
 |---|---|---|---|
-| R12.1 | Error codes namespaced (scene/*, ext/*, op/*, cel/*, acp/*) | T-006 | COVERED |
+| R12.1 | Error codes namespaced (scene/*, ext/*, op/*, scene/rhai-*, acp/*) | T-006 | COVERED |
 | R12.2 | All errors implement miette::Diagnostic with code/severity/help/labels | T-006 | COVERED |
 | R12.3 | Every AST node retains origin span; included fragments track source file + line | T-003, T-004, T-074 | COVERED |
 | R12.4 | ark scene check exits non-zero on error; prints every diagnostic | T-118 | COVERED |
@@ -577,7 +578,7 @@ graph LR
     T001 --> T006[T-006 error enum]
     T001 --> T007[T-007 SceneId]
     T001 --> T009[T-009 selector types]
-    T001 --> T019[T-019 CEL wrap]
+    T001 --> T019[T-019 Rhai wrap]
     T001 --> T026[T-026 view registry]
     T001 --> T081[T-081 ext proto trait]
     T001 --> T088[T-088 ext metadata types]
@@ -602,8 +603,8 @@ graph LR
     T013 --> T014[T-014 handle validation]
     T013 --> T015[T-015 did-you-mean]
 
-    T019 --> T020[T-020 two-scope CEL]
-    T019 --> T021[T-021 CEL stdlib]
+    T019 --> T020[T-020 two-scope Rhai]
+    T019 --> T021[T-021 Rhai helpers]
     T019 --> T022[T-022 interp holes]
     T019 --> T023[T-023 when= bare]
 
@@ -809,7 +810,7 @@ graph LR
 
 ### v0.1 green
 - `cargo build --workspace` compiles.
-- `cargo test -p ark_scene` green (all parser, scope, CEL, layout, view, reaction, keybind unit tests).
+- `cargo test -p ark_scene` green (all parser, scope, Rhai, layout, view, reaction, keybind unit tests).
 - E2E: scene with `on FileEdited path="**/*.md" { exec script="touch <tmp>/fired" }` — edit `.md` file, supervisor fires reaction, touch happens within 2s.
 - E2E: scene with `bind "Alt q" { close @shell }` — dispatching via `zellij action message-plugin ark-bus --name ark-intent --payload '…'` closes pane within 2s.
 - `ark scene check` exits 0 on default scene.
@@ -844,7 +845,7 @@ graph LR
 
 All prior open questions resolved by v3 convergence:
 - Layout DSL vocabulary locked (row/col/span/cells/overlay).
-- CEL vs minijinja locked (CEL only).
+- Expression language locked (Rhai expression-only mode; CEL + minijinja both removed).
 - Extension unification locked (3 modes; no shipped-vs-user distinction).
 - Agent-as-capability locked (no `agent { }` block).
 - Composition locked (include only).
