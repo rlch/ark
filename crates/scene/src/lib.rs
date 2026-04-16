@@ -25,4 +25,5 @@ pub use parse::{parse_scene, SceneIR};
 
 pub mod ast;
 pub mod cache;
+pub mod suggest;
 pub mod validate;
