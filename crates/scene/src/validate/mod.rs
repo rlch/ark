@@ -4,5 +4,7 @@
 //! the tree. Passes are independent and can run in any order.
 //!
 //! - [`scope`]: R2 scope-rule enforcement — rejects misplaced nodes.
+//! - [`handles`]: R2 handle validation — `@ident` grammar + flat namespace dedup.
 
+pub mod handles;
 pub mod scope;
