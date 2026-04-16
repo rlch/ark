@@ -1,0 +1,44 @@
+[package]
+name = "ark-scene"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# T-001: v3 scene crate parse/reflect stack. facet = reflection-capable derive
+# (SHAPE surfaces Rust doc-comments as LSP hover docs); facet-kdl = KDL parser
+# that preserves spans through miette diagnostics; kdl = upstream crate used
+# for formatter output only (AST parse goes through facet-kdl); miette =
+# span-aware error reporting. Pinned to the versions listed in T-001 of
+# build-site-scene.md.
+facet = "0"
+facet-kdl = "0"
+kdl = "6.5"
+miette = { version = "7", features = ["fancy"] }
+# T-001: Rhai is the only expression language in v3 (minijinja + CEL removed
+# per 2026-04-16 redraw). Expression-only mode is configured in T-019; the
+# `sync` feature makes `Engine` + `AST` `Send + Sync` so the compiled scene
+# can be shared across reactor threads. `default-features = false` drops the
+# standard package so we only pay for what we register.
+rhai = { version = "1.19", default-features = false, features = ["sync"] }
+# T-001: regex backs the `matches(str, regex)` Rhai helper registered in
+# T-021 (RE2 flavor, no backrefs, ReDoS-safe).
+regex = "1"
+# T-001: blake3 hashes scene file content to produce `SceneId` for
+# hot-reload delta detection and `ark scene graph` attribution (T-007).
+blake3 = "1"
+# T-001: globset backs the `glob(path, pattern)` Rhai helper (T-021).
+# Shell-style (`*`, `**`, `?`, `[abc]`) patterns compile to a non-
+# backtracking regex engine, so hostile user patterns can't DoS the
+# evaluator.
+globset = { workspace = true }
+# T-001: Jaro-Winkler similarity for "did you mean …?" typo suggestions
+# (T-015). Used across scene-root node names, op verbs, view names,
+# extension names, and event field names.
+strsim = { workspace = true }
+# T-001: error enum derive for `SceneError` (T-006). Pairs with
+# `miette::Diagnostic` impls per variant.
+thiserror = { workspace = true }

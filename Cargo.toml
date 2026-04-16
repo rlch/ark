@@ -12,6 +12,10 @@ members = [
     "crates/core",
     "crates/hook",
     "crates/pane",
+    # T-001: fresh v3 scene crate (Rhai + facet-kdl stack). Replaces the
+    # archived v2 crate as the canonical `ark-scene` package. Populated
+    # incrementally by T-003..T-025+ per context/plans/build-site-scene.md.
+    "crates/scene",
     # Frozen v2 scene crate. Archived 2026-04-16 during v3 redraw; renamed
     # to ark-scene-v2-archive so T-001 can claim the ark-scene name.
     # Dependents alias back via `package = "ark-scene-v2-archive"` until
