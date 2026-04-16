@@ -100,6 +100,16 @@ nix = { workspace = true }
 shlex = { workspace = true }
 ulid = { workspace = true }
 portable-pty = "0.8"
+# T-12.9: `ark ext add` downloads tarballs (url: source) and extracts
+# them. `ureq` is a synchronous blocking HTTPS client — smaller dep
+# footprint than `reqwest`, and the CLI install path is inherently
+# blocking. `flate2` + `tar` decode the gzipped tarball stream into a
+# destination directory. For `github:` source we subprocess `git
+# clone --depth 1` (see `sources::install_github`) to avoid dragging
+# in `git2`'s libgit2 bindings for a single one-shot clone.
+ureq = { version = "2", features = ["tls", "native-certs"], default-features = false }
+flate2 = "1"
+tar = "0.4"
 
 [dev-dependencies]
 tempfile = { workspace = true }
