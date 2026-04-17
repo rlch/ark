@@ -69,9 +69,9 @@ impl StateLayout {
         &self.config
     }
 
-    /// `$base/agents/` — root directory that contains one subdirectory per agent.
-    pub fn agents_root(&self) -> PathBuf {
-        self.base.join("agents")
+    /// `$base/sessions/` — root directory that contains one subdirectory per session.
+    pub fn sessions_root(&self) -> PathBuf {
+        self.base.join("sessions")
     }
 
     /// `$base/agents/{id}/`
@@ -132,11 +132,11 @@ impl StateLayout {
         self.locks_dir().join(format!("{}.lock", id.as_str()))
     }
 
-    /// `$runtime/agents/{id}.sock` — per-supervisor control socket.
+    /// `$runtime/sessions/{id}.sock` — per-supervisor control socket.
     /// See cavekit-hook-ipc.md R4.
     pub fn agent_socket_path(&self, id: &AgentId) -> PathBuf {
         self.runtime
-            .join("agents")
+            .join("sessions")
             .join(format!("{}.sock", id.as_str()))
     }
 
@@ -211,10 +211,10 @@ mod tests {
     }
 
     #[test]
-    fn agents_root_is_base_agents() {
+    fn sessions_root_is_base_sessions() {
         let tmp = tempdir().expect("tempdir");
         let layout = layout_with_base(tmp.path().to_path_buf());
-        assert_eq!(layout.agents_root(), tmp.path().join("agents"));
+        assert_eq!(layout.sessions_root(), tmp.path().join("sessions"));
     }
 
     #[test]
@@ -224,7 +224,7 @@ mod tests {
         let id = AgentId::new("cavekit", "auth");
         let agent = layout.agent_dir(&id);
 
-        assert_eq!(agent, tmp.path().join("agents").join(id.as_str()));
+        assert_eq!(agent, tmp.path().join("sessions").join(id.as_str()));
         assert_eq!(layout.spec_path(&id), agent.join("spec.json"));
         assert_eq!(layout.status_path(&id), agent.join("status.json"));
         assert_eq!(layout.events_path(&id), agent.join("events.jsonl"));
@@ -279,7 +279,7 @@ mod tests {
         let expected = tmp
             .path()
             .join("runtime")
-            .join("agents")
+            .join("sessions")
             .join(format!("{}.sock", id.as_str()));
         assert_eq!(layout.agent_socket_path(&id), expected);
     }
