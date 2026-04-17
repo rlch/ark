@@ -10,6 +10,7 @@ rust-version.workspace = true
 [dependencies]
 ark-types = { path = "../types" }
 ark-core = { path = "../core" }
+serde_json = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true, features = ["event-stream"] }
 tokio = { workspace = true }

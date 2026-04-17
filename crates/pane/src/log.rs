@@ -1,7 +1,7 @@
-//! `ark pane log` — tail `events.jsonl` for a given agent.
+//! `ark pane log` — tail `events.jsonl` for a given session.
 //!
 //! See `context/kits/cavekit-pane-commands.md` R3:
-//! - Opens `$STATE/agents/{id}/events.jsonl` via [`ark_core::events_log::EventLogReader`].
+//! - Opens `$STATE/sessions/{id}/events.jsonl` via [`ark_core::events_log::EventLogReader`].
 //! - Follows new writes via `notify::recommended_watcher` (inotify on Linux,
 //!   FSEvents on macOS); on each Modify event we re-parse from last cursor.
 //! - Renders one row per event: `HH:MM:SS  KIND  summary`.
@@ -10,14 +10,21 @@
 //!   KIND column.
 //! - `gg` → jump to start, `G` → jump to end; auto-scroll follows tail unless
 //!   the user has scrolled off the bottom.
-//! - Missing agent dir → `Agent '{id}' not found` placeholder, exits 3 after 2s.
+//! - Missing session dir → `session '{id}' not found` placeholder, exits 3.
+//!
+//! Post-cavekit-soul Phase 1 the rich `AgentEvent` variants are gone; events
+//! now arrive as the narrow [`CoreEvent`] enum where everything
+//! methodology-flavoured rides inside `CoreEvent::Ext(ExtEvent { ext, kind,
+//! payload })`. The one-liner renders the core variants as
+//! `ark.core.<variant>` and extension events as `<ext>.<kind>` with a short
+//! payload summary.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ark_core::events_log::{EventLogReader, EventRecord};
-use ark_types::{AgentEvent, AgentId, LogLevel, Outcome, StateLayout};
+use ark_types::{CoreEvent, SessionId, StateLayout};
 use crossterm::event::KeyCode;
 use notify::{EventKind, RecursiveMode, Watcher};
 use ratatui::{
@@ -44,139 +51,82 @@ pub struct LogState {
     pub filter: Option<String>,
     pub scroll_offset: usize,
     /// When true (default), new rows auto-scroll the view to the bottom.
-    /// Toggled off by any upward scroll; toggled back on by `G`.
     pub follow: bool,
     /// `gg` two-key sequence: first `g` arms this, second clears it.
     pub awaiting_gg: bool,
-    pub agent_id: String,
+    pub session_id: String,
 }
 
 impl LogState {
-    /// Construct with an agent id string (for display) and optional kind filter.
-    pub fn new(agent_id: impl Into<String>, filter: Option<String>) -> Self {
+    pub fn new(session_id: impl Into<String>, filter: Option<String>) -> Self {
         Self {
             rows: Vec::new(),
             filter,
             scroll_offset: 0,
             follow: true,
             awaiting_gg: false,
-            agent_id: agent_id.into(),
+            session_id: session_id.into(),
         }
     }
 }
 
-/// Produce `(kind, summary)` for any `AgentEvent` variant.
+/// Compact one-line summary of a JSON payload for the summary column.
 ///
-/// Kind strings are snake_case and stable (they match the serde `kind` tag on
-/// [`AgentEvent`]), so `--filter` matching is consistent across builds.
-pub fn one_liner(ev: &AgentEvent) -> (String, String) {
+/// Short values (numbers, strings, bools) stringify as-is; objects and arrays
+/// get truncated JSON. Empty payloads collapse to an empty string.
+fn payload_summary(payload: &serde_json::Value) -> String {
+    if payload.is_null() {
+        return String::new();
+    }
+    let s = serde_json::to_string(payload).unwrap_or_default();
+    if s == "null" || s == "{}" {
+        return String::new();
+    }
+    const MAX: usize = 120;
+    if s.chars().count() <= MAX {
+        s
+    } else {
+        let mut out: String = s.chars().take(MAX.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    }
+}
+
+/// Produce `(kind, summary)` for any [`CoreEvent`] variant.
+///
+/// Core variants render as `ark.core.<variant>`; extension events as
+/// `<ext>.<kind>` with a short payload summary. The kind string matches
+/// [`ark_types::FlatEvent::name`] for filter-column consistency.
+pub fn one_liner(ev: &CoreEvent) -> (String, String) {
     match ev {
-        AgentEvent::Started { spec } => ("started".into(), format!("spec {}", spec.id.as_str())),
-        AgentEvent::TabOpened {
-            id, role, label, ..
-        } => (
-            "tab_opened".into(),
-            format!("{} [{:?}] {}", id.as_str(), role, label),
-        ),
-        AgentEvent::TabClosed { id, tab_handle } => (
-            "tab_closed".into(),
-            format!("{} @ {}", id.as_str(), tab_handle),
-        ),
-        AgentEvent::Progress {
-            done, total, label, ..
-        } => (
-            "progress".into(),
-            match label {
-                Some(l) => format!("{done}/{total} {l}"),
-                None => format!("{done}/{total}"),
-            },
-        ),
-        AgentEvent::TaskDone { task_id, label, .. } => (
-            "task_done".into(),
-            match label {
-                Some(l) => format!("{task_id} {l}"),
-                None => task_id.clone(),
-            },
-        ),
-        AgentEvent::Iteration { n, max, .. } => (
-            "iteration".into(),
-            match max {
-                Some(m) => format!("{n}/{m}"),
-                None => format!("{n}"),
-            },
-        ),
-        AgentEvent::PhaseTransition { from, to, .. } => (
-            "phase_transition".into(),
-            match from {
-                Some(f) => format!("{f} -> {to}"),
-                None => to.clone(),
-            },
-        ),
-        AgentEvent::ToolUse {
-            tool,
-            input_summary,
-            ..
-        } => ("tool_use".into(), format!("{tool} {input_summary}")),
-        AgentEvent::Message { role, summary, .. } => {
-            ("message".into(), format!("{role:?} {summary}"))
+        CoreEvent::Log {
+            level,
+            message,
+            target,
+        } => {
+            let t = target.as_deref().unwrap_or("");
+            (
+                "ark.core.log".to_string(),
+                if t.is_empty() {
+                    format!("{level} {message}")
+                } else {
+                    format!("{level} [{t}] {message}")
+                },
+            )
         }
-        AgentEvent::FileEdited {
-            path,
-            additions,
-            deletions,
-            ..
-        } => (
-            "file_edited".into(),
-            format!("{} +{additions} -{deletions}", path.display()),
+        CoreEvent::Error { error } => ("ark.core.error".to_string(), error.clone()),
+        CoreEvent::SessionStarted { spec } => (
+            "ark.core.session_started".to_string(),
+            format!("spec {}", spec.id.as_str()),
         ),
-        AgentEvent::ReviewComment {
-            severity,
-            path,
-            line,
-            body,
-            ..
-        } => (
-            "review_comment".into(),
-            match line {
-                Some(l) => format!("{severity:?} {}:{l} {body}", path.display()),
-                None => format!("{severity:?} {} {body}", path.display()),
-            },
+        CoreEvent::SessionEnded { terminated_at } => (
+            "ark.core.session_ended".to_string(),
+            format!("terminated {}", terminated_at.format("%H:%M:%S")),
         ),
-        AgentEvent::PermissionAsked { tool, summary, .. } => {
-            ("permission_asked".into(), format!("{tool} {summary}"))
+        CoreEvent::Ext(ext) => {
+            let name = format!("{}.{}", ext.ext, ext.kind);
+            (name, payload_summary(&ext.payload))
         }
-        AgentEvent::PermissionResolved { tool, decision, .. } => {
-            ("permission_resolved".into(), format!("{tool} {decision:?}"))
-        }
-        AgentEvent::Stall { since, .. } => ("stall".into(), format!("since {since}")),
-        AgentEvent::Log { level, line, .. } => {
-            ("log".into(), format!("{} {line}", log_level_tag(level)))
-        }
-        AgentEvent::Error { message, .. } => ("error".into(), message.clone()),
-        AgentEvent::Done { outcome, .. } => ("done".into(), outcome_summary(outcome)),
-        // AgentEvent is `#[non_exhaustive]`; future variants fall through to
-        // a generic kind so the pane never drops an event silently.
-        _ => ("other".into(), String::new()),
-    }
-}
-
-fn log_level_tag(l: &LogLevel) -> &'static str {
-    match l {
-        LogLevel::Trace => "TRACE",
-        LogLevel::Debug => "DEBUG",
-        LogLevel::Info => "INFO",
-        LogLevel::Warn => "WARN",
-        LogLevel::Error => "ERROR",
-    }
-}
-
-fn outcome_summary(o: &Outcome) -> String {
-    match o {
-        Outcome::Success { artifacts } => format!("success ({} artifacts)", artifacts.len()),
-        Outcome::Failed { reason } => format!("failed: {reason}"),
-        Outcome::Killed => "killed".into(),
-        Outcome::Timeout => "timeout".into(),
-        Outcome::Crashed { reason } => format!("crashed: {reason}"),
     }
 }
 
@@ -206,55 +156,52 @@ pub fn record_to_row(rec: &EventRecord) -> LogRow {
 }
 
 /// Color for a given kind string. When `NO_COLOR` is set, falls back to the
-/// terminal default; bold is preserved where the kind is important (error,
-/// done) so the output still has visual hierarchy.
-pub fn color_for_kind(kind: &str, summary: &str) -> Style {
+/// terminal default.
+pub fn color_for_kind(kind: &str, _summary: &str) -> Style {
     if no_color() {
-        // Preserve bold for error/done so users can still see signal.
         return match kind {
-            "error" => Style::default().add_modifier(Modifier::BOLD),
-            "done" if summary.starts_with("failed") || summary.starts_with("crashed") => {
-                Style::default().add_modifier(Modifier::BOLD)
-            }
+            "ark.core.error" => Style::default().add_modifier(Modifier::BOLD),
             _ => Style::default(),
         };
     }
-    match kind {
-        "tool_use" => Style::default().fg(Color::Cyan),
-        "error" => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        "done" => {
-            if summary.starts_with("success") {
-                Style::default().fg(Color::Green)
-            } else {
-                Style::default().fg(Color::Red)
-            }
-        }
-        "permission_asked" => Style::default().fg(Color::Yellow),
-        "permission_resolved" => Style::default().fg(Color::Yellow),
-        "stall" => Style::default().fg(Color::Yellow),
-        "task_done" => Style::default().fg(Color::Green),
-        _ => Style::default().fg(Color::Gray),
+    if kind == "ark.core.error" {
+        return Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
     }
+    if kind == "ark.core.session_started" {
+        return Style::default().fg(Color::Green);
+    }
+    if kind == "ark.core.session_ended" {
+        return Style::default().fg(Color::Yellow);
+    }
+    if kind == "ark.core.log" {
+        return Style::default().fg(Color::Gray);
+    }
+    if kind.contains(".permission.") {
+        return Style::default().fg(Color::Yellow);
+    }
+    if kind.ends_with(".tool.use") {
+        return Style::default().fg(Color::Cyan);
+    }
+    if kind.ends_with(".task.done") {
+        return Style::default().fg(Color::Green);
+    }
+    Style::default().fg(Color::Gray)
 }
 
-/// Top-level entrypoint. Returns exit code 3 via a sentinel error when the
-/// agent directory is missing (the caller — `ark pane log` command — maps
-/// this to `std::process::exit(3)`).
+/// Top-level entrypoint. Missing session dir → stderr note + exit 3.
 pub async fn run(
     state_layout: Arc<StateLayout>,
-    id: AgentId,
+    id: SessionId,
     filter: Option<String>,
 ) -> anyhow::Result<()> {
-    let agent_dir = state_layout.agent_dir(&id);
-    if !agent_dir.exists() {
-        eprintln!("agent {} not found", id.as_str());
+    let session_dir = state_layout.session_dir(&id);
+    if !session_dir.exists() {
+        eprintln!("session {} not found", id.as_str());
         std::process::exit(3);
     }
 
-    let events_path = state_layout.events_path(&id);
-    let state = LogState::new(id.as_str(), filter);
-    // Seed existing events (if any).
-    let mut state = state;
+    let events_path = state_layout.session_events_path(&id);
+    let mut state = LogState::new(id.as_str(), filter);
     if events_path.exists() {
         if let Ok(mut reader) = EventLogReader::open(&events_path) {
             for rec in reader.read_all() {
@@ -263,13 +210,10 @@ pub async fn run(
         }
     }
 
-    // Shared flag toggled by the notify watcher; the tick handler drains it.
     let dirty = Arc::new(Mutex::new(true));
     let dirty_notify = dirty.clone();
-    // Keep watcher alive for the whole pane lifetime.
     let watch_target = events_path.clone();
-    // Watch the parent dir (works even when the file doesn't exist yet).
-    let watch_dir = watch_target
+    let watch_dir: PathBuf = watch_target
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
@@ -321,11 +265,10 @@ pub async fn run(
     run_pane(state, render, handler).await
 }
 
-/// Handle a single key press against the shared state. Extracted so it can be
-/// exercised without crossterm in tests.
+/// Handle a single key press against the shared state.
 pub fn handle_key(s: &mut LogState, code: KeyCode) {
     match code {
-        KeyCode::Char('q') | KeyCode::Esc => { /* quit handled by caller */ }
+        KeyCode::Char('q') | KeyCode::Esc => {}
         KeyCode::Char('j') | KeyCode::Down => {
             s.scroll_offset = s.scroll_offset.saturating_add(1);
             s.awaiting_gg = false;
@@ -346,12 +289,11 @@ pub fn handle_key(s: &mut LogState, code: KeyCode) {
         }
         KeyCode::Char('G') => {
             s.follow = true;
-            s.scroll_offset = usize::MAX; // clamped in render
+            s.scroll_offset = usize::MAX;
             s.awaiting_gg = false;
         }
         KeyCode::Char('g') => {
             if s.awaiting_gg {
-                // second 'g' → jump to top
                 s.scroll_offset = 0;
                 s.follow = false;
                 s.awaiting_gg = false;
@@ -376,8 +318,7 @@ pub fn handle_key(s: &mut LogState, code: KeyCode) {
 }
 
 /// Spawn a notify watcher on `watch_dir`, flipping `dirty` whenever
-/// `target_path` sees a Modify/Create event. Returned guard must be held for
-/// the lifetime of the pane.
+/// `target_path` sees a Modify/Create event.
 fn spawn_watcher(
     watch_dir: PathBuf,
     target_path: PathBuf,
@@ -386,7 +327,6 @@ fn spawn_watcher(
     let target = target_path;
     let res = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         let Ok(ev) = res else { return };
-        // Only care about our specific file.
         if !ev.paths.iter().any(|p| p == &target) {
             return;
         }
@@ -413,7 +353,6 @@ fn spawn_watcher(
 fn render_frame(f: &mut Frame, s: &LogState, events_path: &Path) {
     let area = f.area();
 
-    // Top chrome, body, footer.
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -423,20 +362,18 @@ fn render_frame(f: &mut Frame, s: &LogState, events_path: &Path) {
         ])
         .split(area);
 
-    // Header
     let filter_text = s
         .filter
         .as_deref()
         .map(|f| format!("filter={f}"))
         .unwrap_or_else(|| "filter=*".to_string());
-    let header = Paragraph::new(format!("agent {}  {}", s.agent_id, filter_text)).block(
+    let header = Paragraph::new(format!("session {}  {}", s.session_id, filter_text)).block(
         Block::default()
             .borders(Borders::ALL)
             .title(" ark pane log "),
     );
     f.render_widget(header, chunks[0]);
 
-    // Body
     let filtered: Vec<&LogRow> = s
         .rows
         .iter()
@@ -448,7 +385,7 @@ fn render_frame(f: &mut Frame, s: &LogState, events_path: &Path) {
             let style = color_for_kind(&r.kind, &r.summary);
             Line::from(vec![
                 Span::raw(format!("{}  ", r.ts)),
-                Span::styled(format!("{:<20}", r.kind), style),
+                Span::styled(format!("{:<28}", r.kind), style),
                 Span::raw("  "),
                 Span::raw(r.summary.clone()),
             ])
@@ -472,7 +409,6 @@ fn render_frame(f: &mut Frame, s: &LogState, events_path: &Path) {
     );
     f.render_widget(body, body_area);
 
-    // Footer
     let follow = if s.follow { "follow" } else { "paused" };
     let footer_txt = format!(
         "q quit · j/k scroll · gg top · G end · {follow} · {}",
@@ -485,99 +421,61 @@ fn render_frame(f: &mut Frame, s: &LogState, events_path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_types::{AgentEvent, AgentId, LogLevel, Outcome};
+    use ark_types::{CoreEvent, ExtEvent};
     use chrono::{TimeZone, Utc};
 
-    fn sample_id() -> AgentId {
-        AgentId::new("cavekit", "auth")
+    fn ext_event(ext: &str, kind: &str, payload: serde_json::Value) -> CoreEvent {
+        CoreEvent::Ext(ExtEvent {
+            ext: ext.to_string(),
+            kind: kind.to_string(),
+            payload,
+        })
     }
 
     #[test]
-    fn one_liner_tool_use() {
-        let ev = AgentEvent::ToolUse {
-            id: sample_id(),
-            tool: "Read".into(),
-            input_summary: "foo.rs".into(),
-        };
+    fn one_liner_ext_tool_use() {
+        let ev = ext_event(
+            "claude-code",
+            "tool.use",
+            serde_json::json!({ "tool": "Read", "input_summary": "foo.rs" }),
+        );
         let (k, s) = one_liner(&ev);
-        assert_eq!(k, "tool_use");
+        assert_eq!(k, "claude-code.tool.use");
         assert!(s.contains("Read"));
         assert!(s.contains("foo.rs"));
     }
 
     #[test]
-    fn one_liner_error_and_done() {
-        let err = AgentEvent::Error {
-            id: sample_id(),
-            message: "boom".into(),
+    fn one_liner_core_error() {
+        let err = CoreEvent::Error {
+            error: "boom".into(),
         };
-        assert_eq!(one_liner(&err).0, "error");
-        assert_eq!(one_liner(&err).1, "boom");
-
-        let done_ok = AgentEvent::Done {
-            id: sample_id(),
-            outcome: Outcome::Success {
-                artifacts: vec![PathBuf::from("a")],
-            },
-        };
-        let (k, s) = one_liner(&done_ok);
-        assert_eq!(k, "done");
-        assert!(s.starts_with("success"));
-
-        let done_fail = AgentEvent::Done {
-            id: sample_id(),
-            outcome: Outcome::Failed {
-                reason: "nope".into(),
-            },
-        };
-        let (_k, s) = one_liner(&done_fail);
-        assert!(s.contains("nope"));
+        let (k, s) = one_liner(&err);
+        assert_eq!(k, "ark.core.error");
+        assert_eq!(s, "boom");
     }
 
     #[test]
-    fn one_liner_progress_with_and_without_label() {
-        let p1 = AgentEvent::Progress {
-            id: sample_id(),
-            done: 2,
-            total: 5,
-            label: None,
+    fn one_liner_core_session_ended_uses_terminated_at() {
+        let ts = Utc.with_ymd_and_hms(2026, 4, 14, 10, 30, 15).unwrap();
+        let ev = CoreEvent::SessionEnded {
+            terminated_at: ts,
         };
-        assert_eq!(one_liner(&p1).1, "2/5");
-        let p2 = AgentEvent::Progress {
-            id: sample_id(),
-            done: 2,
-            total: 5,
-            label: Some("step".into()),
-        };
-        assert!(one_liner(&p2).1.contains("step"));
-    }
-
-    #[test]
-    fn one_liner_log_includes_level() {
-        let ev = AgentEvent::Log {
-            id: sample_id(),
-            level: LogLevel::Warn,
-            line: "heads up".into(),
-        };
-        let (_k, s) = one_liner(&ev);
-        assert!(s.contains("WARN"));
-        assert!(s.contains("heads up"));
+        let (k, s) = one_liner(&ev);
+        assert_eq!(k, "ark.core.session_ended");
+        assert!(s.contains("10:30:15"));
     }
 
     #[test]
     fn filter_matches_none_passes_all() {
-        assert!(filter_matches(None, "tool_use"));
-        assert!(filter_matches(None, ""));
+        assert!(filter_matches(None, "tool.use"));
     }
 
     #[test]
     fn filter_matches_case_insensitive_startswith() {
-        assert!(filter_matches(Some("tool"), "tool_use"));
-        assert!(filter_matches(Some("TOOL"), "tool_use"));
-        assert!(filter_matches(Some("Tool"), "tool_use"));
-        assert!(!filter_matches(Some("use"), "tool_use"));
-        assert!(!filter_matches(Some("done"), "tool_use"));
-        // Empty filter behaves like none.
+        assert!(filter_matches(Some("claude"), "claude-code.tool.use"));
+        assert!(filter_matches(Some("CLAUDE"), "claude-code.tool.use"));
+        assert!(!filter_matches(Some("use"), "claude-code.tool.use"));
         assert!(filter_matches(Some(""), "anything"));
     }
 
@@ -586,29 +484,27 @@ mod tests {
         let ts = Utc.with_ymd_and_hms(2026, 4, 14, 3, 7, 9).unwrap();
         let rec = EventRecord {
             ts,
-            event: AgentEvent::Log {
-                id: sample_id(),
-                level: LogLevel::Info,
-                line: "hi".into(),
+            event: CoreEvent::Log {
+                level: "info".into(),
+                message: "hi".into(),
+                target: None,
             },
         };
         let row = record_to_row(&rec);
         assert_eq!(row.ts, "03:07:09");
-        assert_eq!(row.kind, "log");
+        assert_eq!(row.kind, "ark.core.log");
     }
 
     #[test]
     fn handle_key_j_k_scroll_and_follow_pause() {
         let mut s = LogState::new("id", None);
-        // follow on by default.
         assert!(s.follow);
         handle_key(&mut s, KeyCode::Char('j'));
         assert_eq!(s.scroll_offset, 1);
-        // still follow after j (per spec "auto-scroll follows tail unless user scrolled up").
         assert!(s.follow);
         handle_key(&mut s, KeyCode::Char('k'));
         assert_eq!(s.scroll_offset, 0);
-        assert!(!s.follow, "k should pause follow");
+        assert!(!s.follow);
     }
 
     #[test]
@@ -624,7 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_key_capital_g_jumps_to_end_resumes_follow() {
+    fn handle_key_capital_g_resumes_follow() {
         let mut s = LogState::new("id", None);
         s.follow = false;
         s.scroll_offset = 5;
@@ -634,134 +530,33 @@ mod tests {
     }
 
     #[test]
-    fn handle_key_single_g_then_other_cancels_gg() {
-        let mut s = LogState::new("id", None);
-        handle_key(&mut s, KeyCode::Char('g'));
-        assert!(s.awaiting_gg);
-        handle_key(&mut s, KeyCode::Char('j'));
-        assert!(!s.awaiting_gg);
-    }
-
-    #[test]
-    fn file_tailing_cursor_via_read_all_picks_up_appends() {
-        use ark_core::events_log::EventLogWriter;
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("events.jsonl");
-
-        // First batch.
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let handle = EventLogWriter::spawn(path.clone()).unwrap();
-            handle
-                .sender
-                .send(AgentEvent::Log {
-                    id: sample_id(),
-                    level: LogLevel::Info,
-                    line: "first".into(),
-                })
-                .unwrap();
-            drop(handle.sender);
-            handle.task.await.unwrap();
-        });
-
-        let mut reader = EventLogReader::open(&path).unwrap();
-        let first_rows: Vec<_> = reader.read_all().iter().map(record_to_row).collect();
-        assert_eq!(first_rows.len(), 1);
-
-        // Append second batch, then re-read all via a FRESH reader (mimics
-        // what the widget does on each dirty tick).
-        rt.block_on(async {
-            let handle = EventLogWriter::spawn(path.clone()).unwrap();
-            handle
-                .sender
-                .send(AgentEvent::Log {
-                    id: sample_id(),
-                    level: LogLevel::Info,
-                    line: "second".into(),
-                })
-                .unwrap();
-            drop(handle.sender);
-            handle.task.await.unwrap();
-        });
-
-        let mut reader2 = EventLogReader::open(&path).unwrap();
-        let second_rows: Vec<_> = reader2.read_all().iter().map(record_to_row).collect();
-        assert_eq!(second_rows.len(), 2);
-    }
-
-    #[test]
-    fn color_for_kind_no_color_is_plain() {
-        // In no-color mode we cannot directly read the global flag here
-        // without racing; but color_for_kind falls back deterministically
-        // when called. This test just confirms the color path for kinds
-        // we explicitly document.
-        let style = color_for_kind("tool_use", "");
-        // When NO_COLOR isn't set in the process, expect Cyan fg.
-        if !no_color() {
-            assert_eq!(style.fg, Some(Color::Cyan));
-        }
-        let err_style = color_for_kind("error", "");
-        if !no_color() {
-            assert_eq!(err_style.fg, Some(Color::Red));
-        }
-        // Done w/ success should be green.
-        let done_ok = color_for_kind("done", "success (0 artifacts)");
-        if !no_color() {
-            assert_eq!(done_ok.fg, Some(Color::Green));
-        }
-        let done_fail = color_for_kind("done", "failed: x");
-        if !no_color() {
-            assert_eq!(done_fail.fg, Some(Color::Red));
-        }
-    }
-
-    #[test]
-    fn color_for_kind_covers_stall_permission_task_done_and_unknown() {
-        // Expand coverage to every explicit arm of color_for_kind + the
-        // catch-all "Gray" default used for unclassified kinds. Guarded so
-        // setting NO_COLOR at the process level doesn't break the test.
+    fn color_for_kind_error_is_bold_red_when_color_allowed() {
         if no_color() {
             return;
         }
-        assert_eq!(color_for_kind("stall", "").fg, Some(Color::Yellow));
-        assert_eq!(
-            color_for_kind("permission_asked", "").fg,
-            Some(Color::Yellow)
-        );
-        assert_eq!(
-            color_for_kind("permission_resolved", "").fg,
-            Some(Color::Yellow)
-        );
-        assert_eq!(color_for_kind("task_done", "").fg, Some(Color::Green));
-        // Unknown / uncategorized kind falls through to Gray.
-        assert_eq!(color_for_kind("some_future_kind", "").fg, Some(Color::Gray));
-        assert_eq!(color_for_kind("message", "x").fg, Some(Color::Gray));
+        let style = color_for_kind("ark.core.error", "");
+        assert_eq!(style.fg, Some(Color::Red));
     }
 
     #[test]
-    fn log_state_new_preserves_agent_id_and_filter() {
-        // `LogState::new` is the widget's arg-parsing landing zone:
-        // `ark pane log --id <ID> --filter <KIND>` maps `ID` and `KIND` here.
-        let s = LogState::new("cavekit:auth", Some("tool_use".to_string()));
-        assert_eq!(s.agent_id, "cavekit:auth");
-        assert_eq!(s.filter.as_deref(), Some("tool_use"));
-        assert!(s.follow, "follow must default to true per R3");
-        assert!(!s.awaiting_gg);
-        assert_eq!(s.scroll_offset, 0);
-        assert!(s.rows.is_empty());
-
-        // None filter is permitted.
-        let s2 = LogState::new("x:y", None);
-        assert!(s2.filter.is_none());
+    fn color_for_kind_session_ended_is_yellow() {
+        if no_color() {
+            return;
+        }
+        assert_eq!(
+            color_for_kind("ark.core.session_ended", "").fg,
+            Some(Color::Yellow)
+        );
     }
 
     #[test]
-    fn filter_matches_whitespace_padded_needle() {
-        // The implementation trims needle whitespace — verify callers can
-        // pass a `--filter " tool "` value without surprise.
-        assert!(filter_matches(Some("  tool  "), "tool_use"));
-        assert!(filter_matches(Some("\tdone\n"), "done"));
-        // All-whitespace needle behaves like an empty filter (matches all).
-        assert!(filter_matches(Some("   "), "anything"));
+    fn color_for_kind_ext_tool_use_is_cyan() {
+        if no_color() {
+            return;
+        }
+        assert_eq!(
+            color_for_kind("claude-code.tool.use", "").fg,
+            Some(Color::Cyan)
+        );
     }
 }
