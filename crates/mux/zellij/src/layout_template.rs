@@ -42,7 +42,7 @@ pub struct LayoutVars {
     pub agent_cmd: String,
     /// Remaining argv tokens, exposed to templates as a list (e.g. `{% for a in agent_args %}`).
     pub agent_args: Vec<String>,
-    /// Full `AgentId` string.
+    /// Full `SessionId` path-leaf string (`<name>-<ulid>`).
     pub id: String,
     /// Human label for the tab.
     pub name: String,

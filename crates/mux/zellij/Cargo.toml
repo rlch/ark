@@ -17,6 +17,7 @@ ulid = { workspace = true }
 anyhow = { workspace = true }
 minijinja = { workspace = true }
 portable-pty = "0.8"
+serde = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }

@@ -13,7 +13,7 @@
 //! `ark_types::EnvPaths`), so this module stays free of process-env
 //! dependencies and is fully testable with `tempfile`.
 
-use ark_types::AgentId;
+use ark_types::SessionId;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -25,15 +25,16 @@ pub enum LayoutWriteError {
     Io(#[from] std::io::Error),
 }
 
-/// Per-agent per-tab rendered-KDL cache dir: `${runtime_dir}/ark/layouts/`.
+/// Per-session per-tab rendered-KDL cache dir: `${runtime_dir}/ark/layouts/`.
 /// Caller supplies the runtime_dir root (typically from ark_types::EnvPaths).
 pub fn rendered_layouts_dir(runtime_dir_root: &Path) -> PathBuf {
     runtime_dir_root.join("layouts")
 }
 
-/// Compute `{runtime}/ark/layouts/{id}-{tab}.kdl`.
-pub fn rendered_layout_path(runtime_dir_root: &Path, id: &AgentId, tab: &str) -> PathBuf {
-    rendered_layouts_dir(runtime_dir_root).join(format!("{}-{}.kdl", id.as_str(), tab))
+/// Compute `{runtime}/ark/layouts/{id}-{tab}.kdl` where `{id}` is the
+/// session's path-leaf form (`<name>-<ulid>`).
+pub fn rendered_layout_path(runtime_dir_root: &Path, id: &SessionId, tab: &str) -> PathBuf {
+    rendered_layouts_dir(runtime_dir_root).join(format!("{}-{}.kdl", id.as_path_leaf(), tab))
 }
 
 /// Write a rendered layout with strict `.kdl` extension enforcement + 0600 mode.
@@ -69,8 +70,8 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
 
-    fn dummy_id() -> AgentId {
-        AgentId::parse("cavekit-auth-01jx7z8k6x9y2zt4abcdef0123").expect("parse")
+    fn dummy_id() -> SessionId {
+        SessionId::parse("cavekit_auth-01jx7z8k6x9y2zt4abcdef0123").expect("parse")
     }
 
     #[test]
@@ -80,7 +81,7 @@ mod tests {
         let p = rendered_layout_path(root, &id, "builder");
         assert_eq!(
             p,
-            PathBuf::from("/run/ark/layouts/cavekit-auth-01jx7z8k6x9y2zt4abcdef0123-builder.kdl")
+            PathBuf::from("/run/ark/layouts/cavekit_auth-01jx7z8k6x9y2zt4abcdef0123-builder.kdl")
         );
     }
 

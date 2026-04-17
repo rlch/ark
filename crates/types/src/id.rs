@@ -2,11 +2,6 @@
 //!
 //! Every session has a human-friendly `name` plus a freshly generated
 //! `Ulid`. Path-leaf form is `<name>-<ulid>`. See cavekit-soul-phase-1-types.md R3.
-//!
-//! `AgentId` is retained as a transitional alias for [`SessionId`] —
-//! some pre-soul callers (mux/layout writer, hook bridge, plugins) still
-//! reference the old name. Phase 2+ extension migration removes the
-//! alias once those call sites move off `AgentId`.
 
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
@@ -63,14 +58,6 @@ impl SessionId {
         })
     }
 }
-
-/// Transitional alias for [`SessionId`].
-///
-/// Pre-soul code referenced an `AgentId` distinct from `SessionId`; the
-/// two unified under cavekit-soul Phase 1. The alias exists so untouched
-/// call sites (mux layout writer, hook bridge, plugins) continue to
-/// compile while Phase 2+ tiers move them off the legacy name.
-pub type AgentId = SessionId;
 
 /// Normalize a free-form string to id-safe characters: lowercase ASCII letters,
 /// digits, and `_`. Anything else collapses to `_`. Empty input becomes `_`.

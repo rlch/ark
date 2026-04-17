@@ -32,5 +32,5 @@ pub use layout_template::{LayoutTemplateError, LayoutVars, render as render_layo
 pub use layout_writer::{
     LayoutWriteError, cleanup_rendered, rendered_layout_path, rendered_layouts_dir, write_rendered,
 };
-pub use mux::{MIN_ZELLIJ_VERSION, PIPE_TARGET_PICKER, PIPE_TARGET_STATUS, ZellijMux};
+pub use mux::{MIN_ZELLIJ_VERSION, PIPE_TARGET_PICKER, PIPE_TARGET_STATUS, TabHandle, ZellijMux};
 pub use pty::{PtySpawnError, PtyZellijHandle, pty_child_startup_failure, spawn_zellij_with_pty};

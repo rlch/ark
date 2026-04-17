@@ -11,7 +11,7 @@
 use std::any::Any;
 use std::path::{Path, PathBuf};
 
-use ark_types::{AgentId, EventSink};
+use ark_types::{EventSink, SessionId};
 use async_trait::async_trait;
 
 /// Policy for auto-approving engine permission prompts.
@@ -81,13 +81,13 @@ pub trait Engine: Send + Sync + 'static {
     /// safe to invoke twice on the same `cwd`. Runs before the orchestrator
     /// launches the agent process so no early events are lost.
     ///
-    /// `id` is the authoritative [`AgentId`] from the supervisor's
-    /// [`ark_types::AgentSpec`]. Engines MUST key hook commands / transcript
+    /// `id` is the authoritative [`SessionId`] from the supervisor's
+    /// [`ark_types::SessionSpec`]. Engines MUST key hook commands / transcript
     /// routing / log context on this id (never fabricate a synthetic one)
     /// so events flow under the identity the supervisor is listening for.
     async fn install_observability(
         &self,
-        id: &AgentId,
+        id: &SessionId,
         cwd: &Path,
         sink: EventSink,
     ) -> anyhow::Result<EngineHandle>;
@@ -119,7 +119,7 @@ mod tests {
 
     struct MockState {
         installed_at: PathBuf,
-        installed_for: AgentId,
+        installed_for: SessionId,
     }
 
     #[async_trait]
@@ -130,7 +130,7 @@ mod tests {
 
         async fn install_observability(
             &self,
-            id: &AgentId,
+            id: &SessionId,
             cwd: &Path,
             _sink: EventSink,
         ) -> anyhow::Result<EngineHandle> {

@@ -39,8 +39,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
-use ark_mux_zellij::ZellijMux;
-use ark_types::{CoreEvent, EventSink, SessionId, TabHandle};
+use ark_mux_zellij::{TabHandle, ZellijMux};
+use ark_types::{CoreEvent, EventSink, SessionId};
 use chrono::Utc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};

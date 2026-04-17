@@ -45,9 +45,44 @@ use anyhow::anyhow;
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
-use ark_types::TabHandle;
+use serde::{Deserialize, Serialize};
+use std::fmt;
 
 use crate::executor::{CommandExecutor, RealExecutor};
+
+/// Stable handle for a multiplexer tab.
+///
+/// Lives in the mux crate because the multiplex concern owns tab
+/// addressing (see cavekit-soul-phase-1-types.md T-008 — `ark-types`
+/// must not carry mux-shaped state). Carries the multiplexer session
+/// name, a 0-based tab index, and a human-friendly label used for
+/// tracing / tests.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TabHandle {
+    /// Multiplexer session name (e.g. `"ark-cavekit-auth-..."`).
+    pub session: String,
+    /// 0-based tab index inside the session.
+    pub tab_index: u32,
+    /// Human-friendly tab label (e.g. `"builder"`).
+    pub name: String,
+}
+
+impl TabHandle {
+    /// Construct a new `TabHandle`.
+    pub fn new(session: impl Into<String>, tab_index: u32, name: impl Into<String>) -> Self {
+        Self {
+            session: session.into(),
+            tab_index,
+            name: name.into(),
+        }
+    }
+}
+
+impl fmt::Display for TabHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}#{}({})", self.session, self.tab_index, self.name)
+    }
+}
 
 /// Minimum supported zellij version (R6).
 pub const MIN_ZELLIJ_VERSION: (u32, u32, u32) = (0, 44, 1);
