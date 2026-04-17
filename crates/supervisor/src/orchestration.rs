@@ -580,10 +580,19 @@ pub async fn run_supervisor_with(
         config_arc.clone(),
     );
 
-    // Soul phase 1 T-013: orchestrator.run is skipped entirely when no
-    // orchestrator is supplied (bare-launch path). The session still
-    // completes normally — extensions in later phases will take over
-    // the long-running drive via scene reactions.
+    // Soul phase 1 T-016 (cavekit-soul-phase-1-supervisor.md R2): the
+    // supervisor main loop now routes by `orchestrator.is_some()`.
+    //
+    // * **Bare session (`None`)**: the long-lived main loop reduces to a
+    //   single `world.cancel.cancelled().await`. Consumers, the reaction
+    //   dispatcher, the control socket, and every other spawned task
+    //   above continue to run until the same cancel token fires at step
+    //   14. Extensions take over the long-running drive via scene
+    //   reactions in Phase 2+.
+    //
+    // * **Orchestrator-backed session (`Some(_)`)**: prior loop shape is
+    //   preserved — we call `orchestrator.run(spec, world).await`, map
+    //   `Err` to `Outcome::Crashed`, and fall through to the drain.
     let outcome = if let Some(orch) = orchestrator.as_ref() {
         match orch.run(spec.clone(), world).await {
             Ok(o) => o,
@@ -595,12 +604,16 @@ pub async fn run_supervisor_with(
             }
         }
     } else {
-        debug!("R3 step 13: no orchestrator supplied; skipping orchestrator.run");
+        debug!("R3 step 13: no orchestrator; parking on world.cancel.cancelled().await");
+        // R2 main loop: on the bare-session path, the one long-lived
+        // await in this function is the cancel token. Nothing else.
+        world.cancel.cancelled().await;
+        debug!("R3 step 13: cancel observed on bare-session path");
         Outcome::Success {
             summary: "bare launch (no orchestrator)".into(),
         }
     };
-    debug!(?outcome, "R3 step 13: orchestrator.run returned");
+    debug!(?outcome, "R3 step 13: main loop complete");
 
     // Final Done event so consumers observe a terminal phase before we
     // drain them. This is the authoritative signal state_writer uses to
