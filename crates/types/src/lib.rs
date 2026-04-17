@@ -16,9 +16,7 @@ pub use permission::{
     POLICY_FILE_NAME, ParsePermissionPolicyError, PermissionPolicy, READ_ONLY_TOOLS, decide,
     emit_permission_events, read_policy_file, read_policy_for_agent, write_policy_file,
 };
-pub use scope::{
-    ENGINES_V1, MUX_V1, ORCHESTRATORS_V1, is_v1_engine, is_v1_mux, is_v1_orchestrator,
-};
+pub use scope::{MUX_V1, is_v1_mux};
 pub use spec::SessionSpec;
 pub use state_dir::{StateLayout, StateLayoutError};
 pub use status::AgentStatus;
