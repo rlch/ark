@@ -170,18 +170,42 @@ pub fn resolve_layout_source(
     cwd: &Path,
     explicit_scene: Option<&str>,
 ) -> LayoutResolution {
-    match ark_scene::path::resolve_scene_path_from_env(explicit_scene, cwd) {
-        ark_scene::path::ResolvedScene::Named(name) => {
-            // Combo 3A: named scenes always resolve under
-            // ctx.config_dir/scenes/, independent of ARK_APPNAME /
-            // XDG_CONFIG_HOME. Keeps the flag + env-var rungs
-            // interchangeable and avoids surprising per-appname
-            // namespaces for user-named scenes.
-            let path = config_dir.join("scenes").join(format!("{name}.kdl"));
-            LayoutResolution::SceneExplicit { path }
+    let env_scene = std::env::var("ARK_SCENE").ok();
+    let env_appname = std::env::var("ARK_APPNAME").ok();
+    let xdg_config_home = std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| std::path::PathBuf::from(h).join(".config"))
+        });
+    match ark_scene::resolve_path::resolve_scene_path(
+        explicit_scene,
+        env_scene.as_deref(),
+        env_appname.as_deref(),
+        xdg_config_home.as_deref(),
+        cwd,
+    ) {
+        ark_scene::resolve_path::SceneSource::Flag(path)
+        | ark_scene::resolve_path::SceneSource::EnvVar(path) => {
+            // Named scenes (via flag or ARK_SCENE) resolve under
+            // ctx.config_dir/scenes/ when the value looks like a bare
+            // name (no path separators). Otherwise use verbatim.
+            if path.components().count() == 1 && !path.to_string_lossy().contains('/') {
+                let name = path.to_string_lossy();
+                let rooted = config_dir.join("scenes").join(format!("{name}.kdl"));
+                LayoutResolution::SceneExplicit { path: rooted }
+            } else {
+                LayoutResolution::SceneExplicit { path }
+            }
         }
-        ark_scene::path::ResolvedScene::Path(path) => LayoutResolution::SceneDefault { path },
-        ark_scene::path::ResolvedScene::BuiltIn(_) => {
+        ark_scene::resolve_path::SceneSource::ProjectLocal(path)
+        | ark_scene::resolve_path::SceneSource::UserConfig(path) => {
+            LayoutResolution::SceneDefault { path }
+        }
+        ark_scene::resolve_path::SceneSource::BuiltIn => {
             // TODO(T-14.1): materialize the embedded DEFAULT_SCENE_KDL
             // to a per-agent scene file and compile it via the scene
             // pipeline so the "zero-migration" path also benefits from

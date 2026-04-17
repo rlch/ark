@@ -22,8 +22,8 @@ use std::path::PathBuf;
 
 use clap::Args;
 
-use ark_scene_v3::default_scene::DEFAULT_SCENE_KDL;
-use ark_scene_v3::resolve_path::{resolve_scene_path, SceneSource};
+use ark_scene::default_scene::DEFAULT_SCENE_KDL;
+use ark_scene::resolve_path::{resolve_scene_path, SceneSource};
 
 use crate::ctx::Ctx;
 use crate::error::CliError;

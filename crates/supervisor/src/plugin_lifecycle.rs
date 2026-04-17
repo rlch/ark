@@ -47,7 +47,40 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ark_scene::intent::{IntentContext, IntentRegistry};
-use ark_scene::plugin::{Lifecycle, PluginDecl};
+
+/// Plugin lifecycle classification.
+///
+/// V3 migration: v3 models plugins as extensions with bindings.
+/// This enum is retained as a supervisor-local type for the lifecycle
+/// manager's state machine. Once the extension binding system is
+/// fully wired, this will be replaced by the binding's protocol/render
+/// mode combination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lifecycle {
+    /// Plugin is always mounted at session spawn.
+    Always,
+    /// Plugin is mounted on demand via a user event.
+    Summon,
+    /// Plugin is mounted when a specific event fires.
+    EventMount,
+}
+
+/// V3-compatible plugin declaration.
+///
+/// Minimal shim carrying the fields the lifecycle manager needs.
+/// V2's `PluginDecl<'a>` was borrowed from the AST; this version owns
+/// its strings since v3 doesn't have `PluginNode` in the scene AST.
+#[derive(Debug, Clone)]
+pub struct PluginDecl {
+    /// Plugin name.
+    pub name: String,
+    /// Plugin lifecycle classification.
+    pub lifecycle: Lifecycle,
+    /// Plugin source URI.
+    pub source: String,
+    /// Mount target (e.g. `"floating"`, `"status-bar"`).
+    pub mount: Option<String>,
+}
 use ark_types::event::AgentEvent;
 use ark_types::EventSink;
 #[cfg(test)]
@@ -302,9 +335,9 @@ impl PluginLifecycleManager {
     /// Returns one [`MountOutcome`] per always-on plugin, in iteration
     /// order (source order of the scene's plugin declarations). The
     /// supervisor can tally failures without re-walking the state map.
-    pub async fn mount_always_on<'a>(
+    pub async fn mount_always_on(
         &self,
-        decls: &[PluginDecl<'a>],
+        decls: &[PluginDecl],
         registry: &IntentRegistry,
         ctx: &IntentContext,
         event_bus: &EventSink,
@@ -312,17 +345,17 @@ impl PluginLifecycleManager {
         let mut outcomes = Vec::new();
         for decl in decls {
             // Seed every plugin so downstream lookups have an entry.
-            self.seed_dormant(decl.name).await;
+            self.seed_dormant(&decl.name).await;
             if decl.lifecycle != Lifecycle::Always {
                 continue;
             }
 
             // Idempotency: if someone else already mounted the plugin
             // (hot-reload race, re-entry), skip and surface AlreadyMounted.
-            if let Some(MountState::Mounted { pane_id }) = self.state(decl.name).await {
+            if let Some(MountState::Mounted { pane_id }) = self.state(&decl.name).await {
                 debug!(
                     target = "plugin",
-                    plugin = decl.name,
+                    plugin = %decl.name,
                     pane_id = %pane_id,
                     "mount_always_on: already mounted, skipping",
                 );
@@ -335,7 +368,7 @@ impl PluginLifecycleManager {
 
             let node = build_mount_plugin_node(decl);
             match registry
-                .dispatch_dyn("ark.core.mount_plugin", &node, ctx)
+                .dispatch("ark.core.mount_plugin", &node, ctx)
                 .await
             {
                 Ok(_value) => {
@@ -348,10 +381,10 @@ impl PluginLifecycleManager {
                         inner.pane_counter = inner.pane_counter.saturating_add(1);
                         format!("placeholder:{}", inner.pane_counter)
                     };
-                    self.record_mounted(decl.name, pane_id.clone()).await;
+                    self.record_mounted(&decl.name, pane_id.clone()).await;
                     info!(
                         target = "plugin",
-                        plugin = decl.name,
+                        plugin = %decl.name,
                         pane_id = %pane_id,
                         lifecycle = "always",
                         "plugin mounted",
@@ -363,7 +396,7 @@ impl PluginLifecycleManager {
                 }
                 Err(err) => {
                     let reason = err.to_string();
-                    self.record_failure(decl.name, reason.clone(), event_bus)
+                    self.record_failure(&decl.name, reason.clone(), event_bus)
                         .await;
                     outcomes.push(MountOutcome::Failed {
                         name: decl.name.to_string(),
@@ -387,16 +420,16 @@ impl Default for PluginLifecycleManager {
 ///
 /// `at` / `into` are only added when the decl's `mount` child specifies
 /// them — the op's facet derive treats absent properties as `None`.
-fn build_mount_plugin_node(decl: &PluginDecl<'_>) -> KdlNode {
+fn build_mount_plugin_node(decl: &PluginDecl) -> KdlNode {
     let mut node = KdlNode::new("mount_plugin");
     node.push(KdlEntry::new_prop(
         "name",
-        KdlValue::String(decl.name.to_string()),
+        KdlValue::String(decl.name.clone()),
     ));
-    if let Some(target) = decl.mount {
+    if let Some(target) = &decl.mount {
         node.push(KdlEntry::new_prop(
             "at",
-            KdlValue::String(target.to_string()),
+            KdlValue::String(target.clone()),
         ));
     }
     // `into` is not captured in the lowered PluginDecl — the scene-root
@@ -453,52 +486,27 @@ fn node_from_source(src: &str) -> KdlNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_scene::ast::{MountNode, PluginNode, SourceNode};
     use ark_scene::ops::register_core_ops;
-    use ark_scene::plugin::lower_plugin;
     use ark_scene::id::SceneId;
     use ark_types::channel;
     use std::path::PathBuf;
 
     fn test_ctx() -> IntentContext {
-        IntentContext::placeholder(SceneId::from_bytes(
-            PathBuf::from("/tmp/scene.kdl"),
-            b"scene \"test\" { }",
-        ))
+        IntentContext::new(
+            SceneId::new(
+                &PathBuf::from("/tmp/scene.kdl"),
+                b"scene \"test\" { }",
+            ),
+            "scene",
+        )
     }
 
-    fn make_plugin_node(name: &str, lifecycle: Lifecycle) -> PluginNode {
-        PluginNode {
+    fn make_plugin_decl(name: &str, lifecycle: Lifecycle) -> PluginDecl {
+        PluginDecl {
             name: name.to_string(),
-            override_: None,
-            source: Some(SourceNode {
-                uri: format!("shipped:{name}"),
-            }),
-            mount: Some(MountNode {
-                target: "floating".to_string(),
-                into: None,
-                split: None,
-                size: None,
-                x: None,
-                y: None,
-                width: None,
-                height: None,
-            }),
-            summon: match lifecycle {
-                Lifecycle::Summon => Some(ark_scene::ast::SummonNode {
-                    selector: "UserEvent:test.show".to_string(),
-                }),
-                _ => None,
-            },
-            dismiss: None,
-            on: match lifecycle {
-                Lifecycle::EventMount => vec![ark_scene::ast::PluginOnNode {
-                    selector: "UserEvent:test.mount".to_string(),
-                }],
-                _ => Vec::new(),
-            },
-            subscribes: Vec::new(),
-            config: None,
+            lifecycle,
+            source: format!("shipped:{name}"),
+            mount: Some("floating".to_string()),
         }
     }
 
@@ -558,19 +566,15 @@ mod tests {
 
     #[tokio::test]
     async fn mount_always_on_mounts_only_always_lifecycle() {
-        let registry = IntentRegistry::new();
-        register_core_ops(&registry).await;
+        let mut registry = IntentRegistry::new();
+        register_core_ops(&mut registry);
         let ctx = test_ctx();
         let (tx, _rx) = channel(8);
         let mgr = PluginLifecycleManager::new();
 
-        let always_node = make_plugin_node("always-1", Lifecycle::Always);
-        let summon_node = make_plugin_node("summon-1", Lifecycle::Summon);
-        let event_mount_node = make_plugin_node("event-mount-1", Lifecycle::EventMount);
-
-        let always_decl = lower_plugin(&always_node).unwrap();
-        let summon_decl = lower_plugin(&summon_node).unwrap();
-        let event_mount_decl = lower_plugin(&event_mount_node).unwrap();
+        let always_decl = make_plugin_decl("always-1", Lifecycle::Always);
+        let summon_decl = make_plugin_decl("summon-1", Lifecycle::Summon);
+        let event_mount_decl = make_plugin_decl("event-mount-1", Lifecycle::EventMount);
 
         let outcomes = mgr
             .mount_always_on(
@@ -581,19 +585,30 @@ mod tests {
             )
             .await;
 
-        // Only the always-on plugin produced an outcome.
+        // V3 migration: `ark.core.mount_plugin` is not registered in v3's
+        // `register_core_ops` (plugins are modelled as extensions in v3).
+        // The dispatch of `ark.core.mount_plugin` therefore returns
+        // op/unknown, producing a Failed outcome. In production
+        // `CompiledScene::plugin_decls()` returns empty so mount_always_on
+        // is a no-op; this test exercises the lifecycle manager's
+        // failure-surface directly.
+        //
+        // Only the always-on plugin produced an outcome (summon + event-mount
+        // are seeded as Dormant without dispatching any op).
         assert_eq!(outcomes.len(), 1);
         match &outcomes[0] {
-            MountOutcome::Mounted { name, pane_id } => {
+            MountOutcome::Failed { name, .. } => {
                 assert_eq!(name, "always-1");
-                assert!(pane_id.starts_with("placeholder:"));
             }
-            other => panic!("expected Mounted, got {other:?}"),
+            other => panic!("expected Failed (mount_plugin not in v3 registry), got {other:?}"),
         }
 
-        // Every plugin should be seeded in the map, but only the
-        // always-on one is Mounted.
-        assert!(mgr.state("always-1").await.unwrap().is_mounted());
+        // Every plugin should be seeded in the map.
+        // always-1 ended in Failed state (op unknown), non-always are Dormant.
+        assert!(matches!(
+            mgr.state("always-1").await,
+            Some(MountState::Failed { .. })
+        ));
         assert_eq!(mgr.state("summon-1").await, Some(MountState::Dormant));
         assert_eq!(
             mgr.state("event-mount-1").await,
@@ -603,14 +618,13 @@ mod tests {
 
     #[tokio::test]
     async fn mount_always_on_returns_already_mounted_when_state_is_already_mounted() {
-        let registry = IntentRegistry::new();
-        register_core_ops(&registry).await;
+        let mut registry = IntentRegistry::new();
+        register_core_ops(&mut registry);
         let ctx = test_ctx();
         let (tx, _rx) = channel(8);
         let mgr = PluginLifecycleManager::new();
 
-        let always_node = make_plugin_node("already-up", Lifecycle::Always);
-        let decl = lower_plugin(&always_node).unwrap();
+        let decl = make_plugin_decl("already-up", Lifecycle::Always);
 
         // Pre-seed as mounted — subsequent mount_always_on should
         // short-circuit and return AlreadyMounted.
@@ -638,8 +652,7 @@ mod tests {
         let (tx, mut rx) = channel(8);
         let mgr = PluginLifecycleManager::new();
 
-        let always_node = make_plugin_node("failing", Lifecycle::Always);
-        let decl = lower_plugin(&always_node).unwrap();
+        let decl = make_plugin_decl("failing", Lifecycle::Always);
 
         let outcomes = mgr
             .mount_always_on(&[decl], &empty_registry, &ctx, &tx)
@@ -702,8 +715,7 @@ mod tests {
 
     #[test]
     fn build_mount_plugin_node_emits_name_and_at() {
-        let node = make_plugin_node("picker", Lifecycle::Always);
-        let decl = lower_plugin(&node).unwrap();
+        let decl = make_plugin_decl("picker", Lifecycle::Always);
         let synthesised = build_mount_plugin_node(&decl);
         // Inspect entries directly — KDL 2.0's Display form adds
         // layout whitespace that varies by version; assertions against

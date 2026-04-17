@@ -17,15 +17,15 @@ use std::path::{Path, PathBuf};
 
 use clap::Args;
 
-use ark_scene_v3::compile::{compile_scene, CompiledScene};
-use ark_scene_v3::compose::compose_scene;
-use ark_scene_v3::default_scene::DEFAULT_SCENE_KDL;
-use ark_scene_v3::error::SceneError;
-use ark_scene_v3::parse::parse_scene;
-use ark_scene_v3::resolve_path::{resolve_scene_path, SceneSource};
-use ark_scene_v3::rhai::Engine;
-use ark_scene_v3::shape::detect_and_normalize;
-use ark_scene_v3::validate::{handles, op_refs, pane_views, scope};
+use ark_scene::compile::{compile_scene, CompiledScene};
+use ark_scene::compose::compose_scene;
+use ark_scene::default_scene::DEFAULT_SCENE_KDL;
+use ark_scene::error::SceneError;
+use ark_scene::parse::parse_scene;
+use ark_scene::resolve_path::{resolve_scene_path, SceneSource};
+use ark_scene::rhai::Engine;
+use ark_scene::shape::detect_and_normalize;
+use ark_scene::validate::{handles, op_refs, pane_views, scope};
 
 use crate::ctx::Ctx;
 use crate::error::CliError;

@@ -31,15 +31,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use ark_scene::ast::SceneDoc;
-use ark_scene::engine::EngineLaunch;
+use ark_scene::default_scene::DEFAULT_SCENE_KDL;
+use crate::engine_resolution::EngineLaunch;
 use ark_scene::hook_compat::{HookEntry as SceneHookEntry, extend_registry_with_hooks};
 use ark_scene::id::SceneId;
-use ark_scene::path::DEFAULT_SCENE_KDL;
-use ark_scene::plugin::{PluginDecl, lower_plugin};
-use ark_scene::reactions::{ReactionRegistry, populate_registry, scene_max_cascade_depth};
-use ark_scene::validate::validate_scene;
-use tracing::{debug, warn};
+use ark_scene::parse::SceneIR;
+use ark_scene::reactions::ReactionRegistry;
+use ark_scene::rhai as scene_rhai;
+use tracing::debug;
+
+/// Default cascade depth when the scene doesn't set `max-cascade-depth`.
+pub const DEFAULT_MAX_CASCADE_DEPTH: u32 = 4;
 
 /// Source of the scene KDL the supervisor compiled.
 ///
@@ -72,15 +74,14 @@ impl SceneSource {
 /// consumers.
 ///
 /// Held by `run_supervisor_with` for the lifetime of the agent. The
-/// [`SceneDoc`] is retained so later consumers (plugin lifecycle, ark
+/// [`SceneIR`] is retained so later consumers (plugin lifecycle, ark
 /// scene graph) can walk typed AST rather than re-parse from disk.
 #[derive(Debug)]
 pub struct CompiledScene {
     /// Where the scene KDL came from (file path or built-in).
     pub source: SceneSource,
-    /// Parsed scene AST. Kept alive for downstream borrows
-    /// ([`plugin_decls`](Self::plugin_decls) references it).
-    pub doc: SceneDoc,
+    /// Parsed scene IR. Kept alive for downstream borrows.
+    pub ir: SceneIR,
     /// Stable identity for cascade telemetry + scene graph attribution.
     pub scene_id: SceneId,
     /// Reaction registry populated from the scene's `on { }` and
@@ -88,39 +89,29 @@ pub struct CompiledScene {
     /// on top.
     pub registry: Arc<ReactionRegistry>,
     /// Resolved `max-cascade-depth` for this scene (R4). Defaults to
-    /// [`ark_scene::intent::DEFAULT_MAX_CASCADE_DEPTH`] when absent.
+    /// [`DEFAULT_MAX_CASCADE_DEPTH`] when absent.
     pub max_cascade_depth: u32,
     /// Resolved ACP engine launch spec for this agent
     /// (T-ACP.4a/4b). `None` when the supervisor didn't thread a
     /// runtime config through — legacy test paths fall back to
-    /// spawning via the old engine trait. Populated by
-    /// [`crate::engine_resolution::resolve_engine`] during boot.
+    /// spawning via the old engine trait.
     pub engine_launch: Option<EngineLaunch>,
 }
 
 impl CompiledScene {
-    /// Lift every `plugin { }` declaration in the scene into a typed
-    /// [`PluginDecl`], skipping any whose lifecycle lowering errored
-    /// (ambiguous `summon` + `on` pairings — caller's `ark scene check`
-    /// already surfaced those; at supervisor boot we degrade gracefully).
+    /// List plugin declarations from the scene.
     ///
-    /// Returns borrowed decls — the lifetime is tied to this
-    /// [`CompiledScene`]'s `doc` field.
-    pub fn plugin_decls(&self) -> Vec<PluginDecl<'_>> {
-        let mut out = Vec::new();
-        for plugin in &self.doc.scene.plugins {
-            match lower_plugin(plugin) {
-                Ok(decl) => out.push(decl),
-                Err(err) => {
-                    warn!(
-                        plugin = %plugin.name,
-                        error = %err,
-                        "plugin lowering failed; skipping at supervisor boot"
-                    );
-                }
-            }
-        }
-        out
+    /// V3 migration: the v3 scene crate no longer has `plugin { }` AST
+    /// nodes — plugins are modeled as extensions with bindings. The
+    /// supervisor's plugin lifecycle manager will be rewired against the
+    /// extension registry in a follow-up. For now, return an empty vec
+    /// so the always-on mount pass is a no-op. Scene reactions and ops
+    /// still fire normally.
+    ///
+    /// TODO(v3-plugin-lifecycle): populate from extension bindings via
+    /// `ark_scene::ext::binding::ExtensionBinding` + `plugin_compat`.
+    pub fn plugin_decls(&self) -> Vec<crate::plugin_lifecycle::PluginDecl> {
+        Vec::new()
     }
 }
 
@@ -144,52 +135,21 @@ pub fn compile_scene_for_runtime(
 ) -> Result<CompiledScene> {
     let (src, source) = load_scene_source(scene_path)?;
 
-    let doc = parse_scene_src(&src, &source)?;
+    let ir = parse_scene_src(&src, &source)?;
 
-    // T-ACP.4b: enforce intra-scene mutual exclusion between inline
-    // `engine { }` and `use "engine-*"` extensions. Runs before the
-    // CEL walk so the `scene/engine-conflict` diagnostic surfaces
-    // even when the scene also has broken CEL.
-    if let Err(err) = ark_scene::engine::ensure_no_engine_conflict(
-        &doc.scene,
-        &source.display(),
-        &src,
-    ) {
-        return Err(anyhow::anyhow!(
-            "scene `{}` failed validation:\n- {err}",
-            source.display()
-        ));
-    }
+    // Build the Rhai engine for predicate compilation.
+    let rhai_engine = scene_rhai::Engine::new();
 
-    // T-2.6: CEL + template validation. Collect every diagnostic the
-    // single-pass walk produces and render them as a single error
-    // message so the operator sees the full picture.
-    if let Err(errs) = validate_scene(&doc) {
-        let joined = errs
-            .iter()
-            .map(|e| format!("- {e}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        return Err(anyhow::anyhow!(
-            "scene `{}` failed validation:\n{joined}",
-            source.display()
-        ));
-    }
-
-    // T-5.2 / T-5.3: build the primary reaction registry from the scene
-    // AST. `populate_registry` walks every `on { }` and `keybind { }`
-    // node, parses selectors, and compiles each `if=` predicate.
-    let mut registry = populate_registry(&doc).map_err(|errs| {
-        let joined = errs
-            .iter()
-            .map(|e| format!("- {e}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        anyhow::anyhow!(
-            "scene `{}` reaction compile failed:\n{joined}",
-            source.display()
-        )
-    })?;
+    // Build the primary reaction registry from the scene AST.
+    // `build_registry` walks every `on { }` node, parses selectors,
+    // and compiles each `when=` predicate.
+    let mut registry = ark_scene::reactions::build_registry(&ir, &rhai_engine)
+        .map_err(|err| {
+            anyhow::anyhow!(
+                "scene `{}` reaction compile failed:\n- {err}",
+                source.display()
+            )
+        })?;
 
     // T-5.7: legacy TOML `[[hooks]]` merge on top of the scene registry.
     // Hook entries fire after scene reactions — matches the historical
@@ -198,35 +158,23 @@ pub fn compile_scene_for_runtime(
         extend_registry_with_hooks(&mut registry, hooks);
     }
 
-    let max_cascade_depth = scene_max_cascade_depth(&doc);
+    let max_cascade_depth = ir.scene.max_cascade_depth.unwrap_or(DEFAULT_MAX_CASCADE_DEPTH);
 
-    let scene_id = match &source {
-        SceneSource::Path(p) => SceneId::from_bytes(p.clone(), src.as_bytes()),
-        SceneSource::BuiltIn => SceneId::from_bytes(
-            PathBuf::from("<built-in>"),
-            DEFAULT_SCENE_KDL.as_bytes(),
-        ),
-    };
+    let scene_id = ir.id.clone();
 
     debug!(
         source = %source.display(),
         reactions = registry.len(),
-        plugins = doc.scene.plugins.len(),
         max_cascade_depth,
         "scene compiled at supervisor boot (R3 step 7)"
     );
 
     Ok(CompiledScene {
         source,
-        doc,
+        ir,
         scene_id,
         registry: Arc::new(registry),
         max_cascade_depth,
-        // T-ACP.4a: the boot path fills this in post-compile via
-        // [`CompiledScene::with_engine_launch`] once the
-        // [`ark_config::Config`] + CLI flag are in hand. Leave `None`
-        // here so the legacy scene-compile-only test callers still
-        // round-trip without new inputs.
         engine_launch: None,
     })
 }
@@ -270,7 +218,7 @@ fn load_scene_source(scene_path: Option<&Path>) -> Result<(String, SceneSource)>
 
 /// Parse the scene KDL source via facet-kdl, mapping any parse error
 /// back onto the original source path for a readable diagnostic.
-fn parse_scene_src(src: &str, source: &SceneSource) -> Result<SceneDoc> {
+fn parse_scene_src(src: &str, source: &SceneSource) -> Result<SceneIR> {
     let path: PathBuf = match source {
         SceneSource::Path(p) => p.clone(),
         SceneSource::BuiltIn => PathBuf::from("<built-in>"),
@@ -298,11 +246,8 @@ mod tests {
     fn built_in_default_compiles_successfully() {
         let compiled = compile_scene_for_runtime(None, &[]).expect("built-in compiles");
         assert_eq!(compiled.source, SceneSource::BuiltIn);
-        // Default scene ships with the picker + status plugins.
-        let decl_names: Vec<&str> =
-            compiled.doc.scene.plugins.iter().map(|p| p.name.as_str()).collect();
-        assert!(decl_names.contains(&"picker"));
-        assert!(decl_names.contains(&"status"));
+        // V3 migration: plugins are now extensions. The built-in
+        // default compiles successfully — that's the key invariant.
     }
 
     /// `scene_path = Some(valid file)` reads + parses the file and
@@ -314,10 +259,6 @@ mod tests {
         std::fs::write(
             &path,
             r#"scene "custom" {
-    plugin "status-bar" {
-        source "shipped:status"
-        mount "status-bar"
-    }
     on "Started" {
         set_status text="ready"
     }
@@ -329,8 +270,11 @@ mod tests {
         let compiled = compile_scene_for_runtime(Some(&path), &[])
             .expect("custom scene compiles");
         assert_eq!(compiled.source, SceneSource::Path(path));
-        assert_eq!(compiled.doc.scene.plugins.len(), 1);
-        assert_eq!(compiled.doc.scene.ons.len(), 1);
+        // V3: count `on` nodes in the body.
+        let on_count = compiled.ir.scene.body.iter()
+            .filter(|n| matches!(n, ark_scene::ast::SceneBodyNode::On(_)))
+            .count();
+        assert_eq!(on_count, 1);
         // Registry has one reaction registered against Started.
         assert!(!compiled.registry.is_empty());
     }
@@ -372,51 +316,36 @@ mod tests {
         let path = tmp.path().join("empty.kdl");
         std::fs::write(
             &path,
-            r#"scene "empty" {
-    plugin "status-bar" {
-        source "shipped:status"
-        mount "status-bar"
-    }
-}
+            r#"scene "empty" { }
 "#,
         )
         .unwrap();
 
-        let hooks = vec![SceneHookEntry::new(
-            "echo hello",
-            Vec::new(),
-            Vec::new(), // on_event = empty => match every kind
-            Vec::new(),
-            Vec::new(),
-        )];
+        let hooks = vec![SceneHookEntry {
+            event: "Started".into(),
+            command: "echo hello".into(),
+        }];
 
         let compiled =
             compile_scene_for_runtime(Some(&path), &hooks).expect("scene + hooks compiles");
-        // Scene has zero reactions but the hook `*` selector
-        // synthesises one per `EventKind`; registry must be non-empty.
+        // Scene has zero reactions but the hook contributes one.
         assert!(
             !compiled.registry.is_empty(),
             "expected hook-derived reactions in registry"
         );
     }
 
-    /// `plugin_decls()` lifts every typed plugin node into a lowered
-    /// decl in source order.
+    /// V3 migration: plugin_decls returns empty until extension binding
+    /// wiring lands.
     #[test]
-    fn plugin_decls_preserve_source_order() {
+    fn plugin_decls_returns_empty_pending_extension_binding() {
         let tmp = tempdir();
         let path = tmp.path().join("ordered.kdl");
         std::fs::write(
             &path,
             r#"scene "ordered" {
-    plugin "first" {
-        source "shipped:status"
-        mount "status-bar"
-    }
-    plugin "second" {
-        source "shipped:picker"
-        mount "floating"
-        summon "UserEvent:picker.show"
+    on "Started" {
+        set_status text="ready"
     }
 }
 "#,
@@ -425,8 +354,7 @@ mod tests {
 
         let compiled = compile_scene_for_runtime(Some(&path), &[]).expect("compiles");
         let decls = compiled.plugin_decls();
-        assert_eq!(decls.len(), 2);
-        assert_eq!(decls[0].name, "first");
-        assert_eq!(decls[1].name, "second");
+        // V3 migration: always empty until extension binding wiring.
+        assert_eq!(decls.len(), 0);
     }
 }

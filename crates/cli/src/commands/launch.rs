@@ -15,6 +15,14 @@
 
 use std::path::{Path, PathBuf};
 
+use ark_scene::ast::SceneBodyNode;
+use ark_scene::compile::{compile_scene, compile_layout_kdl, write_layout_artifact};
+use ark_scene::compose::compose_scene;
+use ark_scene::parse::parse_scene;
+use ark_scene::rhai::Engine;
+use ark_scene::shape::detect_and_normalize;
+use ark_scene::view::ViewRegistry;
+
 use crate::commands::session::{
     LayoutResolution, ZellijSpawn, build_switch_session_command, build_zellij_command,
     inside_zellij, require_zellij_on_path, resolve_layout_source,
@@ -100,30 +108,60 @@ pub fn run(
                     what: format!("scene file `{}`", path.display()),
                 });
             }
-            // Build a minimal AgentSpec-like snapshot for the compile
-            // context. The launch path doesn't create a full agent —
-            // it just needs the scene compiled to a layout.
-            let compile_ctx = ark_scene::compile::CompileContext::new(
-                ark_scene::context::AgentSnapshot {
-                    id: String::new(),
-                    name: session.clone(),
-                    orchestrator: String::new(),
-                    engine: String::new(),
-                    cwd: cwd.display().to_string(),
-                    cmd: String::new(),
-                    args: Vec::new(),
-                },
-                ark_scene::context::SessionSnapshot {
-                    name: session.clone(),
-                },
-            );
-
-            let (rendered, _scene_id) =
-                ark_scene::compile::compile_scene_file(path, &ctx.runtime_dir, &compile_ctx)
-                    .map_err(|e| CliError::Generic {
-                        reason: format!("compile scene `{}`: {e}", path.display()),
-                    })?;
-            Some(rendered)
+            // V3 compile pipeline:
+            // 1. Read + normalize shape
+            // 2. Parse into SceneIR
+            // 3. Compose (resolve includes)
+            // 4. Compile Rhai predicates
+            // 5. Lower layout to zellij KDL and write artifact
+            let src = std::fs::read_to_string(path).map_err(|e| CliError::Generic {
+                reason: format!("read scene `{}`: {e}", path.display()),
+            })?;
+            let normalized = detect_and_normalize(&src, path).map_err(|e| {
+                CliError::Generic {
+                    reason: format!("scene shape `{}`: {e}", path.display()),
+                }
+            })?;
+            let ir = parse_scene(&normalized, path).map_err(|e| CliError::Generic {
+                reason: format!("parse scene `{}`: {e}", path.display()),
+            })?;
+            let ir = compose_scene(ir).map_err(|e| CliError::Generic {
+                reason: format!("compose scene `{}`: {e}", path.display()),
+            })?;
+            let engine = Engine::new();
+            let compiled = compile_scene(&engine, ir).map_err(|e| CliError::Generic {
+                reason: format!("compile scene `{}`: {e}", path.display()),
+            })?;
+            // Find the first layout node in the scene body.
+            let layout = compiled
+                .ir
+                .scene
+                .body
+                .iter()
+                .find_map(|node| {
+                    if let SceneBodyNode::Layout(l) = node {
+                        Some(l)
+                    } else {
+                        None
+                    }
+                })
+                .ok_or_else(|| CliError::Generic {
+                    reason: format!(
+                        "scene `{}` has no layout block",
+                        path.display()
+                    ),
+                })?;
+            let registry = ViewRegistry::with_primitives();
+            let kdl_doc = compile_layout_kdl(layout, &registry).map_err(|e| {
+                CliError::Generic {
+                    reason: format!("layout compile `{}`: {e}", path.display()),
+                }
+            })?;
+            let artifact_path = write_layout_artifact(&kdl_doc, &compiled.ir.id)
+                .map_err(|e| CliError::Generic {
+                    reason: format!("write layout artifact: {e}"),
+                })?;
+            Some(artifact_path)
         }
         None => None,
     };

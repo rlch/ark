@@ -856,11 +856,11 @@ fn picker_plugin_kdl_snippet(path: &Path) -> String {
 
 /// T-126 check 1: verify the built-in default scene parses without errors.
 ///
-/// Uses `ark_scene_v3::default_scene::parse_default_scene()` to exercise
+/// Uses `ark_scene::default_scene::parse_default_scene()` to exercise
 /// the same parse path as `ark launch` / `ark scene check`. A parse failure
 /// here means the binary ships a broken default scene — hard fail.
 fn check_default_scene() -> CheckResult {
-    match ark_scene_v3::default_scene::parse_default_scene() {
+    match ark_scene::default_scene::parse_default_scene() {
         Ok(ir) => CheckResult::ok(
             "default-scene",
             format!("built-in default scene `{}` parses ok", ir.scene.name),

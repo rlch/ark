@@ -38,11 +38,29 @@
 use std::collections::BTreeMap;
 
 use ark_config::schema::{Config, EngineLaunchSpec};
-use ark_scene::ast::SceneDoc;
-use ark_scene::engine::{EngineLaunch, lower_engine};
-use ark_scene::use_resolution::MergedUse;
+use ark_scene::parse::SceneIR;
 
 use crate::factory::SupervisorError;
+
+/// V3 engine launch descriptor.
+///
+/// V3 migration: the v2 `ark_scene::engine::EngineLaunch` carried
+/// `name`, `command`, `args`, `env`. The v3 compat shim in
+/// `engine_compat::EngineLaunch` has `command`, `args`,
+/// `extension_name` — a different shape. The supervisor's own
+/// `EngineLaunch` retains the v2 fields since they are consumed by
+/// `acp_client::AcpClient::spawn` which hasn't migrated.
+#[derive(Debug, Clone)]
+pub struct EngineLaunch {
+    /// Engine name (e.g. `"claude"`).
+    pub name: String,
+    /// Executable name or path (`argv[0]`).
+    pub command: String,
+    /// Arguments passed to the subprocess (`argv[1..]`).
+    pub args: Vec<String>,
+    /// Extra environment variables.
+    pub env: BTreeMap<String, String>,
+}
 
 /// Name convention for extension-declared engine cartridges.
 ///
@@ -104,30 +122,19 @@ fn launch_from_config_spec(name: &str, spec: &EngineLaunchSpec) -> EngineLaunch 
 /// default, producing the same `claude --acp` invocation either way.
 pub fn resolve_engine(
     flag: Option<&str>,
-    scene: &SceneDoc,
+    _scene: &SceneIR,
     config: &Config,
-    resolved_uses: &[MergedUse],
+    _resolved_uses: &[()],
 ) -> Result<EngineLaunch, SupervisorError> {
-    // -- Intra-scene mutual exclusion (T-ACP.4b) --------------------
+    // V3 migration: rungs 2 (inline engine block) and 3 (extension-
+    // declared engine) are deferred — v3's SceneNode doesn't have an
+    // `engine { }` child and `MergedUse` is no longer available.
+    // The supervisor falls through to rungs 1/4/5 which cover the
+    // common --engine flag and config.toml paths.
     //
-    // R17: a scene may declare AT MOST ONE of:
-    //   * an inline `engine { }` block (rung 2), OR
-    //   * a `use "engine-*"` extension with agent/engine capability
-    //     (rung 3).
-    //
-    // Declaring both is `scene/engine-conflict` and aborts resolution
-    // regardless of the `--engine` flag (rung 1) — the flag is a
-    // runtime override, not a conflict-resolver.
-    if scene.scene.engine.is_some() {
-        if let Some(conflicting) = resolved_uses
-            .iter()
-            .find(|m| m.resolved.name.starts_with(ENGINE_EXTENSION_PREFIX))
-        {
-            return Err(SupervisorError::EngineConflict {
-                use_name: conflicting.resolved.name.clone(),
-            });
-        }
-    }
+    // TODO(v3-engine-resolution): wire rung 2 via v3 scene extensions
+    // and rung 3 via the extension registry when the full engine
+    // migration lands.
 
     // -- Rung 1: --engine NAME --------------------------------------
     if let Some(name) = flag {
@@ -141,10 +148,6 @@ pub fn resolve_engine(
         if let Some(spec) = config.engines.get(name) {
             return Ok(launch_from_config_spec(name, spec));
         }
-        // Shipped-default shortcut: `--engine claude` / `codex` /
-        // `gemini-cli` work without the user baking an
-        // `[engines.<name>]` into config.toml. Mirrors the
-        // T-ACP.8 shipped launch specs.
         if let Some(shipped) = shipped_engine(name) {
             return Ok(shipped);
         }
@@ -154,27 +157,7 @@ pub fn resolve_engine(
         });
     }
 
-    // -- Rung 2: scene `engine { }` block ---------------------------
-    if let Some(node) = scene.scene.engine.as_ref() {
-        return Ok(lower_engine(node));
-    }
-
-    // -- Rung 3: extension-declared engine --------------------------
-    //
-    // T-ACP.4b: walk every resolved `use` and take the first one whose
-    // metadata declares an `engine` capability. Mutual exclusion with
-    // rung 2 is enforced by the scene compiler (EngineConflict), which
-    // runs BEFORE resolve_engine — so by the time we get here a scene
-    // with both layers has already aborted compile.
-    if let Some(launch) = extension_engine(resolved_uses) {
-        return Ok(launch);
-    }
-
     // -- Rung 4: [engines.<name>] in config.toml --------------------
-    //
-    // Pick the engine by the `defaults.engine` slug. When the slug is
-    // `auto` / empty we fall through to the hardcoded default so rung 4
-    // is opt-in rather than eagerly consuming every spawn.
     let slug = config.defaults.engine.trim();
     if !slug.is_empty() && slug != "auto" {
         if let Some(spec) = config.engines.get(slug) {
@@ -187,45 +170,6 @@ pub fn resolve_engine(
 
     // -- Rung 5: hardcoded default ----------------------------------
     Ok(default_engine_launch())
-}
-
-/// Probe `resolved_uses` for the first extension that contributes an
-/// engine capability. Returns `None` when none declares one.
-///
-/// T-ACP.4b: the extension manifest grammar reserves the top-level
-/// `capabilities { agent { engine { speaks "acp" } } }` block for this
-/// purpose. The v0.3 metadata shape does NOT yet expose that subtree
-/// via a typed accessor; for now we heuristically match on the
-/// extension name convention `engine-*` and fall back to lowering the
-/// extension's `scene.kdl` sidecar `engine { }` block (if any). The
-/// heuristic matches the spec's documented "use of extension with
-/// `capabilities { agent { engine { speaks "acp" } } }`" — extensions
-/// that name themselves `engine-claude` / `engine-codex` / etc. follow
-/// the canonical shape.
-fn extension_engine(resolved_uses: &[MergedUse]) -> Option<EngineLaunch> {
-    for merged in resolved_uses {
-        let ext = &merged.resolved;
-        if !ext.name.starts_with(ENGINE_EXTENSION_PREFIX) {
-            continue;
-        }
-        // Prefer the sidecar scene's `engine { }` block when the
-        // extension ships one — that's the richest surface we have
-        // today.
-        if let Some(sidecar) = ext.sidecar_scene.as_ref()
-            && let Some(node) = sidecar.scene.engine.as_ref()
-        {
-            return Some(lower_engine(node));
-        }
-        // Fallback: synthesise a minimal launch from the extension
-        // name (`engine-claude` → `claude`). This keeps the rung
-        // functional until the metadata grammar grows an explicit
-        // engine spec surface.
-        let short = ext.name.trim_start_matches(ENGINE_EXTENSION_PREFIX).to_string();
-        if let Some(shipped) = shipped_engine(&short) {
-            return Some(shipped);
-        }
-    }
-    None
 }
 
 /// Return the shipped launch spec for a well-known engine name, if
@@ -280,57 +224,12 @@ fn engine_names_in_config(config: &Config) -> Vec<String> {
 mod tests {
     use super::*;
     use ark_config::schema::{Config, EngineLaunchSpec};
-    use ark_ext_metadata_types::{CapabilitySet, ConfigSchema, ExtensionMetadata, StringNode};
     use ark_scene::parse::parse_scene;
-    use ark_scene::use_resolution::{MergedUse, ResolvedUse};
     use std::path::PathBuf;
 
-    /// Build a minimal [`MergedUse`] fixture with the supplied extension
-    /// name. Drops every optional field to keep the test fixture
-    /// concise — the resolver only inspects `resolved.name` + the
-    /// sidecar scene.
-    fn merged_use(ext_name: &str) -> MergedUse {
-        MergedUse {
-            resolved: ResolvedUse {
-                name: ext_name.to_string(),
-                metadata: ExtensionMetadata {
-                    name: StringNode::new(ext_name),
-                    version: StringNode::new("0.0.1"),
-                    ark_range: StringNode::new("*"),
-                    zellij_range: StringNode::new(""),
-                    requires: Vec::new(),
-                    intents: Vec::new(),
-                    events: Vec::new(),
-                    views: Vec::new(),
-                    config: ConfigSchema::default(),
-                    capabilities: CapabilitySet::default(),
-                },
-                root_path: None,
-                sidecar_scene: None,
-                intents: Vec::new(),
-                events: Vec::new(),
-                config_block: None,
-            },
-            occurrences: 1,
-        }
-    }
-
-    fn empty_scene() -> SceneDoc {
+    fn empty_scene() -> SceneIR {
         let src = r#"scene "s" { }"#;
-        parse_scene(src, &PathBuf::from("test.kdl")).expect("parse empty scene")
-    }
-
-    fn scene_with_engine(cmd: &str, arg: &str) -> SceneDoc {
-        let src = format!(
-            r#"scene "s" {{
-                engine {{
-                    name "from-scene"
-                    command "{cmd}"
-                    args "{arg}"
-                }}
-            }}"#
-        );
-        parse_scene(&src, &PathBuf::from("test.kdl")).expect("parse scene with engine")
+        parse_scene(src, PathBuf::from("test.kdl")).expect("parse empty scene")
     }
 
     #[test]
@@ -343,18 +242,12 @@ mod tests {
         assert_eq!(launch.args, vec!["--acp"]);
     }
 
-    #[test]
-    fn rung2_scene_engine_block_wins_over_default() {
-        let scene = scene_with_engine("my-engine", "--flag");
-        let cfg = Config::defaults();
-        let launch = resolve_engine(None, &scene, &cfg, &[]).expect("resolve");
-        assert_eq!(launch.command, "my-engine");
-        assert_eq!(launch.args, vec!["--flag"]);
-    }
+    // V3 migration: rung 2 test removed (no inline `engine { }` in v3 SceneNode).
+    // rung 1 flag test simplified (no scene_with_engine).
 
     #[test]
-    fn rung1_flag_wins_over_scene() {
-        let scene = scene_with_engine("my-engine", "--flag");
+    fn rung1_flag_wins_over_config() {
+        let scene = empty_scene();
         let mut cfg = Config::defaults();
         cfg.engines.insert(
             "flag-engine".into(),
@@ -440,78 +333,8 @@ mod tests {
         assert!(shipped_engine("unknown").is_none());
     }
 
-    // ---- T-ACP.4b: rung 3 + intra-scene mutual exclusion ----
-
-    #[test]
-    fn rung3_extension_engine_wins_when_scene_has_no_inline_block() {
-        let scene = empty_scene();
-        let cfg = Config::defaults();
-        let uses = vec![merged_use("engine-codex")];
-        let launch = resolve_engine(None, &scene, &cfg, &uses).expect("resolve");
-        assert_eq!(launch.name, "codex");
-        assert_eq!(launch.command, "codex");
-    }
-
-    #[test]
-    fn rung3_skipped_when_use_is_not_engine_prefixed() {
-        let scene = empty_scene();
-        let cfg = Config::defaults();
-        let uses = vec![merged_use("ark-bus")];
-        // Non-engine extension → rung 3 skipped → rung 5 default.
-        let launch = resolve_engine(None, &scene, &cfg, &uses).expect("resolve");
-        assert_eq!(launch.name, "claude");
-    }
-
-    #[test]
-    fn rung3_first_engine_extension_wins() {
-        let scene = empty_scene();
-        let cfg = Config::defaults();
-        let uses = vec![
-            merged_use("engine-gemini"),
-            merged_use("engine-claude"),
-        ];
-        let launch = resolve_engine(None, &scene, &cfg, &uses).expect("resolve");
-        // First match wins; the extension name trimmed to `gemini`
-        // and then mapped to the shipped `gemini-cli` spec.
-        assert_eq!(launch.name, "gemini-cli");
-    }
-
-    #[test]
-    fn mutual_exclusion_inline_engine_plus_engine_extension() {
-        let scene = scene_with_engine("my-engine", "--flag");
-        let cfg = Config::defaults();
-        let uses = vec![merged_use("engine-codex")];
-        let err = resolve_engine(None, &scene, &cfg, &uses).expect_err("conflict");
-        match err {
-            SupervisorError::EngineConflict { use_name } => {
-                assert_eq!(use_name, "engine-codex");
-            }
-            other => panic!("expected EngineConflict, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn mutual_exclusion_survives_flag_override() {
-        // Flag would otherwise satisfy rung 1, but the conflict check
-        // runs FIRST — a scene with both inline + engine-ext is
-        // invalid regardless of the flag.
-        let scene = scene_with_engine("my-engine", "--flag");
-        let cfg = Config::defaults();
-        let uses = vec![merged_use("engine-claude")];
-        let err = resolve_engine(Some("claude"), &scene, &cfg, &uses)
-            .expect_err("conflict wins over flag");
-        assert!(matches!(err, SupervisorError::EngineConflict { .. }));
-    }
-
-    #[test]
-    fn flag_still_wins_over_rung3_when_no_inline_engine() {
-        // Flag > rung 3 > default. No conflict because the scene
-        // lacks an inline `engine { }` block.
-        let scene = empty_scene();
-        let cfg = Config::defaults();
-        let uses = vec![merged_use("engine-claude")];
-        let launch = resolve_engine(Some("codex"), &scene, &cfg, &uses).expect("resolve");
-        // Flag pins codex.
-        assert_eq!(launch.name, "codex");
-    }
+    // V3 migration: rung 2 (inline engine block) and rung 3 (extension-
+    // declared engine) tests removed — these v2 features are not yet
+    // wired in v3. The remaining tests cover rungs 1, 4, and 5 which
+    // are the supervisor's own resolution paths.
 }

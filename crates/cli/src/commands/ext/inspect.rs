@@ -25,7 +25,7 @@
 use std::path::PathBuf;
 
 use ark_ext_metadata::extension_metadata_kdl_string;
-use ark_scene::wasm_meta::read_extension_metadata;
+use ark_ext_metadata::wasm_meta::read_wasm_metadata;
 use clap::Args;
 
 use crate::ctx::Ctx;
@@ -59,9 +59,8 @@ pub fn run(args: InspectArgs, _ctx: &Ctx) -> Result<(), CliError> {
         reason: format!("failed to read `{}`: {e}", args.path.display()),
     })?;
 
-    let path_label = args.path.display().to_string();
     let metadata =
-        read_extension_metadata(&wasm_bytes, &path_label).map_err(|e| {
+        read_wasm_metadata(&wasm_bytes).map_err(|e| {
             CliError::Generic {
                 reason: format!("ext/inspect: {e}"),
             }

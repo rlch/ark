@@ -122,7 +122,7 @@ pub struct SupervisorCommandCtx {
 #[derive(Clone)]
 pub struct IntentBridge {
     /// The registry that resolves op names to implementations.
-    pub registry: IntentRegistry,
+    pub registry: Arc<IntentRegistry>,
     /// The context every dispatch sees as `&IntentContext`. Cloned per
     /// dispatch (cheap — every field is `Arc`) so concurrent control
     /// commands don't share mutable state.
@@ -446,17 +446,21 @@ async fn handle_intent(ctx: &SupervisorCommandCtx, args: IntentArgs) -> Response
     );
     match bridge
         .registry
-        .dispatch_dyn(&args.name, &kdl_node, &bridge.ctx)
+        .dispatch(&args.name, &kdl_node, &bridge.ctx)
         .await
     {
-        Ok(Some(value)) => Response::ok(serde_json::json!({
-            "dispatched": args.name,
-            "result": value,
-        })),
-        Ok(None) => Response::ok(serde_json::json!({
-            "dispatched": args.name,
-            "result": JsonValue::Null,
-        })),
+        Ok(value) => {
+            let result = match value {
+                ark_scene::intent::IntentValue::None => JsonValue::Null,
+                ark_scene::intent::IntentValue::String(s) => JsonValue::String(s),
+                ark_scene::intent::IntentValue::Integer(n) => serde_json::json!(n),
+                ark_scene::intent::IntentValue::Boolean(b) => JsonValue::Bool(b),
+            };
+            Response::ok(serde_json::json!({
+                "dispatched": args.name,
+                "result": result,
+            }))
+        }
         Err(err) => Response::err(format!("intent `{}` failed: {err}", args.name)),
     }
 }

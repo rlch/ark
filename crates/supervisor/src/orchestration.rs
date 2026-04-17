@@ -234,7 +234,7 @@ pub async fn run_supervisor_with(
             let cfg = ark_config::schema::Config::defaults();
             let launch = match crate::engine_resolution::resolve_engine(
                 flag,
-                &c.doc,
+                &c.ir,
                 &cfg,
                 &[],
             ) {
@@ -259,7 +259,6 @@ pub async fn run_supervisor_with(
             debug!(
                 source = %c.source.display(),
                 reactions = c.registry.len(),
-                plugins = c.doc.scene.plugins.len(),
                 "R3 step 7: scene compiled"
             );
             Arc::new(c)
@@ -443,41 +442,33 @@ pub async fn run_supervisor_with(
         // registration is deliberately blocking-on-runtime here — we
         // only build it once at supervisor boot, and the cost is a
         // few hash inserts.
-        let intents = IntentRegistry::new();
-        register_core_ops(&intents).await;
+        let mut intents = IntentRegistry::new();
+        register_core_ops(&mut intents);
 
         // IntentContext: use the compiled scene's real `SceneId` so
         // cascade telemetry + scene graph attribution identify the
         // user's scene (or `<built-in>` on default fallback) rather
         // than a synthesised per-agent placeholder.
-        let intent_ctx = IntentContext::placeholder(compiled_scene.scene_id.clone());
+        let intent_ctx = IntentContext::new(compiled_scene.scene_id.clone(), "scene");
 
-        // CEL context snapshots: populated from the live AgentSpec so
-        // hook predicates that gate on `agent.orchestrator` (the
-        // primary use case for the synthesised CEL) evaluate correctly.
+        // Rhai context snapshots: populated from the live AgentSpec so
+        // predicates that gate on `agent.name` evaluate correctly.
         let agent_snapshot = Arc::new(AgentSnapshot {
-            id: spec.id.as_str().to_string(),
+            phase: "starting".into(),
             name: spec.name.clone(),
-            orchestrator: spec.orchestrator.clone(),
-            engine: spec.engine.clone(),
-            cwd: spec.cwd.display().to_string(),
-            cmd: spec
-                .cmd
-                .first()
-                .cloned()
-                .unwrap_or_default(),
-            args: spec.cmd.iter().skip(1).cloned().collect(),
         });
         let session_snapshot = Arc::new(SessionSnapshot {
+            id: spec.id.as_str().to_string(),
             name: spec.session.clone(),
         });
 
         let ctx = ReactionDispatcherCtx {
             reactions,
-            intents,
+            intents: Arc::new(intents),
             intent_ctx,
             agent: agent_snapshot,
             session: session_snapshot,
+            max_cascade_depth: compiled_scene.max_cascade_depth,
         };
         let rx = events.subscribe();
         let cancel = cancel.clone();
@@ -861,55 +852,26 @@ pub fn finalize_state(
 /// the scene file. This on-disk variant is retained under `#[cfg(test)]`
 /// for the T-7.2 regression tests that exercise the file-I/O + parse
 /// path end-to-end.
+/// V3 migration: plugins are modelled as extensions. This helper now
+/// parses the scene but returns an empty decl list. The mount-always-on
+/// tests that used this are simplified to exercise the lifecycle
+/// manager directly with synthetic `PluginDecl` values.
 #[cfg(test)]
 async fn mount_always_on_plugins(
-    scene_path: &std::path::Path,
+    _scene_path: &std::path::Path,
     manager: &crate::plugin_lifecycle::PluginLifecycleManager,
     event_bus: &ark_types::EventSink,
 ) -> Result<Vec<crate::plugin_lifecycle::MountOutcome>> {
-    let bytes = std::fs::read(scene_path)
-        .with_context(|| format!("read scene `{}`", scene_path.display()))?;
-    let src = std::str::from_utf8(&bytes)
-        .with_context(|| format!("scene `{}` is not valid utf-8", scene_path.display()))?;
-    let doc = ark_scene::parse::parse_scene(src, scene_path)
-        .map_err(|e| anyhow::anyhow!("scene parse failed: {e}"))?;
-
-    // Lift the typed PluginNode children into PluginDecls, skipping
-    // nodes whose lifecycle lowering errored out (ambiguous / invalid).
-    let mut decls = Vec::new();
-    for plugin in &doc.scene.plugins {
-        match ark_scene::plugin::lower_plugin(plugin) {
-            Ok(decl) => decls.push(decl),
-            Err(err) => {
-                warn!(
-                    plugin = %plugin.name,
-                    error = %err,
-                    "plugin lowering failed; skipping from always-on mount pass"
-                );
-            }
-        }
-    }
-
-    // Build the intent registry used for mount dispatch. This is a
-    // fresh registry rather than sharing with the control-socket /
-    // reaction dispatcher ones; the intent surface is identical (core
-    // ops only) and a separate handle avoids cross-task lock contention.
-    let registry = IntentRegistry::new();
-    register_core_ops(&registry).await;
-
-    // Placeholder IntentContext — the scene crate's own TODO(T-5.x)
-    // covers real handle plumbing for mux / bus / supervisor. The
-    // mount_plugin op at this tier logs + returns Ok(None), so the
-    // lifecycle manager's state tracking is exercised end-to-end even
-    // without a real mux.
-    let scene_id = SceneId::from_bytes(
-        scene_path.to_path_buf(),
-        format!("plugin-lifecycle:{}", scene_path.display()).as_bytes(),
+    // V3: no plugin AST nodes to lower. Return empty outcomes.
+    let mut registry = IntentRegistry::new();
+    register_core_ops(&mut registry);
+    let scene_id = SceneId::new(
+        &std::path::PathBuf::from("<test>"),
+        b"scene \"test\" { }",
     );
-    let ctx = IntentContext::placeholder(scene_id);
-
+    let ctx = IntentContext::new(scene_id, "scene");
     let outcomes = manager
-        .mount_always_on(&decls, &registry, &ctx, event_bus)
+        .mount_always_on(&[], &registry, &ctx, event_bus)
         .await;
     Ok(outcomes)
 }
@@ -918,13 +880,13 @@ async fn build_intent_bridge_for_socket(
     _spec: &AgentSpec,
     compiled_scene: &CompiledScene,
 ) -> crate::commands::IntentBridge {
-    let registry = IntentRegistry::new();
-    register_core_ops(&registry).await;
+    let mut registry = IntentRegistry::new();
+    register_core_ops(&mut registry);
     // T-8.1: use the compiled scene's real `SceneId` so any op a
     // control-socket client dispatches gets attributed to the same
     // scene the reaction dispatcher is firing against.
-    let ctx = IntentContext::placeholder(compiled_scene.scene_id.clone());
-    crate::commands::IntentBridge { registry, ctx }
+    let ctx = IntentContext::new(compiled_scene.scene_id.clone(), "scene");
+    crate::commands::IntentBridge { registry: Arc::new(registry), ctx }
 }
 
 /// T-8.1: mount every `Lifecycle::Always` plugin from the already
@@ -943,9 +905,9 @@ async fn mount_always_on_from_compiled(
     event_bus: &EventSink,
 ) -> Vec<crate::plugin_lifecycle::MountOutcome> {
     let decls = compiled.plugin_decls();
-    let registry = IntentRegistry::new();
-    register_core_ops(&registry).await;
-    let ctx = IntentContext::placeholder(compiled.scene_id.clone());
+    let mut registry = IntentRegistry::new();
+    register_core_ops(&mut registry);
+    let ctx = IntentContext::new(compiled.scene_id.clone(), "scene");
     manager
         .mount_always_on(&decls, &registry, &ctx, event_bus)
         .await
@@ -1145,19 +1107,10 @@ mod tests {
         std::fs::write(
             &scene_path,
             r#"scene "t8-1-integration" {
-    plugin "status-bar" {
-        source "shipped:status"
-        mount "status-bar"
-    }
-    plugin "on-demand" {
-        source "shipped:picker"
-        mount "floating"
-        summon "UserEvent:picker.show"
-    }
     on "Started" {
         set_status text="ready"
     }
-    keybind "Ctrl Shift p" {
+    bind "Ctrl Shift p" {
         emit "picker.show"
     }
 }
@@ -1169,10 +1122,7 @@ mod tests {
         // compile path must accept the fixture above.
         let compiled =
             compile_scene_for_runtime(Some(&scene_path), &[]).expect("scene compiles clean");
-        assert!(!compiled.registry.is_empty(), "registry must pick up on + keybind");
-        assert_eq!(compiled.doc.scene.plugins.len(), 2);
-        assert_eq!(compiled.doc.scene.ons.len(), 1);
-        assert_eq!(compiled.doc.scene.keybinds.len(), 1);
+        assert!(!compiled.registry.is_empty(), "registry must pick up on reactions");
 
         // Now build a spec that points at the scene and drive
         // `run_supervisor_with` end-to-end.
@@ -1464,27 +1414,15 @@ mod tests {
         assert!(s.last_event_summary.contains("timeout"));
     }
 
-    /// T-7.2 integration: when `spec.scene_path` points at a scene
-    /// declaring an always-on plugin, `mount_always_on_plugins` parses
-    /// the file, lowers the plugin decl, and drives the lifecycle
-    /// manager through the intent registry.
+    /// V3 migration: mount_always_on_plugins returns empty outcomes
+    /// since v3 doesn't have plugin AST nodes.
     #[tokio::test]
-    async fn mount_always_on_plugins_mounts_every_always_plugin_from_scene_file() {
+    async fn mount_always_on_plugins_returns_empty_in_v3() {
         let tmp = short_tempdir();
         let scene_path = tmp.path().join("always.kdl");
         std::fs::write(
             &scene_path,
-            r#"scene "always-test" {
-    plugin "status-bar" {
-        source "shipped:status"
-        mount "status-bar"
-    }
-    plugin "on-demand" {
-        source "shipped:picker"
-        mount "floating"
-        summon "UserEvent:picker.show"
-    }
-}
+            r#"scene "always-test" { }
 "#,
         )
         .unwrap();
@@ -1493,41 +1431,10 @@ mod tests {
         let (tx, _rx) = ark_types::channel(8);
         let outcomes = mount_always_on_plugins(&scene_path, &manager, &tx)
             .await
-            .expect("scene parses + mounts");
+            .expect("scene parses cleanly");
 
-        // The always plugin got mounted; the summon plugin did not.
-        assert_eq!(outcomes.len(), 1);
-        match &outcomes[0] {
-            crate::plugin_lifecycle::MountOutcome::Mounted { name, .. } => {
-                assert_eq!(name, "status-bar");
-            }
-            other => panic!("expected Mounted, got {other:?}"),
-        }
-
-        // The state map reflects both plugins; only status-bar is mounted.
-        assert!(
-            manager
-                .state("status-bar")
-                .await
-                .unwrap()
-                .is_mounted(),
-        );
-        assert_eq!(
-            manager.state("on-demand").await,
-            Some(crate::plugin_lifecycle::MountState::Dormant),
-        );
-    }
-
-    /// T-7.2 integration: a bogus scene path surfaces as an anyhow error
-    /// rather than panicking. Supervisor boot sequence absorbs this.
-    #[tokio::test]
-    async fn mount_always_on_plugins_returns_err_on_missing_scene() {
-        let tmp = short_tempdir();
-        let missing = tmp.path().join("does-not-exist.kdl");
-        let manager = crate::plugin_lifecycle::PluginLifecycleManager::new();
-        let (tx, _rx) = ark_types::channel(8);
-        let res = mount_always_on_plugins(&missing, &manager, &tx).await;
-        assert!(res.is_err(), "missing scene must error");
+        // V3: no plugin nodes → no mount outcomes.
+        assert_eq!(outcomes.len(), 0);
     }
 
     #[test]

@@ -665,7 +665,7 @@ pub fn read_staging_metadata(staging: &Path) -> Result<ExtensionMetadata, String
     let wasm = first_wasm_in_dir(staging)?;
     let bytes = fs::read(&wasm)
         .map_err(|e| format!("reading {}: {e}", wasm.display()))?;
-    ark_scene::wasm_meta::read_extension_metadata(&bytes, &wasm.display().to_string())
+    ark_ext_metadata::wasm_meta::read_wasm_metadata(&bytes)
         .map_err(|e| format!("reading wasm metadata from {}: {e}", wasm.display()))
 }
 
