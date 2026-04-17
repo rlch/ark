@@ -348,12 +348,3 @@ fn op_handle_type_mismatch() {
     );
 }
 
-#[test]
-fn acp_no_agent() {
-    snap(
-        "acp_no-agent",
-        &SceneError::AcpNoAgent {
-            op: "acp.prompt".into(),
-        },
-    );
-}

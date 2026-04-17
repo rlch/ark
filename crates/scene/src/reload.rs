@@ -360,10 +360,6 @@ fn hash_op_node(op: &OpNode, h: &mut impl Hasher) {
         OpNode::Pipe(o) => { o.from.hash(h); o.to.hash(h); o.payload.hash(h); o.when.hash(h); }
         OpNode::Emit(o) => { o.event_name.hash(h); o.when.hash(h); }
         OpNode::SetStatus(o) => { o.text.hash(h); o.severity.hash(h); o.ttl_ms.hash(h); o.when.hash(h); }
-        OpNode::AcpPrompt(o) => { o.text.hash(h); o.when.hash(h); }
-        OpNode::AcpCancel(o) => { o.when.hash(h); }
-        OpNode::AcpPermit(o) => { o.request_id.hash(h); o.outcome.hash(h); o.when.hash(h); }
-        OpNode::AcpSetMode(o) => { o.mode.hash(h); o.when.hash(h); }
         OpNode::Exec(o) => { o.script.hash(h); o.shell.hash(h); o.timeout_ms.hash(h); o.when.hash(h); }
         OpNode::ReloadScene(o) => { o.when.hash(h); }
         OpNode::Unknown { verb, .. } => { verb.hash(h); }

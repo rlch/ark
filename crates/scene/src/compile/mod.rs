@@ -330,19 +330,6 @@ impl<'a> CompileCtx<'a> {
                 self.compile_when(&o.when, RhaiScope::Event, &format!("{path}.when"))?;
                 self.compile_interp_str(&o.text, RhaiScope::Event, &format!("{path}.text"))?;
             }
-            OpNode::AcpPrompt(o) => {
-                self.compile_when(&o.when, RhaiScope::Event, &format!("{path}.when"))?;
-                self.compile_interp_str(&o.text, RhaiScope::Event, &format!("{path}.text"))?;
-            }
-            OpNode::AcpCancel(o) => {
-                self.compile_when(&o.when, RhaiScope::Event, &format!("{path}.when"))?;
-            }
-            OpNode::AcpPermit(o) => {
-                self.compile_when(&o.when, RhaiScope::Event, &format!("{path}.when"))?;
-            }
-            OpNode::AcpSetMode(o) => {
-                self.compile_when(&o.when, RhaiScope::Event, &format!("{path}.when"))?;
-            }
             OpNode::Exec(o) => {
                 self.compile_when(&o.when, RhaiScope::Event, &format!("{path}.when"))?;
                 self.compile_interp_str(

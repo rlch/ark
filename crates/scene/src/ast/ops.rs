@@ -206,51 +206,6 @@ pub struct SetStatusOp {
     pub when: Option<String>,
 }
 
-/// `acp.prompt text="…"` — send a user message into the ACP session.
-#[derive(Facet, Debug, Clone)]
-pub struct AcpPromptOp {
-    /// Prompt body (Rhai-interpolated).
-    #[facet(kdl::property)]
-    pub text: String,
-    /// Optional per-op Rhai guard.
-    #[facet(kdl::property, default)]
-    pub when: Option<String>,
-}
-
-/// `acp.cancel` — cancel the in-flight ACP turn.
-#[derive(Facet, Debug, Clone)]
-pub struct AcpCancelOp {
-    /// Optional per-op Rhai guard.
-    #[facet(kdl::property, default)]
-    pub when: Option<String>,
-}
-
-/// `acp.permit request_id="…" outcome=<allow|reject_once|reject_always>`.
-#[derive(Facet, Debug, Clone)]
-pub struct AcpPermitOp {
-    /// ACP request id to respond to.
-    #[facet(kdl::property)]
-    pub request_id: String,
-    /// Raw outcome string (`"allow"` / `"reject_once"` / `"reject_always"`);
-    /// validated against the R7 set at T-052.
-    #[facet(kdl::property)]
-    pub outcome: String,
-    /// Optional per-op Rhai guard.
-    #[facet(kdl::property, default)]
-    pub when: Option<String>,
-}
-
-/// `acp.set_mode mode="…"` — set the ACP agent mode (plan / edit / …).
-#[derive(Facet, Debug, Clone)]
-pub struct AcpSetModeOp {
-    /// Mode name (protocol-defined; ark passes through).
-    #[facet(kdl::property)]
-    pub mode: String,
-    /// Optional per-op Rhai guard.
-    #[facet(kdl::property, default)]
-    pub when: Option<String>,
-}
-
 /// `exec script="…" shell="…" timeout_ms=<int>` — run a shell script.
 #[derive(Facet, Debug, Clone)]
 pub struct ExecOp {
@@ -322,18 +277,6 @@ pub enum OpNode {
     /// `set_status …` op.
     #[facet(rename = "set_status")]
     SetStatus(SetStatusOp),
-    /// `acp.prompt text=…` op.
-    #[facet(rename = "acp.prompt")]
-    AcpPrompt(AcpPromptOp),
-    /// `acp.cancel` op.
-    #[facet(rename = "acp.cancel")]
-    AcpCancel(AcpCancelOp),
-    /// `acp.permit …` op.
-    #[facet(rename = "acp.permit")]
-    AcpPermit(AcpPermitOp),
-    /// `acp.set_mode mode=…` op.
-    #[facet(rename = "acp.set_mode")]
-    AcpSetMode(AcpSetModeOp),
     /// `exec script=…` op.
     #[facet(rename = "exec")]
     Exec(ExecOp),

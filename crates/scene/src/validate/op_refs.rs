@@ -190,7 +190,7 @@ fn op_metadata(op: &OpNode) -> (&'static str, Option<&str>, ExpectedKind) {
         // handles pass (T-014) for clash detection, not by this pass.
         OpNode::Spawn(o) => ("spawn", Some(&o.handle), ExpectedKind::Introduce),
         OpNode::NewTab(o) => ("new_tab", Some(&o.handle), ExpectedKind::Introduce),
-        // Use-mode / pipe / emit / set_status / acp.* / exec /
+        // Use-mode / pipe / emit / set_status / exec /
         // reload_scene carry no direct handle ref in their first
         // argument. Pipe's `from=`/`to=` are pane handles but live as
         // properties — we validate them specially below.
@@ -198,10 +198,6 @@ fn op_metadata(op: &OpNode) -> (&'static str, Option<&str>, ExpectedKind) {
         OpNode::Pipe(_) => ("pipe", None, ExpectedKind::None),
         OpNode::Emit(_) => ("emit", None, ExpectedKind::None),
         OpNode::SetStatus(_) => ("set_status", None, ExpectedKind::None),
-        OpNode::AcpPrompt(_) => ("acp.prompt", None, ExpectedKind::None),
-        OpNode::AcpCancel(_) => ("acp.cancel", None, ExpectedKind::None),
-        OpNode::AcpPermit(_) => ("acp.permit", None, ExpectedKind::None),
-        OpNode::AcpSetMode(_) => ("acp.set_mode", None, ExpectedKind::None),
         OpNode::Exec(_) => ("exec", None, ExpectedKind::None),
         OpNode::ReloadScene(_) => ("reload_scene", None, ExpectedKind::None),
         OpNode::Unknown { .. } => ("unknown", None, ExpectedKind::None),

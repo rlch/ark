@@ -37,9 +37,8 @@ use ark_scene::ast::layout::{
     ColNode, Handle, PaneNode, RowNode, TabNode,
 };
 use ark_scene::ast::ops::{
-    AcpCancelOp, AcpPermitOp, AcpPromptOp, AcpSetModeOp, CloseOp, EmitOp,
-    ExecOp, FocusOp, MoveOp, NewTabOp, OpNode, PinOp, PipeOp, RenameOp,
-    ReloadSceneOp, ResizeOp, SetStatusOp, SpawnOp, UnpinOp, UseModeOp,
+    CloseOp, EmitOp, ExecOp, FocusOp, MoveOp, NewTabOp, OpNode, PinOp, PipeOp,
+    RenameOp, ReloadSceneOp, ResizeOp, SetStatusOp, SpawnOp, UnpinOp, UseModeOp,
 };
 use ark_scene::ast::selector::EventSelector;
 
@@ -90,10 +89,6 @@ fn generate_scene_schema_kdl() -> String {
         PipeOp::SHAPE,
         EmitOp::SHAPE,
         SetStatusOp::SHAPE,
-        AcpPromptOp::SHAPE,
-        AcpCancelOp::SHAPE,
-        AcpPermitOp::SHAPE,
-        AcpSetModeOp::SHAPE,
         ExecOp::SHAPE,
         ReloadSceneOp::SHAPE,
         // Selector

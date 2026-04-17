@@ -531,34 +531,6 @@ pub enum SceneError {
         span: SourceSpan,
     },
 
-    /// Scene dispatched an `acp.*` op but no ACP-capable extension is
-    /// active (R7 ACP ops). No-ops with this warning surfaced via the
-    /// status bar.
-    #[error("`{op}` requires an ACP-capable extension but none is active")]
-    #[diagnostic(
-        code = "acp/no-agent",
-        severity(Error),
-        help("Add a `use \"<ext>\"` for an extension that declares `capabilities {{ agent {{ speaks \"acp\" }} }}`, or remove the `acp.*` op from the scene.")
-    )]
-    AcpNoAgent {
-        /// The ACP op that was dispatched.
-        op: String,
-    },
-
-    /// Multiple extensions declare ACP capability (T-104). The scene
-    /// compiler cannot disambiguate which agent to launch. The user
-    /// must deactivate all but one.
-    #[error("multiple extensions declare ACP capability: {}", extensions.join(", "))]
-    #[diagnostic(
-        code = "acp/multiple-agents",
-        severity(Error),
-        help("Only one extension may declare `capabilities {{ agent {{ speaks \"acp\" }} }}`. Remove the `use` directive for all but one of the listed extensions.")
-    )]
-    AcpMultipleAgents {
-        /// Names of the conflicting extensions.
-        extensions: Vec<String>,
-    },
-
     /// An `emit`-op chain exceeded the scene's cascade-depth cap
     /// (R4.10 / T-062). Runtime-only — no scene span. The dispatcher
     /// drops the offending event and logs this diagnostic.
@@ -668,20 +640,6 @@ pub enum SceneError {
         first: String,
         /// File that redefined the handle.
         second: String,
-    },
-
-    /// An `acp.permit` op referenced a `request_id` that is not in the
-    /// pending permission set — either already resolved, expired, or
-    /// never registered (T-108).
-    #[error("permission request `{request_id}` not found")]
-    #[diagnostic(
-        code = "acp/permission-not-found",
-        severity(Error),
-        help("The request may have already been resolved by another reaction, timed out, or never existed. Check the `request_id` value matches the one from the `ark.acp.permission_requested` event.")
-    )]
-    PermissionNotFound {
-        /// The `request_id` that could not be correlated.
-        request_id: String,
     },
 
     /// An `include "ext:<name>/…"` references an extension that was not
@@ -1023,14 +981,6 @@ mod tests {
     }
 
     #[test]
-    fn acp_no_agent_code() {
-        let err = SceneError::AcpNoAgent {
-            op: "acp.prompt".into(),
-        };
-        assert_code(&err, "acp/no-agent");
-    }
-
-    #[test]
     fn cascade_depth_exceeded_code() {
         let err = SceneError::CascadeDepthExceeded {
             depth: 5,
@@ -1057,14 +1007,6 @@ mod tests {
             root: "/home/user/scenes".into(),
         };
         assert_code(&err, "scene/include-escape");
-    }
-
-    #[test]
-    fn permission_not_found_code() {
-        let err = SceneError::PermissionNotFound {
-            request_id: "req-42".into(),
-        };
-        assert_code(&err, "acp/permission-not-found");
     }
 
     #[test]

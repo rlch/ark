@@ -1,8 +1,0 @@
----
-source: crates/scene/tests/errors.rs
-expression: render(err)
----
-acp/no-agent
-
-  × `acp.prompt` requires an ACP-capable extension but none is active
-  help: Add a `use "<ext>"` for an extension that declares `capabilities { agent { speaks "acp" } }`, or remove the `acp.*` op from the scene.
