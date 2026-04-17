@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use crate::id::AgentId;
+use crate::id::SessionId;
 
 /// On-disk layout for ark state. Resolves XDG base directories with
 /// macOS-correct fallbacks. See cavekit-types-state-events.md R5 and
@@ -74,52 +74,52 @@ impl StateLayout {
         self.base.join("sessions")
     }
 
-    /// `$base/agents/{id}/`
-    pub fn agent_dir(&self, id: &AgentId) -> PathBuf {
-        id.state_dir(&self.base)
+    /// `$base/sessions/{id}/`
+    pub fn session_dir(&self, id: &SessionId) -> PathBuf {
+        self.sessions_root().join(id.as_path_leaf())
     }
 
-    /// `$base/agents/{id}/spec.json`
-    pub fn spec_path(&self, id: &AgentId) -> PathBuf {
-        self.agent_dir(id).join("spec.json")
+    /// `$base/sessions/{id}/spec.json`
+    pub fn session_spec_path(&self, id: &SessionId) -> PathBuf {
+        self.session_dir(id).join("spec.json")
     }
 
-    /// `$base/agents/{id}/status.json`
-    pub fn status_path(&self, id: &AgentId) -> PathBuf {
-        self.agent_dir(id).join("status.json")
+    /// `$base/sessions/{id}/status.json`
+    pub fn session_status_path(&self, id: &SessionId) -> PathBuf {
+        self.session_dir(id).join("status.json")
     }
 
-    /// `$base/agents/{id}/events.jsonl`
-    pub fn events_path(&self, id: &AgentId) -> PathBuf {
-        self.agent_dir(id).join("events.jsonl")
+    /// `$base/sessions/{id}/events.jsonl`
+    pub fn session_events_path(&self, id: &SessionId) -> PathBuf {
+        self.session_dir(id).join("events.jsonl")
     }
 
-    /// `$base/agents/{id}/pid`
-    pub fn pid_path(&self, id: &AgentId) -> PathBuf {
-        self.agent_dir(id).join("pid")
+    /// `$base/sessions/{id}/pid`
+    pub fn session_pid_path(&self, id: &SessionId) -> PathBuf {
+        self.session_dir(id).join("pid")
     }
 
-    /// `$base/agents/{id}/supervisor.log`
-    pub fn supervisor_log_path(&self, id: &AgentId) -> PathBuf {
-        self.agent_dir(id).join("supervisor.log")
+    /// `$base/sessions/{id}/supervisor.log`
+    pub fn session_supervisor_log_path(&self, id: &SessionId) -> PathBuf {
+        self.session_dir(id).join("supervisor.log")
     }
 
-    /// `$base/agents/{id}/hooks/`
-    pub fn hooks_dir(&self, id: &AgentId) -> PathBuf {
-        self.agent_dir(id).join("hooks")
+    /// `$base/sessions/{id}/hooks/`
+    pub fn session_hooks_dir(&self, id: &SessionId) -> PathBuf {
+        self.session_dir(id).join("hooks")
     }
 
-    /// `$base/agents/{id}/artifacts/`
-    pub fn artifacts_dir(&self, id: &AgentId) -> PathBuf {
-        self.agent_dir(id).join("artifacts")
+    /// `$base/sessions/{id}/artifacts/`
+    pub fn session_artifacts_dir(&self, id: &SessionId) -> PathBuf {
+        self.session_dir(id).join("artifacts")
     }
 
     /// `$base/archive/{YYYY-MM-DD}/{id}/`
-    pub fn archive_dir(&self, date: chrono::NaiveDate, id: &AgentId) -> PathBuf {
+    pub fn archive_dir(&self, date: chrono::NaiveDate, id: &SessionId) -> PathBuf {
         self.base
             .join("archive")
             .join(date.format("%Y-%m-%d").to_string())
-            .join(id.as_str())
+            .join(id.as_path_leaf())
     }
 
     /// `$base/locks/` — directory that holds `{id}.lock` files.
@@ -128,16 +128,16 @@ impl StateLayout {
     }
 
     /// `$base/locks/{id}.lock`
-    pub fn lock_path(&self, id: &AgentId) -> PathBuf {
-        self.locks_dir().join(format!("{}.lock", id.as_str()))
+    pub fn lock_path(&self, id: &SessionId) -> PathBuf {
+        self.locks_dir().join(format!("{}.lock", id.as_path_leaf()))
     }
 
     /// `$runtime/sessions/{id}.sock` — per-supervisor control socket.
     /// See cavekit-hook-ipc.md R4.
-    pub fn agent_socket_path(&self, id: &AgentId) -> PathBuf {
+    pub fn session_socket_path(&self, id: &SessionId) -> PathBuf {
         self.runtime
             .join("sessions")
-            .join(format!("{}.sock", id.as_str()))
+            .join(format!("{}.sock", id.as_path_leaf()))
     }
 
     /// Idempotently create `path` (and its parents) with mode 0700 on any
@@ -218,36 +218,36 @@ mod tests {
     }
 
     #[test]
-    fn per_agent_paths_match_schema() {
+    fn per_session_paths_match_schema() {
         let tmp = tempdir().expect("tempdir");
         let layout = layout_with_base(tmp.path().to_path_buf());
-        let id = AgentId::new("cavekit", "auth");
-        let agent = layout.agent_dir(&id);
+        let id = SessionId::new("auth");
+        let session = layout.session_dir(&id);
 
-        assert_eq!(agent, tmp.path().join("sessions").join(id.as_str()));
-        assert_eq!(layout.spec_path(&id), agent.join("spec.json"));
-        assert_eq!(layout.status_path(&id), agent.join("status.json"));
-        assert_eq!(layout.events_path(&id), agent.join("events.jsonl"));
-        assert_eq!(layout.pid_path(&id), agent.join("pid"));
+        assert_eq!(session, tmp.path().join("sessions").join(id.as_path_leaf()));
+        assert_eq!(layout.session_spec_path(&id), session.join("spec.json"));
+        assert_eq!(layout.session_status_path(&id), session.join("status.json"));
+        assert_eq!(layout.session_events_path(&id), session.join("events.jsonl"));
+        assert_eq!(layout.session_pid_path(&id), session.join("pid"));
         assert_eq!(
-            layout.supervisor_log_path(&id),
-            agent.join("supervisor.log")
+            layout.session_supervisor_log_path(&id),
+            session.join("supervisor.log")
         );
-        assert_eq!(layout.hooks_dir(&id), agent.join("hooks"));
-        assert_eq!(layout.artifacts_dir(&id), agent.join("artifacts"));
+        assert_eq!(layout.session_hooks_dir(&id), session.join("hooks"));
+        assert_eq!(layout.session_artifacts_dir(&id), session.join("artifacts"));
     }
 
     #[test]
     fn archive_path_includes_date_and_id() {
         let tmp = tempdir().expect("tempdir");
         let layout = layout_with_base(tmp.path().to_path_buf());
-        let id = AgentId::new("cavekit", "auth");
+        let id = SessionId::new("auth");
         let date = chrono::NaiveDate::from_ymd_opt(2026, 4, 14).expect("date");
         let expected = tmp
             .path()
             .join("archive")
             .join("2026-04-14")
-            .join(id.as_str());
+            .join(id.as_path_leaf());
         assert_eq!(layout.archive_dir(date, &id), expected);
     }
 
@@ -255,12 +255,12 @@ mod tests {
     fn lock_path_under_locks_dir() {
         let tmp = tempdir().expect("tempdir");
         let layout = layout_with_base(tmp.path().to_path_buf());
-        let id = AgentId::new("cavekit", "auth");
+        let id = SessionId::new("auth");
         assert_eq!(
             layout.lock_path(&id),
             tmp.path()
                 .join("locks")
-                .join(format!("{}.lock", id.as_str()))
+                .join(format!("{}.lock", id.as_path_leaf()))
         );
     }
 
@@ -272,16 +272,16 @@ mod tests {
     }
 
     #[test]
-    fn agent_socket_path_under_runtime() {
+    fn session_socket_path_under_runtime() {
         let tmp = tempdir().expect("tempdir");
         let layout = layout_with_base(tmp.path().to_path_buf());
-        let id = AgentId::new("cavekit", "auth");
+        let id = SessionId::new("auth");
         let expected = tmp
             .path()
             .join("runtime")
             .join("sessions")
-            .join(format!("{}.sock", id.as_str()));
-        assert_eq!(layout.agent_socket_path(&id), expected);
+            .join(format!("{}.sock", id.as_path_leaf()));
+        assert_eq!(layout.session_socket_path(&id), expected);
     }
 
     #[test]
