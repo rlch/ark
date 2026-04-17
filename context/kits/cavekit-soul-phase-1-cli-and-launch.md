@@ -17,8 +17,10 @@ Phase 1 end-to-end green. Four sub-areas:
 2. `crates/cli/src/id_resolver.rs` reads `name` from `SessionSpec`.
 3. `crates/core/src/consumers/state_writer.rs` rewritten against
    `CoreEvent`; phase-rollup logic stubbed out for Phase-2 ext fan-in.
-4. `crates/core/src/consumers/reaction_dispatcher.rs` keeps `OpNode::Acp*`
-   variants temporarily but no longer triggers `engine_compat`.
+4. `crates/core/src/consumers/reaction_dispatcher.rs` — `OpNode::Acp*`
+   variants deleted outright (ACP leaves the tree per 2026-04-17
+   interview #2). Dispatcher no longer matches them. `engine_compat`
+   gone.
 5. Bare `ark` launch constructs a `SessionSpec { name: "ark", scene: default, … }`
    and calls `run_supervisor_with(spec, None, None, world)`.
 6. PTY smoke test goes green.
@@ -103,25 +105,30 @@ is acceptable).
 
 **Dependencies:** `cavekit-soul-phase-1-types.md` R4, R5, R6.
 
-### R4: `reaction_dispatcher` keeps `OpNode::Acp*` but stops triggering `engine_compat`
+### R4: `reaction_dispatcher` drops ACP + engine_compat entirely
 
 **Description:** `crates/core/src/consumers/reaction_dispatcher.rs`
-keeps the `OpNode::AcpPrompt` / `AcpCancel` / `AcpPermit` / `AcpSetMode`
-match arms as placeholders — full ACP op removal is Phase 3. But the
-dispatcher no longer invokes `ark_scene::engine_compat::*`. Any code
-path that previously pivoted through `engine_compat` (whether to emit
-a compatibility event or to resolve an engine handle) is removed or
-stubbed.
+deletes its `OpNode::AcpPrompt` / `AcpCancel` / `AcpPermit` / `AcpSetMode`
+match arms. ACP leaves the tree entirely per 2026-04-17 interview #2
+(was Phase 3, now folded into Phase 1). Scene's OpNode enum shrinks
+accordingly. `engine_compat` module deletes too.
 
 The dispatcher continues to route core ops (`OpNode::Pipe`, `Emit`,
-`SetStatus`, `Exec`, `ReloadScene`, `Unknown`) normally.
+`SetStatus`, `Exec`, `ReloadScene`, `Unknown`) normally, now against
+`CoreEvent`.
 
 **Acceptance Criteria:**
-- [ ] `rg -n "engine_compat" crates/core/src/consumers/reaction_dispatcher.rs` prints zero hits.
-- [ ] `rg -n "OpNode::Acp" crates/core/src/consumers/reaction_dispatcher.rs` prints at least one hit (placeholder arms preserved).
-- [ ] The placeholder `Acp*` arms emit a structured `tracing::warn!` or equivalent "acp dispatch disabled; will re-home in Phase 3" message (or equivalent no-op with an explicit TODO), verified by code review and a `cargo test -p ark-core` test asserting an `OpNode::AcpPrompt` dispatch does NOT panic and does NOT invoke engine-compat wiring.
+- [ ] `rg -n "engine_compat" crates/core/` prints zero hits.
+- [ ] `rg -n "OpNode::Acp" crates/core/src/consumers/reaction_dispatcher.rs` prints zero hits (arms deleted).
+- [ ] `rg -n "AcpPrompt|AcpCancel|AcpPermit|AcpSetMode" crates/scene/src/` prints zero hits (variants gone).
+- [ ] `ls crates/acp-client` fails (crate deleted).
+- [ ] `ls crates/scene/src/engine_compat.rs` fails.
+- [ ] `ls crates/scene/src/ops/acp.rs` fails.
+- [ ] `ls crates/scene/src/ext/acp.rs` fails; same for `permission.rs`, `inflight.rs`, `doctor.rs` under `crates/scene/src/ext/`.
+- [ ] `ls crates/supervisor/src/permission.rs` fails; same for `turn_inflight.rs`, `engine_resolution.rs`.
+- [ ] `rg "AcpHandle" crates/scene/src/intent.rs` prints zero hits.
 - [ ] `cargo test -p ark-core` passes.
-- [ ] `cargo check -p ark-scene` passes even if `crates/scene/src/engine_compat.rs` still exists — its public API may stay, but no in-core caller consumes it in Phase 1.
+- [ ] `cargo check -p ark-scene` passes without any ACP module.
 
 **Dependencies:** `cavekit-soul-phase-1-types.md` R6.
 

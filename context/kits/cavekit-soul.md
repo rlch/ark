@@ -100,7 +100,7 @@ below.
   one batch). In-proc (`#[derive(Extension)]`) + subprocess (NDJSON
   JSON-RPC) transports unchanged. WASM transport remains future.
 - **`crates/extensions/<name>/` layout.** No `ext-` package prefix in
-  the path; binaries keep short names (`cc-hook`, `acp-client`).
+  the path; binaries keep short names (`cc-hook`, etc.).
   Cargo package names may still use `ext-` prefix to avoid crate-namespace
   collisions.
 - **`SessionId::new(name)`** bakes the ulid in. Path becomes
@@ -116,6 +116,20 @@ below.
 - **Hot-reload: full story.** Both transports. Subprocess exts reload
   via R16 shutdown ladder + respawn. In-proc exts require supervisor
   restart (accept the gap). Scene reload unchanged.
+- **ACP deleted outright (2026-04-17 interview #2).** Phase 3 no longer
+  moves ACP to an extension — the protocol leaves the tree entirely.
+  Each agent vendor gets its own extension using its native IPC:
+  `ext-claude-code` uses Claude's native hook system (`ark-hook` binary
+  + control socket, including Claude's `PermissionRequest` hook for
+  human-in-the-loop approval); `ext-pi` (own kit, future) uses pi.dev's
+  API; `ext-codex-cli` / `ext-gemini-cli` (future) use whatever their
+  CLIs expose. ACP may return if/when it cleanly fits the ext protocol,
+  as a separate kit — not Phase 1-6 scope. All ACP-specific code
+  (`crates/acp-client/`, `supervisor/permission.rs`,
+  `supervisor/turn_inflight.rs`, `supervisor/engine_resolution.rs`,
+  scene `ext/{acp,permission,inflight,doctor}.rs`, `ops/acp.rs`,
+  `engine_compat.rs`, `intent.rs::AcpHandle`, `OpNode::Acp*` variants)
+  deletes in Phase 1 scope expansion (was Phase 3).
 
 ## Current State — What's Hardcoded
 
@@ -371,7 +385,7 @@ enum CoreEvent {
 }
 
 struct ExtEvent {
-    ext: String,             // e.g. "acp-client", "claude-code"
+    ext: String,             // e.g. "claude-code", "pi"
     kind: String,            // e.g. "permission.asked", "tool.use"
     payload: serde_json::Value,
 }
@@ -388,7 +402,7 @@ Scene script ergonomics:
 ```kdl
 on "ark.core.session.started" { ... }
 on "claude-code.tool.use" where="payload.tool == \"Read\"" { ... }
-on "acp-client.permission.asked" { ... }
+on "claude-code.permission.asked" { ... }
 ```
 
 The `on <CamelCaseVariant>` form (closed-enum pattern-match) still
@@ -407,26 +421,32 @@ Extensions can register:
     surfaces)
   - `permission_dispatcher() -> Option<Arc<dyn PermissionDispatcher>>`
   - `scene_compile_hook(&self, compiled: &mut CompiledScene) -> Result<()>`
-    (lets e.g. `extensions/acp-client/` attach its own engine-launch
-    metadata)
+    (lets an extension attach its own engine-launch metadata or
+    register dynamic scene primitives at compile time)
   - `doctor_checks() -> Vec<CheckSpec>` (fanned into `ark doctor`)
   - `list_columns() -> Vec<ColumnSpec>` (contributed to `ark list`)
 - **Pane-side (existing):** pane views.
 
 Example extensions the new architecture supports:
 
-- `extensions/acp-client/` — ACP subprocess lifecycle, `session/prompt`
-  tracking, permission dispatch. Replaces `crates/acp-client/` + the
-  supervisor's `permission.rs` + `turn_inflight.rs`.
-- `extensions/claude-code/` — Claude Code hook glue (`cc-hook`
-  binary), transcript watching, permission-policy taxonomy, git diff
-  artifact collection. Replaces `crates/orchestrators/claude-code/` +
-  absorbs `crates/hook/` + `crates/types/src/permission.rs`.
+- `extensions/claude-code/` — Claude Code integration via Claude's
+  native hook JSON (`cc-hook` binary + control socket), including
+  `PermissionRequest` for human-in-the-loop approval. Transcript
+  watching, permission-policy taxonomy, git diff artifact collection.
+  Replaces `crates/orchestrators/claude-code/` + absorbs `crates/hook/`
+  + `crates/types/src/permission.rs`.
 - `extensions/cavekit/` — build-site progress tracking, findings feed,
   worktree-aware kill. Replaces `crates/orchestrators/cavekit/`.
-- `extensions/pi` (future) — pi.dev native integration.
+- `extensions/pi` (future, own kit) — pi.dev native integration using
+  pi's HTTP/WS API.
+- `extensions/codex-cli`, `extensions/gemini-cli` (future) — wrap their
+  respective CLIs' native output surfaces.
 - `extensions/subagents-on-pi` (future) — meta-extension built on
   `extensions/pi`, coordinating multiple subagents.
+
+ACP is explicitly NOT an extension. If it returns, it does so via a
+separate kit evaluating whether the protocol fits cleanly into the ext
+surface.
 
 ### Hot-reload
 
@@ -447,8 +467,9 @@ Extension reload:
 
 ### What stays the same
 
-- Scene KDL format. ACP-specific scene extensions move to
-  `extensions/acp-client/` but the *grammar* is unchanged.
+- Scene KDL format. ACP-specific scene extensions are deleted (not
+  moved); the *grammar* is unchanged — `OpNode::Acp*` variants gone
+  from the AST enum.
 - Every reaction / keybind / plugin mechanism.
 - zellij as the substrate. The web client is zellij's, not ark's.
 - `ark list` / `ark kill` / `ark scene *` / `ark pane *` /
@@ -469,18 +490,17 @@ Explicit call-outs beyond the obvious trait moves:
   to `extensions/claude-code/`.
 - `crates/scene/src/ext/{acp,permission,inflight,doctor}.rs` +
   `crates/scene/src/ops/acp.rs` + `crates/scene/src/engine_compat.rs`
-  — move to `extensions/acp-client/`, which registers these scene-side
-  primitives via the new supervisor-extension hooks (Phase 3).
-- `crates/scene/src/intent.rs:AcpHandle` — replaced by extensions
-  registering their own intent handlers. `IntentContext` no longer has
-  an `acp` field.
+  — deleted (folded into Phase 1 Tier 5).
+- `crates/scene/src/intent.rs:AcpHandle` — deleted. `IntentContext`
+  loses its `acp` field. Extension-registered intent handlers replace
+  this in Phase 2.
 - `crates/scene/src/context.rs:AgentSnapshot` — generalises to
   `SessionSnapshot` with an `extensions: Map<String, Value>`
   sub-map.
-- `crates/orchestrators/cavekit/` → `extensions/cavekit/`.
+- `crates/orchestrators/cavekit/` → `extensions/cavekit/` (Phase 4).
 - `crates/orchestrators/claude-code/` merges into
-  `extensions/claude-code/`.
-- `crates/acp-client/` → `extensions/acp-client/`.
+  `extensions/claude-code/` (Phase 4).
+- `crates/acp-client/` — deleted (folded into Phase 1 Tier 5).
 
 ## Migration Path
 
@@ -544,8 +564,14 @@ required to make bare `ark` launch succeed.
      for these; they survive Phase 1 unchanged behaviour-wise).
 
 **Out of scope for Phase 1:** extension-registered session-lifecycle
-hooks, ACP extraction, claude-code extraction, doctor refactor,
-picker. All deferred.
+hooks (Phase 2), claude-code / cavekit extraction into extensions
+(Phase 4), doctor refactor (Phase 4), picker (Phase 6).
+
+**Expanded into Phase 1 Tier 5 (2026-04-17 interview #2):** ACP deletion
+— all ACP-specific code in acp-client/supervisor/scene deletes outright
+rather than moving to an extension. This simplifies T-026
+(reaction_dispatcher no longer stubs ACP arms — the variants are gone)
+and lets scene's `OpNode` enum shrink cleanly.
 
 **Execution:** Cavekit build-site. `/ck:sketch` the Phase 1 kit from
 this spec's Phase 1 sub-areas, `/ck:map` to generate a build graph
@@ -563,18 +589,33 @@ Peer-review via Codex.
 - `ark list` columns + `ark doctor` checks become ext-fan-in.
 - Integration tests with a stub in-proc extension.
 
-### Phase 3: ACP → `extensions/acp-client/`
+### Phase 3 (folded into Phase 1): Delete ACP outright
 
-- Move `crates/acp-client/` + `crates/supervisor/src/permission.rs` +
-  `crates/supervisor/src/turn_inflight.rs` + scene `ext/{acp,permission,inflight,doctor}.rs`
-  + `ops/acp.rs` + `engine_compat.rs` + `intent.rs:AcpHandle` into
-  `extensions/acp-client/`.
-- Supervisor no longer depends on `acp-client`.
-- `reaction_dispatcher::OpNode::Acp*` variants removed; dispatcher
-  gets open-op-kind dispatch (ext-registered op handler trait).
-- `engine_resolution.rs` chain moves to `extensions/acp-client/`.
-- `ark doctor` uses ext-fan-in from Phase 2 for `check_acp`,
-  `check_claude`, etc.
+Per the 2026-04-17 interview #2 decision, ACP leaves the tree entirely
+rather than moving to an extension. This work folds into Phase 1's
+remaining Tier 5 scope (simplifying T-026 and scene-crate migration).
+
+Deleted in Phase 1:
+- `crates/acp-client/` crate (removed from workspace)
+- `crates/supervisor/src/permission.rs`
+- `crates/supervisor/src/turn_inflight.rs`
+- `crates/supervisor/src/engine_resolution.rs`
+- `crates/scene/src/ext/{acp,permission,inflight,doctor}.rs`
+- `crates/scene/src/ops/acp.rs`
+- `crates/scene/src/engine_compat.rs`
+- `crates/scene/src/intent.rs::AcpHandle` trait + `IntentContext.acp`
+  field
+- `OpNode::{AcpPrompt, AcpCancel, AcpPermit, AcpSetMode}` variants from
+  scene's AST — reaction_dispatcher's match on them is gone, not
+  stubbed.
+- `[acp]` TOML config section + `permission_timeout_ms` setting
+- `check_acp` in `ark doctor`
+
+Claude Code integration (future `extensions/claude-code/`) uses Claude's
+native hook JSON via `ark-hook` + control socket, including Claude's
+`PermissionRequest` hook which supports returning a decision — human
+approval UX works without ACP. Pi / Codex / Gemini each get their own
+extension with their own native protocol (separate kits).
 
 ### Phase 4: Claude Code + Cavekit → extensions
 
