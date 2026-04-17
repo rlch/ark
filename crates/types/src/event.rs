@@ -65,6 +65,64 @@ pub enum CoreEvent {
     Ext(ExtEvent),
 }
 
+/// Flattened event projection consumed by scene predicates, the event log,
+/// and anything else that wants a `(name, payload)` pair without having to
+/// pattern-match on [`CoreEvent`].
+///
+/// See cavekit-soul-phase-1-types.md R7. Core variants flatten to
+/// `ark.core.<variant_snake>`; extension events flatten to `<ext>.<kind>`
+/// with the payload passed through unchanged.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct FlatEvent {
+    /// Dotted event name — `ark.core.<variant>` for core, `<ext>.<kind>` for
+    /// extension-emitted events.
+    pub name: String,
+    /// JSON payload — variant fields serialised as a JSON object for core
+    /// events, the passed-through payload for extension events.
+    pub payload: serde_json::Value,
+}
+
+impl From<&CoreEvent> for FlatEvent {
+    fn from(ev: &CoreEvent) -> Self {
+        match ev {
+            CoreEvent::Log {
+                level,
+                message,
+                target,
+            } => FlatEvent {
+                name: "ark.core.log".to_string(),
+                payload: serde_json::json!({
+                    "level": level,
+                    "message": message,
+                    "target": target,
+                }),
+            },
+            CoreEvent::Error { error } => FlatEvent {
+                name: "ark.core.error".to_string(),
+                payload: serde_json::json!({ "error": error }),
+            },
+            CoreEvent::SessionStarted { spec } => FlatEvent {
+                name: "ark.core.session_started".to_string(),
+                payload: serde_json::json!({ "spec": spec }),
+            },
+            CoreEvent::SessionEnded { terminated_at } => FlatEvent {
+                name: "ark.core.session_ended".to_string(),
+                payload: serde_json::json!({ "terminated_at": terminated_at }),
+            },
+            CoreEvent::Ext(ext) => FlatEvent::from(ext),
+        }
+    }
+}
+
+impl From<&ExtEvent> for FlatEvent {
+    fn from(ev: &ExtEvent) -> Self {
+        FlatEvent {
+            name: format!("{}.{}", ev.ext, ev.kind),
+            payload: ev.payload.clone(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,6 +172,42 @@ mod tests {
             let back_json = serde_json::to_string(&back).expect("re-ser");
             assert_eq!(back_json, json, "roundtrip not stable: {json}");
         }
+    }
+
+    #[test]
+    fn flat_event_from_core_session_started() {
+        let ev = CoreEvent::SessionStarted {
+            spec: sample_spec(),
+        };
+        let flat = FlatEvent::from(&ev);
+        assert_eq!(flat.name, "ark.core.session_started");
+        assert!(flat.payload.get("spec").is_some());
+    }
+
+    #[test]
+    fn flat_event_from_core_ext() {
+        let ev = CoreEvent::Ext(ExtEvent {
+            ext: "claude-code".to_string(),
+            kind: "tool.use".to_string(),
+            payload: serde_json::json!({ "tool": "Read" }),
+        });
+        let flat = FlatEvent::from(&ev);
+        assert_eq!(flat.name, "claude-code.tool.use");
+        assert_eq!(flat.payload, serde_json::json!({ "tool": "Read" }));
+    }
+
+    #[test]
+    fn flat_event_from_core_log_and_error() {
+        let log = CoreEvent::Log {
+            level: "info".to_string(),
+            message: "hi".to_string(),
+            target: None,
+        };
+        assert_eq!(FlatEvent::from(&log).name, "ark.core.log");
+        let err = CoreEvent::Error {
+            error: "boom".to_string(),
+        };
+        assert_eq!(FlatEvent::from(&err).name, "ark.core.error");
     }
 
     #[test]

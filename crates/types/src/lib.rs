@@ -9,7 +9,7 @@ pub mod state_dir;
 pub mod status;
 
 pub use env_paths::{EnvPaths, EnvPathsError};
-pub use event::{CoreEvent, ExtEvent, LogLevel};
+pub use event::{CoreEvent, ExtEvent, FlatEvent, LogLevel};
 pub use event_bus::{DEFAULT_CAPACITY, EventReceiver, EventSink, channel, default_channel};
 pub use id::SessionId;
 pub use permission::{
