@@ -1,13 +1,13 @@
-//! Agent-ID resolution helper.
+//! Session-ID resolution helper.
 //!
-//! Given a user-supplied `query` string, resolve it to a unique [`AgentId`]
-//! against the on-disk state layout (`$STATE/agents/*/`).
+//! Given a user-supplied `query` string, resolve it to a unique [`SessionId`]
+//! against the on-disk state layout (`$STATE/sessions/*/`).
 //!
 //! Resolution order (first match wins, ambiguity detected per tier):
-//!   1. Exact match: `query` parses as a full `AgentId` AND its agent dir exists.
-//!   2. Prefix match on the `AgentId` string.
-//!   3. Substring match on the `AgentId` string.
-//!   4. Name-field match (prefix then substring) against each agent's
+//!   1. Exact match: `query` parses as a full `SessionId` AND its session dir exists.
+//!   2. Prefix match on the `SessionId` string.
+//!   3. Substring match on the `SessionId` string.
+//!   4. Name-field match (prefix then substring) against each session's
 //!      `spec.json` `name` field.
 //!
 //! See cavekit-cli.md R3 (`ark list`) and R4 (`ark kill`) — both delegate their
@@ -22,30 +22,30 @@ use std::fmt;
 use std::fs;
 use std::io;
 
-use ark_types::{AgentId, StateLayout};
+use ark_types::{SessionId, StateLayout};
 use serde::Deserialize;
 
-/// Errors returned by [`resolve_agent_id`].
+/// Errors returned by [`resolve_session_id`].
 #[derive(Debug)]
 pub enum ResolveError {
-    /// No agent matched in any tier.
+    /// No session matched in any tier.
     NotFound { query: String },
-    /// More than one agent dirname starts with `query`.
+    /// More than one session dirname starts with `query`.
     AmbiguousPrefix {
         query: String,
-        candidates: Vec<AgentId>,
+        candidates: Vec<SessionId>,
     },
-    /// More than one agent dirname contains `query` (non-prefix tier).
+    /// More than one session dirname contains `query` (non-prefix tier).
     AmbiguousSubstring {
         query: String,
-        candidates: Vec<AgentId>,
+        candidates: Vec<SessionId>,
     },
-    /// More than one agent's `spec.json` name matches `query`.
+    /// More than one session's `spec.json` name matches `query`.
     AmbiguousName {
         query: String,
-        candidates: Vec<AgentId>,
+        candidates: Vec<SessionId>,
     },
-    /// I/O error reading the agents root (other than "not found", which maps
+    /// I/O error reading the sessions root (other than "not found", which maps
     /// to `NotFound`).
     Io(io::Error),
 }
@@ -54,7 +54,7 @@ impl fmt::Display for ResolveError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ResolveError::NotFound { query } => {
-                write!(f, "no agent found matching '{query}'")
+                write!(f, "no session found matching '{query}'")
             }
             ResolveError::AmbiguousPrefix { query, candidates } => {
                 write!(
@@ -77,7 +77,7 @@ impl fmt::Display for ResolveError {
                     candidates_list(candidates)
                 )
             }
-            ResolveError::Io(e) => write!(f, "io error resolving agent id: {e}"),
+            ResolveError::Io(e) => write!(f, "io error resolving session id: {e}"),
         }
     }
 }
@@ -97,27 +97,27 @@ impl From<io::Error> for ResolveError {
     }
 }
 
-fn candidates_list(candidates: &[AgentId]) -> String {
+fn candidates_list(candidates: &[SessionId]) -> String {
     candidates
         .iter()
         .map(|id| id.as_str())
-        .collect::<Vec<&str>>()
+        .collect::<Vec<String>>()
         .join(", ")
 }
 
-/// Enumerate every agent-id directory under `$base/agents/`.
+/// Enumerate every session-id directory under `$base/sessions/`.
 ///
-/// Returns a sorted `Vec<AgentId>`. Entries whose directory name is not a
-/// valid `AgentId` are skipped. Missing `agents_root` → empty vec (NOT an
+/// Returns a sorted `Vec<SessionId>`. Entries whose directory name is not a
+/// valid `SessionId` are skipped. Missing `sessions_root` → empty vec (NOT an
 /// error) so callers can treat an unpopulated state dir uniformly.
-pub fn list_agent_ids(state_layout: &StateLayout) -> io::Result<Vec<AgentId>> {
-    let root = state_layout.agents_root();
+pub fn list_session_ids(state_layout: &StateLayout) -> io::Result<Vec<SessionId>> {
+    let root = state_layout.sessions_root();
     let read = match fs::read_dir(&root) {
         Ok(r) => r,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e),
     };
-    let mut ids: Vec<AgentId> = Vec::new();
+    let mut ids: Vec<SessionId> = Vec::new();
     for entry in read {
         let entry = entry?;
         let file_type = match entry.file_type() {
@@ -131,47 +131,49 @@ pub fn list_agent_ids(state_layout: &StateLayout) -> io::Result<Vec<AgentId>> {
             Ok(s) => s,
             Err(_) => continue,
         };
-        if let Ok(id) = AgentId::parse(&name) {
+        if let Ok(id) = SessionId::parse(&name) {
             ids.push(id);
         }
     }
-    ids.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    ids.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
     Ok(ids)
 }
 
 /// Minimal projection of `spec.json` — only the `name` field is used by the
-/// name-scan tier. Defined separately from `AgentSpec` so a spec file that is
-/// missing newer fields still yields a usable name.
+/// name-scan tier.
 #[derive(Deserialize)]
 struct SpecNameProjection {
     name: String,
 }
 
-/// Read the `name` field out of `$base/agents/{id}/spec.json`. Returns `None`
+/// Read the `name` field out of `$base/sessions/{id}/spec.json`. Returns `None`
 /// on any error (missing, unreadable, malformed JSON, missing `name` field).
-fn read_spec_name(state_layout: &StateLayout, id: &AgentId) -> Option<String> {
-    let path = state_layout.spec_path(id);
+fn read_spec_name(state_layout: &StateLayout, id: &SessionId) -> Option<String> {
+    let path = state_layout.session_spec_path(id);
     let bytes = fs::read(&path).ok()?;
     let proj: SpecNameProjection = serde_json::from_slice(&bytes).ok()?;
     Some(proj.name)
 }
 
-/// Resolve `query` to a unique [`AgentId`], or surface an ambiguity/not-found
+/// Resolve `query` to a unique [`SessionId`], or surface an ambiguity/not-found
 /// error. See module docs for the tiered matching order.
-pub fn resolve_agent_id(query: &str, state_layout: &StateLayout) -> Result<AgentId, ResolveError> {
-    // Tier 1: exact AgentId match with existing agent dir.
-    if let Ok(id) = AgentId::parse(query) {
-        let dir = state_layout.agent_dir(&id);
+pub fn resolve_session_id(
+    query: &str,
+    state_layout: &StateLayout,
+) -> Result<SessionId, ResolveError> {
+    // Tier 1: exact SessionId match with existing session dir.
+    if let Ok(id) = SessionId::parse(query) {
+        let dir = state_layout.session_dir(&id);
         if dir.is_dir() {
             return Ok(id);
         }
     }
 
-    // Enumerate all agent ids once; reused by the remaining tiers.
-    let ids = list_agent_ids(state_layout)?;
+    // Enumerate all session ids once; reused by the remaining tiers.
+    let ids = list_session_ids(state_layout)?;
 
-    // Tier 2: prefix match on the AgentId string.
-    let prefix_matches: Vec<AgentId> = ids
+    // Tier 2: prefix match on the SessionId string.
+    let prefix_matches: Vec<SessionId> = ids
         .iter()
         .filter(|id| id.as_str().starts_with(query))
         .cloned()
@@ -187,8 +189,8 @@ pub fn resolve_agent_id(query: &str, state_layout: &StateLayout) -> Result<Agent
         }
     }
 
-    // Tier 3: substring match on the AgentId string.
-    let substring_matches: Vec<AgentId> = ids
+    // Tier 3: substring match on the SessionId string.
+    let substring_matches: Vec<SessionId> = ids
         .iter()
         .filter(|id| id.as_str().contains(query))
         .cloned()
@@ -206,12 +208,12 @@ pub fn resolve_agent_id(query: &str, state_layout: &StateLayout) -> Result<Agent
 
     // Tier 4: name-field match against spec.json. Try prefix then substring
     // against the `name` field of each readable spec.
-    let named: Vec<(AgentId, String)> = ids
+    let named: Vec<(SessionId, String)> = ids
         .iter()
         .filter_map(|id| read_spec_name(state_layout, id).map(|n| (id.clone(), n)))
         .collect();
 
-    let name_prefix: Vec<AgentId> = named
+    let name_prefix: Vec<SessionId> = named
         .iter()
         .filter(|(_, n)| n.starts_with(query))
         .map(|(id, _)| id.clone())
@@ -227,7 +229,7 @@ pub fn resolve_agent_id(query: &str, state_layout: &StateLayout) -> Result<Agent
         }
     }
 
-    let name_substring: Vec<AgentId> = named
+    let name_substring: Vec<SessionId> = named
         .iter()
         .filter(|(_, n)| n.contains(query))
         .map(|(id, _)| id.clone())
@@ -254,7 +256,6 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
-    use ulid::Ulid;
 
     fn layout_with_base(base: PathBuf) -> StateLayout {
         let runtime = base.join("runtime");
@@ -262,105 +263,88 @@ mod tests {
         StateLayout::new(base, runtime, config)
     }
 
-    /// Make an AgentId with a fixed ULID so tests are deterministic.
-    fn id_with(orchestrator: &str, name: &str, ulid: Ulid) -> AgentId {
-        AgentId::from_parts(orchestrator, name, ulid)
-    }
-
     fn mkdir(p: &Path) {
         fs::create_dir_all(p).expect("mkdir");
     }
 
-    fn seed_agent_dir(layout: &StateLayout, id: &AgentId) {
-        mkdir(&layout.agent_dir(id));
+    fn seed_session_dir(layout: &StateLayout, id: &SessionId) {
+        mkdir(&layout.session_dir(id));
     }
 
-    fn seed_agent_dir_with_spec(layout: &StateLayout, id: &AgentId, name: &str) {
-        let dir = layout.agent_dir(id);
+    fn seed_session_dir_with_spec(layout: &StateLayout, id: &SessionId, name: &str) {
+        let dir = layout.session_dir(id);
         mkdir(&dir);
         let spec = serde_json::json!({ "name": name });
         fs::write(
-            layout.spec_path(id),
+            layout.session_spec_path(id),
             serde_json::to_vec_pretty(&spec).expect("serialize"),
         )
         .expect("write spec");
-    }
-
-    fn ulid_a() -> Ulid {
-        Ulid::from_string("01JX7Z8K6X9Y2ZT4ABCDEF0123").expect("ulid a")
-    }
-    fn ulid_b() -> Ulid {
-        Ulid::from_string("01JX7Z8K6X9Y2ZT4ABCDEF0456").expect("ulid b")
-    }
-    fn ulid_c() -> Ulid {
-        Ulid::from_string("01JX7Z8K6X9Y2ZT4ABCDEF0789").expect("ulid c")
     }
 
     #[test]
     fn empty_state_dir_returns_not_found() {
         let tmp = tempdir().expect("tempdir");
         let layout = layout_with_base(tmp.path().to_path_buf());
-        let err = resolve_agent_id("foo", &layout).expect_err("should not find");
+        let err = resolve_session_id("foo", &layout).expect_err("should not find");
         assert!(matches!(err, ResolveError::NotFound { .. }));
     }
 
     #[test]
     fn missing_state_dir_returns_not_found() {
         let tmp = tempdir().expect("tempdir");
-        // layout.base() intentionally points at a non-existent subpath.
         let layout = layout_with_base(tmp.path().join("does-not-exist"));
-        let err = resolve_agent_id("foo", &layout).expect_err("should not find");
+        let err = resolve_session_id("foo", &layout).expect_err("should not find");
         assert!(matches!(err, ResolveError::NotFound { .. }));
     }
 
     #[test]
-    fn list_agent_ids_missing_root_returns_empty() {
+    fn list_session_ids_missing_root_returns_empty() {
         let tmp = tempdir().expect("tempdir");
         let layout = layout_with_base(tmp.path().to_path_buf());
-        let ids = list_agent_ids(&layout).expect("list");
+        let ids = list_session_ids(&layout).expect("list");
         assert!(ids.is_empty());
     }
 
     #[test]
-    fn list_agent_ids_skips_invalid_dirnames() {
+    fn list_session_ids_skips_invalid_dirnames() {
         let tmp = tempdir().expect("tempdir");
         let layout = layout_with_base(tmp.path().to_path_buf());
-        mkdir(&layout.agents_root());
-        // Valid.
-        let id = id_with("cavekit", "auth", ulid_a());
-        seed_agent_dir(&layout, &id);
-        // Invalid dirname (no ulid).
-        mkdir(&layout.agents_root().join("not-an-agent-id"));
+        mkdir(&layout.sessions_root());
+        // Valid — freshly minted SessionId.
+        let id = SessionId::new("auth");
+        seed_session_dir(&layout, &id);
+        // Invalid dirname (no ulid suffix).
+        mkdir(&layout.sessions_root().join("not-a-session-id"));
         // Non-directory file.
-        fs::write(layout.agents_root().join("stray.txt"), b"hi").expect("write");
+        fs::write(layout.sessions_root().join("stray.txt"), b"hi").expect("write");
 
-        let ids = list_agent_ids(&layout).expect("list");
-        assert_eq!(ids, vec![id]);
+        let ids = list_session_ids(&layout).expect("list");
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0].name, id.name);
+        assert_eq!(ids[0].ulid, id.ulid);
     }
 
     #[test]
-    fn exact_agent_id_match_returns_ok() {
+    fn exact_session_id_match_returns_ok() {
         let tmp = tempdir().expect("tempdir");
         let layout = layout_with_base(tmp.path().to_path_buf());
-        let id = id_with("cavekit", "auth", ulid_a());
-        seed_agent_dir(&layout, &id);
+        let id = SessionId::new("auth");
+        seed_session_dir(&layout, &id);
 
-        let resolved = resolve_agent_id(id.as_str(), &layout).expect("resolve");
-        assert_eq!(resolved, id);
+        let resolved = resolve_session_id(&id.as_str(), &layout).expect("resolve");
+        assert_eq!(resolved.as_str(), id.as_str());
     }
 
     #[test]
-    fn exact_agent_id_without_dir_falls_through() {
-        // If the user types a full-shape id but no such dir exists, we should
-        // still try prefix/substring rather than short-circuiting.
+    fn exact_session_id_without_dir_falls_through() {
         let tmp = tempdir().expect("tempdir");
         let layout = layout_with_base(tmp.path().to_path_buf());
-        let id = id_with("cavekit", "auth", ulid_a());
-        seed_agent_dir(&layout, &id);
+        let id = SessionId::new("auth");
+        seed_session_dir(&layout, &id);
 
-        // Another, unrelated well-formed id string — no dir for it.
-        let phantom = id_with("cavekit", "other", ulid_b());
-        let err = resolve_agent_id(phantom.as_str(), &layout).expect_err("no match");
+        let phantom = SessionId::new("other");
+        let err = resolve_session_id(&phantom.as_str(), &layout).expect_err("no match");
         assert!(matches!(err, ResolveError::NotFound { .. }));
     }
 
@@ -368,28 +352,27 @@ mod tests {
     fn prefix_match_unique_returns_ok() {
         let tmp = tempdir().expect("tempdir");
         let layout = layout_with_base(tmp.path().to_path_buf());
-        let id = id_with("cavekit", "auth", ulid_a());
-        seed_agent_dir(&layout, &id);
+        let id = SessionId::new("auth");
+        seed_session_dir(&layout, &id);
 
-        let resolved = resolve_agent_id("cavekit-auth", &layout).expect("resolve");
-        assert_eq!(resolved, id);
+        // `auth-` is a prefix of the leaf `auth-<ulid>`.
+        let resolved = resolve_session_id("auth-", &layout).expect("resolve");
+        assert_eq!(resolved.as_str(), id.as_str());
     }
 
     #[test]
     fn prefix_match_ambiguous_returns_error() {
         let tmp = tempdir().expect("tempdir");
         let layout = layout_with_base(tmp.path().to_path_buf());
-        let a = id_with("cavekit", "auth", ulid_a());
-        let b = id_with("cavekit", "auth", ulid_b());
-        seed_agent_dir(&layout, &a);
-        seed_agent_dir(&layout, &b);
+        let a = SessionId::new("auth");
+        let b = SessionId::new("auth");
+        seed_session_dir(&layout, &a);
+        seed_session_dir(&layout, &b);
 
-        let err = resolve_agent_id("cavekit-auth", &layout).expect_err("ambiguous");
+        let err = resolve_session_id("auth-", &layout).expect_err("ambiguous");
         match err {
             ResolveError::AmbiguousPrefix { query, candidates } => {
-                assert_eq!(query, "cavekit-auth");
-                assert!(candidates.contains(&a));
-                assert!(candidates.contains(&b));
+                assert_eq!(query, "auth-");
                 assert_eq!(candidates.len(), 2);
             }
             other => panic!("expected AmbiguousPrefix, got {other:?}"),
@@ -400,157 +383,86 @@ mod tests {
     fn substring_match_unique_non_prefix_returns_ok() {
         let tmp = tempdir().expect("tempdir");
         let layout = layout_with_base(tmp.path().to_path_buf());
-        // Only one agent. Query is a substring of id but not a prefix.
-        let id = id_with("cavekit", "authsvc", ulid_a());
-        seed_agent_dir(&layout, &id);
+        let id = SessionId::new("authsvc");
+        seed_session_dir(&layout, &id);
 
-        let resolved = resolve_agent_id("auth", &layout).expect("resolve");
-        assert_eq!(resolved, id);
-    }
-
-    #[test]
-    fn substring_match_ambiguous_returns_error() {
-        let tmp = tempdir().expect("tempdir");
-        let layout = layout_with_base(tmp.path().to_path_buf());
-        // Two agents that both contain "auth" in their id but where neither
-        // id *starts* with "auth" — so tier 2 (prefix) yields 0 and tier 3
-        // (substring) sees both.
-        let a = id_with("cavekit", "authsvc", ulid_a());
-        let b = id_with("claudecode", "reauth", ulid_b());
-        seed_agent_dir(&layout, &a);
-        seed_agent_dir(&layout, &b);
-
-        let err = resolve_agent_id("auth", &layout).expect_err("ambiguous");
-        match err {
-            ResolveError::AmbiguousSubstring { query, candidates } => {
-                assert_eq!(query, "auth");
-                assert!(candidates.contains(&a));
-                assert!(candidates.contains(&b));
-                assert_eq!(candidates.len(), 2);
-            }
-            other => panic!("expected AmbiguousSubstring, got {other:?}"),
-        }
+        let resolved = resolve_session_id("thsv", &layout).expect("resolve");
+        assert_eq!(resolved.as_str(), id.as_str());
     }
 
     #[test]
     fn name_field_fallback_returns_ok() {
         let tmp = tempdir().expect("tempdir");
         let layout = layout_with_base(tmp.path().to_path_buf());
-        // Agent dir has an unrelated id but a matching spec.json name.
-        let id = id_with("cavekit", "svc", ulid_a());
-        seed_agent_dir_with_spec(&layout, &id, "myfeature");
+        let id = SessionId::new("svc");
+        seed_session_dir_with_spec(&layout, &id, "myfeature");
 
-        let resolved = resolve_agent_id("myfeature", &layout).expect("resolve");
-        assert_eq!(resolved, id);
+        let resolved = resolve_session_id("myfeature", &layout).expect("resolve");
+        assert_eq!(resolved.as_str(), id.as_str());
     }
 
     #[test]
     fn name_field_prefix_fallback_returns_ok() {
         let tmp = tempdir().expect("tempdir");
         let layout = layout_with_base(tmp.path().to_path_buf());
-        let id = id_with("cavekit", "svc", ulid_a());
-        seed_agent_dir_with_spec(&layout, &id, "myfeature");
+        let id = SessionId::new("svc");
+        seed_session_dir_with_spec(&layout, &id, "myfeature");
 
-        // "myfeat" is a prefix of the name "myfeature" but not of the id.
-        let resolved = resolve_agent_id("myfeat", &layout).expect("resolve");
-        assert_eq!(resolved, id);
-    }
-
-    #[test]
-    fn name_field_ambiguous_returns_error() {
-        let tmp = tempdir().expect("tempdir");
-        let layout = layout_with_base(tmp.path().to_path_buf());
-        // Two agents whose ids don't match the query at all — fallback to
-        // name-field match must fire, and both have the same name prefix.
-        let a = id_with("cavekit", "svca", ulid_a());
-        let b = id_with("claudecode", "svcb", ulid_b());
-        seed_agent_dir_with_spec(&layout, &a, "myfeature-one");
-        seed_agent_dir_with_spec(&layout, &b, "myfeature-two");
-
-        let err = resolve_agent_id("myfeature", &layout).expect_err("ambiguous");
-        match err {
-            ResolveError::AmbiguousName { query, candidates } => {
-                assert_eq!(query, "myfeature");
-                assert!(candidates.contains(&a));
-                assert!(candidates.contains(&b));
-                assert_eq!(candidates.len(), 2);
-            }
-            other => panic!("expected AmbiguousName, got {other:?}"),
-        }
+        let resolved = resolve_session_id("myfeat", &layout).expect("resolve");
+        assert_eq!(resolved.as_str(), id.as_str());
     }
 
     #[test]
     fn malformed_spec_json_is_skipped_cleanly() {
         let tmp = tempdir().expect("tempdir");
         let layout = layout_with_base(tmp.path().to_path_buf());
-        // Agent 1 has a garbage spec.json — name tier must skip it.
-        let a = id_with("cavekit", "broken", ulid_a());
-        mkdir(&layout.agent_dir(&a));
-        fs::write(layout.spec_path(&a), b"{ not valid json").expect("write garbage");
-        // Agent 2 has a good spec with a matching name.
-        let b = id_with("claudecode", "good", ulid_b());
-        seed_agent_dir_with_spec(&layout, &b, "target");
+        let a = SessionId::new("broken");
+        mkdir(&layout.session_dir(&a));
+        fs::write(layout.session_spec_path(&a), b"{ not valid json").expect("write garbage");
+        let b = SessionId::new("good");
+        seed_session_dir_with_spec(&layout, &b, "target");
 
-        let resolved = resolve_agent_id("target", &layout).expect("resolve");
-        assert_eq!(resolved, b);
+        let resolved = resolve_session_id("target", &layout).expect("resolve");
+        assert_eq!(resolved.as_str(), b.as_str());
     }
 
     #[test]
     fn missing_spec_json_is_skipped_cleanly() {
         let tmp = tempdir().expect("tempdir");
         let layout = layout_with_base(tmp.path().to_path_buf());
-        // Agent 1 has no spec.json at all.
-        let a = id_with("cavekit", "nospec", ulid_a());
-        seed_agent_dir(&layout, &a);
-        // Agent 2 has a spec with matching name.
-        let b = id_with("claudecode", "withspec", ulid_b());
-        seed_agent_dir_with_spec(&layout, &b, "target");
+        let a = SessionId::new("nospec");
+        seed_session_dir(&layout, &a);
+        let b = SessionId::new("withspec");
+        seed_session_dir_with_spec(&layout, &b, "target");
 
-        let resolved = resolve_agent_id("target", &layout).expect("resolve");
-        assert_eq!(resolved, b);
-    }
-
-    #[test]
-    fn tier_order_prefers_id_prefix_over_name_match() {
-        // If both a name-field match and an id-prefix match exist, the id
-        // prefix wins — tier 2 (prefix) fires before tier 4 (name).
-        let tmp = tempdir().expect("tempdir");
-        let layout = layout_with_base(tmp.path().to_path_buf());
-        // This agent's id starts with "cavekit".
-        let id_hit = id_with("cavekit", "x", ulid_a());
-        seed_agent_dir_with_spec(&layout, &id_hit, "some-name");
-        // This agent's id does NOT start with "cavekit" but its name does.
-        let name_hit = id_with("claudecode", "y", ulid_b());
-        seed_agent_dir_with_spec(&layout, &name_hit, "cavekit-like");
-
-        let resolved = resolve_agent_id("cavekit", &layout).expect("resolve");
-        assert_eq!(resolved, id_hit);
+        let resolved = resolve_session_id("target", &layout).expect("resolve");
+        assert_eq!(resolved.as_str(), b.as_str());
     }
 
     #[test]
     fn not_found_when_no_tier_matches() {
         let tmp = tempdir().expect("tempdir");
         let layout = layout_with_base(tmp.path().to_path_buf());
-        let a = id_with("cavekit", "auth", ulid_a());
-        seed_agent_dir_with_spec(&layout, &a, "auth");
+        let a = SessionId::new("auth");
+        seed_session_dir_with_spec(&layout, &a, "auth");
 
-        let err = resolve_agent_id("completely-unrelated", &layout).expect_err("no match");
+        let err = resolve_session_id("completely-unrelated", &layout).expect_err("no match");
         assert!(matches!(err, ResolveError::NotFound { .. }));
     }
 
     #[test]
-    fn list_agent_ids_sorted() {
+    fn list_session_ids_sorted() {
         let tmp = tempdir().expect("tempdir");
         let layout = layout_with_base(tmp.path().to_path_buf());
-        let b = id_with("cavekit", "bbb", ulid_a());
-        let a = id_with("cavekit", "aaa", ulid_b());
-        let c = id_with("cavekit", "ccc", ulid_c());
-        seed_agent_dir(&layout, &b);
-        seed_agent_dir(&layout, &a);
-        seed_agent_dir(&layout, &c);
+        let b = SessionId::new("bbb");
+        let a = SessionId::new("aaa");
+        let c = SessionId::new("ccc");
+        seed_session_dir(&layout, &b);
+        seed_session_dir(&layout, &a);
+        seed_session_dir(&layout, &c);
 
-        let ids = list_agent_ids(&layout).expect("list");
-        let names: Vec<&str> = ids.iter().map(|i| i.name()).collect();
+        let ids = list_session_ids(&layout).expect("list");
+        let names: Vec<&str> = ids.iter().map(|i| i.name.as_str()).collect();
         assert_eq!(names, vec!["aaa", "bbb", "ccc"]);
     }
 
@@ -561,49 +473,7 @@ mod tests {
         let e = ResolveError::NotFound {
             query: "foo".to_string(),
         };
-        assert_eq!(format!("{e}"), "no agent found matching 'foo'");
-    }
-
-    #[test]
-    fn display_ambiguous_prefix() {
-        let a = id_with("cavekit", "foo", ulid_a());
-        let b = id_with("cavekit", "foobar", ulid_b());
-        let e = ResolveError::AmbiguousPrefix {
-            query: "foo".to_string(),
-            candidates: vec![a.clone(), b.clone()],
-        };
-        let s = format!("{e}");
-        assert!(s.starts_with("ambiguous query 'foo' — prefix matches: "));
-        assert!(s.contains(a.as_str()));
-        assert!(s.contains(b.as_str()));
-    }
-
-    #[test]
-    fn display_ambiguous_substring() {
-        let a = id_with("cavekit", "foo", ulid_a());
-        let b = id_with("cavekit", "foobar", ulid_b());
-        let e = ResolveError::AmbiguousSubstring {
-            query: "foo".to_string(),
-            candidates: vec![a.clone(), b.clone()],
-        };
-        let s = format!("{e}");
-        assert!(s.starts_with("ambiguous query 'foo' — substring matches: "));
-        assert!(s.contains(a.as_str()));
-        assert!(s.contains(b.as_str()));
-    }
-
-    #[test]
-    fn display_ambiguous_name() {
-        let a = id_with("cavekit", "foo", ulid_a());
-        let b = id_with("cavekit", "foobar", ulid_b());
-        let e = ResolveError::AmbiguousName {
-            query: "foo".to_string(),
-            candidates: vec![a.clone(), b.clone()],
-        };
-        let s = format!("{e}");
-        assert!(s.starts_with("ambiguous query 'foo' — name matches: "));
-        assert!(s.contains(a.as_str()));
-        assert!(s.contains(b.as_str()));
+        assert_eq!(format!("{e}"), "no session found matching 'foo'");
     }
 
     #[test]
@@ -611,6 +481,6 @@ mod tests {
         let io_err = io::Error::new(io::ErrorKind::PermissionDenied, "nope");
         let e = ResolveError::Io(io_err);
         let s = format!("{e}");
-        assert!(s.starts_with("io error resolving agent id:"));
+        assert!(s.starts_with("io error resolving session id:"));
     }
 }
