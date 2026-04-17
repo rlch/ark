@@ -48,9 +48,12 @@ thiserror = { workspace = true }
 # facet SHAPE walk once the supervisor exposes concrete AgentSnapshot /
 # SessionSnapshot types.
 ark-types = { path = "../types" }
-# T-025: serde_json backs the `AgentEvent -> rhai::Map` conversion in
-# `build_event_scope` (serialize variant, walk Value, build Dynamic).
+# T-025: serde_json backs the `CoreEvent -> rhai::Map` conversion in
+# `build_event_scope` (serialize flattened event, walk Value, build Dynamic).
 serde_json = { workspace = true }
+# T-011 (soul phase 1): SessionSnapshot carries `started_at: DateTime<Utc>`
+# surfaced to scene predicates through the `session` binding.
+chrono = { workspace = true }
 # T-041..T-046: reconciler drives `zellij action override-layout` via the
 # mux crate's `CommandExecutor` trait (so tests can substitute
 # `StubExecutor`). Uses tokio for debounce (T-043) + async dispatch.

@@ -6,56 +6,64 @@
 //!   `id`, `name`, `env` (env as a `rhai::Map` of `String -> String`).
 //!   Called once per spawn / reconciler pass.
 //! - [`build_event_scope`] — event-time context. Bindings: `event`
-//!   (flat-mapped `AgentEvent` variant), `payload` (extracted for
-//!   `UserEvent`), `agent`, `session`, plus selector-captured locals.
+//!   (flat-mapped `CoreEvent` variant), `payload` (the flattened event
+//!   payload), `session`, plus selector-captured locals.
 //!   Called per reaction / bind op fire.
 //!
-//! # Placeholder snapshot types
+//! # Snapshot types
 //!
-//! [`AgentSnapshot`] and [`SessionSnapshot`] are minimal local structs
-//! for T-025. The full supervisor-owned snapshot types will land in
-//! later tiers (T-056+); this module will be rewired once they are
-//! public.
+//! [`SessionSnapshot`] is the session-runtime view exposed to scene
+//! predicates. Agent-era snapshot types are gone (Phase 1 kills the
+//! agent concept); session state is the only runtime scope.
 //!
-//! # AgentEvent → rhai conversion
+//! # Event → rhai conversion
 //!
-//! Conversion walks `AgentEvent` through `serde_json::Value` and
-//! converts nodes bottom-up to `rhai::Dynamic`. Round-tripping through
-//! JSON is not the cleanest path — a direct facet SHAPE walk is on the
-//! roadmap — but it keeps T-025 independent of facet-SHAPE work and is
-//! sufficient for smoke-level scene predicates.
+//! Conversion walks the [`FlatEvent`] projection through
+//! `serde_json::Value` and converts nodes bottom-up to `rhai::Dynamic`.
+//! Round-tripping through JSON is not the cleanest path — a direct facet
+//! SHAPE walk is on the roadmap — but it keeps scene independent of
+//! facet-SHAPE work and is sufficient for smoke-level scene predicates.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
-use ark_types::AgentEvent;
+use ark_types::{CoreEvent, FlatEvent, SessionId};
 use rhai::{Dynamic, Scope};
 
-/// Placeholder agent runtime snapshot.
+/// Session runtime snapshot exposed to event-scope predicates.
 ///
-/// Replace with the supervisor's own `AgentSnapshot` type when
-/// T-056+ exposes one; the binding name (`agent`) and fields
-/// (`phase`, `name`) are the stable surface scene predicates rely on.
-#[derive(Debug, Clone, Default)]
-pub struct AgentSnapshot {
-    /// Agent lifecycle phase (e.g. `"planning"`, `"executing"`,
-    /// `"review"`). Mirrors `ark_types::Phase` as a string for scene
-    /// predicate use.
-    pub phase: String,
-    /// Agent display name.
-    pub name: String,
-}
-
-/// Placeholder session runtime snapshot.
+/// Replaces the agent-era `AgentSnapshot`. The binding name (`session`)
+/// and fields (`id`, `name`, `cwd`, `started_at`, `extensions`) are the
+/// stable surface scene predicates rely on.
 ///
-/// Replace with the supervisor's own `SessionSnapshot` type when
-/// T-056+ exposes one; the binding name (`session`) and fields
-/// (`id`, `name`) are the stable surface scene predicates rely on.
-#[derive(Debug, Clone, Default)]
+/// See cavekit-soul-phase-1-types.md R9.
+#[derive(Debug, Clone)]
 pub struct SessionSnapshot {
-    /// Session identifier (ULID, UUID, etc. — transparent to scene).
-    pub id: String,
+    /// Session identifier — carries `name` + `ulid`.
+    pub id: SessionId,
     /// Human-readable session label.
     pub name: String,
+    /// Session working directory.
+    pub cwd: PathBuf,
+    /// When the session was created.
+    pub started_at: chrono::DateTime<chrono::Utc>,
+    /// Per-extension state bucket. Each extension owns one entry keyed by
+    /// its manifest name; the value is free-form JSON the extension
+    /// maintains. Exposed to Rhai as `session.extensions` — a string-keyed
+    /// map of dynamic values.
+    pub extensions: BTreeMap<String, serde_json::Value>,
+}
+
+impl Default for SessionSnapshot {
+    fn default() -> Self {
+        Self {
+            id: SessionId::new("default"),
+            name: String::new(),
+            cwd: PathBuf::new(),
+            started_at: chrono::Utc::now(),
+            extensions: BTreeMap::new(),
+        }
+    }
 }
 
 /// Build a fresh [`rhai::Scope`] for the spawn-time scope (R8).
@@ -83,41 +91,56 @@ pub fn build_spawn_scope(
 
 /// Build a fresh [`rhai::Scope`] for the event-time scope (R8).
 ///
-/// Bindings: `event` (variant flat-map), `payload` (extracted for
-/// `UserEvent`; `()` otherwise), `agent` (map of snapshot fields),
-/// `session` (map of snapshot fields), plus every key in `locals`
-/// pushed as its own top-level binding (these are the selector-captured
-/// locals from T-058).
+/// Bindings: `event` (flattened event — `name` + `payload`), `payload`
+/// (the flat payload), `session` (map of snapshot fields), plus every
+/// key in `locals` pushed as its own top-level binding (these are the
+/// selector-captured locals from T-058).
 pub fn build_event_scope(
-    event: &AgentEvent,
-    agent: &AgentSnapshot,
+    event: &CoreEvent,
     session: &SessionSnapshot,
     locals: &BTreeMap<String, Dynamic>,
 ) -> Scope<'static> {
     let mut scope = Scope::new();
 
-    // `event` — serialize the entire variant to JSON, then convert.
-    // `serde_json` preserves the `#[serde(tag = "kind", rename_all = "snake_case")]`
-    // shape so scene predicates can match on `event.kind`.
-    let event_json = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
+    // Flatten the event into the stable (`name`, `payload`) projection
+    // (see types R7 / FlatEvent).
+    let flat = FlatEvent::from(event);
+
+    // `event` — the full flattened object.
+    let event_json =
+        serde_json::to_value(&flat).unwrap_or(serde_json::Value::Null);
     scope.push("event", json_to_dynamic(&event_json));
 
-    // `payload` — extract for UserEvent; elsewhere `()`.
-    if let AgentEvent::UserEvent { payload, .. } = event {
-        scope.push("payload", json_to_dynamic(payload));
-    } else {
-        scope.push("payload", Dynamic::UNIT);
-    }
+    // `payload` — the flat payload, directly. For core variants this is
+    // a JSON object of the variant fields; for extension events it's the
+    // extension-owned payload verbatim.
+    scope.push("payload", json_to_dynamic(&flat.payload));
 
-    // `agent`, `session` — small flat maps.
-    let mut agent_map = rhai::Map::new();
-    agent_map.insert("phase".into(), Dynamic::from(agent.phase.clone()));
-    agent_map.insert("name".into(), Dynamic::from(agent.name.clone()));
-    scope.push("agent", agent_map);
-
+    // `session` — flat map of snapshot fields.
     let mut session_map = rhai::Map::new();
-    session_map.insert("id".into(), Dynamic::from(session.id.clone()));
-    session_map.insert("name".into(), Dynamic::from(session.name.clone()));
+    session_map.insert(
+        "id".into(),
+        Dynamic::from(session.id.as_path_leaf()),
+    );
+    session_map.insert(
+        "name".into(),
+        Dynamic::from(session.name.clone()),
+    );
+    session_map.insert(
+        "cwd".into(),
+        Dynamic::from(session.cwd.display().to_string()),
+    );
+    session_map.insert(
+        "started_at".into(),
+        Dynamic::from(session.started_at.to_rfc3339()),
+    );
+    // `session.extensions` — string-keyed map of per-ext JSON buckets.
+    let ext_map: rhai::Map = session
+        .extensions
+        .iter()
+        .map(|(k, v)| (k.clone().into(), json_to_dynamic(v)))
+        .collect();
+    session_map.insert("extensions".into(), Dynamic::from(ext_map));
     scope.push("session", session_map);
 
     // Selector-captured locals flow in as top-level bindings (T-058).
@@ -167,7 +190,7 @@ fn json_to_dynamic(v: &serde_json::Value) -> Dynamic {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_types::AgentId;
+    use ark_types::ExtEvent;
 
     #[test]
     fn spawn_scope_has_expected_keys() {
@@ -175,7 +198,6 @@ mod tests {
             .into_iter()
             .collect();
         let scope = build_spawn_scope("/tmp", "abc", "demo", &env);
-        // contains() checks whether the binding is in scope.
         assert!(scope.contains("cwd"));
         assert!(scope.contains("id"));
         assert!(scope.contains("name"));
@@ -184,8 +206,6 @@ mod tests {
 
     #[test]
     fn spawn_scope_eval_roundtrip() {
-        // Feed the scope to a real Rhai engine and evaluate a
-        // predicate that reads every binding.
         let engine = rhai::Engine::new();
         let env: BTreeMap<String, String> =
             [("HOME".into(), "/home/me".into())].into_iter().collect();
@@ -200,24 +220,15 @@ mod tests {
     }
 
     #[test]
-    fn event_scope_user_event_exposes_payload() {
-        let id = AgentId::new("test", "agent");
-        let evt = AgentEvent::UserEvent {
-            name: "myext.something".into(),
-            source: "ext:myext".into(),
+    fn event_scope_ext_event_exposes_payload() {
+        let evt = CoreEvent::Ext(ExtEvent {
+            ext: "myext".into(),
+            kind: "something".into(),
             payload: serde_json::json!({ "n": 42, "tag": "alpha" }),
-        };
-        let agent = AgentSnapshot {
-            phase: "planning".into(),
-            name: "builder".into(),
-        };
-        let session = SessionSnapshot {
-            id: "s1".into(),
-            name: "session-1".into(),
-        };
-        let _ = id;
+        });
+        let session = SessionSnapshot::default();
         let locals = BTreeMap::new();
-        let scope = build_event_scope(&evt, &agent, &session, &locals);
+        let scope = build_event_scope(&evt, &session, &locals);
 
         let engine = rhai::Engine::new();
         let mut scope2 = scope.clone();
@@ -232,53 +243,47 @@ mod tests {
             .expect("payload tag should evaluate");
         assert_eq!(tag, "alpha");
 
-        let mut scope4 = scope.clone();
-        let phase: String = engine
-            .eval_expression_with_scope(&mut scope4, r#"agent["phase"]"#)
-            .expect("agent phase should evaluate");
-        assert_eq!(phase, "planning");
-
-        let mut scope5 = scope;
-        let sid: String = engine
-            .eval_expression_with_scope(&mut scope5, r#"session["id"]"#)
-            .expect("session id should evaluate");
-        assert_eq!(sid, "s1");
+        let mut scope4 = scope;
+        let name: String = engine
+            .eval_expression_with_scope(&mut scope4, r#"event["name"]"#)
+            .expect("event name should evaluate");
+        assert_eq!(name, "myext.something");
     }
 
     #[test]
-    fn event_scope_non_user_event_payload_is_unit() {
-        let id = AgentId::new("test", "agent");
-        let evt = AgentEvent::Error {
-            id: id.clone(),
-            message: "boom".into(),
+    fn event_scope_exposes_session_extensions() {
+        let mut session = SessionSnapshot::default();
+        session.name = "demo".into();
+        session
+            .extensions
+            .insert("myext".into(), serde_json::json!({ "counter": 7 }));
+        let evt = CoreEvent::Error {
+            error: "boom".into(),
         };
-        let agent = AgentSnapshot::default();
-        let session = SessionSnapshot::default();
         let locals = BTreeMap::new();
-        let scope = build_event_scope(&evt, &agent, &session, &locals);
+        let scope = build_event_scope(&evt, &session, &locals);
         let engine = rhai::Engine::new();
         let mut scope2 = scope;
-        // Payload is unit (aka ()) — type check via `type_of`.
-        let t: String = engine
-            .eval_expression_with_scope(&mut scope2, r#"type_of(payload)"#)
-            .expect("type_of(payload) should evaluate");
-        assert_eq!(t, "()");
+        let counter: i64 = engine
+            .eval_expression_with_scope(
+                &mut scope2,
+                r#"session["extensions"]["myext"]["counter"]"#,
+            )
+            .expect("session.extensions.myext.counter should evaluate");
+        assert_eq!(counter, 7);
     }
 
     #[test]
     fn event_scope_captures_locals() {
-        let id = AgentId::new("test", "agent");
-        let evt = AgentEvent::Error {
-            id,
-            message: "boom".into(),
+        let evt = CoreEvent::Error {
+            error: "boom".into(),
         };
-        let agent = AgentSnapshot::default();
         let session = SessionSnapshot::default();
         let mut locals: BTreeMap<String, Dynamic> = BTreeMap::new();
         locals.insert("path".into(), Dynamic::from("src/README.md".to_string()));
         locals.insert("count".into(), Dynamic::from(7_i64));
 
-        let scope = build_event_scope(&evt, &agent, &session, &locals);
+        let scope = build_event_scope(&evt, &session, &locals);
         let engine = rhai::Engine::new();
         let mut scope2 = scope.clone();
         let p: String = engine
@@ -294,28 +299,26 @@ mod tests {
     }
 
     #[test]
-    fn event_scope_started_variant() {
-        // Smoke test: Started variant flows through the JSON pipeline.
-        let spec = ark_types::AgentSpec::new(
-            AgentId::new("test", "agent"),
-            "demo",
-            "cavekit",
-            "claude-code",
-            std::path::PathBuf::from("/tmp"),
-            vec!["echo".into(), "hello".into()],
-        );
-        let evt = AgentEvent::Started { spec };
-        let agent = AgentSnapshot::default();
+    fn event_scope_core_session_started_event_name() {
+        let spec = ark_types::SessionSpec {
+            id: SessionId::new("demo"),
+            name: "demo".to_string(),
+            scene_path: None,
+            cwd: PathBuf::from("/tmp"),
+            env: BTreeMap::new(),
+            created_at: chrono::Utc::now(),
+            ext_config: BTreeMap::new(),
+        };
+        let evt = CoreEvent::SessionStarted { spec };
         let session = SessionSnapshot::default();
         let locals = BTreeMap::new();
-        let scope = build_event_scope(&evt, &agent, &session, &locals);
-        // `event.kind` should be `"started"` per serde `rename_all = "snake_case"`.
+        let scope = build_event_scope(&evt, &session, &locals);
         let engine = rhai::Engine::new();
         let mut scope2 = scope;
-        let kind: String = engine
-            .eval_expression_with_scope(&mut scope2, r#"event["kind"]"#)
-            .expect("event kind should evaluate");
-        assert_eq!(kind, "started");
+        let name: String = engine
+            .eval_expression_with_scope(&mut scope2, r#"event["name"]"#)
+            .expect("event name should evaluate");
+        assert_eq!(name, "ark.core.session_started");
     }
 
     #[test]
