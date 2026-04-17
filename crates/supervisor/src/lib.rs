@@ -81,7 +81,7 @@ pub use permission::{
 pub mod engine_stub;
 pub use engine_stub::{AcpEngineStub, preflight as engine_preflight};
 pub use orchestration::{
-    SupervisorMode, finalize_state, outcome_exit_code, run_supervisor, run_supervisor_with,
+    SupervisorMode, finalize_state, run_supervisor, run_supervisor_with,
 };
 
 // W-1: supervisor_main bootstrap helper (cavekit-supervisor R1 + R3 step 12).

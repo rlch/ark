@@ -36,10 +36,16 @@
 //!
 //! ## Shape of the return
 //!
-//! On success [`run_supervisor`] returns the `Outcome` the orchestrator
-//! produced. The daemon path turns that into an exit code via
-//! [`outcome_exit_code`]; the foreground path may propagate it up to the
-//! parent CLI directly.
+//! [`run_supervisor`] returns `Result<(), anyhow::Error>` — `Ok(())` on a
+//! clean run (including the case where the orchestrator produced a
+//! methodology-specific "failed" outcome; that lands on status.json via
+//! [`finalize_state`] but does not flow back out of the return type). `Err`
+//! signals that the supervisor infrastructure itself could not start or
+//! could not complete. Callers (daemon path in `ark-cli` / foreground path)
+//! derive their Unix exit code with `match result { Ok(()) => 0, Err(_) => 1 }`.
+//! Legacy `Outcome`-specific branches (Killed, Timeout, Crashed) collapse
+//! into the generic "error" case — per cavekit-soul-phase-1-supervisor.md R3,
+//! the richer lifecycle semantics re-home inside extensions in Phase 2+.
 
 use std::sync::Arc;
 
@@ -90,23 +96,6 @@ pub enum SupervisorMode {
 /// out for the real figment-loaded type.
 const DEFAULT_EVENT_BUS_CAPACITY: usize = 256;
 
-/// Map an `Outcome` to a Unix exit code.
-///
-/// * `Success` → 0
-/// * `Failed`  → 1
-/// * `Killed`  → 2
-/// * `Timeout` → 2 (treated same as Killed — the supervisor hit a kill
-///   signal via cancel, and Unix generally surfaces timeouts that way)
-/// * `Crashed` → 3
-pub fn outcome_exit_code(outcome: &Outcome) -> i32 {
-    match outcome {
-        Outcome::Success { .. } => 0,
-        Outcome::Failed { .. } => 1,
-        Outcome::Killed | Outcome::Timeout => 2,
-        Outcome::Crashed { .. } => 3,
-    }
-}
-
 /// Run the supervisor to completion.
 ///
 /// The full 18-step R3 sequence. Long-running: the inner
@@ -119,7 +108,7 @@ pub async fn run_supervisor(
     config: Config,
     ready_writer: Option<ReadyWriter>,
     external_cancel: Option<CancellationToken>,
-) -> Result<Outcome> {
+) -> Result<()> {
     let state_layout = StateLayout::from_env().context("resolve state layout")?;
     // Soul phase 1 T-013: engine + orchestrator are now optional. The
     // factory-built concrete instances become `Some(..)` here when config
@@ -165,7 +154,7 @@ pub async fn run_supervisor_with(
     run_preflight: bool,
     ready_writer: Option<ReadyWriter>,
     external_cancel: Option<CancellationToken>,
-) -> Result<Outcome> {
+) -> Result<()> {
     // ---- Step 1: StateDir + spec.json + initial status.json ----
     let agent_dir = state_layout.agent_dir(&spec.id);
     StateLayout::ensure_dir_0700(&agent_dir).context("ensure agent state dir")?;
@@ -686,7 +675,7 @@ pub async fn run_supervisor_with(
     drop(lock_guard);
     debug!("R3 step 18: lock released");
 
-    Ok(outcome)
+    Ok(())
 }
 
 /// Write the authoritative `spec.json` under the agent state dir.
@@ -1026,11 +1015,9 @@ mod tests {
         .await
         .expect("run_supervisor_with ok");
 
-        // Outcome must be Success.
-        match &result {
-            Outcome::Success { .. } => {}
-            other => panic!("expected Success, got {other:?}"),
-        }
+        // Return type is `Result<(), anyhow::Error>` — an `Ok(())` here is
+        // the success signal the daemon path derives exit-code 0 from.
+        let () = result;
 
         // ---- Step 1 verification: StateDir + spec.json + status.json present
         assert!(layout.agent_dir(&spec.id).is_dir(), "agent dir must exist");
@@ -1156,10 +1143,9 @@ mod tests {
         .await
         .expect("run_supervisor_with with scene_path ok");
 
-        assert!(
-            matches!(result, Outcome::Success { .. }),
-            "expected Success, got {result:?}"
-        );
+        // `run_supervisor_with` now returns `Result<()>`; a successful boot
+        // is just `Ok(())` here.
+        let () = result;
 
         // Step 1 verification: state dir + spec.json present, and the
         // spec.json round-trip preserved the scene_path we set.
@@ -1235,28 +1221,6 @@ mod tests {
         drop(re);
     }
 
-    #[test]
-    fn outcome_exit_code_matches_kit() {
-        assert_eq!(
-            outcome_exit_code(&Outcome::Success { artifacts: vec![] }),
-            0
-        );
-        assert_eq!(
-            outcome_exit_code(&Outcome::Failed {
-                reason: "boom".into()
-            }),
-            1
-        );
-        assert_eq!(outcome_exit_code(&Outcome::Killed), 2);
-        assert_eq!(outcome_exit_code(&Outcome::Timeout), 2);
-        assert_eq!(
-            outcome_exit_code(&Outcome::Crashed {
-                reason: "panic".into()
-            }),
-            3
-        );
-    }
-
     fn short_tempdir() -> tempfile::TempDir {
         tempfile::Builder::new()
             .prefix("sv-run")
@@ -1317,7 +1281,8 @@ mod tests {
         )
         .await
         .expect("run_supervisor_with ok (signal handler install path must not error)");
-        assert!(matches!(result, Outcome::Success { .. }));
+        // `Result<()>` success is just `Ok(())`.
+        let () = result;
 
         // Socket must be unlinked on the way out — same invariant the
         // signal handler's `unlink_if_exists` path protects on SIGTERM.

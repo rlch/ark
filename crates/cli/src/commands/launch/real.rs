@@ -129,21 +129,28 @@ impl SupervisorSpawner for ForkSupervisor {
                     }
                 };
 
-                let outcome = runtime.block_on(ark_supervisor::supervisor_main(
+                let result = runtime.block_on(ark_supervisor::supervisor_main(
                     spec,
                     ark_supervisor::SupervisorMode::Daemon,
                     config,
                     Some(writer),
                     None,
                 ));
-                match outcome {
-                    Ok(o) => {
-                        tracing::info!(?o, "supervisor exited cleanly");
-                        std::process::exit(ark_supervisor::outcome_exit_code(&o));
+                // Cavekit-soul-phase-1 T-015: `supervisor_main` now returns
+                // `Result<(), anyhow::Error>`. The richer `Outcome` variants
+                // (Killed / Timeout / Crashed) have been collapsed into the
+                // generic error case — infrastructure failures or an
+                // orchestrator-level crash both exit with 1, while a clean
+                // end-of-life exits with 0. Methodology-specific lifecycle
+                // signalling re-homes inside extensions in Phase 2+.
+                match result {
+                    Ok(()) => {
+                        tracing::info!("supervisor exited cleanly");
+                        std::process::exit(0);
                     }
                     Err(e) => {
                         tracing::error!(error = %e, "supervisor returned Err");
-                        std::process::exit(3);
+                        std::process::exit(1);
                     }
                 }
             }

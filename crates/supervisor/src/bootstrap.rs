@@ -16,14 +16,15 @@
 //!    propagating. Callers that run inside a detached daemon (where the only
 //!    observer is `supervisor.log`) get a visible trace line.
 //!
-//! 3. **Outcome tracing**: on success, the final `Outcome` is logged at
-//!    `info` level so `supervisor.log` always contains the terminal state.
+//! 3. **Completion tracing**: on success, the clean exit is logged at
+//!    `info` level so `supervisor.log` always carries a terminal record.
 //!
 //! ## Callers
 //!
 //! * **Daemon branch** (`spawn.rs`, post-`daemonize()`): builds a
 //!   current-thread tokio runtime and calls `runtime.block_on(supervisor_main(...))`.
-//!   Maps the returned `Outcome` to an exit code via [`crate::outcome_exit_code`].
+//!   Maps the returned `Result<()>` to a Unix exit code with
+//!   `match result { Ok(()) => 0, Err(_) => 1 }`.
 //!
 //! * **Foreground / `--no-detach`** (`spawn.rs`, no-fork path): spawns a
 //!   background thread with a tokio runtime that drives `supervisor_main(...)`.
@@ -32,7 +33,7 @@
 
 use anyhow::Result;
 use ark_core::Config;
-use ark_types::{AgentSpec, CancellationToken, Outcome};
+use ark_types::{AgentSpec, CancellationToken};
 use tracing::{error, info};
 
 use crate::orchestration::SupervisorMode;
@@ -60,26 +61,28 @@ use crate::ready_signal::ReadyWriter;
 ///
 /// # Returns
 ///
-/// `Ok(Outcome)` on a clean run (even if the agent itself failed — that's
-/// `Outcome::Failed`). `Err` if the supervisor infrastructure could not
-/// start (lock, socket, scene compile, etc.).
+/// `Ok(())` on a clean run. Methodology-specific "failed" / "killed" /
+/// "timeout" / "crashed" states are persisted to `status.json` via
+/// [`crate::finalize_state`] but do not flow back out of the return type —
+/// they all still yield `Ok(())` here. `Err` signals that the supervisor
+/// infrastructure itself could not start or could not complete (lock,
+/// socket, scene compile, etc.). See cavekit-soul-phase-1-supervisor.md R3.
 pub async fn supervisor_main(
     spec: AgentSpec,
     mode: SupervisorMode,
     config: Config,
     ready_writer: Option<ReadyWriter>,
     external_cancel: Option<CancellationToken>,
-) -> Result<Outcome> {
+) -> Result<()> {
     let agent_id = spec.id.clone();
 
     match crate::run_supervisor(spec, mode, config, ready_writer, external_cancel).await {
-        Ok(outcome) => {
+        Ok(()) => {
             info!(
                 agent = %agent_id.as_str(),
-                ?outcome,
                 "supervisor_main: supervisor exited cleanly"
             );
-            Ok(outcome)
+            Ok(())
         }
         Err(err) => {
             // The ReadyWriter (if any) was passed into run_supervisor and
@@ -114,16 +117,16 @@ mod tests {
         )
     }
 
-    /// supervisor_main propagates Ok(Outcome) from a successful run.
+    /// supervisor_main propagates Ok(()) from a successful run.
     ///
     /// This test exercises the full R3 sequence via the injected stubs in
     /// orchestration.rs. It verifies that supervisor_main:
     ///   1. Threads the spec + config through to run_supervisor.
-    ///   2. Returns Ok(Outcome::Success) on a clean run.
-    ///   3. Logs the outcome at info level (verified by the tracing layer
+    ///   2. Returns Ok(()) on a clean run.
+    ///   3. Logs the clean exit at info level (verified by the tracing layer
     ///      in CI; not asserted here).
     #[tokio::test]
-    async fn supervisor_main_returns_ok_outcome_on_success() {
+    async fn supervisor_main_returns_ok_on_success() {
         // Reuse the orchestration test helpers. We can't inject stubs through
         // supervisor_main (it calls run_supervisor which builds via factory),
         // so we rely on the factory returning Err for "stub-engine" (unknown
