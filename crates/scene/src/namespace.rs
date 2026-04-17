@@ -95,9 +95,9 @@ fn rewrite_ops(ops: &mut [OpNode], ctx: &NamespaceContext) -> Result<(), SceneEr
     Ok(())
 }
 
-/// Returns `true` when `kind` is a well-known `AgentEvent` kind (either
+/// Returns `true` when `kind` is a well-known `CoreEvent` kind (either
 /// PascalCase or snake_case spelling). Well-known kinds must NOT be
-/// namespace-qualified — they are `AgentEvent` discriminators, not user-
+/// namespace-qualified — they are `CoreEvent` discriminators, not user-
 /// or extension-owned event names.
 fn is_well_known_event(kind: &str) -> bool {
     EventKind::parse(kind).is_some()
@@ -107,8 +107,8 @@ fn is_well_known_event(kind: &str) -> bool {
 /// ops in the body.
 fn rewrite_on(on: &mut OnNode, ctx: &NamespaceContext) -> Result<(), SceneError> {
     // Rewrite the event selector kind if present, but skip well-known
-    // AgentEvent kinds (FileEdited, ToolUse, etc.) — those are host-owned
-    // discriminators and must not be namespace-qualified.
+    // CoreEvent kinds (Log, Error, SessionStarted, etc.) — those are
+    // host-owned discriminators and must not be namespace-qualified.
     if let Some(selector) = &mut on.selector {
         if !is_well_known_event(&selector.kind) {
             selector.kind = rewrite_name(&selector.kind, ctx)?;

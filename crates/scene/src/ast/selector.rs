@@ -28,9 +28,9 @@ use thiserror::Error;
 /// event="<selector>"` (R11) when matching reactions for removal.
 #[derive(Facet, Debug, Clone, PartialEq, Eq)]
 pub struct EventSelector {
-    /// Event kind — the bare identifier after `on` (e.g. `"FileEdited"`,
-    /// `"ark.acp.tool_call"`). Validated against the `AgentEvent` variant
-    /// set by a later compile pass (T-057); this struct carries it
+    /// Event kind — the bare identifier after `on` (e.g. `"Error"`,
+    /// `"Ext"`, `"myext.something"`). Validated against the `CoreEvent`
+    /// variant set by a later compile pass (T-057); this struct carries it
     /// verbatim as authored.
     pub kind: String,
 

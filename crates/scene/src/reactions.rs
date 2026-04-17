@@ -12,22 +12,19 @@
 //!
 //! - `by_kind`: canonical snake_case `EventKind` string → Vec<Entry>.
 //!   Every reaction lives here.
-//! - `by_user_event_name`: dotted event name (`ark.acp.tool_call`,
-//!   `myext.something`) → Vec<Entry>. Populated only for UserEvent
-//!   selectors that pin a `name=<literal>` field pattern. Entries in
-//!   this index are ALSO present in `by_kind` under `"user_event"` —
-//!   the secondary index is purely a dispatcher fan-out optimisation.
+//! - `by_ext_name`: dotted event name (`myext.something`) → Vec<Entry>.
+//!   Populated only for `Ext` selectors that pin a literal `name=<val>`
+//!   field pattern. Entries in this index are ALSO present in `by_kind`
+//!   under `"ext"` — the secondary index is purely a dispatcher
+//!   fan-out optimisation.
 //!
 //! # Selector matching (T-058 + T-059)
 //!
-//! [`match_selector`] walks a selector against a live `AgentEvent`,
+//! [`match_selector`] walks a selector against a live `CoreEvent`,
 //! returning captured locals on match. Rules:
 //!
-//! 1. Field value comes from the event's flat JSON representation
-//!    (round-trip via `serde_json`).
-//! 2. For `UserEvent` selectors with bare field names (not `name`,
-//!    `source`, `payload`), the lookup falls through to
-//!    `payload.<field>`. `payload.X` is an explicit escape hatch.
+//! 1. Event is first flattened to a [`FlatEvent`] (name + payload).
+//! 2. Field value comes from the flat payload JSON.
 //! 3. Glob patterns capture the matched string under the field name as
 //!    a local; regex patterns also capture the full match plus any
 //!    named groups.
@@ -42,7 +39,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use ark_types::AgentEvent;
+use ark_types::{CoreEvent, FlatEvent};
 use rhai::Dynamic;
 
 use crate::ast::ops::OpNode;
@@ -53,132 +50,62 @@ use crate::parse::SceneIR;
 use crate::rhai::{compile_in_scope, Engine, Program, RhaiScope};
 
 // ---------------------------------------------------------------------------
-// EventKind — snake_case classification of `AgentEvent`.
+// EventKind — snake_case classification of `CoreEvent`.
 // ---------------------------------------------------------------------------
 
-/// Enumerated discriminator of [`AgentEvent`] — matches the serde
-/// `tag = "kind"` rename (`snake_case`). Used as the primary-index key
+/// Enumerated discriminator of [`CoreEvent`] — matches the serde
+/// `tag = "type"` rename (`snake_case`). Used as the primary-index key
 /// in [`ReactionRegistry`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum EventKind {
-    /// `AgentEvent::Started` — canonical `"started"`.
-    Started,
-    /// `AgentEvent::TabOpened` — canonical `"tab_opened"`.
-    TabOpened,
-    /// `AgentEvent::TabClosed` — canonical `"tab_closed"`.
-    TabClosed,
-    /// `AgentEvent::Progress` — canonical `"progress"`.
-    Progress,
-    /// `AgentEvent::TaskDone` — canonical `"task_done"`.
-    TaskDone,
-    /// `AgentEvent::Iteration` — canonical `"iteration"`.
-    Iteration,
-    /// `AgentEvent::PhaseTransition` — canonical `"phase_transition"`.
-    PhaseTransition,
-    /// `AgentEvent::ToolUse` — canonical `"tool_use"`.
-    ToolUse,
-    /// `AgentEvent::Message` — canonical `"message"`.
-    Message,
-    /// `AgentEvent::FileEdited` — canonical `"file_edited"`.
-    FileEdited,
-    /// `AgentEvent::ReviewComment` — canonical `"review_comment"`.
-    ReviewComment,
-    /// `AgentEvent::PermissionAsked` — canonical `"permission_asked"`.
-    PermissionAsked,
-    /// `AgentEvent::PermissionResolved` — canonical `"permission_resolved"`.
-    PermissionResolved,
-    /// `AgentEvent::Stall` — canonical `"stall"`.
-    Stall,
-    /// `AgentEvent::Log` — canonical `"log"`.
+    /// `CoreEvent::Log` — canonical `"log"`.
     Log,
-    /// `AgentEvent::Error` — canonical `"error"`.
+    /// `CoreEvent::Error` — canonical `"error"`.
     Error,
-    /// `AgentEvent::Done` — canonical `"done"`.
-    Done,
-    /// `AgentEvent::UserEvent` — canonical `"user_event"`.
-    UserEvent,
+    /// `CoreEvent::SessionStarted` — canonical `"session_started"`.
+    SessionStarted,
+    /// `CoreEvent::SessionEnded` — canonical `"session_ended"`.
+    SessionEnded,
+    /// `CoreEvent::Ext(_)` — canonical `"ext"`. Extension-emitted events.
+    /// Secondary index by `<ext>.<kind>` dotted name.
+    Ext,
 }
 
 impl EventKind {
-    /// Canonical snake_case rendering (matches `AgentEvent`'s
-    /// `#[serde(rename_all = "snake_case")]` tag).
+    /// Canonical snake_case rendering (matches `CoreEvent`'s
+    /// `#[serde(tag = "type", rename_all = "snake_case")]`).
     pub fn as_str(self) -> &'static str {
         match self {
-            EventKind::Started => "started",
-            EventKind::TabOpened => "tab_opened",
-            EventKind::TabClosed => "tab_closed",
-            EventKind::Progress => "progress",
-            EventKind::TaskDone => "task_done",
-            EventKind::Iteration => "iteration",
-            EventKind::PhaseTransition => "phase_transition",
-            EventKind::ToolUse => "tool_use",
-            EventKind::Message => "message",
-            EventKind::FileEdited => "file_edited",
-            EventKind::ReviewComment => "review_comment",
-            EventKind::PermissionAsked => "permission_asked",
-            EventKind::PermissionResolved => "permission_resolved",
-            EventKind::Stall => "stall",
             EventKind::Log => "log",
             EventKind::Error => "error",
-            EventKind::Done => "done",
-            EventKind::UserEvent => "user_event",
+            EventKind::SessionStarted => "session_started",
+            EventKind::SessionEnded => "session_ended",
+            EventKind::Ext => "ext",
         }
     }
 
     /// Parse a selector kind token, accepting both canonical snake_case
-    /// and the PascalCase spelling scene authors typically use (per R4
-    /// — `on FileEdited`, `on PhaseTransition`). Returns `None` for
-    /// unknown tokens.
+    /// and PascalCase spellings that scene authors typically write.
+    /// Returns `None` for unknown tokens.
     pub fn parse(input: &str) -> Option<Self> {
         match input {
-            "started" | "Started" => Some(EventKind::Started),
-            "tab_opened" | "TabOpened" => Some(EventKind::TabOpened),
-            "tab_closed" | "TabClosed" => Some(EventKind::TabClosed),
-            "progress" | "Progress" => Some(EventKind::Progress),
-            "task_done" | "TaskDone" => Some(EventKind::TaskDone),
-            "iteration" | "Iteration" => Some(EventKind::Iteration),
-            "phase_transition" | "PhaseTransition" => Some(EventKind::PhaseTransition),
-            "tool_use" | "ToolUse" => Some(EventKind::ToolUse),
-            "message" | "Message" => Some(EventKind::Message),
-            "file_edited" | "FileEdited" => Some(EventKind::FileEdited),
-            "review_comment" | "ReviewComment" => Some(EventKind::ReviewComment),
-            "permission_asked" | "PermissionAsked" => Some(EventKind::PermissionAsked),
-            "permission_resolved" | "PermissionResolved" => Some(EventKind::PermissionResolved),
-            "stall" | "Stall" => Some(EventKind::Stall),
             "log" | "Log" => Some(EventKind::Log),
             "error" | "Error" => Some(EventKind::Error),
-            "done" | "Done" => Some(EventKind::Done),
-            "user_event" | "UserEvent" => Some(EventKind::UserEvent),
+            "session_started" | "SessionStarted" => Some(EventKind::SessionStarted),
+            "session_ended" | "SessionEnded" => Some(EventKind::SessionEnded),
+            "ext" | "Ext" => Some(EventKind::Ext),
             _ => None,
         }
     }
 
-    /// Classify a live [`AgentEvent`] into its [`EventKind`].
-    pub fn of(event: &AgentEvent) -> Self {
+    /// Classify a live [`CoreEvent`] into its [`EventKind`].
+    pub fn of(event: &CoreEvent) -> Self {
         match event {
-            AgentEvent::Started { .. } => EventKind::Started,
-            AgentEvent::TabOpened { .. } => EventKind::TabOpened,
-            AgentEvent::TabClosed { .. } => EventKind::TabClosed,
-            AgentEvent::Progress { .. } => EventKind::Progress,
-            AgentEvent::TaskDone { .. } => EventKind::TaskDone,
-            AgentEvent::Iteration { .. } => EventKind::Iteration,
-            AgentEvent::PhaseTransition { .. } => EventKind::PhaseTransition,
-            AgentEvent::ToolUse { .. } => EventKind::ToolUse,
-            AgentEvent::Message { .. } => EventKind::Message,
-            AgentEvent::FileEdited { .. } => EventKind::FileEdited,
-            AgentEvent::ReviewComment { .. } => EventKind::ReviewComment,
-            AgentEvent::PermissionAsked { .. } => EventKind::PermissionAsked,
-            AgentEvent::PermissionResolved { .. } => EventKind::PermissionResolved,
-            AgentEvent::Stall { .. } => EventKind::Stall,
-            AgentEvent::Log { .. } => EventKind::Log,
-            AgentEvent::Error { .. } => EventKind::Error,
-            AgentEvent::Done { .. } => EventKind::Done,
-            AgentEvent::UserEvent { .. } => EventKind::UserEvent,
-            // `#[non_exhaustive]` upstream — any future variant lands
-            // here with a synthetic classification as UserEvent so the
-            // dispatcher degrades predictably. T-057-style validation
-            // gates user-facing unknowns at parse time.
-            _ => EventKind::UserEvent,
+            CoreEvent::Log { .. } => EventKind::Log,
+            CoreEvent::Error { .. } => EventKind::Error,
+            CoreEvent::SessionStarted { .. } => EventKind::SessionStarted,
+            CoreEvent::SessionEnded { .. } => EventKind::SessionEnded,
+            CoreEvent::Ext(_) => EventKind::Ext,
         }
     }
 }
@@ -233,11 +160,7 @@ impl ReactionOrigin {
 /// One compiled reaction.
 ///
 /// Carries the parsed selector, an optional compiled `when=` predicate,
-/// the ordered op list, and origin attribution. Cloneable so the
-/// registry can stash the entry in both primary + secondary indices
-/// cheaply (op list is an `Arc`-friendly `Vec`; the compiled program
-/// clones the underlying `rhai::AST` cheaply thanks to its internal
-/// `Arc`).
+/// the ordered op list, and origin attribution.
 #[derive(Debug, Clone)]
 pub struct Entry {
     /// Parsed event selector (kind + field patterns).
@@ -257,11 +180,11 @@ pub struct Entry {
 /// Reaction index built at scene compile.
 ///
 /// Primary lookup by [`EventKind`]; secondary lookup by
-/// `UserEvent` name. See module docs for indexing semantics.
+/// `Ext` dotted name (`<ext>.<kind>`). See module docs for indexing semantics.
 #[derive(Debug, Clone, Default)]
 pub struct ReactionRegistry {
     by_kind: BTreeMap<&'static str, Vec<Entry>>,
-    by_user_event_name: BTreeMap<String, Vec<Entry>>,
+    by_ext_name: BTreeMap<String, Vec<Entry>>,
 }
 
 impl ReactionRegistry {
@@ -281,22 +204,22 @@ impl ReactionRegistry {
     }
 
     /// Insert `entry` under the primary `kind` slot, mirroring into
-    /// the secondary index when `user_event_name` is `Some`. Callers
-    /// that pass a non-`UserEvent` kind together with a name will see
-    /// the name ignored (the mirror is only written for UserEvent).
+    /// the secondary index when `ext_name` is `Some`. Callers
+    /// that pass a non-`Ext` kind together with a name will see
+    /// the name ignored (the mirror is only written for Ext).
     pub fn insert(
         &mut self,
         kind: EventKind,
-        user_event_name: Option<String>,
+        ext_name: Option<String>,
         entry: Entry,
     ) {
         self.by_kind
             .entry(kind.as_str())
             .or_default()
             .push(entry.clone());
-        if let Some(name) = user_event_name {
-            if kind == EventKind::UserEvent {
-                self.by_user_event_name
+        if let Some(name) = ext_name {
+            if kind == EventKind::Ext {
+                self.by_ext_name
                     .entry(name)
                     .or_default()
                     .push(entry);
@@ -313,10 +236,10 @@ impl ReactionRegistry {
             .unwrap_or(&[])
     }
 
-    /// Fetch every reaction registered under a `UserEvent:<name>`
-    /// selector. Subset of `by_kind(EventKind::UserEvent)`.
-    pub fn by_user_event_name(&self, name: &str) -> &[Entry] {
-        self.by_user_event_name
+    /// Fetch every reaction registered under an `Ext` dotted name
+    /// (`<ext>.<kind>`). Subset of `by_kind(EventKind::Ext)`.
+    pub fn by_ext_name(&self, name: &str) -> &[Entry] {
+        self.by_ext_name
             .get(name)
             .map(|v| v.as_slice())
             .unwrap_or(&[])
@@ -332,12 +255,12 @@ impl ReactionRegistry {
         }
         // Drop empty slots so iter counts stay consistent.
         self.by_kind.retain(|_, v| !v.is_empty());
-        // Rebuild secondary index from surviving UserEvent entries.
-        self.by_user_event_name.clear();
-        if let Some(ue) = self.by_kind.get("user_event") {
-            for entry in ue {
-                if let Some(name) = user_event_name_of(&entry.selector) {
-                    self.by_user_event_name
+        // Rebuild secondary index from surviving Ext entries.
+        self.by_ext_name.clear();
+        if let Some(ext) = self.by_kind.get("ext") {
+            for entry in ext {
+                if let Some(name) = ext_name_of(&entry.selector) {
+                    self.by_ext_name
                         .entry(name)
                         .or_default()
                         .push(entry.clone());
@@ -352,9 +275,9 @@ impl ReactionRegistry {
         self.by_kind.iter()
     }
 
-    /// Iterate every `(user_event_name, entries)` pair.
-    pub fn iter_user_events(&self) -> impl Iterator<Item = (&String, &Vec<Entry>)> {
-        self.by_user_event_name.iter()
+    /// Iterate every `(ext_name, entries)` pair.
+    pub fn iter_ext_names(&self) -> impl Iterator<Item = (&String, &Vec<Entry>)> {
+        self.by_ext_name.iter()
     }
 }
 
@@ -374,8 +297,7 @@ impl ReactionRegistry {
 ///
 /// Parse errors (unknown event kind, malformed Rhai predicate) surface
 /// immediately — build_registry does NOT continue past the first bad
-/// reaction. Callers that want collect-all behaviour should wrap with
-/// their own driver.
+/// reaction.
 #[allow(clippy::result_large_err)]
 pub fn build_registry(
     ir: &SceneIR,
@@ -386,12 +308,6 @@ pub fn build_registry(
         if let SceneBodyNode::On(on) = node {
             let selector = resolve_selector_for_on(ir, idx, on)?;
             let kind = EventKind::parse(&selector.kind).ok_or_else(|| {
-                // An unknown selector kind at registry build time
-                // falls back to `scene/unknown-event-field`-class
-                // diagnostic; we reuse `UnknownEventField` with a
-                // synthetic "kind" field name rather than adding a
-                // brand-new variant until the compile-pass pipeline
-                // catches up.
                 SceneError::UnknownEventField {
                     event_kind: selector.kind.clone(),
                     field: "<kind>".to_string(),
@@ -410,8 +326,8 @@ pub fn build_registry(
                 Some(src) => Some(compile_in_scope(engine, src, RhaiScope::Event)?),
                 None => None,
             };
-            let user_event_name = if kind == EventKind::UserEvent {
-                user_event_name_of(&selector)
+            let ext_name = if kind == EventKind::Ext {
+                ext_name_of(&selector)
             } else {
                 None
             };
@@ -421,17 +337,17 @@ pub fn build_registry(
                 ops: on.ops.clone(),
                 origin: ReactionOrigin::user_scene(ir.path.clone()),
             };
-            registry.insert(kind, user_event_name, entry);
+            registry.insert(kind, ext_name, entry);
         }
     }
     Ok(registry)
 }
 
-/// Extract the `name` field pattern value from a UserEvent selector
+/// Extract the `name` field pattern value from an Ext selector
 /// when pinned as an exact string — used to key the secondary index.
-/// `None` for non-UserEvent or for selectors whose `name=` pattern is
+/// `None` for non-Ext or for selectors whose `name=` pattern is
 /// a glob/regex (dispatchers still find those via the primary index).
-fn user_event_name_of(selector: &EventSelector) -> Option<String> {
+fn ext_name_of(selector: &EventSelector) -> Option<String> {
     let fp = selector.field_patterns.get("name")?;
     if matches!(fp.match_type, MatchType::Exact) {
         Some(fp.raw.clone())
@@ -452,16 +368,12 @@ fn resolve_selector_for_on(
     if let Some(sel) = &on.selector {
         return Ok(sel.clone());
     }
-    // Fall back to kdl_doc extraction. The scene body of `ir.scene`
-    // is what facet-kdl produced; the raw `ir.kdl_doc` preserves the
-    // `on` nodes under the top-level `scene "<name>" { … }` wrapper.
+    // Fall back to kdl_doc extraction.
     let doc = ir
         .kdl_doc
         .as_ref()
         .ok_or_else(|| malformed_on_node(ir, "raw KDL document unavailable"))?;
     let on_nodes: Vec<&kdl::KdlNode> = collect_on_nodes(doc);
-    // Count the number of preceding `on` nodes in `ir.scene.body`
-    // before `body_idx` to find the matching raw node.
     let preceding_ons = ir.scene.body[..body_idx]
         .iter()
         .filter(|n| matches!(n, SceneBodyNode::On(_)))
@@ -491,18 +403,7 @@ fn collect_on_nodes(doc: &kdl::KdlDocument) -> Vec<&kdl::KdlNode> {
     out
 }
 
-/// Build an [`EventSelector`] from a raw `on <kind> field=pat …` KDL
-/// node.
-///
-/// Positional arguments (strings) after the node name form the kind
-/// token — we accept the FIRST positional string as the kind, so both
-/// `on FileEdited` (bare identifier, parsed as an implicit string by
-/// kdl) and `on "FileEdited"` shapes flow through the same code path.
-/// Subsequent non-string positional arguments surface as a
-/// [`SceneError::UnknownEventField`] (they are grammatically ill-formed).
-///
-/// Named properties (`path="x"`, `tool="Bash"`) become field patterns
-/// via [`FieldPattern::parse`].
+/// Build an [`EventSelector`] from a raw `on <kind> field=pat …` KDL node.
 #[allow(clippy::result_large_err)]
 fn selector_from_kdl_node(
     node: &kdl::KdlNode,
@@ -513,19 +414,7 @@ fn selector_from_kdl_node(
     for entry in node.entries() {
         match entry.name() {
             None => {
-                // Positional arg — first one is the kind.
-                let val = entry
-                    .value()
-                    .as_string()
-                    .map(|s| s.to_string())
-                    .or_else(|| {
-                        // Some KDL 2.0 parsers lift bare identifiers
-                        // into typed `KdlValue::String` automatically;
-                        // when they don't, try `to_string()` via
-                        // Display. Integers / bools aren't valid
-                        // kinds so we reject them.
-                        None
-                    });
+                let val = entry.value().as_string().map(|s| s.to_string());
                 match val {
                     Some(s) if kind.is_none() => kind = Some(s),
                     _ => {
@@ -538,9 +427,6 @@ fn selector_from_kdl_node(
             }
             Some(ident) => {
                 let field_name = ident.value().to_string();
-                // `when` is the Rhai guard predicate, not a selector
-                // field — skip it so it doesn't pollute the field-
-                // pattern map and cause false negatives in matching.
                 if field_name == "when" {
                     continue;
                 }
@@ -549,11 +435,6 @@ fn selector_from_kdl_node(
                     .as_string()
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| {
-                        // Coerce numeric / bool values to strings for
-                        // field-pattern matching. This is loose by
-                        // design — field values in `AgentEvent` are
-                        // usually strings; matching against a
-                        // stringified int is still predictable.
                         match entry.value() {
                             kdl::KdlValue::Integer(i) => i.to_string(),
                             kdl::KdlValue::Float(f) => f.to_string(),
@@ -601,45 +482,38 @@ fn malformed_on_node(ir: &SceneIR, message: &str) -> SceneError {
 // Selector matching + captured locals (T-058 / T-059).
 // ---------------------------------------------------------------------------
 
-/// Match `selector` against a live [`AgentEvent`]. Returns the map of
+/// Match `selector` against a live [`CoreEvent`]. Returns the map of
 /// captured locals on match, or `None` on no-match.
 ///
-/// Captured locals currently include:
-///
-/// - Every field name matched by the selector whose value is a string
-///   — the matched string is bound as `{field_name}` in the event
-///   scope.
-/// - For regex matches, the full match plus every named capture
-///   group.
+/// The event is flattened via [`FlatEvent`] first: `name` and `payload`
+/// fields are available for matching. For `Ext` selectors a bare field
+/// name falls through to `payload.<field>` (hybrid access equivalent
+/// to the old UserEvent behaviour).
 pub fn match_selector(
     selector: &EventSelector,
-    event: &AgentEvent,
+    event: &CoreEvent,
 ) -> Option<BTreeMap<String, Dynamic>> {
     // Kind check.
     if EventKind::parse(&selector.kind).map(|k| k == EventKind::of(event)) != Some(true) {
         return None;
     }
-    let event_json = serde_json::to_value(event).ok()?;
-    let is_user_event = matches!(event, AgentEvent::UserEvent { .. });
-    let payload_json = if is_user_event {
-        event_json.get("payload").cloned()
-    } else {
-        None
-    };
+
+    let flat = FlatEvent::from(event);
+    let is_ext = matches!(event, CoreEvent::Ext(_));
+
+    // Build JSON from the flat event for field lookup.
+    let flat_json = serde_json::to_value(&flat).ok()?;
+    let payload_json = flat_json.get("payload").cloned();
 
     let mut captures: BTreeMap<String, Dynamic> = BTreeMap::new();
     for (field, pattern) in &selector.field_patterns {
-        let lookup = lookup_field_value(field, &event_json, payload_json.as_ref(), is_user_event);
+        let lookup = lookup_field_value(field, &flat_json, payload_json.as_ref(), is_ext);
         let value_str = match lookup {
             Some(v) => v,
             None => return None, // field absent ⇒ no match
         };
         match match_field_pattern(pattern, &value_str, &mut captures) {
             true => {
-                // On successful match, bind the raw matched string
-                // under the field name unless it's a reserved
-                // UserEvent top-level name whose semantic matches the
-                // field binding convention already.
                 captures
                     .entry(field.clone())
                     .or_insert_with(|| Dynamic::from(value_str.clone()));
@@ -650,21 +524,20 @@ pub fn match_selector(
     Some(captures)
 }
 
-/// Resolve `field` against a flattened event JSON. For UserEvent
-/// selectors the lookup hybrid-accesses the payload (T-059):
+/// Resolve `field` against a flattened event JSON. For Ext selectors
+/// the lookup hybrid-accesses the payload:
 ///
-/// 1. Reserved top-level keys (`name`, `source`, `payload`) bypass the
-///    payload redirect.
+/// 1. Reserved top-level keys (`name`, `payload`) bypass the payload redirect.
 /// 2. `payload.X` explicit prefix routes directly into the payload.
-/// 3. Bare field names on UserEvent fall through to `payload.<field>`
-///    when they're not present at the top level.
+/// 3. Bare field names on Ext events fall through to `payload.<field>`
+///    when not present at the top level.
 fn lookup_field_value(
     field: &str,
-    event_json: &serde_json::Value,
+    flat_json: &serde_json::Value,
     payload_json: Option<&serde_json::Value>,
-    is_user_event: bool,
+    is_ext: bool,
 ) -> Option<String> {
-    const RESERVED: &[&str] = &["name", "source", "payload"];
+    const RESERVED: &[&str] = &["name", "payload"];
 
     // Explicit `payload.X` escape hatch.
     if let Some(rest) = field.strip_prefix("payload.") {
@@ -673,11 +546,8 @@ fn lookup_field_value(
             .map(json_to_match_string);
     }
 
-    if is_user_event && !RESERVED.contains(&field) {
-        // Hybrid access: try payload first; the top-level keys for
-        // UserEvent are limited to `kind`, `name`, `source`,
-        // `payload`, none of which are a meaningful lookup target
-        // under the hybrid rule.
+    if is_ext && !RESERVED.contains(&field) {
+        // Hybrid access: try payload first.
         if let Some(payload) = payload_json {
             if let Some(v) = payload.get(field) {
                 return Some(json_to_match_string(v));
@@ -685,13 +555,10 @@ fn lookup_field_value(
         }
     }
 
-    event_json.get(field).map(json_to_match_string)
+    flat_json.get(field).map(json_to_match_string)
 }
 
-/// Stringify a `serde_json::Value` for selector matching. Strings
-/// come through verbatim; numbers / bools via `Display`; objects /
-/// arrays / null never match (we return an empty string so glob /
-/// regex attempts skip them).
+/// Stringify a `serde_json::Value` for selector matching.
 fn json_to_match_string(v: &serde_json::Value) -> String {
     match v {
         serde_json::Value::String(s) => s.clone(),
@@ -722,7 +589,6 @@ fn match_field_pattern(
             let Some(caps) = re.captures(value) else {
                 return false;
             };
-            // Named groups become top-level captures.
             for name in re.capture_names().flatten() {
                 if let Some(m) = caps.name(name) {
                     captures.insert(name.to_string(), Dynamic::from(m.as_str().to_string()));
@@ -740,42 +606,47 @@ fn match_field_pattern(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_types::AgentId;
+    use ark_types::ExtEvent;
     use std::path::PathBuf;
-
-    fn sample_id() -> AgentId {
-        AgentId::new("test", "agent")
-    }
 
     // ---- EventKind ----
 
     #[test]
     fn event_kind_parse_accepts_both_cases() {
-        assert_eq!(EventKind::parse("FileEdited"), Some(EventKind::FileEdited));
+        assert_eq!(EventKind::parse("SessionStarted"), Some(EventKind::SessionStarted));
         assert_eq!(
-            EventKind::parse("file_edited"),
-            Some(EventKind::FileEdited)
+            EventKind::parse("session_started"),
+            Some(EventKind::SessionStarted)
         );
         assert_eq!(EventKind::parse("nope"), None);
     }
 
     #[test]
-    fn event_kind_of_classifies_user_event() {
-        let evt = AgentEvent::UserEvent {
-            name: "x".into(),
-            source: "scene".into(),
+    fn event_kind_of_classifies_ext() {
+        let evt = CoreEvent::Ext(ExtEvent {
+            ext: "myext".into(),
+            kind: "something".into(),
             payload: serde_json::json!({}),
-        };
-        assert_eq!(EventKind::of(&evt), EventKind::UserEvent);
+        });
+        assert_eq!(EventKind::of(&evt), EventKind::Ext);
     }
 
     #[test]
     fn event_kind_of_classifies_error() {
-        let evt = AgentEvent::Error {
-            id: sample_id(),
-            message: "boom".into(),
+        let evt = CoreEvent::Error {
+            error: "boom".into(),
         };
         assert_eq!(EventKind::of(&evt), EventKind::Error);
+    }
+
+    #[test]
+    fn event_kind_of_classifies_log() {
+        let evt = CoreEvent::Log {
+            level: "info".into(),
+            message: "hello".into(),
+            target: None,
+        };
+        assert_eq!(EventKind::of(&evt), EventKind::Log);
     }
 
     // ---- Registry insert / lookup ----
@@ -783,52 +654,46 @@ mod tests {
     #[test]
     fn registry_insert_primary_and_secondary() {
         let mut reg = ReactionRegistry::new();
-        let mut sel_fe = EventSelector {
-            kind: "FileEdited".into(),
+        let sel_err = EventSelector {
+            kind: "Error".into(),
             field_patterns: BTreeMap::new(),
         };
-        sel_fe.field_patterns.insert(
-            "path".into(),
-            FieldPattern {
-                raw: "**/*.md".into(),
-                match_type: MatchType::Glob,
-            },
-        );
         let entry = Entry {
-            selector: sel_fe,
+            selector: sel_err,
             predicate: None,
             ops: Vec::new(),
             origin: ReactionOrigin::user_scene(PathBuf::from("scene.kdl")),
         };
-        reg.insert(EventKind::FileEdited, None, entry);
-        assert_eq!(reg.by_kind(EventKind::FileEdited).len(), 1);
+        reg.insert(EventKind::Error, None, entry);
+        assert_eq!(reg.by_kind(EventKind::Error).len(), 1);
         assert_eq!(reg.len(), 1);
 
-        let mut ue_sel = EventSelector {
-            kind: "UserEvent".into(),
+        // Insert an Ext reaction with a pinned name for secondary index.
+        let mut ext_sel = EventSelector {
+            kind: "Ext".into(),
             field_patterns: BTreeMap::new(),
         };
-        ue_sel.field_patterns.insert(
+        ext_sel.field_patterns.insert(
             "name".into(),
             FieldPattern {
-                raw: "user.hello".into(),
+                raw: "myext.something".into(),
                 match_type: MatchType::Exact,
             },
         );
-        let ue_entry = Entry {
-            selector: ue_sel,
+        let ext_entry = Entry {
+            selector: ext_sel,
             predicate: None,
             ops: Vec::new(),
             origin: ReactionOrigin::user_scene(PathBuf::from("scene.kdl")),
         };
-        reg.insert(EventKind::UserEvent, Some("user.hello".into()), ue_entry);
-        assert_eq!(reg.by_kind(EventKind::UserEvent).len(), 1);
-        assert_eq!(reg.by_user_event_name("user.hello").len(), 1);
-        assert_eq!(reg.by_user_event_name("user.missing").len(), 0);
+        reg.insert(EventKind::Ext, Some("myext.something".into()), ext_entry);
+        assert_eq!(reg.by_kind(EventKind::Ext).len(), 1);
+        assert_eq!(reg.by_ext_name("myext.something").len(), 1);
+        assert_eq!(reg.by_ext_name("myext.missing").len(), 0);
     }
 
     #[test]
-    fn registry_insert_rejects_name_on_non_user_event() {
+    fn registry_insert_rejects_name_on_non_ext() {
         let mut reg = ReactionRegistry::new();
         let sel = EventSelector {
             kind: "Error".into(),
@@ -842,7 +707,7 @@ mod tests {
         };
         reg.insert(EventKind::Error, Some("bogus".into()), entry);
         // Not mirrored to secondary index.
-        assert_eq!(reg.by_user_event_name("bogus").len(), 0);
+        assert_eq!(reg.by_ext_name("bogus").len(), 0);
         assert_eq!(reg.by_kind(EventKind::Error).len(), 1);
     }
 
@@ -852,19 +717,19 @@ mod tests {
     fn build_registry_populates_both_indices() {
         let src = r#"
 scene "s" {
-    on FileEdited path="**/*.md" { }
-    on UserEvent name="user.hello" { }
-    on UserEvent name="user.world" when="1 == 1" { }
+    on Error { }
+    on Ext name="myext.hello" { }
+    on Ext name="myext.world" when="1 == 1" { }
 }
 "#;
         let ir = crate::parse::parse_scene(src, "test.kdl").expect("parse");
         let engine = Engine::new();
         let reg = build_registry(&ir, &engine).expect("build");
-        assert_eq!(reg.by_kind(EventKind::FileEdited).len(), 1);
-        assert_eq!(reg.by_kind(EventKind::UserEvent).len(), 2);
-        assert_eq!(reg.by_user_event_name("user.hello").len(), 1);
-        assert_eq!(reg.by_user_event_name("user.world").len(), 1);
-        let world = &reg.by_user_event_name("user.world")[0];
+        assert_eq!(reg.by_kind(EventKind::Error).len(), 1);
+        assert_eq!(reg.by_kind(EventKind::Ext).len(), 2);
+        assert_eq!(reg.by_ext_name("myext.hello").len(), 1);
+        assert_eq!(reg.by_ext_name("myext.world").len(), 1);
+        let world = &reg.by_ext_name("myext.world")[0];
         assert!(world.predicate.is_some(), "when= should compile");
     }
 
@@ -885,7 +750,7 @@ scene "s" {
     fn build_registry_rejects_bad_predicate() {
         let src = r#"
 scene "s" {
-    on FileEdited when="1 +" { }
+    on Error when="1 +" { }
 }
 "#;
         let ir = crate::parse::parse_scene(src, "test.kdl").expect("parse");
@@ -897,100 +762,94 @@ scene "s" {
     // ---- match_selector ----
 
     #[test]
-    fn match_exact_field() {
+    fn match_exact_field_on_error() {
         let mut fps = BTreeMap::new();
         fps.insert(
-            "tool".into(),
+            "error".into(),
             FieldPattern {
-                raw: "Bash".into(),
+                raw: "boom".into(),
                 match_type: MatchType::Exact,
             },
         );
         let sel = EventSelector {
-            kind: "ToolUse".into(),
+            kind: "Error".into(),
             field_patterns: fps,
         };
-        let evt = AgentEvent::ToolUse {
-            id: sample_id(),
-            tool: "Bash".into(),
-            input_summary: "ls".into(),
+        let evt = CoreEvent::Error {
+            error: "boom".into(),
         };
         let caps = match_selector(&sel, &evt).expect("should match");
-        assert_eq!(caps.get("tool").unwrap().clone().into_string().unwrap(), "Bash");
+        assert_eq!(caps.get("error").unwrap().clone().into_string().unwrap(), "boom");
     }
 
     #[test]
     fn no_match_different_kind() {
         let sel = EventSelector {
-            kind: "FileEdited".into(),
+            kind: "Error".into(),
             field_patterns: BTreeMap::new(),
         };
-        let evt = AgentEvent::Error {
-            id: sample_id(),
-            message: "x".into(),
+        let evt = CoreEvent::Log {
+            level: "info".into(),
+            message: "hi".into(),
+            target: None,
         };
         assert!(match_selector(&sel, &evt).is_none());
     }
 
     #[test]
-    fn match_glob_captures_path() {
+    fn match_glob_on_log_message() {
         let mut fps = BTreeMap::new();
         fps.insert(
-            "path".into(),
+            "message".into(),
             FieldPattern {
-                raw: "**/*.md".into(),
+                raw: "hello*".into(),
                 match_type: MatchType::Glob,
             },
         );
         let sel = EventSelector {
-            kind: "FileEdited".into(),
+            kind: "Log".into(),
             field_patterns: fps,
         };
-        let evt = AgentEvent::FileEdited {
-            id: sample_id(),
-            path: PathBuf::from("src/README.md"),
-            additions: 1,
-            deletions: 0,
+        let evt = CoreEvent::Log {
+            level: "info".into(),
+            message: "hello world".into(),
+            target: None,
         };
         let caps = match_selector(&sel, &evt).expect("glob should match");
         assert_eq!(
-            caps.get("path").unwrap().clone().into_string().unwrap(),
-            "src/README.md"
+            caps.get("message").unwrap().clone().into_string().unwrap(),
+            "hello world"
         );
     }
 
     #[test]
-    fn match_regex_captures_named_groups() {
+    fn match_regex_named_group_on_error() {
         let mut fps = BTreeMap::new();
         fps.insert(
-            "tool".into(),
+            "error".into(),
             FieldPattern {
-                raw: r"^(?P<verb>\w+)$".into(),
+                raw: r"^(?P<msg>\w+)$".into(),
                 match_type: MatchType::Regex,
             },
         );
         let sel = EventSelector {
-            kind: "ToolUse".into(),
+            kind: "Error".into(),
             field_patterns: fps,
         };
-        let evt = AgentEvent::ToolUse {
-            id: sample_id(),
-            tool: "Bash".into(),
-            input_summary: "ls".into(),
+        let evt = CoreEvent::Error {
+            error: "boom".into(),
         };
         let caps = match_selector(&sel, &evt).expect("regex match");
         assert_eq!(
-            caps.get("verb").unwrap().clone().into_string().unwrap(),
-            "Bash"
+            caps.get("msg").unwrap().clone().into_string().unwrap(),
+            "boom"
         );
     }
 
-    // ---- T-059: UserEvent hybrid payload access ----
+    // ---- Ext hybrid payload access ----
 
     #[test]
-    fn user_event_hybrid_bare_name_looks_in_payload() {
-        // `on UserEvent tool=Bash` with the event carrying
-        // `payload.tool = "Bash"` matches via hybrid access.
+    fn ext_event_hybrid_bare_name_looks_in_payload() {
         let mut fps = BTreeMap::new();
         fps.insert(
             "tool".into(),
@@ -1000,20 +859,20 @@ scene "s" {
             },
         );
         let sel = EventSelector {
-            kind: "UserEvent".into(),
+            kind: "Ext".into(),
             field_patterns: fps,
         };
-        let evt = AgentEvent::UserEvent {
-            name: "ark.acp.tool_call".into(),
-            source: "ext:foo".into(),
+        let evt = CoreEvent::Ext(ExtEvent {
+            ext: "claude-code".into(),
+            kind: "tool.use".into(),
             payload: serde_json::json!({ "tool": "Bash" }),
-        };
+        });
         let caps = match_selector(&sel, &evt).expect("hybrid access should match");
         assert_eq!(caps.get("tool").unwrap().clone().into_string().unwrap(), "Bash");
     }
 
     #[test]
-    fn user_event_explicit_payload_prefix_matches() {
+    fn ext_event_explicit_payload_prefix_matches() {
         let mut fps = BTreeMap::new();
         fps.insert(
             "payload.tool".into(),
@@ -1023,75 +882,37 @@ scene "s" {
             },
         );
         let sel = EventSelector {
-            kind: "UserEvent".into(),
+            kind: "Ext".into(),
             field_patterns: fps,
         };
-        let evt = AgentEvent::UserEvent {
-            name: "ark.acp.tool_call".into(),
-            source: "ext:foo".into(),
+        let evt = CoreEvent::Ext(ExtEvent {
+            ext: "claude-code".into(),
+            kind: "tool.use".into(),
             payload: serde_json::json!({ "tool": "Bash" }),
-        };
+        });
         assert!(match_selector(&sel, &evt).is_some());
     }
 
     #[test]
-    fn user_event_reserved_name_bypasses_payload() {
-        // `name=` should pin the top-level `name` field, not the
-        // payload.name (which may differ or be absent).
+    fn ext_event_name_field_bypasses_payload() {
+        // `name=` should pin the flat event `name` field (e.g. `claude-code.tool.use`).
         let mut fps = BTreeMap::new();
         fps.insert(
             "name".into(),
             FieldPattern {
-                raw: "ark.acp.tool_call".into(),
+                raw: "claude-code.tool.use".into(),
                 match_type: MatchType::Exact,
             },
         );
         let sel = EventSelector {
-            kind: "UserEvent".into(),
+            kind: "Ext".into(),
             field_patterns: fps,
         };
-        let evt = AgentEvent::UserEvent {
-            name: "ark.acp.tool_call".into(),
-            source: "ext:foo".into(),
+        let evt = CoreEvent::Ext(ExtEvent {
+            ext: "claude-code".into(),
+            kind: "tool.use".into(),
             payload: serde_json::json!({ "name": "different" }),
-        };
-        assert!(match_selector(&sel, &evt).is_some());
-        // Sanity: a selector on the different value would NOT match
-        // via top-level name.
-        let mut fps2 = BTreeMap::new();
-        fps2.insert(
-            "name".into(),
-            FieldPattern {
-                raw: "different".into(),
-                match_type: MatchType::Exact,
-            },
-        );
-        let sel2 = EventSelector {
-            kind: "UserEvent".into(),
-            field_patterns: fps2,
-        };
-        assert!(match_selector(&sel2, &evt).is_none());
-    }
-
-    #[test]
-    fn user_event_source_reserved_key() {
-        let mut fps = BTreeMap::new();
-        fps.insert(
-            "source".into(),
-            FieldPattern {
-                raw: "ext:foo".into(),
-                match_type: MatchType::Exact,
-            },
-        );
-        let sel = EventSelector {
-            kind: "UserEvent".into(),
-            field_patterns: fps,
-        };
-        let evt = AgentEvent::UserEvent {
-            name: "x".into(),
-            source: "ext:foo".into(),
-            payload: serde_json::json!({}),
-        };
+        });
         assert!(match_selector(&sel, &evt).is_some());
     }
 
@@ -1101,57 +922,48 @@ scene "s" {
     fn when_predicate_can_see_captured_locals() {
         let src = r#"
 scene "s" {
-    on FileEdited path="**/*.md" when="path.ends_with(\"README.md\")" { }
+    on Error when="error.ends_with(\"boom\")" { }
 }
 "#;
         let ir = crate::parse::parse_scene(src, "test.kdl").expect("parse");
         let engine = Engine::new();
         let reg = build_registry(&ir, &engine).expect("build");
-        let entries = reg.by_kind(EventKind::FileEdited);
+        let entries = reg.by_kind(EventKind::Error);
         assert_eq!(entries.len(), 1);
         let entry = &entries[0];
-        let evt = AgentEvent::FileEdited {
-            id: sample_id(),
-            path: PathBuf::from("src/README.md"),
-            additions: 1,
-            deletions: 0,
+        let evt = CoreEvent::Error {
+            error: "something boom".into(),
         };
         let locals = match_selector(&entry.selector, &evt).expect("match");
-        // Build an event scope including captured locals and eval.
-        use crate::context::{build_event_scope, AgentSnapshot, SessionSnapshot};
+        use crate::context::{SessionSnapshot, build_event_scope};
         use crate::rhai::eval_bool_in_scope;
-        let agent = AgentSnapshot::default();
         let session = SessionSnapshot::default();
-        let mut scope = build_event_scope(&evt, &agent, &session, &locals);
+        let mut scope = build_event_scope(&evt, &session, &locals);
         let program = entry.predicate.as_ref().expect("predicate");
         let ok = eval_bool_in_scope(&engine, program, RhaiScope::Event, &mut scope)
             .expect("eval");
-        assert!(ok, "README.md should match the predicate");
+        assert!(ok, "error ending with boom should match the predicate");
     }
 
     #[test]
     fn when_false_skips_reaction_at_eval_time() {
         let src = r#"
 scene "s" {
-    on FileEdited path="**/*.md" when="false" { }
+    on Error when="false" { }
 }
 "#;
         let ir = crate::parse::parse_scene(src, "test.kdl").expect("parse");
         let engine = Engine::new();
         let reg = build_registry(&ir, &engine).expect("build");
-        let entry = &reg.by_kind(EventKind::FileEdited)[0];
-        let evt = AgentEvent::FileEdited {
-            id: sample_id(),
-            path: PathBuf::from("x.md"),
-            additions: 0,
-            deletions: 0,
+        let entry = &reg.by_kind(EventKind::Error)[0];
+        let evt = CoreEvent::Error {
+            error: "x".into(),
         };
         let locals = match_selector(&entry.selector, &evt).expect("match");
-        use crate::context::{build_event_scope, AgentSnapshot, SessionSnapshot};
+        use crate::context::{SessionSnapshot, build_event_scope};
         use crate::rhai::eval_bool_in_scope;
         let mut scope = build_event_scope(
             &evt,
-            &AgentSnapshot::default(),
             &SessionSnapshot::default(),
             &locals,
         );
@@ -1165,37 +977,36 @@ scene "s" {
         assert!(!ok, "when=false should return false");
     }
 
-    // ---- T-063: overlapping selectors each run ----
+    // ---- overlapping selectors each run ----
 
     #[test]
     fn overlapping_selectors_both_registered() {
         let src = r#"
 scene "s" {
-    on FileEdited path="**/*.md" { }
-    on FileEdited path="src/**" { }
-    on FileEdited { }
+    on Ext name="myext.a" { }
+    on Ext name="myext.b" { }
+    on Ext { }
 }
 "#;
         let ir = crate::parse::parse_scene(src, "test.kdl").expect("parse");
         let engine = Engine::new();
         let reg = build_registry(&ir, &engine).expect("build");
-        // Every `on FileEdited` block is registered — no dedup.
-        assert_eq!(reg.by_kind(EventKind::FileEdited).len(), 3);
-        let evt = AgentEvent::FileEdited {
-            id: sample_id(),
-            path: PathBuf::from("src/README.md"),
-            additions: 0,
-            deletions: 0,
-        };
-        // Count reactions that actually match — glob `**/*.md` matches,
-        // glob `src/**` matches, unfiltered matches.
+        // Every `on Ext` block is registered — no dedup.
+        assert_eq!(reg.by_kind(EventKind::Ext).len(), 3);
+        let evt = CoreEvent::Ext(ExtEvent {
+            ext: "myext".into(),
+            kind: "a".into(),
+            payload: serde_json::json!({}),
+        });
         let mut matched = 0usize;
-        for e in reg.by_kind(EventKind::FileEdited) {
+        for e in reg.by_kind(EventKind::Ext) {
             if match_selector(&e.selector, &evt).is_some() {
                 matched += 1;
             }
         }
-        assert_eq!(matched, 3);
+        // Matches: `name="myext.a"` (flat name = "myext.a"), and bare `on Ext`.
+        // `name="myext.b"` does not match. So 2.
+        assert_eq!(matched, 2);
     }
 
     // ---- remove_matching ----
@@ -1204,32 +1015,23 @@ scene "s" {
     fn remove_matching_drops_by_selector() {
         let src = r#"
 scene "s" {
-    on FileEdited path="**/*.md" { }
-    on FileEdited path="**/*.rs" { }
+    on Error { }
+    on Log { }
 }
 "#;
         let ir = crate::parse::parse_scene(src, "test.kdl").expect("parse");
         let engine = Engine::new();
         let mut reg = build_registry(&ir, &engine).expect("build");
-        assert_eq!(reg.by_kind(EventKind::FileEdited).len(), 2);
+        assert_eq!(reg.by_kind(EventKind::Error).len(), 1);
+        assert_eq!(reg.by_kind(EventKind::Log).len(), 1);
 
-        // Clear: drop entries whose path pattern equals `**/*.md`.
-        let mut fps = BTreeMap::new();
-        fps.insert(
-            "path".into(),
-            FieldPattern {
-                raw: "**/*.md".into(),
-                match_type: MatchType::Glob,
-            },
-        );
         let clear = EventSelector {
-            kind: "FileEdited".into(),
-            field_patterns: fps,
+            kind: "Error".into(),
+            field_patterns: BTreeMap::new(),
         };
         reg.remove_matching(&clear);
-        assert_eq!(reg.by_kind(EventKind::FileEdited).len(), 1);
-        let remaining = &reg.by_kind(EventKind::FileEdited)[0];
-        assert_eq!(remaining.selector.field_patterns.get("path").unwrap().raw, "**/*.rs");
+        assert_eq!(reg.by_kind(EventKind::Error).len(), 0);
+        assert_eq!(reg.by_kind(EventKind::Log).len(), 1);
     }
 }
 

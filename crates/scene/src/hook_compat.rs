@@ -26,8 +26,8 @@ use crate::reactions::{
 /// them here for conversion into scene reactions.
 #[derive(Debug, Clone)]
 pub struct HookEntry {
-    /// Event kind or name to match (e.g. `"FileEdited"`,
-    /// `"user_event:my.event"`).
+    /// Event kind or name to match (e.g. `"Error"`,
+    /// `"ext:myext.something"`).
     pub event: String,
     /// Shell command to execute when the event fires.
     pub command: String,
@@ -46,7 +46,7 @@ pub fn hooks_to_on_nodes(hooks: &[HookEntry]) -> Vec<OnNode> {
 /// Convert a single [`HookEntry`] into an [`OnNode`].
 fn hook_to_on_node(hook: &HookEntry) -> OnNode {
     // Parse the event string. If it contains a colon (e.g.
-    // `"user_event:my.event"`) the part before the colon is the kind
+    // `"ext:myext.something"`) the part before the colon is the kind
     // and the part after is the `name=` field pattern. Otherwise the
     // whole string is the event kind.
     let (kind, name_pattern) = match hook.event.split_once(':') {
@@ -98,11 +98,10 @@ pub fn extend_registry_with_hooks(
             continue;
         };
         let Some(kind) = EventKind::parse(&selector.kind) else {
-            // Unknown event kind — skip rather than error so the
-            // supervisor can surface its own diagnostic.
+            // Unknown event kind — skip rather than error.
             continue;
         };
-        let user_event_name = if kind == EventKind::UserEvent {
+        let ext_name = if kind == EventKind::Ext {
             selector
                 .field_patterns
                 .get("name")
@@ -121,7 +120,7 @@ pub fn extend_registry_with_hooks(
                 kind: OriginKind::UserScene,
             },
         };
-        registry.insert(kind, user_event_name, entry);
+        registry.insert(kind, ext_name, entry);
     }
 }
 
@@ -132,31 +131,31 @@ mod tests {
     #[test]
     fn hook_to_on_node_simple_event() {
         let hook = HookEntry {
-            event: "FileEdited".into(),
-            command: "echo edited".into(),
+            event: "Error".into(),
+            command: "echo error".into(),
         };
         let on = hook_to_on_node(&hook);
         let sel = on.selector.as_ref().unwrap();
-        assert_eq!(sel.kind, "FileEdited");
+        assert_eq!(sel.kind, "Error");
         assert!(sel.field_patterns.is_empty());
         assert_eq!(on.ops.len(), 1);
         match &on.ops[0] {
-            OpNode::Exec(exec) => assert_eq!(exec.script, "echo edited"),
+            OpNode::Exec(exec) => assert_eq!(exec.script, "echo error"),
             other => panic!("expected Exec op, got: {other:?}"),
         }
     }
 
     #[test]
-    fn hook_to_on_node_user_event_with_name() {
+    fn hook_to_on_node_ext_with_name() {
         let hook = HookEntry {
-            event: "UserEvent:my.custom.event".into(),
+            event: "ext:myext.custom".into(),
             command: "notify-send hello".into(),
         };
         let on = hook_to_on_node(&hook);
         let sel = on.selector.as_ref().unwrap();
-        assert_eq!(sel.kind, "UserEvent");
+        assert_eq!(sel.kind, "ext");
         let name_fp = sel.field_patterns.get("name").unwrap();
-        assert_eq!(name_fp.raw, "my.custom.event");
+        assert_eq!(name_fp.raw, "myext.custom");
         assert_eq!(name_fp.match_type, MatchType::Exact);
     }
 
@@ -164,12 +163,12 @@ mod tests {
     fn hooks_to_on_nodes_batch() {
         let hooks = vec![
             HookEntry {
-                event: "Started".into(),
-                command: "echo start".into(),
+                event: "Log".into(),
+                command: "echo log".into(),
             },
             HookEntry {
-                event: "Done".into(),
-                command: "echo done".into(),
+                event: "Error".into(),
+                command: "echo error".into(),
             },
         ];
         let nodes = hooks_to_on_nodes(&hooks);
@@ -181,19 +180,19 @@ mod tests {
         let mut reg = ReactionRegistry::new();
         let hooks = vec![
             HookEntry {
-                event: "FileEdited".into(),
-                command: "echo edited".into(),
+                event: "Error".into(),
+                command: "echo error".into(),
             },
             HookEntry {
-                event: "UserEvent:ark.custom".into(),
+                event: "ext:myext.custom".into(),
                 command: "echo custom".into(),
             },
         ];
         extend_registry_with_hooks(&mut reg, &hooks);
 
-        assert_eq!(reg.by_kind(EventKind::FileEdited).len(), 1);
-        assert_eq!(reg.by_kind(EventKind::UserEvent).len(), 1);
-        assert_eq!(reg.by_user_event_name("ark.custom").len(), 1);
+        assert_eq!(reg.by_kind(EventKind::Error).len(), 1);
+        assert_eq!(reg.by_kind(EventKind::Ext).len(), 1);
+        assert_eq!(reg.by_ext_name("myext.custom").len(), 1);
     }
 
     #[test]

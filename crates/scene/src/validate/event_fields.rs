@@ -1,61 +1,45 @@
 //! Event-field validation (T-057 / R4.2).
 //!
 //! For each `on <EventKind> field=pattern …` selector, verify every
-//! field name exists on the target `AgentEvent` variant. Unknown
+//! field name exists on the target `CoreEvent` variant. Unknown
 //! fields surface as [`SceneError::UnknownEventField`] with a Jaro-
 //! Winkler suggestion.
 //!
 //! # Why hardcoded
 //!
-//! `ark_types::AgentEvent` does NOT derive `facet::Facet` today (its
-//! serde shape is hand-tuned). Rather than wait for a facet migration
-//! of the types crate, this pass hardcodes the field set per variant
-//! against [`crate::reactions::event_kind::EventKind`]. The list stays
-//! in sync with `AgentEvent` via a unit test that walks a sample of
-//! each variant through serde_json and asserts the fields match.
+//! `CoreEvent` does not derive `facet::Facet` today. Rather than wait
+//! for a facet migration of the types crate, this pass hardcodes the
+//! field set per variant against [`crate::reactions::EventKind`]. The
+//! list stays in sync with `CoreEvent` via a unit test.
 //!
-//! # UserEvent special case
+//! # Ext special case
 //!
-//! The UserEvent variant exposes only `name`, `source`, and `payload`
-//! as first-class fields. Scene selectors can address arbitrary keys
-//! under `payload.*` — those are NOT validated against any schema,
-//! because payload shape is emitter-owned (R4.7). The hybrid-access
-//! rule means bare field names on a UserEvent selector route into
-//! `payload.*` at dispatch; we therefore skip field-existence checks
-//! for UserEvent selectors entirely.
+//! The Ext variant wraps extension-owned `ExtEvent { ext, kind,
+//! payload }`. Scene selectors can address:
+//! - `name` — the flattened dotted name (`<ext>.<kind>`)
+//! - `payload` — the full payload object
+//! - `payload.X` — a specific payload key (not validated against any
+//!   schema since payload shape is extension-owned)
+//!
+//! We therefore skip field-existence checks for Ext selectors entirely.
 
 use crate::ast::selector::EventSelector;
 use crate::error::SceneError;
 use crate::reactions::EventKind;
 use miette::{NamedSource, SourceSpan};
 
-/// Canonical field list for a non-UserEvent `AgentEvent` variant.
+/// Canonical field list for a non-Ext `CoreEvent` variant.
 ///
-/// Returns `None` for `EventKind::UserEvent` — see module docs. When
-/// `Some(&[…])`, the slice enumerates every field the variant carries
-/// (other than the serde `kind` tag, which is never a selectable
-/// field because the kind is already expressed as the `on <Kind>`
-/// head).
+/// Returns `None` for `EventKind::Ext` — see module docs. When
+/// `Some(&[…])`, the slice enumerates every selectable field the
+/// variant carries (excluding the serde `type` tag).
 pub fn canonical_fields(kind: EventKind) -> Option<&'static [&'static str]> {
     match kind {
-        EventKind::Started => Some(&["spec"]),
-        EventKind::TabOpened => Some(&["id", "parent", "role", "tab_handle", "label"]),
-        EventKind::TabClosed => Some(&["id", "tab_handle"]),
-        EventKind::Progress => Some(&["id", "done", "total", "label"]),
-        EventKind::TaskDone => Some(&["id", "task_id", "label"]),
-        EventKind::Iteration => Some(&["id", "n", "max"]),
-        EventKind::PhaseTransition => Some(&["id", "from", "to"]),
-        EventKind::ToolUse => Some(&["id", "tool", "input_summary"]),
-        EventKind::Message => Some(&["id", "role", "summary"]),
-        EventKind::FileEdited => Some(&["id", "path", "additions", "deletions"]),
-        EventKind::ReviewComment => Some(&["id", "reviewer", "severity", "path", "line", "body"]),
-        EventKind::PermissionAsked => Some(&["id", "tool", "summary"]),
-        EventKind::PermissionResolved => Some(&["id", "tool", "decision"]),
-        EventKind::Stall => Some(&["id", "since"]),
-        EventKind::Log => Some(&["id", "level", "line"]),
-        EventKind::Error => Some(&["id", "message"]),
-        EventKind::Done => Some(&["id", "outcome"]),
-        EventKind::UserEvent => None,
+        EventKind::Log => Some(&["level", "message", "target"]),
+        EventKind::Error => Some(&["error"]),
+        EventKind::SessionStarted => Some(&["spec"]),
+        EventKind::SessionEnded => Some(&["terminated_at"]),
+        EventKind::Ext => None,
     }
 }
 
@@ -64,20 +48,19 @@ pub fn canonical_fields(kind: EventKind) -> Option<&'static [&'static str]> {
 /// name is valid; on the first unknown field, returns
 /// [`SceneError::UnknownEventField`] with a Jaro-Winkler suggestion.
 ///
-/// For UserEvent selectors, the pass accepts the three reserved
-/// top-level keys (`name`, `source`, `payload`) AND any other field
-/// name — see module docs for the rationale (hybrid payload access
-/// means arbitrary bare names are legal).
+/// For Ext selectors, the pass accepts any field name — see module
+/// docs for the rationale (hybrid payload access means arbitrary bare
+/// names are legal, and `name`/`payload`/`payload.X` are the only
+/// first-class fields).
 #[allow(clippy::result_large_err)]
 pub fn validate_event_fields(selector: &EventSelector) -> Result<(), SceneError> {
     let Some(kind) = EventKind::parse(&selector.kind) else {
-        // Unknown selector kind surfaces via a separate pass (T-056);
-        // here we simply short-circuit so the dispatcher can report
-        // the kind error without this validator also firing.
+        // Unknown selector kind surfaces via a separate pass;
+        // here we simply short-circuit.
         return Ok(());
     };
     let Some(allowed) = canonical_fields(kind) else {
-        // UserEvent: every field name is valid (see module docs).
+        // Ext: every field name is valid.
         return Ok(());
     };
     for field in selector.field_patterns.keys() {
@@ -97,8 +80,7 @@ pub fn validate_event_fields(selector: &EventSelector) -> Result<(), SceneError>
 }
 
 /// Jaro-Winkler nearest-match suggestion from the canonical field
-/// list. Threshold of 0.7 picks up obvious typos while rejecting
-/// wildly wrong names.
+/// list. Threshold of 0.7 picks up obvious typos.
 fn best_suggestion<'a>(needle: &str, haystack: &'a [&'a str]) -> Option<&'a str> {
     let mut best: Option<(&str, f64)> = None;
     for candidate in haystack {
@@ -111,9 +93,7 @@ fn best_suggestion<'a>(needle: &str, haystack: &'a [&'a str]) -> Option<&'a str>
     best.and_then(|(s, score)| if score >= 0.7 { Some(s) } else { None })
 }
 
-/// Format the miette `#[help]` text. Surfaces the available field
-/// list and, when a close match exists, prepends a "did you mean …?"
-/// cue.
+/// Format the miette `#[help]` text.
 fn format_help(allowed: &[&str], suggestion: Option<&str>) -> String {
     let list = allowed.join(", ");
     match suggestion {
@@ -146,19 +126,25 @@ mod tests {
     }
 
     #[test]
-    fn known_field_accepts() {
-        let s = sel("FileEdited", &[("path", "x"), ("id", "y")]);
+    fn known_field_on_log_accepts() {
+        let s = sel("Log", &[("level", "info"), ("message", "hi")]);
         validate_event_fields(&s).expect("known fields should pass");
     }
 
     #[test]
-    fn unknown_field_rejects_with_suggestion() {
-        let s = sel("FileEdited", &[("pth", "x")]);
+    fn known_field_on_error_accepts() {
+        let s = sel("Error", &[("error", "boom")]);
+        validate_event_fields(&s).expect("known field should pass");
+    }
+
+    #[test]
+    fn unknown_field_on_error_rejects_with_suggestion() {
+        let s = sel("Error", &[("errors", "boom")]);
         let err = validate_event_fields(&s).expect_err("typo should reject");
         match err {
             SceneError::UnknownEventField { field, help, .. } => {
-                assert_eq!(field, "pth");
-                assert!(help.contains("path"), "help: {help}");
+                assert_eq!(field, "errors");
+                assert!(help.contains("error"), "help: {help}");
             }
             other => panic!("expected UnknownEventField, got {other:?}"),
         }
@@ -166,28 +152,25 @@ mod tests {
 
     #[test]
     fn unknown_kind_is_silent() {
-        // Unknown event kinds get a dedicated pass; this validator
-        // short-circuits so the error does not fire twice.
         let s = sel("NotARealKind", &[("foo", "x")]);
         validate_event_fields(&s).expect("unknown kind should not fire here");
     }
 
     #[test]
-    fn user_event_accepts_arbitrary_fields() {
+    fn ext_accepts_arbitrary_fields() {
         let s = sel(
-            "UserEvent",
-            &[("name", "n"), ("source", "s"), ("tool", "Bash"), ("anything", "x")],
+            "Ext",
+            &[("name", "n"), ("payload", "{}"), ("anything", "x"), ("tool", "Bash")],
         );
-        validate_event_fields(&s).expect("UserEvent should accept arbitrary fields");
+        validate_event_fields(&s).expect("Ext should accept arbitrary fields");
     }
 
     #[test]
     fn no_suggestion_when_wildly_different() {
-        let s = sel("FileEdited", &[("xyzzy", "q")]);
+        let s = sel("Error", &[("xyzzy", "q")]);
         let err = validate_event_fields(&s).unwrap_err();
         match err {
             SceneError::UnknownEventField { help, .. } => {
-                // Expect no "did you mean" prefix when no close match.
                 assert!(!help.contains("did you mean"), "help was: {help}");
                 assert!(help.contains("Available fields:"));
             }
@@ -197,26 +180,11 @@ mod tests {
 
     #[test]
     fn canonical_fields_table_has_no_duplicates() {
-        // Sanity: every `Some(list)` in `canonical_fields` has unique
-        // entries. Guards against typos in the table above.
         for kind in [
-            EventKind::Started,
-            EventKind::TabOpened,
-            EventKind::TabClosed,
-            EventKind::Progress,
-            EventKind::TaskDone,
-            EventKind::Iteration,
-            EventKind::PhaseTransition,
-            EventKind::ToolUse,
-            EventKind::Message,
-            EventKind::FileEdited,
-            EventKind::ReviewComment,
-            EventKind::PermissionAsked,
-            EventKind::PermissionResolved,
-            EventKind::Stall,
             EventKind::Log,
             EventKind::Error,
-            EventKind::Done,
+            EventKind::SessionStarted,
+            EventKind::SessionEnded,
         ] {
             if let Some(fields) = canonical_fields(kind) {
                 let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
