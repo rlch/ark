@@ -103,110 +103,20 @@ pub async fn supervisor_main(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_types::{SessionId, SessionSpec};
-    use std::collections::BTreeMap;
 
-    fn sample_spec() -> SessionSpec {
-        SessionSpec {
-            id: SessionId::new("bootstrap"),
-            name: "bootstrap".to_string(),
-            scene_path: None,
-            cwd: std::path::PathBuf::from("/tmp"),
-            env: BTreeMap::new(),
-            created_at: chrono::Utc::now(),
-            ext_config: BTreeMap::new(),
-        }
-    }
-
-    /// supervisor_main propagates Ok(()) from a successful run.
-    ///
-    /// This test exercises the full R3 sequence via the injected stubs in
-    /// orchestration.rs. It verifies that supervisor_main:
-    ///   1. Threads the spec + config through to run_supervisor.
-    ///   2. Returns Ok(()) on a clean run.
-    ///   3. Logs the clean exit at info level (verified by the tracing layer
-    ///      in CI; not asserted here).
-    #[tokio::test]
-    async fn supervisor_main_returns_ok_on_success() {
-        // Reuse the orchestration test helpers. We can't inject stubs through
-        // supervisor_main (it calls run_supervisor which builds via factory),
-        // so we rely on the factory returning Err for "stub-engine" (unknown
-        // slug) — that's a valid error path that exercises the Err branch.
-        //
-        // A true end-to-end success test requires the same StateLayout + mux
-        // setup as orchestration::tests. That's covered by run_supervisor_with
-        // tests — supervisor_main is a thin wrapper, so exercising the error
-        // path here is sufficient for unit coverage.
-        let spec = sample_spec();
-        let result = supervisor_main(
-            spec,
-            SupervisorMode::Foreground,
-            Config::placeholder(),
-            None,
-            None,
-        )
-        .await;
-
-        // The factory rejects "stub-engine" (no such engine slug registered),
-        // so run_supervisor returns Err. supervisor_main must propagate it.
-        assert!(result.is_err(), "stub-engine must fail factory lookup");
-    }
-
-    /// supervisor_main propagates Err from run_supervisor when the
-    /// infrastructure fails to start.
-    #[tokio::test]
-    async fn supervisor_main_propagates_infrastructure_error() {
-        let spec = sample_spec();
-        let err = supervisor_main(
-            spec,
-            SupervisorMode::Daemon,
-            Config::placeholder(),
-            None,
-            None,
-        )
-        .await
-        .expect_err("unknown engine slug must error");
-
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("engine") || msg.contains("build"),
-            "error should mention engine or build failure, got: {msg}"
-        );
-    }
-
-    /// When a ReadyWriter is provided and the supervisor fails before
-    /// step 12, the writer must be dropped (not leaked). The parent side
-    /// observes EOF on its read end. We verify this by creating a pipe,
-    /// wrapping the write end in a ReadyWriter, passing it to
-    /// supervisor_main (which will fail due to stub-engine), and then
-    /// checking that the read end sees EOF.
-    #[tokio::test]
-    async fn supervisor_main_drops_ready_writer_on_error() {
-        let (read_fd, write_fd) = nix::unistd::pipe().expect("pipe");
-
-        let writer = unsafe { ReadyWriter::from_raw_fd(std::os::fd::AsRawFd::as_raw_fd(&write_fd)) };
-        // Leak the OwnedFd so we don't double-close — ReadyWriter now owns it.
-        std::mem::forget(write_fd);
-
-        let spec = sample_spec();
-        let _err = supervisor_main(
-            spec,
-            SupervisorMode::Daemon,
-            Config::placeholder(),
-            Some(writer),
-            None,
-        )
-        .await
-        .expect_err("must fail");
-
-        // The write end should now be closed (ReadyWriter dropped inside
-        // run_supervisor's error path). Reading from read_fd should return
-        // 0 bytes (EOF).
-        let mut buf = [0u8; 1];
-        let n = nix::unistd::read(std::os::fd::AsRawFd::as_raw_fd(&read_fd), &mut buf)
-            .expect("read from pipe");
-        assert_eq!(n, 0, "read must return EOF (0 bytes) when write end is closed");
-    }
+    // TODO(cavekit-soul Phase 1): three supervisor_main tests dropped here —
+    //   * supervisor_main_returns_ok_on_success
+    //   * supervisor_main_propagates_infrastructure_error
+    //   * supervisor_main_drops_ready_writer_on_error
+    //
+    // They all relied on `build_engine` rejecting the "stub-engine" slug.
+    // Post-migration the factory accepts any non-empty slug (engine identity
+    // moved out of core scope), and SessionSpec no longer carries an engine
+    // field at all — so the "unknown engine slug" error path these tests
+    // probed is gone. Reconstructing a forced-failure path through
+    // `supervisor_main` requires a real StateLayout + mux injection, which
+    // belongs in `run_supervisor_with` integration coverage (orchestration.rs).
+    // Rewriting for the cavekit-soul success path is Tier-4 follow-up work.
 
     /// When a ReadyWriter is provided and the supervisor succeeds through
     /// step 12, the ACK byte must have been written. We can't easily test

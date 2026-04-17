@@ -333,14 +333,14 @@ mod tests {
         seed_agent(&layout, &b);
 
         let args = KillArgs {
-            id: "cavekit-auth".into(),
+            id: "auth".into(),
             force: false,
             keep_worktree: false,
         };
         let err = run(args, &ctx).expect_err("ambiguous");
         match err {
             CliError::Ambiguous { what, candidates } => {
-                assert_eq!(what, "cavekit-auth");
+                assert_eq!(what, "auth");
                 assert_eq!(candidates.len(), 2);
             }
             other => panic!("expected Ambiguous, got {other:?}"),

@@ -473,7 +473,7 @@ mod tests {
             .expect_err("bind should fail when parent dir is unreachable");
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("ensure agents dir") || msg.contains("bind control socket"),
+            msg.contains("ensure sessions dir") || msg.contains("bind control socket"),
             "error should mention bind/ensure, got {msg}"
         );
     }

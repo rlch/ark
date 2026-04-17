@@ -8,8 +8,6 @@
 //! * [`spawn`]     — `spawn` (tiled + overlay), `new_tab`
 //! * [`messaging`] — `pipe`, `emit`, `set_status`
 //! * [`control`]   — `exec`, `reload_scene`
-//! * [`acp`]       — `acp.prompt`, `acp.cancel`, `acp.permit`,
-//!                   `acp.set_mode`
 //!
 //! Each op is a zero-sized struct implementing [`crate::intent::Intent`];
 //! they're registered into an [`crate::intent::IntentRegistry`] via

@@ -242,7 +242,7 @@ mod tests {
         std::fs::write(
             &path,
             r#"scene "custom" {
-    on "Started" {
+    on "SessionStarted" {
         set_status text="ready"
     }
 }
@@ -305,7 +305,7 @@ mod tests {
         .unwrap();
 
         let hooks = vec![SceneHookEntry {
-            event: "Started".into(),
+            event: "SessionStarted".into(),
             command: "echo hello".into(),
         }];
 
@@ -327,7 +327,7 @@ mod tests {
         std::fs::write(
             &path,
             r#"scene "ordered" {
-    on "Started" {
+    on "SessionStarted" {
         set_status text="ready"
     }
 }
