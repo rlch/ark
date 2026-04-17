@@ -1,110 +1,101 @@
-//! `state_writer` consumer task.
+//! `state_writer` consumer task (soul phase 1 T-025).
 //!
-//! Implements cavekit-supervisor.md R2 (first bullet) + cavekit-types-state-events.md R6:
+//! Consumes `CoreEvent` from the supervisor broadcast bus and maintains the
+//! on-disk session state tree per cavekit-soul-phase-1-supervisor.md R2 +
+//! cavekit-soul-phase-1-types.md R1/R4/R6:
 //!
-//! - Subscribes to the supervisor's broadcast bus.
-//! - Appends every received event to `events.jsonl` via [`crate::EventLogWriter`].
-//! - Rolls up `status.json` atomically via [`crate::write_status_atomic`] —
-//!   updates `phase`, `last_event_at`, `last_event_summary`, `progress`,
-//!   `tab_handles`, `findings`, and `stalled_since`.
-//! - Detects phase changes between successive events; on an actual change,
-//!   re-broadcasts a [`AgentEvent::PhaseTransition`] back onto the bus via the
-//!   supplied `EventSink`, suppressed when the incoming event is itself a
-//!   `PhaseTransition` (to avoid loops) or when the rolled-up phase did not
-//!   change vs the cached previous phase.
-//! - Lagged: `tracing::warn!` and continue. Closed: `Ok(())`. Cancel: `Ok(())`.
+//! - [`CoreEvent::SessionStarted`] — atomically publishes `spec.json` and
+//!   seeds `status.json` with an empty `ext_state` map.
+//! - [`CoreEvent::SessionEnded`] — read-modify-writes `status.json`,
+//!   setting `terminated_at`.
+//! - [`CoreEvent::Ext`], [`CoreEvent::Log`], [`CoreEvent::Error`] — append
+//!   as line-delimited JSON to `sessions/{id}/events.jsonl`.
+//!
+//! `ext_state` stays empty here; per cavekit-soul roadmap core never writes
+//! into those buckets — each extension owns its own entry via the
+//! `reaction_dispatcher` (`SetStatus` op) and, later, via dedicated
+//! ext-registered state-writer hooks.
+//!
+//! Resilient to `RecvError::Lagged(n)` (warn-log + continue), exits on
+//! `RecvError::Closed`, honors a `tokio_util::sync::CancellationToken` for
+//! supervisor-driven shutdown.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::Result;
-use ark_types::{
-    AgentEvent, AgentId, AgentSpec, AgentStatus, EventSink, Outcome, Phase, StateLayout, TabHandle,
-};
+use ark_types::{CoreEvent, EventSink, SessionId, SessionStatus, StateLayout};
 use chrono::Utc;
 use tokio::sync::broadcast::{Receiver, error::RecvError};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::events_log::EventLogWriter;
-use crate::status_writer::{read_status, write_status_atomic};
+use crate::status_writer::{read_status, write_session_status_atomic};
 
 /// Long-running consumer task. Returns once the bus closes or the cancel
 /// token fires. Per-event IO failures are logged and do not terminate the
 /// loop.
 ///
-/// `tx` is the **same** `EventSink` the supervisor cloned to all producers;
-/// `state_writer` uses it solely to re-broadcast `PhaseTransition` events
-/// when its rollup detects an actual phase change. Pass `None` to disable
-/// re-broadcast (used by tests that want to observe the `RecvError::Closed`
-/// path — `state_writer` holding a `Sender` clone would otherwise keep the
-/// channel open indefinitely).
+/// `id` is the session whose state tree this writer maintains. The
+/// writer will:
+/// - Create `sessions/{id}/` on-demand.
+/// - Publish `spec.json` and `status.json` on the first `SessionStarted`
+///   it observes for the session.
+/// - Append every subsequent event to `events.jsonl`.
+///
+/// The `_tx` parameter is kept for API symmetry with earlier revisions —
+/// the new core writer does not re-broadcast any derived events (phase is
+/// an extension concept now). It's unused today but reserved for future
+/// ext-hook fan-out without churning callers.
+// TODO(cavekit-soul Phase 2): ext-registered state_writer hooks
 pub async fn state_writer(
-    mut rx: Receiver<AgentEvent>,
-    tx: Option<EventSink>,
+    mut rx: Receiver<CoreEvent>,
+    _tx: Option<EventSink>,
     layout: Arc<StateLayout>,
-    id: AgentId,
-    supervisor_pid: u32,
+    id: SessionId,
     cancel: CancellationToken,
 ) -> Result<()> {
-    // Set up the disk writer for events.jsonl. We own the handle for the
-    // life of the loop and drop it (closing the channel) before returning so
-    // the writer task drains and exits cleanly.
-    let events_path = layout.events_path(&id);
-    StateLayout::ensure_dir_0700(&layout.agent_dir(&id))?;
-    let log_handle = EventLogWriter::spawn(events_path)?;
+    // Ensure `sessions/{id}/` exists with tight perms before the event-log
+    // writer tries to open `events.jsonl`. `StateLayout::ensure_dir_0700`
+    // is idempotent.
+    StateLayout::ensure_dir_0700(&layout.session_dir(&id))?;
 
-    // Cached previous phase for transition dedupe. `None` until the first
-    // event lands or until status.json already exists from the supervisor's
-    // initial bootstrap (R3 step 1).
-    let mut prev_phase: Option<Phase> = match read_status(&layout, &id) {
-        Ok(Some(s)) => Some(s.phase),
-        _ => None,
-    };
+    let events_path = layout.session_events_path(&id);
+    let log_handle = EventLogWriter::spawn(events_path)?;
 
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
-                debug!(agent_id = %id.as_str(), "state_writer: cancel fired, exiting");
+                debug!(session_id = %id.as_str(), "state_writer: cancel fired, exiting");
                 break;
             }
             recv = rx.recv() => match recv {
                 Ok(event) => {
-                    // 1. Append to events.jsonl. Failures inside the writer
-                    //    task are warn-logged there; here we just enqueue.
-                    if let Err(e) = log_handle.sender.send(event.clone()) {
+                    // Lifecycle rollups first; the events.jsonl append
+                    // below is unconditional (every CoreEvent gets logged).
+                    match &event {
+                        CoreEvent::SessionStarted { spec } => {
+                            if let Err(e) = write_session_spec(&layout, spec) {
+                                warn!(error = %e, "state_writer: spec.json write failed");
+                            }
+                            if let Err(e) = seed_session_status(&layout, spec) {
+                                warn!(error = %e, "state_writer: status.json seed failed");
+                            }
+                        }
+                        CoreEvent::SessionEnded { terminated_at } => {
+                            if let Err(e) = update_terminated_at(&layout, &id, *terminated_at) {
+                                warn!(error = %e, "state_writer: status.json terminated_at update failed");
+                            }
+                        }
+                        // Log / Error / Ext are append-only on events.jsonl.
+                        _ => {}
+                    }
+
+                    // Unconditional: every event lands in events.jsonl.
+                    if let Err(e) = log_handle.sender.send(event) {
                         warn!(error = %e, "state_writer: events.jsonl writer channel closed");
                     }
-
-                    // 2. Roll up status.json.
-                    let new_phase = match update_status(&layout, &id, supervisor_pid, &event) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            warn!(error = %e, "state_writer: status.json rollup failed");
-                            continue;
-                        }
-                    };
-
-                    // 3. Phase change emit — only when phase actually changed
-                    //    vs a *known* prior phase AND the incoming event
-                    //    isn't itself PhaseTransition. Suppressing when
-                    //    `prev_phase` is None avoids spurious emits on the
-                    //    bootstrap event (Starting→Starting is a non-event).
-                    let is_phase_event = matches!(event, AgentEvent::PhaseTransition { .. });
-                    if !is_phase_event
-                        && let Some(prev) = prev_phase
-                        && prev != new_phase
-                        && let Some(tx) = tx.as_ref()
-                    {
-                        let transition = AgentEvent::PhaseTransition {
-                            id: id.clone(),
-                            from: Some(phase_slug(prev).to_string()),
-                            to: phase_slug(new_phase).to_string(),
-                        };
-                        // Send is best-effort — if no receivers remain, the
-                        // bus is shutting down and we'll see Closed soon.
-                        let _ = tx.send(transition);
-                    }
-                    prev_phase = Some(new_phase);
                 }
                 Err(RecvError::Lagged(n)) => {
                     warn!(skipped = n, "state_writer: broadcast lagged; continuing");
@@ -126,235 +117,106 @@ pub async fn state_writer(
     Ok(())
 }
 
-/// Read-modify-write the agent's `status.json`, returning the new `phase`.
-///
-/// Lazy bootstrap: if `status.json` is missing AND the event is not
-/// `Started`, a minimal [`AgentStatus`] is synthesized (phase = `Running`,
-/// empty counts, a placeholder spec derived from `id`) so subsequent
-/// events are still rolled up instead of being dropped. If `Started`
-/// arrives later, its authoritative spec overlays the placeholder.
-/// During the short window before `Started`, status.json may report
-/// `phase = Running` with a stub spec — acceptable for v1 since events
-/// are demonstrably flowing.
-///
-/// Late Started events fill in spec metadata but do NOT regress phase if
-/// the agent has already advanced. If the writer lazy-bootstrapped from
-/// an earlier non-Started event (setting phase = Running) and Started
-/// arrives afterward, we overlay Started's spec but preserve the
-/// already-advanced phase rather than snapping back to Starting. This
-/// also guards terminal phases (Done / Failed / Crashed) from being
-/// resurrected by an out-of-order Started. See F-054 (+F-047 cross-ref).
-fn update_status(
+/// Atomically publish `spec.json` for `spec.id` via temp-file + rename.
+fn write_session_spec(
     layout: &StateLayout,
-    id: &AgentId,
-    supervisor_pid: u32,
-    event: &AgentEvent,
-) -> std::io::Result<Phase> {
-    // Load current status; if missing, bootstrap. Preferred path: Started
-    // carries the authoritative spec. Fallback: synthesize a stub so the
-    // rollup proceeds instead of dropping every event when the receiver
-    // missed Started (e.g. due to Lagged).
-    //
-    // `freshly_created` distinguishes "we just made this status in this
-    // call" from "we loaded an existing status from disk". Only the
-    // fresh-from-Started case may legitimately set phase = Starting; a
-    // late Started over an already-advanced status must not regress.
-    let (mut status, freshly_created) = match read_status(layout, id)? {
-        Some(s) => (s, false),
-        None => match event {
-            AgentEvent::Started { spec } => (AgentStatus::new(spec.clone(), supervisor_pid), true),
-            _ => {
-                let mut s = AgentStatus::new(stub_spec(id), supervisor_pid);
-                s.phase = Phase::Running;
-                (s, true)
-            }
-        },
+    spec: &ark_types::SessionSpec,
+) -> std::io::Result<()> {
+    use std::fs::{self, OpenOptions};
+    use std::io::Write;
+
+    let session_dir = layout.session_dir(&spec.id);
+    StateLayout::ensure_dir_0700(&session_dir)?;
+    let final_path = layout.session_spec_path(&spec.id);
+    let tmp_path = {
+        let mut p = final_path.clone();
+        let mut name = p
+            .file_name()
+            .map(|s| s.to_os_string())
+            .unwrap_or_else(|| std::ffi::OsString::from("spec.json"));
+        name.push(".tmp");
+        p.set_file_name(name);
+        p
     };
 
-    // Always-applied fields.
-    status.last_event_at = Utc::now();
-    status.last_event_summary = summarize(event);
+    let bytes = serde_json::to_vec_pretty(spec)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
-    // Per-variant rollups.
-    match event {
-        AgentEvent::Started { spec } => {
-            // Overlay Started's authoritative spec if we lazy-bootstrapped
-            // with a stub earlier; otherwise this is a fresh bootstrap and
-            // AgentStatus::new already populated the spec.
-            status.spec = spec.clone();
-            // Phase semantics: Started means "the agent just came up".
-            // Only apply that if (a) we just created status this call
-            // (true fresh bootstrap) or (b) the loaded status is still
-            // in Starting (hasn't advanced yet). Otherwise a late Started
-            // would regress Running/Reviewing/Done/etc. back to Starting.
-            // See F-054 and F-047 cross-reference.
-            if freshly_created || status.phase == Phase::Starting {
-                status.phase = Phase::Starting;
-            }
+    let mut file = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp_path)
+    {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            tracing::warn!(
+                path = %tmp_path.display(),
+                "stale spec.json.tmp from previous writer; overwriting"
+            );
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&tmp_path)?
         }
-        AgentEvent::TabOpened { tab_handle, .. } => {
-            push_unique_tab(&mut status.tab_handles, tab_handle.clone());
-            // First tab opened typically means we're past Starting.
-            if status.phase == Phase::Starting {
-                status.phase = Phase::Running;
-            }
-        }
-        AgentEvent::TabClosed { tab_handle, .. } => {
-            status.tab_handles.retain(|h| h != tab_handle);
-        }
-        AgentEvent::Progress { done, total, .. } => {
-            status.progress = Some((*done, *total));
-            if status.phase == Phase::Starting {
-                status.phase = Phase::Running;
-            }
-        }
-        AgentEvent::ToolUse { .. } => {
-            if matches!(status.phase, Phase::Starting | Phase::Idle) {
-                status.phase = Phase::Running;
-            }
-            status.stalled_since = None;
-        }
-        AgentEvent::Message { .. } | AgentEvent::FileEdited { .. } => {
-            if matches!(status.phase, Phase::Starting | Phase::Idle) {
-                status.phase = Phase::Running;
-            }
-            status.stalled_since = None;
-        }
-        AgentEvent::ReviewComment { severity, .. } => {
-            status.findings.record(severity.clone());
-            status.phase = Phase::Reviewing;
-        }
-        AgentEvent::PermissionAsked { .. } => {
-            status.phase = Phase::Prompting;
-        }
-        AgentEvent::PermissionResolved { .. } => {
-            // Back to running unless a later event re-prompts.
-            if status.phase == Phase::Prompting {
-                status.phase = Phase::Running;
-            }
-        }
-        AgentEvent::Stall { since, .. } => {
-            status.stalled_since = Some(*since);
-            status.phase = Phase::Idle;
-        }
-        AgentEvent::PhaseTransition { to, .. } => {
-            if let Some(p) = parse_phase(to) {
-                status.phase = p;
-            }
-        }
-        AgentEvent::Done { outcome, .. } => {
-            // F-088: Killed and Timeout are distinct terminal phases; do
-            // NOT collapse them into Done (which means "successful").
-            status.phase = match outcome {
-                Outcome::Success { .. } => Phase::Done,
-                Outcome::Failed { .. } => Phase::Failed,
-                Outcome::Killed => Phase::Killed,
-                Outcome::Timeout => Phase::Timeout,
-                Outcome::Crashed { .. } => Phase::Crashed,
-            };
-        }
-        // No-op for Iteration / TaskDone / Log / Error — they update
-        // last_event_* but don't change phase.
-        _ => {}
+        Err(e) => return Err(e),
+    };
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    drop(file);
+
+    fs::rename(&tmp_path, &final_path)?;
+    Ok(())
+}
+
+/// Seed `status.json` on the first `SessionStarted` observation. Later
+/// observations leave the existing status intact — `spec.json` is
+/// immutable so a second seed would be a no-op; idempotency is
+/// preserved by short-circuiting when the file already exists.
+fn seed_session_status(
+    layout: &StateLayout,
+    spec: &ark_types::SessionSpec,
+) -> std::io::Result<()> {
+    if read_status(layout, &spec.id)?.is_some() {
+        return Ok(());
     }
-
-    let phase = status.phase;
-    write_status_atomic(layout, id, &status)?;
-    Ok(phase)
+    let status = SessionStatus {
+        id: spec.id.clone(),
+        started_at: Utc::now(),
+        terminated_at: None,
+        ext_state: BTreeMap::new(),
+    };
+    write_session_status_atomic(layout, &spec.id, &status)
 }
 
-/// Build a minimal placeholder [`AgentSpec`] from just the agent id.
-///
-/// Used exclusively by the lazy-bootstrap path when `status.json` is
-/// missing and the event does not carry a spec (every variant except
-/// `Started`). The placeholder is overwritten when `Started` arrives
-/// later; consumers reading status.json during the bootstrap window
-/// should treat these fields as stubs.
-fn stub_spec(id: &AgentId) -> AgentSpec {
-    AgentSpec::new(
-        id.clone(),
-        id.name(),
-        id.orchestrator(),
-        "",
-        std::path::PathBuf::new(),
-        Vec::new(),
-    )
-}
-
-fn push_unique_tab(handles: &mut Vec<TabHandle>, h: TabHandle) {
-    if !handles.iter().any(|x| x == &h) {
-        handles.push(h);
-    }
-}
-
-fn phase_slug(p: Phase) -> &'static str {
-    match p {
-        Phase::Starting => "starting",
-        Phase::Running => "running",
-        Phase::Idle => "idle",
-        Phase::Prompting => "prompting",
-        Phase::Reviewing => "reviewing",
-        Phase::Done => "done",
-        Phase::Failed => "failed",
-        Phase::Crashed => "crashed",
-        Phase::Killed => "killed",
-        Phase::Timeout => "timeout",
-    }
-}
-
-fn parse_phase(slug: &str) -> Option<Phase> {
-    Some(match slug {
-        "starting" => Phase::Starting,
-        "running" => Phase::Running,
-        "idle" => Phase::Idle,
-        "prompting" => Phase::Prompting,
-        "reviewing" => Phase::Reviewing,
-        "done" => Phase::Done,
-        "failed" => Phase::Failed,
-        "crashed" => Phase::Crashed,
-        "killed" => Phase::Killed,
-        "timeout" => Phase::Timeout,
-        _ => return None,
-    })
-}
-
-fn summarize(event: &AgentEvent) -> String {
-    use AgentEvent::*;
-    match event {
-        Started { spec } => format!("started {}", spec.name),
-        TabOpened { label, .. } => format!("tab opened: {label}"),
-        TabClosed { tab_handle, .. } => format!("tab closed: {}", tab_handle.name),
-        Progress {
-            done, total, label, ..
-        } => match label {
-            Some(l) => format!("{done}/{total} {l}"),
-            None => format!("{done}/{total}"),
+/// Update `status.json.terminated_at`. When status.json is missing
+/// (SessionEnded before SessionStarted — shouldn't happen in practice but
+/// we accept it) we bootstrap a minimal status so the terminal timestamp
+/// is still captured.
+fn update_terminated_at(
+    layout: &StateLayout,
+    id: &SessionId,
+    terminated_at: chrono::DateTime<Utc>,
+) -> std::io::Result<()> {
+    let status = match read_status(layout, id)? {
+        Some(mut s) => {
+            s.terminated_at = Some(terminated_at);
+            s
+        }
+        None => SessionStatus {
+            id: id.clone(),
+            started_at: terminated_at,
+            terminated_at: Some(terminated_at),
+            ext_state: BTreeMap::new(),
         },
-        TaskDone { task_id, .. } => format!("task done: {task_id}"),
-        Iteration { n, max, .. } => match max {
-            Some(m) => format!("iteration {n}/{m}"),
-            None => format!("iteration {n}"),
-        },
-        PhaseTransition { to, .. } => format!("phase: {to}"),
-        ToolUse { tool, .. } => format!("tool: {tool}"),
-        Message { role, .. } => format!("message: {role:?}"),
-        FileEdited { path, .. } => format!("edit: {}", path.display()),
-        ReviewComment { severity, .. } => format!("finding: {severity:?}"),
-        PermissionAsked { tool, .. } => format!("perm asked: {tool}"),
-        PermissionResolved { tool, decision, .. } => format!("perm {tool}: {decision:?}"),
-        Stall { .. } => "stalled".into(),
-        Log { line, .. } => format!("log: {line}"),
-        Error { message, .. } => format!("error: {message}"),
-        Done { outcome, .. } => format!("done: {outcome:?}"),
-        _ => "event".into(),
-    }
+    };
+    write_session_status_atomic(layout, id, &status)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_types::{AgentSpec, MessageRole, Severity, channel};
-    use std::collections::BTreeMap;
+    use ark_types::{ExtEvent, SessionSpec, channel};
     use std::path::PathBuf;
 
     fn layout_in(base: PathBuf) -> Arc<StateLayout> {
@@ -365,24 +227,23 @@ mod tests {
         ))
     }
 
-    fn sample_spec(id: &AgentId) -> AgentSpec {
-        let mut spec = AgentSpec::new(
-            id.clone(),
-            "auth",
-            "cavekit",
-            "claude-code",
-            PathBuf::from("/tmp/wt"),
-            vec!["claude".into()],
-        );
-        spec.env = BTreeMap::new();
-        spec
+    fn sample_spec(id: &SessionId) -> SessionSpec {
+        SessionSpec {
+            id: id.clone(),
+            name: "auth".to_string(),
+            scene_path: None,
+            cwd: PathBuf::from("/tmp/worktree"),
+            env: BTreeMap::new(),
+            created_at: Utc::now(),
+            ext_config: BTreeMap::new(),
+        }
     }
 
     #[tokio::test]
-    async fn happy_path_writes_jsonl_and_status() {
+    async fn session_started_writes_spec_and_status() {
         let dir = tempfile::tempdir().unwrap();
         let layout = layout_in(dir.path().to_path_buf());
-        let id = AgentId::new("cavekit", "auth");
+        let id = SessionId::new("auth");
         let cancel = CancellationToken::new();
 
         let (tx, rx) = channel(64);
@@ -391,33 +252,72 @@ mod tests {
         let writer = tokio::spawn({
             let layout = layout.clone();
             let id = id.clone();
-            let tx = tx.clone();
             let cancel = cancel.clone();
-            async move { state_writer(rx, Some(tx), layout, id, 4242, cancel).await }
+            async move { state_writer(rx, None, layout, id, cancel).await }
         });
 
-        // Bootstrap: Started → TabOpened → ToolUse → Done.
-        tx.send(AgentEvent::Started {
+        tx.send(CoreEvent::SessionStarted {
             spec: sample_spec(&id),
         })
         .unwrap();
-        tx.send(AgentEvent::ToolUse {
-            id: id.clone(),
-            tool: "Read".into(),
-            input_summary: "foo.rs".into(),
+
+        // Wait for spec.json to appear.
+        for _ in 0..200 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            if layout.session_spec_path(&id).is_file() {
+                break;
+            }
+        }
+
+        cancel.cancel();
+        let _ = writer.await.unwrap();
+
+        // spec.json present and round-trips.
+        let spec_bytes = std::fs::read(layout.session_spec_path(&id)).expect("spec.json");
+        let got_spec: SessionSpec = serde_json::from_slice(&spec_bytes).expect("spec parse");
+        assert_eq!(got_spec.id, id);
+        assert_eq!(got_spec.name, "auth");
+
+        // status.json seeded with terminated_at = None and empty ext_state.
+        let status = read_status(&layout, &id).expect("read status").expect("status.json");
+        assert_eq!(status.id, id);
+        assert!(status.terminated_at.is_none());
+        assert!(status.ext_state.is_empty());
+    }
+
+    #[tokio::test]
+    async fn session_ended_updates_terminated_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = layout_in(dir.path().to_path_buf());
+        let id = SessionId::new("auth");
+        let cancel = CancellationToken::new();
+
+        let (tx, rx) = channel(64);
+        let _keepalive = tx.subscribe();
+
+        let writer = tokio::spawn({
+            let layout = layout.clone();
+            let id = id.clone();
+            let cancel = cancel.clone();
+            async move { state_writer(rx, None, layout, id, cancel).await }
+        });
+
+        // Start first, then end.
+        tx.send(CoreEvent::SessionStarted {
+            spec: sample_spec(&id),
         })
         .unwrap();
-        tx.send(AgentEvent::Done {
-            id: id.clone(),
-            outcome: Outcome::Success { artifacts: vec![] },
+        let end_ts = Utc::now();
+        tx.send(CoreEvent::SessionEnded {
+            terminated_at: end_ts,
         })
         .unwrap();
 
-        // Wait for processing: poll status.json for Done.
+        // Wait for terminated_at to land.
         for _ in 0..200 {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             if let Ok(Some(s)) = read_status(&layout, &id)
-                && s.phase == Phase::Done
+                && s.terminated_at.is_some()
             {
                 break;
             }
@@ -426,493 +326,96 @@ mod tests {
         cancel.cancel();
         let _ = writer.await.unwrap();
 
-        let s = read_status(&layout, &id).unwrap().unwrap();
-        assert_eq!(s.phase, Phase::Done);
-        assert!(s.last_event_summary.contains("done"));
+        let status = read_status(&layout, &id).unwrap().unwrap();
+        let got = status.terminated_at.expect("terminated_at populated");
+        // Timestamps round-trip through serde so exact-equality is fine.
+        assert_eq!(got, end_ts);
+    }
 
-        // events.jsonl: should contain at least the 3 input events plus
-        // PhaseTransition events emitted by the writer.
-        let mut reader = crate::EventLogReader::open(&layout.events_path(&id)).unwrap();
+    #[tokio::test]
+    async fn ext_event_appends_to_events_jsonl() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = layout_in(dir.path().to_path_buf());
+        let id = SessionId::new("auth");
+        let cancel = CancellationToken::new();
+
+        let (tx, rx) = channel(64);
+        let _keepalive = tx.subscribe();
+
+        let writer = tokio::spawn({
+            let layout = layout.clone();
+            let id = id.clone();
+            let cancel = cancel.clone();
+            async move { state_writer(rx, None, layout, id, cancel).await }
+        });
+
+        tx.send(CoreEvent::SessionStarted {
+            spec: sample_spec(&id),
+        })
+        .unwrap();
+        tx.send(CoreEvent::Ext(ExtEvent {
+            ext: "claude-code".into(),
+            kind: "tool.use".into(),
+            payload: serde_json::json!({ "tool": "Read" }),
+        }))
+        .unwrap();
+        tx.send(CoreEvent::Log {
+            level: "info".into(),
+            message: "hello".into(),
+            target: None,
+        })
+        .unwrap();
+
+        // Wait until events.jsonl has content.
+        let events_path = layout.session_events_path(&id);
+        for _ in 0..200 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            if events_path.is_file()
+                && std::fs::metadata(&events_path).map(|m| m.len()).unwrap_or(0) > 0
+            {
+                break;
+            }
+        }
+
+        cancel.cancel();
+        let _ = writer.await.unwrap();
+
+        // Read the log back and verify we see SessionStarted + Ext + Log.
+        let mut reader = crate::EventLogReader::open(&events_path).unwrap();
         let records = reader.read_all();
         assert!(
             records.len() >= 3,
-            "expected ≥3 records, got {}",
+            "expected at least 3 records, got {}",
             records.len()
         );
         assert!(
             records
                 .iter()
-                .any(|r| matches!(r.event, AgentEvent::PhaseTransition { .. })),
-            "expected at least one PhaseTransition emitted by state_writer"
+                .any(|r| matches!(r.event, CoreEvent::Ext(_))),
+            "at least one Ext event must be present in events.jsonl"
         );
-    }
-
-    #[tokio::test]
-    async fn phase_transition_dedupe() {
-        let dir = tempfile::tempdir().unwrap();
-        let layout = layout_in(dir.path().to_path_buf());
-        let id = AgentId::new("cavekit", "auth");
-        let cancel = CancellationToken::new();
-
-        let (tx, rx) = channel(64);
-        // Separate subscriber to count emitted PhaseTransition events.
-        let mut spy = tx.subscribe();
-
-        let writer = tokio::spawn({
-            let layout = layout.clone();
-            let id = id.clone();
-            let tx = tx.clone();
-            let cancel = cancel.clone();
-            async move { state_writer(rx, Some(tx), layout, id, 1, cancel).await }
-        });
-
-        // Two events that map to the *same* phase (Running) should produce
-        // exactly one PhaseTransition (Starting → Running).
-        tx.send(AgentEvent::Started {
-            spec: sample_spec(&id),
-        })
-        .unwrap();
-        tx.send(AgentEvent::ToolUse {
-            id: id.clone(),
-            tool: "Read".into(),
-            input_summary: "x".into(),
-        })
-        .unwrap();
-        tx.send(AgentEvent::Message {
-            id: id.clone(),
-            role: MessageRole::Assistant,
-            summary: "hi".into(),
-        })
-        .unwrap();
-
-        // Poll until status reports Running.
-        for _ in 0..200 {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            if let Ok(Some(s)) = read_status(&layout, &id)
-                && s.phase == Phase::Running
-            {
-                break;
-            }
-        }
-
-        cancel.cancel();
-        let _ = writer.await.unwrap();
-
-        // Drain and count PhaseTransitions on the spy receiver.
-        let mut transitions = 0;
-        while let Ok(ev) = spy.try_recv() {
-            if matches!(ev, AgentEvent::PhaseTransition { .. }) {
-                transitions += 1;
-            }
-        }
-        // Exactly one transition emitted: Starting -> Running. ToolUse and
-        // Message do NOT re-emit because the cached prev_phase already
-        // matches.
-        assert_eq!(
-            transitions, 1,
-            "expected exactly 1 PhaseTransition, got {transitions}"
-        );
-    }
-
-    #[tokio::test]
-    async fn lazy_bootstrap_before_started_then_started_overlays_spec() {
-        let dir = tempfile::tempdir().unwrap();
-        let layout = layout_in(dir.path().to_path_buf());
-        let id = AgentId::new("cavekit", "auth");
-        let cancel = CancellationToken::new();
-
-        let (tx, rx) = channel(64);
-        let _keepalive = tx.subscribe();
-
-        let writer = tokio::spawn({
-            let layout = layout.clone();
-            let id = id.clone();
-            let tx = tx.clone();
-            let cancel = cancel.clone();
-            async move { state_writer(rx, Some(tx), layout, id, 7777, cancel).await }
-        });
-
-        // Feed events with NO Started first. Consumer must lazy-bootstrap.
-        tx.send(AgentEvent::ToolUse {
-            id: id.clone(),
-            tool: "Read".into(),
-            input_summary: "foo.rs".into(),
-        })
-        .unwrap();
-        tx.send(AgentEvent::Message {
-            id: id.clone(),
-            role: MessageRole::Assistant,
-            summary: "hi".into(),
-        })
-        .unwrap();
-
-        // Wait until status.json exists and reports Running.
-        for _ in 0..200 {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            if let Ok(Some(s)) = read_status(&layout, &id)
-                && s.phase == Phase::Running
-            {
-                break;
-            }
-        }
-        let mid = read_status(&layout, &id).unwrap().unwrap();
-        assert_eq!(mid.phase, Phase::Running, "pre-Started phase");
-        // Stub spec: engine is "" until Started overlays.
-        assert_eq!(mid.spec.engine, "", "stub spec engine should be empty");
-
-        // Now Started arrives late — its spec must overlay the stub.
-        let real_spec = sample_spec(&id);
-        tx.send(AgentEvent::Started {
-            spec: real_spec.clone(),
-        })
-        .unwrap();
-        tx.send(AgentEvent::Done {
-            id: id.clone(),
-            outcome: Outcome::Success { artifacts: vec![] },
-        })
-        .unwrap();
-
-        for _ in 0..200 {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            if let Ok(Some(s)) = read_status(&layout, &id)
-                && s.phase == Phase::Done
-            {
-                break;
-            }
-        }
-
-        cancel.cancel();
-        let _ = writer.await.unwrap();
-
-        let s = read_status(&layout, &id).unwrap().unwrap();
-        assert_eq!(s.phase, Phase::Done);
-        assert_eq!(
-            s.spec.engine, "claude-code",
-            "Started must overlay stub spec with authoritative fields"
-        );
-        assert_eq!(s.spec.name, real_spec.name);
-    }
-
-    #[tokio::test]
-    async fn late_started_does_not_regress_phase() {
-        // F-054: Bootstrap ToolUse → phase=Running. Late Started arrives.
-        // Spec must be overlaid, but phase must stay Running (not regress
-        // to Starting).
-        let dir = tempfile::tempdir().unwrap();
-        let layout = layout_in(dir.path().to_path_buf());
-        let id = AgentId::new("cavekit", "auth");
-
-        // Drive update_status directly so we can observe status.json
-        // after each event without racing the broadcast consumer.
-        StateLayout::ensure_dir_0700(&layout.agent_dir(&id)).unwrap();
-
-        // 1. Lazy bootstrap via ToolUse → phase=Running, stub spec.
-        let p1 = update_status(
-            &layout,
-            &id,
-            4242,
-            &AgentEvent::ToolUse {
-                id: id.clone(),
-                tool: "Read".into(),
-                input_summary: "foo.rs".into(),
-            },
-        )
-        .unwrap();
-        assert_eq!(p1, Phase::Running);
-        let s1 = read_status(&layout, &id).unwrap().unwrap();
-        assert_eq!(s1.phase, Phase::Running);
-        assert_eq!(s1.spec.engine, "", "stub spec engine should be empty");
-
-        // 2. Late Started → spec overlays but phase MUST stay Running.
-        let real_spec = sample_spec(&id);
-        let p2 = update_status(
-            &layout,
-            &id,
-            4242,
-            &AgentEvent::Started {
-                spec: real_spec.clone(),
-            },
-        )
-        .unwrap();
-        assert_eq!(
-            p2,
-            Phase::Running,
-            "late Started must NOT regress advanced phase to Starting"
-        );
-        let s2 = read_status(&layout, &id).unwrap().unwrap();
-        assert_eq!(s2.phase, Phase::Running);
-        assert_eq!(
-            s2.spec.engine, "claude-code",
-            "late Started must still overlay spec"
-        );
-        assert_eq!(s2.spec.name, real_spec.name);
-    }
-
-    #[tokio::test]
-    async fn toolue_started_done_final_phase_done() {
-        // F-054: ToolUse → Started → Done. Final phase must be Done, not
-        // Starting (i.e. Started never regressed, then Done applied).
-        let dir = tempfile::tempdir().unwrap();
-        let layout = layout_in(dir.path().to_path_buf());
-        let id = AgentId::new("cavekit", "auth");
-        StateLayout::ensure_dir_0700(&layout.agent_dir(&id)).unwrap();
-
-        update_status(
-            &layout,
-            &id,
-            1,
-            &AgentEvent::ToolUse {
-                id: id.clone(),
-                tool: "Read".into(),
-                input_summary: "x".into(),
-            },
-        )
-        .unwrap();
-        update_status(
-            &layout,
-            &id,
-            1,
-            &AgentEvent::Started {
-                spec: sample_spec(&id),
-            },
-        )
-        .unwrap();
-        update_status(
-            &layout,
-            &id,
-            1,
-            &AgentEvent::Done {
-                id: id.clone(),
-                outcome: Outcome::Success { artifacts: vec![] },
-            },
-        )
-        .unwrap();
-
-        let s = read_status(&layout, &id).unwrap().unwrap();
-        assert_eq!(s.phase, Phase::Done);
-    }
-
-    #[tokio::test]
-    async fn late_started_after_done_preserves_terminal() {
-        // F-054: Terminal phase (Done) must be preserved even if a
-        // straggling Started arrives afterward. Spec still overlays.
-        let dir = tempfile::tempdir().unwrap();
-        let layout = layout_in(dir.path().to_path_buf());
-        let id = AgentId::new("cavekit", "auth");
-        StateLayout::ensure_dir_0700(&layout.agent_dir(&id)).unwrap();
-
-        // Bootstrap directly via Done → phase=Done (first event, stub spec).
-        update_status(
-            &layout,
-            &id,
-            1,
-            &AgentEvent::ToolUse {
-                id: id.clone(),
-                tool: "Read".into(),
-                input_summary: "x".into(),
-            },
-        )
-        .unwrap();
-        update_status(
-            &layout,
-            &id,
-            1,
-            &AgentEvent::Done {
-                id: id.clone(),
-                outcome: Outcome::Success { artifacts: vec![] },
-            },
-        )
-        .unwrap();
-        let pre = read_status(&layout, &id).unwrap().unwrap();
-        assert_eq!(pre.phase, Phase::Done);
-
-        // Late Started after terminal.
-        let real_spec = sample_spec(&id);
-        update_status(
-            &layout,
-            &id,
-            1,
-            &AgentEvent::Started {
-                spec: real_spec.clone(),
-            },
-        )
-        .unwrap();
-
-        let s = read_status(&layout, &id).unwrap().unwrap();
-        assert_eq!(
-            s.phase,
-            Phase::Done,
-            "terminal phase must not be resurrected by late Started"
-        );
-        assert_eq!(
-            s.spec.engine, "claude-code",
-            "late Started must still overlay spec even over terminal phase"
-        );
-    }
-
-    #[tokio::test]
-    async fn lazy_bootstrap_without_started_at_all() {
-        let dir = tempfile::tempdir().unwrap();
-        let layout = layout_in(dir.path().to_path_buf());
-        let id = AgentId::new("cavekit", "auth");
-        let cancel = CancellationToken::new();
-
-        let (tx, rx) = channel(64);
-        let _keepalive = tx.subscribe();
-
-        let writer = tokio::spawn({
-            let layout = layout.clone();
-            let id = id.clone();
-            let tx = tx.clone();
-            let cancel = cancel.clone();
-            async move { state_writer(rx, Some(tx), layout, id, 8888, cancel).await }
-        });
-
-        // Skip Started entirely.
-        tx.send(AgentEvent::ToolUse {
-            id: id.clone(),
-            tool: "Edit".into(),
-            input_summary: "bar.rs".into(),
-        })
-        .unwrap();
-        tx.send(AgentEvent::Done {
-            id: id.clone(),
-            outcome: Outcome::Success { artifacts: vec![] },
-        })
-        .unwrap();
-
-        for _ in 0..200 {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            if let Ok(Some(s)) = read_status(&layout, &id)
-                && s.phase == Phase::Done
-            {
-                break;
-            }
-        }
-
-        cancel.cancel();
-        let _ = writer.await.unwrap();
-
-        let s = read_status(&layout, &id).unwrap().unwrap();
-        assert_eq!(
-            s.phase,
-            Phase::Done,
-            "Done outcome must still apply even when Started was missed"
-        );
-        assert!(
-            s.last_event_summary.contains("done"),
-            "summary should reflect the last event: {}",
-            s.last_event_summary
-        );
-        // last_event_at was updated from the stub default.
-        assert!(
-            (Utc::now() - s.last_event_at).num_seconds().abs() < 10,
-            "last_event_at should be recent"
-        );
-    }
-
-    #[tokio::test]
-    async fn lagged_warn_and_survives() {
-        // capacity 4 + flood 50 → guaranteed Lagged on first recv.
-        let dir = tempfile::tempdir().unwrap();
-        let layout = layout_in(dir.path().to_path_buf());
-        let id = AgentId::new("cavekit", "auth");
-        let cancel = CancellationToken::new();
-
-        let (tx, rx) = channel(4);
-
-        // Pre-flood BEFORE spawning the consumer so it sees Lagged on first
-        // recv.
-        for _ in 0..50 {
-            // Use Started on every send: it's spec-bearing so the consumer
-            // can bootstrap status.json from the first non-skipped event.
-            tx.send(AgentEvent::Started {
-                spec: sample_spec(&id),
-            })
-            .unwrap();
-        }
-
-        let writer = tokio::spawn({
-            let layout = layout.clone();
-            let id = id.clone();
-            let tx = tx.clone();
-            let cancel = cancel.clone();
-            async move { state_writer(rx, Some(tx), layout, id, 1, cancel).await }
-        });
-
-        // Give the consumer time to drain past the Lagged report.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // Send one more after the Lagged is consumed.
-        tx.send(AgentEvent::Done {
-            id: id.clone(),
-            outcome: Outcome::Killed,
-        })
-        .unwrap();
-
-        for _ in 0..200 {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            if let Ok(Some(s)) = read_status(&layout, &id)
-                && s.phase == Phase::Done
-            {
-                break;
-            }
-        }
-
-        cancel.cancel();
-        // Must NOT panic, must return Ok.
-        let res = writer.await.unwrap();
-        assert!(res.is_ok(), "state_writer should survive Lagged: {res:?}");
     }
 
     #[tokio::test]
     async fn cancel_returns_promptly() {
         let dir = tempfile::tempdir().unwrap();
         let layout = layout_in(dir.path().to_path_buf());
-        let id = AgentId::new("cavekit", "auth");
+        let id = SessionId::new("auth");
         let cancel = CancellationToken::new();
 
         let (tx, rx) = channel(8);
         let writer = tokio::spawn({
             let layout = layout.clone();
             let id = id.clone();
-            let tx = tx.clone();
             let cancel = cancel.clone();
-            async move { state_writer(rx, Some(tx), layout, id, 1, cancel).await }
+            async move { state_writer(rx, None, layout, id, cancel).await }
         });
 
         cancel.cancel();
+        drop(tx);
         let res = tokio::time::timeout(std::time::Duration::from_secs(2), writer)
             .await
             .expect("state_writer didn't return promptly on cancel");
         assert!(res.unwrap().is_ok());
-    }
-
-    #[tokio::test]
-    async fn closed_returns_ok() {
-        let dir = tempfile::tempdir().unwrap();
-        let layout = layout_in(dir.path().to_path_buf());
-        let id = AgentId::new("cavekit", "auth");
-        let cancel = CancellationToken::new();
-
-        let (tx, rx) = channel(8);
-        let writer = tokio::spawn({
-            let layout = layout.clone();
-            let id = id.clone();
-            let cancel = cancel.clone();
-            async move { state_writer(rx, None, layout, id, 1, cancel).await }
-        });
-
-        // Drop all senders → broadcast closes. state_writer holds no tx
-        // clone (None passed above), so the channel actually closes.
-        drop(tx);
-        let res = tokio::time::timeout(std::time::Duration::from_secs(2), writer)
-            .await
-            .expect("state_writer didn't return on Closed");
-        assert!(res.unwrap().is_ok());
-
-        // Severity import suppresses unused-import warning while keeping
-        // the file's intent self-documenting for future tests.
-        let _ = Severity::P0;
     }
 }
