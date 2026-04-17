@@ -47,10 +47,6 @@ kdl = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 ark-mux-zellij = { path = "../mux/zellij", features = ["test-support"] }
-# T-ACP.4b: build `MergedUse` / `ResolvedUse` fixtures in the
-# engine_resolution tests. Tests only — the production resolver
-# consumes `ark-scene`'s re-export.
-ark-ext-metadata-types = { path = "../ark-ext-metadata-types" }
 
 # Tiny helper binary exercised by the lock + daemon tests. It's a dev-
 # only fixture — kept inside the crate (rather than in tests/) so the

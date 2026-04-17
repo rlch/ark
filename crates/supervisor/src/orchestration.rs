@@ -463,47 +463,6 @@ pub async fn run_supervisor_with(
         "R3 step 10: observability installed"
     );
 
-    // ---- Step 10.25: permission dispatcher (T-ACP.5 / T-ACP.5b) ----
-    //
-    // Wires the Zed 5-tier permission dispatcher to the event bus:
-    // every `ark.acp.permission_requested` event the ACP client
-    // re-publishes lands on the request tracker, which arms a
-    // per-request timeout (config: `[acp] permission_timeout_ms`)
-    // and drops late responses. Until T-ACP.5/the engine spawn
-    // lands, the dispatcher sits idle — no events flow through
-    // the bus because the ACP client is not yet alive — but the
-    // wiring exists so future tiers drop into it cleanly.
-    //
-    // T-ACP.5b: the timeout is read from `ark_config::Config.acp`
-    // (loaded here with shipped defaults because the real
-    // `ark_config::Config` isn't threaded through the supervisor
-    // boot yet — a future tier wires the figment-loaded value
-    // through). `ARK_NONINTERACTIVE=1` or a non-TTY stdin force
-    // the effective timeout to zero (disabled).
-    let permission_dispatcher = {
-        let acp_cfg = ark_config::schema::Config::defaults();
-        let ms = if is_noninteractive() {
-            0
-        } else {
-            acp_cfg.acp.permission_timeout_ms
-        };
-        let dur = std::time::Duration::from_millis(ms);
-        crate::permission::PermissionDispatcher::new(dur)
-    };
-    let permission_watcher = crate::permission::spawn_request_watcher(
-        permission_dispatcher.clone(),
-        events.subscribe(),
-        cancel.clone(),
-    );
-    let permission_timeout_pump = {
-        let d = permission_dispatcher.clone();
-        let cancel = cancel.clone();
-        let sink = events.clone();
-        tokio::spawn(async move {
-            d.run_timeout_pump(cancel, sink).await;
-        })
-    };
-
     // ---- Step 10.5: mount always-on plugins (T-7.2 + T-8.1) ----
     //
     // Walk the compiled scene's `plugin { }` declarations and mount
@@ -656,13 +615,6 @@ pub async fn run_supervisor_with(
     tab_registry_feeder.abort();
     let _ = tab_registry_feeder.await;
 
-    // T-ACP.5: drain the permission-dispatcher background tasks.
-    // Cancel already fired above — these joins are just cleanup.
-    permission_watcher.abort();
-    let _ = permission_watcher.await;
-    permission_timeout_pump.abort();
-    let _ = permission_timeout_pump.await;
-    drop(permission_dispatcher);
     // Registry itself is retained by nothing here post-drain; `_tab_registry`
     // exists only so `kill_handler` paths outside the happy path (a real
     // SIGTERM mid-run) can see non-empty state. On clean exit we drop it.
@@ -790,37 +742,6 @@ async fn drain_consumers(set: &mut JoinSet<Result<()>>, timeout: std::time::Dura
         );
         set.abort_all();
     }
-}
-
-/// T-ACP.5b: determine whether the current supervisor is running in
-/// non-interactive mode. Two signals drive the answer:
-///
-///   * `ARK_NONINTERACTIVE=1` (or any non-empty value) → forced
-///     non-interactive, regardless of TTY status.
-///   * stdin is NOT a TTY → non-interactive by default (common for
-///     CI + headless spawns).
-///
-/// Non-interactive supervisors disable the permission-request
-/// timeout (the spec says `permission_timeout_ms=0` is the default
-/// in that case) so scenes relying on scene-rule / picker responses
-/// still get an answer — or permanently block — rather than being
-/// silently auto-rejected with `option_id="timeout"`.
-fn is_noninteractive() -> bool {
-    if std::env::var_os("ARK_NONINTERACTIVE")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false)
-    {
-        return true;
-    }
-    !is_tty_stdin()
-}
-
-/// Probe whether stdin is attached to a TTY. Uses `isatty(0)`.
-fn is_tty_stdin() -> bool {
-    use std::os::unix::io::AsRawFd;
-    let fd = std::io::stdin().as_raw_fd();
-    // `nix::unistd::isatty` returns `Ok(true)` for TTY, `Ok(false)` otherwise.
-    nix::unistd::isatty(fd).unwrap_or(false)
 }
 
 /// Write the final `status.json` with the terminal phase derived from

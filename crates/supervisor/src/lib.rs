@@ -61,21 +61,6 @@ pub mod factory;
 pub mod orchestration;
 pub use factory::{SupervisorError, build_engine, build_multiplexer, build_orchestrator};
 
-// T-ACP.4a/4b: engine-resolution chain (--engine flag / scene engine{} /
-// extension engine / config.engines / hardcoded default).
-pub mod engine_resolution;
-pub use engine_resolution::{
-    DEFAULT_ENGINE_NAME, default_engine_launch, resolve_engine, shipped_engine,
-};
-
-// T-ACP.5 / T-ACP.5b: permission dispatcher with the Zed 5-tier
-// precedence + timeout + late-response handling.
-pub mod permission;
-pub use permission::{
-    PENDING_REQUEST_CAPACITY, PERMISSION_TIMEOUT_EVENT, PermissionDispatcher, TIMEOUT_OPTION_ID,
-    Tier1Outcome, evaluate_tier1, spawn_request_watcher,
-};
-
 // T-ACP.7: minimal ACP-engine Engine-trait stub that replaces the
 // retired `ark-engines-claude-code` crate.
 pub mod engine_stub;
@@ -123,9 +108,3 @@ pub use plugin_lifecycle::{
 pub mod scene_runtime;
 pub use scene_runtime::{CompiledScene, SceneSource, compile_scene_for_runtime};
 
-// T-ACP.2c: turn-inflight tracker — per-session wait table the
-// reload-gate (T-11.1) queries before applying scene deltas, so
-// `reload_scene` fires can't land between a `session/prompt`
-// request and its response. See cavekit-scene R14 + R17.
-pub mod turn_inflight;
-pub use turn_inflight::{StopReason, TurnInflightQuery, TurnInflightTracker, TurnKey};
