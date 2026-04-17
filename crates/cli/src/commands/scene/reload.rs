@@ -19,7 +19,7 @@
 //!
 //! Session resolution:
 //! * `--session <name>` — resolves against the on-disk agent layout
-//!   via [`resolve_agent_id`] (the same helper `ark kill` uses), so
+//!   via [`resolve_session_id`] (the same helper `ark kill` uses), so
 //!   users can pass any unambiguous id fragment (full id, prefix,
 //!   substring, or `spec.json` name).
 //! * When omitted, the command errors with a clear message pointing
@@ -36,7 +36,7 @@ use serde_json::{Value, json};
 
 use crate::ctx::Ctx;
 use crate::error::CliError;
-use crate::id_resolver::{ResolveError, resolve_agent_id};
+use crate::id_resolver::{ResolveError, resolve_session_id};
 
 /// Arguments for `ark scene reload`.
 #[derive(Debug, Args)]
@@ -60,9 +60,9 @@ pub fn run(args: ReloadArgs, ctx: &Ctx) -> Result<(), CliError> {
         ctx.runtime_dir.clone(),
         ctx.config_dir.clone(),
     );
-    let resolved = resolve_agent_id(query, &layout).map_err(|e| map_resolve_err(e, query))?;
+    let resolved = resolve_session_id(query, &layout).map_err(|e| map_resolve_err(e, query))?;
 
-    let sock = layout.agent_socket_path(&resolved);
+    let sock = layout.session_socket_path(&resolved);
     let stream = UnixStream::connect(&sock).map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
             CliError::OrphanOrDead {
@@ -121,7 +121,7 @@ fn exchange(mut stream: UnixStream, request: &Value) -> Result<Value, CliError> 
 
 /// Render the response envelope on stdout + classify errors.
 fn render_response(
-    resolved: &ark_types::AgentId,
+    resolved: &ark_types::SessionId,
     response: &Value,
 ) -> Result<(), CliError> {
     let ok = response.get("ok").and_then(Value::as_bool).unwrap_or(false);
@@ -214,7 +214,7 @@ fn map_resolve_err(e: ResolveError, query: &str) -> CliError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_types::AgentId;
+    use ark_types::SessionId;
 
     #[test]
     fn build_request_has_expected_shape() {
@@ -229,7 +229,7 @@ mod tests {
 
     #[test]
     fn render_response_reports_ok() {
-        let id = AgentId::new("cavekit", "scene-reload");
+        let id = SessionId::new("scene-reload");
         let resp = serde_json::json!({
             "ok": true,
             "data": {
@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn render_response_surfaces_error_envelope() {
-        let id = AgentId::new("cavekit", "scene-reload");
+        let id = SessionId::new("scene-reload");
         let resp = serde_json::json!({
             "ok": false,
             "error": "intents disabled (no IntentRegistry wired)"
@@ -266,7 +266,7 @@ mod tests {
 
     #[test]
     fn render_response_bubbles_partial_stage() {
-        let id = AgentId::new("cavekit", "scene-reload");
+        let id = SessionId::new("scene-reload");
         let resp = serde_json::json!({
             "ok": true,
             "data": {

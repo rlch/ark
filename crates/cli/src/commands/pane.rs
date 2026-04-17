@@ -18,7 +18,7 @@ use clap::{Args, Subcommand};
 
 use crate::ctx::Ctx;
 use crate::error::CliError;
-use crate::id_resolver::{ResolveError, resolve_agent_id};
+use crate::id_resolver::{ResolveError, resolve_session_id};
 
 /// Default debounce window for `ark pane diff` (cavekit-pane-commands R1).
 const DIFF_DEBOUNCE_MS: u64 = 300;
@@ -131,7 +131,7 @@ fn run_log(args: LogArgs, ctx: &Ctx) -> Result<(), CliError> {
         ctx.runtime_dir.clone(),
         ctx.config_dir.clone(),
     );
-    let id = resolve_agent_id(&args.id, &layout).map_err(|e| map_resolve_err(&args.id, e))?;
+    let id = resolve_session_id(&args.id, &layout).map_err(|e| map_resolve_err(&args.id, e))?;
     let rt = build_runtime()?;
     rt.block_on(ark_pane::log::run(Arc::new(layout), id, None))
         .map_err(widget_err)
@@ -262,13 +262,11 @@ mod tests {
     // and manual QA against zellij layouts.
 
     use crate::id_resolver::ResolveError;
-    use ark_types::{AgentId, StateLayout};
+    use ark_types::{SessionId, StateLayout};
     use tempfile::tempdir;
-    use ulid::Ulid;
 
-    fn fixed_id(name: &str) -> AgentId {
-        let ulid = Ulid::from_string("01JX7Z8K6X9Y2ZT4ABCDEF0123").expect("ulid");
-        AgentId::from_parts("cavekit", name, ulid)
+    fn fixed_id(name: &str) -> SessionId {
+        SessionId::new(name)
     }
 
     #[test]
@@ -309,8 +307,8 @@ mod tests {
             CliError::Ambiguous { what, candidates } => {
                 assert!(what.contains("\"a\""));
                 assert_eq!(candidates.len(), 2);
-                assert!(candidates.iter().any(|c| c == a.as_str()));
-                assert!(candidates.iter().any(|c| c == b.as_str()));
+                assert!(candidates.iter().any(|c| c == &a.as_str()));
+                assert!(candidates.iter().any(|c| c == &b.as_str()));
             }
             other => panic!("expected Ambiguous, got {other:?}"),
         }

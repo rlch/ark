@@ -11,7 +11,7 @@
 //!   Response: {"ok":true,"data":...}  OR  {"ok":false,"error":"..."}
 //!
 //! Connection flow:
-//!   1. Resolve the user's fragment via `resolve_agent_id` against
+//!   1. Resolve the user's fragment via `resolve_session_id` against
 //!      the on-disk `StateLayout`.
 //!   2. Connect to `${runtime}/agents/{id}.sock` as a `UnixStream`.
 //!   3. Write one NDJSON line, read one NDJSON line back.
@@ -28,7 +28,7 @@ use serde_json::{Value, json};
 
 use crate::ctx::Ctx;
 use crate::error::CliError;
-use crate::id_resolver::{ResolveError, resolve_agent_id};
+use crate::id_resolver::{ResolveError, resolve_session_id};
 
 /// Arguments for `ark kill`.
 #[derive(Debug, Args)]
@@ -164,9 +164,9 @@ pub fn run(args: KillArgs, ctx: &Ctx) -> Result<(), CliError> {
         ctx.runtime_dir.clone(),
         ctx.config_dir.clone(),
     );
-    let resolved = resolve_agent_id(&args.id, &layout).map_err(|e| map_resolve_err(e, &args.id))?;
+    let resolved = resolve_session_id(&args.id, &layout).map_err(|e| map_resolve_err(e, &args.id))?;
 
-    let sock = layout.agent_socket_path(&resolved);
+    let sock = layout.session_socket_path(&resolved);
     let stream = match UnixStream::connect(&sock) {
         Ok(s) => s,
         Err(e) => match map_connect_err(e) {
@@ -203,7 +203,7 @@ pub fn run(args: KillArgs, ctx: &Ctx) -> Result<(), CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_types::AgentId;
+    use ark_types::SessionId;
     use clap::Parser;
     use std::fs;
     use std::path::PathBuf;
@@ -291,8 +291,8 @@ mod tests {
         }
     }
 
-    fn seed_agent(layout: &StateLayout, id: &AgentId) {
-        fs::create_dir_all(layout.agent_dir(id)).expect("mkdir");
+    fn seed_agent(layout: &StateLayout, id: &SessionId) {
+        fs::create_dir_all(layout.session_dir(id)).expect("mkdir");
     }
 
     fn ulid_a() -> Ulid {
@@ -327,8 +327,8 @@ mod tests {
             ctx.runtime_dir.clone(),
             ctx.config_dir.clone(),
         );
-        let a = AgentId::from_parts("cavekit", "auth", ulid_a());
-        let b = AgentId::from_parts("cavekit", "auth", ulid_b());
+        let a = SessionId::new("auth");
+        let b = SessionId::new("auth");
         seed_agent(&layout, &a);
         seed_agent(&layout, &b);
 
@@ -364,7 +364,7 @@ mod tests {
             ctx.runtime_dir.clone(),
             ctx.config_dir.clone(),
         );
-        let id = AgentId::from_parts("cavekit", "dead", ulid_a());
+        let id = SessionId::new("dead");
         seed_agent(&layout, &id);
 
         let args = KillArgs {

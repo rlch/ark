@@ -34,7 +34,7 @@ pub use commands::Commands;
 pub use ctx::{Ctx, detect_log_level, detect_no_color, log_level_from_env, no_color_from_env};
 pub use error::CliError;
 pub use exit::ExitCode;
-pub use id_resolver::{ResolveError, list_agent_ids, resolve_agent_id};
+pub use id_resolver::{ResolveError, list_session_ids, resolve_session_id};
 
 /// Test-only process-env serialization lock (F-509).
 ///

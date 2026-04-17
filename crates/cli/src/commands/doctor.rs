@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use ark_config::{ConfigLoader, schema::Config};
-use ark_types::{AgentId, AgentSpec, StateLayout};
+use ark_types::{SessionId, SessionSpec, StateLayout};
 use clap::Args;
 use nix::sys::signal::kill as nix_kill;
 use nix::unistd::Pid;
@@ -449,17 +449,17 @@ fn pid_alive(pid: i32) -> bool {
     }
 }
 
-/// Read `$STATE/agents/{id}/pid` if present.
-fn read_pid(layout: &StateLayout, id: &AgentId) -> Option<i32> {
-    let p = layout.pid_path(id);
+/// Read `$STATE/sessions/{id}/pid` if present.
+fn read_pid(layout: &StateLayout, id: &SessionId) -> Option<i32> {
+    let p = layout.session_pid_path(id);
     let raw = fs::read_to_string(&p).ok()?;
     raw.trim().parse().ok()
 }
 
-/// Enumerate agent ids present in `$STATE/agents/`.
-fn state_agent_ids(layout: &StateLayout) -> Vec<AgentId> {
+/// Enumerate agent ids present in `$STATE/sessions/`.
+fn state_agent_ids(layout: &StateLayout) -> Vec<SessionId> {
     let mut out = Vec::new();
-    let Ok(entries) = fs::read_dir(layout.agents_root()) else {
+    let Ok(entries) = fs::read_dir(layout.sessions_root()) else {
         return out;
     };
     for e in entries.flatten() {
@@ -470,14 +470,14 @@ fn state_agent_ids(layout: &StateLayout) -> Vec<AgentId> {
             Ok(s) => s,
             Err(_) => continue,
         };
-        if let Ok(id) = AgentId::parse(&name) {
+        if let Ok(id) = SessionId::parse(&name) {
             out.push(id);
         }
     }
     out
 }
 
-/// Walk `$RUNTIME/agents/*.sock` and classify each.
+/// Walk `$RUNTIME/sessions/*.sock` and classify each.
 fn check_orphan_sockets(layout: &StateLayout) -> Vec<CheckResult> {
     let mut out = Vec::new();
     let root = layout.runtime().join("agents");
@@ -508,7 +508,7 @@ fn check_orphan_sockets(layout: &StateLayout) -> Vec<CheckResult> {
             .and_then(|s| s.to_str())
             .unwrap_or("?")
             .to_string();
-        let matched_pid = AgentId::parse(&id_str)
+        let matched_pid = SessionId::parse(&id_str)
             .ok()
             .and_then(|id| read_pid(layout, &id))
             .map(|p| live_pids.contains(&p))
@@ -550,16 +550,16 @@ fn check_stale_locks(layout: &StateLayout) -> Vec<CheckResult> {
     out
 }
 
-/// Walk `$STATE/agents/*/spec.json` for missing-cwd entries.
+/// Walk `$STATE/sessions/*/spec.json` for missing-cwd entries.
 /// Emits Warn only; the cwd is user data so we never auto-delete.
 fn check_dangling_worktrees(layout: &StateLayout) -> Vec<CheckResult> {
     let mut out = Vec::new();
     for id in state_agent_ids(layout) {
-        let spec_path = layout.spec_path(&id);
+        let spec_path = layout.session_spec_path(&id);
         let Ok(raw) = fs::read_to_string(&spec_path) else {
             continue;
         };
-        let Ok(spec) = serde_json::from_str::<AgentSpec>(&raw) else {
+        let Ok(spec) = serde_json::from_str::<SessionSpec>(&raw) else {
             continue;
         };
         if !spec.cwd.exists() {
@@ -576,7 +576,7 @@ fn check_dangling_worktrees(layout: &StateLayout) -> Vec<CheckResult> {
                 format!("agent {} cwd {} missing", id.as_str(), spec.cwd.display()),
             );
             if dead {
-                r = r.with_fix(FixAction::RemoveAgentDir(layout.agent_dir(&id)));
+                r = r.with_fix(FixAction::RemoveAgentDir(layout.session_dir(&id)));
             }
             out.push(r);
         }
@@ -1484,8 +1484,8 @@ mod tests {
 
     #[test]
     fn dangling_worktree_flagged_when_cwd_missing() {
-        use ark_types::AgentSpec;
-        use ulid::Ulid;
+        use ark_types::SessionSpec;
+        use std::collections::BTreeMap;
 
         let tmp = tempfile::Builder::new()
             .prefix("arkd")
@@ -1497,26 +1497,19 @@ mod tests {
             ctx.runtime_dir.clone(),
             ctx.config_dir.clone(),
         );
-        let id = AgentId::from_parts(
-            "cavekit",
-            "lost",
-            Ulid::from_string("01JX7Z8K6X9Y2ZT4ABCDEF0123").unwrap(),
-        );
-        fs::create_dir_all(layout.agent_dir(&id)).unwrap();
-        let mut spec = AgentSpec::new(
-            id.clone(),
-            id.name(),
-            "cavekit",
-            "claude-code",
-            PathBuf::from("/nonexistent/doctor/probe"),
-            vec!["claude".into()],
-        );
-        // `PermissionsExt` kept in scope so this file compiles on
-        // non-unix builds too — the trait import is unused there
-        // and silenced below.
-        let _ = &mut spec;
+        let id = SessionId::new("lost");
+        fs::create_dir_all(layout.session_dir(&id)).unwrap();
+        let spec = SessionSpec {
+            id: id.clone(),
+            name: id.name.clone(),
+            scene_path: None,
+            cwd: PathBuf::from("/nonexistent/doctor/probe"),
+            env: BTreeMap::new(),
+            created_at: chrono::Utc::now(),
+            ext_config: BTreeMap::new(),
+        };
         let raw = serde_json::to_string(&spec).unwrap();
-        fs::write(layout.spec_path(&id), raw).unwrap();
+        fs::write(layout.session_spec_path(&id), raw).unwrap();
 
         let rs = check_dangling_worktrees(&layout);
         assert_eq!(rs.len(), 1);
