@@ -2,7 +2,7 @@
 created: "2026-04-17T00:00:00Z"
 last_edited: "2026-04-17T00:00:00Z"
 supersedes: cavekit-architecture.md
-status: draft
+status: ready
 ---
 
 # Spec: ark's Soul — Reactive IDE on zellij, Extensions Own AI
@@ -56,6 +56,66 @@ Ark is NOT:
 - an ACP client (ACP is one extension among many);
 - opinionated about what finishes a "run" (there is no run, just a
   session).
+
+## Resolved Decisions (2026-04-17 interview)
+
+Locked calls from kit flesh-out. Drove the migration plan + target shape
+below.
+
+- **State compat:** nuke `$STATE` on first boot after Phase 1 lands. No
+  migration code. User is sole dev; state dirs are ephemeral.
+- **Path leaf:** `$STATE/agents/` renames to `$STATE/sessions/`. One-time
+  rename alongside type migration; no symlink bridge.
+- **No `SessionKind` discriminator.** Every session is just a session.
+  Behaviour comes from which extensions have been loaded / registered
+  for the session. Core never branches on kind.
+- **`Phase` + `Outcome` delete from core entirely.** `AgentStatus`
+  becomes `SessionStatus { id, started_at, terminated_at: Option, ext_state:
+  BTreeMap<String, Value> }`. Extensions write into their own bucket.
+  `ark list` default = core columns only; extensions contribute columns
+  via a formatter hook. `pane::log` asks the ext that owned the session
+  to format its terminal line; bare session gets a generic "session
+  ended".
+- **Engine / Orchestrator traits delete outright in Phase 5.** No shim
+  crate. No shared `ark-ext-agent` base. Each extension that wants an
+  internal abstraction defines its own.
+- **`ark-hook` binary moves whole to `extensions/claude-code/`.** Not
+  generalised. Claude Code hook JSON is a Claude Code concern.
+- **Tool taxonomy (`READ_ONLY_TOOLS`, `PermissionPolicy`) moves to
+  `extensions/claude-code/`.** No generic policy engine in core. Other
+  agent exts invent their own.
+- **`ark doctor` baseline:** zellij + scene-dir + state-dir only.
+  `check_claude` / `check_acp` / `check_status_plugin_installed` etc
+  move to their respective extensions. Doctor iterates loaded
+  extensions and runs each preflight.
+- **Bus payload shape:** 2-level `CoreEvent` (closed, small) +
+  `CoreEvent::Ext(ExtEvent { ext, kind, payload })` (open, tagged).
+  Scene-script convenience: a `Into<FlatEvent>` shim flattens both into
+  a uniform `{ name: String, payload: Value }` so Rhai selectors can
+  match on `"ark.core.session.started"` or `"claude-code.tool.use"` the
+  same way.
+- **Extension loading:** use the existing `ArkExtension` trait. Phase 2
+  adds `on_session_start` / `on_session_end` / `control_verbs` /
+  `permission_dispatcher` methods to the trait surface (one minor bump,
+  one batch). In-proc (`#[derive(Extension)]`) + subprocess (NDJSON
+  JSON-RPC) transports unchanged. WASM transport remains future.
+- **`crates/extensions/<name>/` layout.** No `ext-` package prefix in
+  the path; binaries keep short names (`cc-hook`, `acp-client`).
+  Cargo package names may still use `ext-` prefix to avoid crate-namespace
+  collisions.
+- **`SessionId::new(name)`** bakes the ulid in. Path becomes
+  `sessions/<name>-<ulid>`. `orchestrator` slug is gone from the ID
+  constructor.
+- **Phase 1 is bundled.** One phase covers: SessionSpec, path rename,
+  AgentEvent → CoreEvent shrink, `Phase` / `Outcome` delete from core,
+  supervisor `Option<Orchestrator>`, bare launch works, PTY test
+  green, `$STATE` wiped on first run.
+- **Phase 1 execution via Cavekit build-site.** `/ck:sketch` →
+  `/ck:map` → `/ck:make` for Phase 1's ~30 tasks; parallel agents for
+  independent subsystems.
+- **Hot-reload: full story.** Both transports. Subprocess exts reload
+  via R16 shutdown ladder + respawn. In-proc exts require supervisor
+  restart (accept the gap). Scene reload unchanged.
 
 ## Current State — What's Hardcoded
 
@@ -111,42 +171,44 @@ corrections.
 - `crates/types/src/scope.rs:6-12` — `ENGINES_V1`, `ORCHESTRATORS_V1`,
   `MUX_V1` const slugs + `is_v1_*` predicates. This is where the v1
   scope lock lives; every new AI integration edits this file. Kit's
-  Phase 5 must retire these (keep only `MUX_V1`).
+  Phase 5 retires these (keep only `MUX_V1`).
 - `crates/types/src/event.rs:41-167` — `AgentEvent` enum. Ten variants
   assume agent semantics: `TaskDone`, `Iteration`, `PhaseTransition`,
   `ToolUse`, `Message`, `FileEdited`, `ReviewComment`,
   `PermissionAsked`, `PermissionResolved`, `Stall`. Only `UserEvent`,
-  `Log`, `Error` are generically reactive. Extensions should define
-  their own event types and route into the bus as `UserEvent`s.
+  `Log`, `Error` are generically reactive. Phase 1 shrinks this enum
+  and renames to `CoreEvent`; extension-emitted events route through
+  `CoreEvent::Ext(ExtEvent)`.
 - `crates/types/src/status.rs:25-38` — `Phase` enum (`Prompting`,
   `Reviewing`, `Done`, `Failed`, `Killed`, `Timeout`, `Crashed`) +
   `AgentStatus::findings: Findings { p0..p3 }`. Review phases +
   severity-bucketed finding counts are Cavekit-methodology concepts
-  living in core types.
+  living in core types. Phase 1 deletes both outright; per-ext state
+  moves into `SessionStatus.ext_state`.
 - `crates/types/src/id.rs:32` — `AgentId::new(orchestrator, name)`.
-  The ID constructor REQUIRES an orchestrator slug. Every
-  `$STATE/agents/<orchestrator>-<name>-<ulid>` path has orchestrator
-  baked in, which means `SessionSpec` can't just drop the orchestrator
-  field without a parallel ID-namespace migration.
+  Phase 1 renames to `SessionId::new(name)`; ulid baked in; path
+  becomes `sessions/<name>-<ulid>`.
 - `crates/types/src/spec.rs:79` — `pub type OrchestratorSpec = AgentSpec`
-  alias. Second re-export of the same leaky shape.
+  alias. Second re-export of the same leaky shape. Delete.
 - `crates/types/src/permission.rs:42-63` — `READ_ONLY_TOOLS = ["Read",
   "Glob", "Grep", "WebFetch", "WebSearch"]` + `PermissionPolicy`
   variants + `POLICY_FILE_NAME = "permission_policy"`. Claude Code tool
-  taxonomy hardcoded in `ark-types`.
+  taxonomy hardcoded in `ark-types`. Phase 4 moves to
+  `extensions/claude-code/`.
 
 **Core consumers — P0**
 
 - `crates/core/src/consumers/state_writer.rs:179-260` — `update_status`
   hardcodes phase-rollup rules keyed on each agent-specific
-  `AgentEvent` variant (`TabOpened → Running`, `ToolUse → Running`,
-  `Message → Running`, `PhaseTransition::to == "done" → Done`). Shrinks
-  with `AgentEvent`.
+  `AgentEvent` variant. Shrinks with `AgentEvent`. Phase 1 rewrites
+  against `CoreEvent`; per-ext rollup logic moves with its
+  extension.
 - `crates/core/src/consumers/reaction_dispatcher.rs:372-390` — the
   reaction dispatcher has `OpNode::AcpPrompt / AcpCancel / AcpPermit /
   AcpSetMode` match arms *inside core*. ACP ops are dispatched from
-  core, not from `acp-client`. Kit must include the reaction
-  dispatcher in the ACP-extraction phase.
+  core, not from `acp-client`. Kit includes the reaction dispatcher
+  in the ACP-extraction phase (Phase 3) via open-dispatch (trait-object
+  op nodes or ext-registered op kinds).
 
 **Scene crate — P0 (entire subtrees that are pure ACP)**
 
@@ -158,28 +220,36 @@ corrections.
 - `crates/scene/src/engine_compat.rs`
 - `crates/scene/src/intent.rs:172-300` — `AcpHandle` trait on
   `IntentContext`; `ctx.acp: Option<Arc<dyn AcpHandle>>`. ACP is
-  hardwired into the scene intent-dispatch context.
+  hardwired into the scene intent-dispatch context. Phase 3 replaces
+  with ext-registered intent handlers; `IntentContext` loses `acp`
+  field.
 - `crates/scene/src/context.rs` — `AgentSnapshot` used as the Rhai
-  event-scope's `agent.*` binding. The scripting language's primary
-  context object is agent-shaped, not session-shaped.
+  event-scope's `agent.*` binding. Phase 1 generalises to
+  `SessionSnapshot` with an `extensions: Map<String, Value>` sub-map
+  for per-extension state. Scene scripts migrate `agent.*` →
+  `session.*` / `session.extensions.<name>.*`.
 
 **Supervisor — P0 additions**
 
 - `crates/supervisor/src/scene_runtime.rs:94-99,182-189` —
   `CompiledScene.engine_launch: Option<EngineLaunch>` + the
-  `with_engine_launch` builder. The scene-compile output carries an
-  engine launch spec. This is the structural leak in the scene
-  runtime, not in the scene *crate* — move `engine_launch` out of
-  `CompiledScene`.
+  `with_engine_launch` builder. Phase 1 removes the field; extensions
+  that want to launch agent subprocesses on scene compile register a
+  scene-compile hook (Phase 2) and do it themselves.
 - `crates/supervisor/src/auto_close.rs:60-87` — `AutoClosePolicy {
-  on_done, on_fail, on_kill }` + `should_close(outcome)`. Pure
-  outcome-lifecycle residue that the kit's initial audit missed.
+  on_done, on_fail, on_kill }` + `should_close(outcome)`. Consumes
+  `Outcome`. Phase 1 rewrites against session-lifecycle events; ext
+  hooks can register their own close conditions (Phase 2). Bare
+  sessions default to no-auto-close.
 - `crates/supervisor/src/commands.rs:366-395` — `Kill` command accepts
   `remove_worktree: bool`. Worktrees are methodology-level, not
-  generic session control.
+  generic session control. Phase 4 moves worktree cleanup into
+  `extensions/cavekit/` via a kill-time hook.
 - `crates/supervisor/src/kill.rs:166-170` — always emits `AgentEvent::
-  Done { Outcome::Killed }` at kill time, even for sessions that
-  weren't agents. Under bare-ark this synthesizes a fake "done" event.
+  Done { Outcome::Killed }` at kill time. Phase 1 changes to emit
+  `CoreEvent::SessionEnded { terminated_at }`; extensions that want
+  "killed" semantics observe the event and emit their own
+  `ExtEvent`.
 
 **Config, hooks, CLI — P1**
 
@@ -189,23 +259,24 @@ corrections.
   / permission_policy / inject_hooks`; `[orchestrator.cavekit]` with
   `watch_ralph_loop / spawn_review_tab / review_on_phase`;
   `[orchestrator.claude_code]`; `[acp].permission_timeout_ms`;
-  `[engines.<name>]` named-map section. Ext-owned config inverts the
-  section-naming convention.
+  `[engines.<name>]` named-map section. Phase 4 moves ext-owned
+  config sections to their extensions (extensions register their own
+  config schemas via the ext-proto surface).
 - `crates/config/src/hooks.rs:67-98` — `HookEntry.on_orchestrator:
-  Vec<String>` + `HookContext.orchestrator: String`. Hook filtering
-  keyed on orchestrator.
+  Vec<String>` + `HookContext.orchestrator: String`. Phase 4 migrates
+  to `on_extension: Vec<String>`.
 - `crates/cli/src/commands/list.rs:52-141,282-289` — `--orchestrator`
-  filter flag, `PHASE_NAMES` hardcoded (`prompting`, `reviewing`,
-  etc), detail view prints `orchestrator:` + `engine:` fields.
+  filter flag, `PHASE_NAMES` hardcoded, detail view prints
+  `orchestrator:` + `engine:` fields. Phase 1 drops the hardcoded
+  columns; exts contribute columns via formatter hooks (Phase 2).
 - `crates/cli/src/commands/doctor.rs:241-372,668-859` — `check_claude`,
   `check_acp`, `check_status_plugin_installed`,
-  `check_picker_plugin_installed`, `check_dangling_worktrees`.
-  Agent-methodology-specific preflight baked into the `ark doctor`
-  verb. Doctor should ask each loaded extension for its own preflight
-  checks rather than hardcoding these.
+  `check_picker_plugin_installed`, `check_dangling_worktrees`. Phase 4
+  moves each check to its owning extension; doctor iterates loaded
+  extensions and runs each preflight.
 - `crates/cli/src/id_resolver.rs:6-11,126-187` — resolve-by-name reads
-  `spec.json` as `{ name }`. Any `SessionSpec` migration must keep
-  `name` readable from legacy `spec.json`.
+  `spec.json` as `{ name }`. Phase 1 keeps `name` readable from
+  `SessionSpec`.
 
 **ark-hook crate — P0 (flagged Claude-specific in its entirety)**
 
@@ -216,13 +287,14 @@ corrections.
   translation to `ToolUse`, `Done { Outcome::Success }`,
   `PermissionAsked`, `Message`, `TaskDone`.
 - The `ark-hook` binary is Claude-Code glue, not generic
-  event-bridging. It belongs inside `ext-claude-code`.
+  event-bridging. Phase 4 moves inside `extensions/claude-code/` as
+  `cc-hook` binary.
 
 **Core-resident contract suites — P2**
 
 - `crates/core/src/engine_contract.rs` + `crates/core/src/orchestrator_contract.rs`
   — reusable trait-conformance test suites exported from `ark-core`.
-  Retire with the traits they test.
+  Delete with the traits in Phase 5.
 
 ## Target Architecture
 
@@ -232,8 +304,8 @@ corrections.
    reactions, keybinds, plugin decls, hot-reload. (Already clean.)
 2. **Mux** — zellij wrapper. Session / tab lifecycle. Layout artifacts.
    (Already clean.)
-3. **Hook IPC** — event taxonomy + `ark-hook` CLI +
-   per-supervisor control socket. (Already clean.)
+3. **Hook IPC** — event taxonomy + per-supervisor control socket.
+   (Claude Code hook binary moves to extension.)
 4. **Supervisor reactive loop** — what remains after Engine/Orchestrator
    leave:
    - Lock, control-socket bind, scene compile, plugin lifecycle,
@@ -241,280 +313,368 @@ corrections.
    - Main loop: `world.cancel.cancelled().await`. Nothing else.
    - No `orchestrator.run`. No `engine.teardown`. No factory slug
      matching beyond `mux`.
-5. **Extension host** — the only way to add AI-side functionality.
+5. **Extension host** — the only way to add AI-side functionality. Uses
+   existing `ArkExtension` trait + in-proc / subprocess transports;
+   Phase 2 adds new supervisor-side methods.
 
-### Layer 2: Sessions vs agents
+### Layer 2: SessionSpec + SessionStatus + SessionId
 
-Separate `SessionSpec` from `AgentSpec`.
+Replaces `AgentSpec` / `AgentStatus` / `AgentId`:
 
 ```rust
-// Replaces AgentSpec for the supervisor's perspective.
+// crates/types/src/spec.rs
 struct SessionSpec {
-    id: SessionId,          // renamed from AgentId
-    session: String,        // zellij session name (for 1:1 binding)
+    id: SessionId,
+    name: String,                // human-friendly, unique within state dir
     scene_path: Option<PathBuf>,
     cwd: PathBuf,
     env: BTreeMap<String, String>,
     created_at: DateTime<Utc>,
-    // No orchestrator, no engine, no cmd, no runner_config.
-    // Extensions that need these carry them in their own state.
+    // Extensions serialize their per-session config into this map
+    // under their ext name. Core never reads these fields.
+    ext_config: BTreeMap<String, serde_json::Value>,
+}
+
+// crates/types/src/id.rs
+struct SessionId { name: String, ulid: Ulid }
+impl SessionId {
+    pub fn new(name: &str) -> Self { /* ulid baked in */ }
+    pub fn as_path_leaf(&self) -> String { format!("{}-{}", self.name, self.ulid) }
+}
+
+// crates/types/src/status.rs
+struct SessionStatus {
+    id: SessionId,
+    started_at: DateTime<Utc>,
+    terminated_at: Option<DateTime<Utc>>,
+    // Per-extension state. Each ext writes into its own bucket.
+    // `ark list` shows only core columns by default; exts contribute
+    // columns via a formatter hook (Phase 2).
+    ext_state: BTreeMap<String, serde_json::Value>,
 }
 ```
 
-`AgentSpec` survives inside the agent extension(s) that care about it.
-The picker UI (when it comes back) operates on whatever "things you can
-spawn" an extension exposes — which might be agents, or workflows, or
-demos, or none at all.
+`AgentSpec` survives inside extensions that care about it — e.g.,
+`extensions/acp-client/src/agent_spec.rs`. The picker UI (when it comes
+back) operates on whatever "spawnable things" an extension exposes.
 
-### Layer 3: Extensions own AI
+### Layer 3: Bus payload — CoreEvent + ExtEvent (2-level)
+
+```rust
+// crates/types/src/event.rs
+enum CoreEvent {
+    Log { level, message, target },
+    Error { error },
+    SessionStarted { spec: SessionSpec },
+    SessionEnded { terminated_at: DateTime<Utc> },
+    Ext(ExtEvent),
+}
+
+struct ExtEvent {
+    ext: String,             // e.g. "acp-client", "claude-code"
+    kind: String,            // e.g. "permission.asked", "tool.use"
+    payload: serde_json::Value,
+}
+
+// Convenience shim for scene scripts — both core and ext events
+// render as { name, payload } so Rhai selectors match uniformly.
+struct FlatEvent { name: String, payload: serde_json::Value }
+impl From<&CoreEvent> for FlatEvent { /* core events → "ark.core.*" */ }
+impl From<&ExtEvent>  for FlatEvent { /* "<ext>.<kind>" */ }
+```
+
+Scene script ergonomics:
+
+```kdl
+on "ark.core.session.started" { ... }
+on "claude-code.tool.use" where="payload.tool == \"Read\"" { ... }
+on "acp-client.permission.asked" { ... }
+```
+
+The `on <CamelCaseVariant>` form (closed-enum pattern-match) still
+works for core variants; for ext events, the string form is the only
+option.
+
+### Layer 4: Extensions own AI
 
 Extensions can register:
-- **Scene-side:** reactions, keybinds, plugin decls (existing).
-- **Supervisor-side (new):**
-  - Long-running tasks spawned at scene compile time.
-  - Control-socket command handlers (custom `ark ext foo intent` verbs).
-  - Hook providers (custom hook names).
-  - Session-lifecycle listeners (on-session-start / on-session-end).
-  - Permission dispatchers (the ACP extension supplies ACP's).
-- **Pane-side:** views (existing).
+- **Scene-side (existing):** reactions, keybinds, plugin decls, intents,
+  event subscriptions with glob selectors.
+- **Supervisor-side (new, Phase 2):**
+  - `on_session_start(&self, spec: &SessionSpec) -> Result<()>`
+  - `on_session_end(&self, id: &SessionId, reason: ExitReason)`
+  - `control_verbs() -> Vec<VerbSpec>` (custom `ark ext foo intent`
+    surfaces)
+  - `permission_dispatcher() -> Option<Arc<dyn PermissionDispatcher>>`
+  - `scene_compile_hook(&self, compiled: &mut CompiledScene) -> Result<()>`
+    (lets e.g. `extensions/acp-client/` attach its own engine-launch
+    metadata)
+  - `doctor_checks() -> Vec<CheckSpec>` (fanned into `ark doctor`)
+  - `list_columns() -> Vec<ColumnSpec>` (contributed to `ark list`)
+- **Pane-side (existing):** pane views.
 
 Example extensions the new architecture supports:
 
-- `ext-acp-client` — ACP subprocess lifecycle, `session/prompt`
-  tracking, permission dispatch. Replaces core's `acp-client` + the
+- `extensions/acp-client/` — ACP subprocess lifecycle, `session/prompt`
+  tracking, permission dispatch. Replaces `crates/acp-client/` + the
   supervisor's `permission.rs` + `turn_inflight.rs`.
-- `ext-claude-code` — Cavekit-style reactions, transcript watching, git
-  diff artifact collection. Replaces
-  `crates/orchestrators/claude-code/`.
-- `ext-cavekit` — build-site progress tracking, findings feed.
-  Replaces `crates/orchestrators/cavekit/`.
-- `ext-pi` (future) — pi.dev native integration. Plugins that live in
-  zellij panes speak to pi via the extension's supervisor-side task.
-- `ext-subagents-on-pi` (future) — a meta-extension built on top of
-  `ext-pi`, coordinating multiple subagents through scene-level
-  "stacks" (new scene primitive TBD).
+- `extensions/claude-code/` — Claude Code hook glue (`cc-hook`
+  binary), transcript watching, permission-policy taxonomy, git diff
+  artifact collection. Replaces `crates/orchestrators/claude-code/` +
+  absorbs `crates/hook/` + `crates/types/src/permission.rs`.
+- `extensions/cavekit/` — build-site progress tracking, findings feed,
+  worktree-aware kill. Replaces `crates/orchestrators/cavekit/`.
+- `extensions/pi` (future) — pi.dev native integration.
+- `extensions/subagents-on-pi` (future) — meta-extension built on
+  `extensions/pi`, coordinating multiple subagents.
+
+### Hot-reload
+
+Scene reload: unchanged (already clean).
+
+Extension reload:
+- **Subprocess extensions** reload live via R16 shutdown ladder
+  (stdin-close → SIGTERM → SIGKILL) + respawn. Supervisor exposes
+  `ark ext reload <name>`; under the hood this issues R16 shutdown
+  then `on_session_start` for every live session that registered with
+  the ext.
+- **In-proc extensions** (`#[derive(Extension)]` + `inventory::submit!`)
+  require supervisor restart. Accept the gap. Document in the ext
+  authoring guide.
+- **Ext manifest hot-swap** (bumping `extensions/<name>/manifest.kdl`):
+  same rules. Subprocess → restart the subprocess; in-proc → supervisor
+  restart.
 
 ### What stays the same
 
-- Scene KDL format (the grammar — ACP-specific scene extensions move
-  to `ext-acp-client`).
+- Scene KDL format. ACP-specific scene extensions move to
+  `extensions/acp-client/` but the *grammar* is unchanged.
 - Every reaction / keybind / plugin mechanism.
 - zellij as the substrate. The web client is zellij's, not ark's.
 - `ark list` / `ark kill` / `ark scene *` / `ark pane *` /
   `ark config *` — bare-ark session management is unchanged
-  user-facing (the internal shape of `AgentStatus` changes, but the
-  user view stays).
-- `ark doctor` keeps its verb. Its *checks* become extension-supplied:
-  each loaded extension exposes a preflight list, doctor fans out.
+  user-facing. Internal shape of `AgentStatus` → `SessionStatus`
+  changes but the user view stays plus ext-contributed columns.
+- `ark doctor` keeps its verb. Its *checks* become extension-supplied.
+- The `ArkExtension` RPC surface (34 methods today). Phase 2 adds
+  methods; doesn't rip any.
 
 ### What explicitly moves out of core
 
 Explicit call-outs beyond the obvious trait moves:
 
-- `crates/hook/` — Claude Code glue. Moves to `ext-claude-code`.
+- `crates/hook/` — Claude Code glue. Moves to
+  `extensions/claude-code/bin/cc-hook/`.
 - `crates/types/src/permission.rs` — Claude Code tool taxonomy. Moves
-  to `ext-claude-code` (or a shared agent-ext base).
+  to `extensions/claude-code/`.
 - `crates/scene/src/ext/{acp,permission,inflight,doctor}.rs` +
   `crates/scene/src/ops/acp.rs` + `crates/scene/src/engine_compat.rs`
-  — move to `ext-acp-client`, which registers these scene-side
-  primitives via the new supervisor-extension hook (Phase 3).
+  — move to `extensions/acp-client/`, which registers these scene-side
+  primitives via the new supervisor-extension hooks (Phase 3).
 - `crates/scene/src/intent.rs:AcpHandle` — replaced by extensions
-  registering their own intent handlers. The `IntentContext` no
-  longer has an `acp` field.
+  registering their own intent handlers. `IntentContext` no longer has
+  an `acp` field.
 - `crates/scene/src/context.rs:AgentSnapshot` — generalises to
-  `SessionSnapshot` with an extensions sub-map for per-extension
-  state.
+  `SessionSnapshot` with an `extensions: Map<String, Value>`
+  sub-map.
+- `crates/orchestrators/cavekit/` → `extensions/cavekit/`.
+- `crates/orchestrators/claude-code/` merges into
+  `extensions/claude-code/`.
+- `crates/acp-client/` → `extensions/acp-client/`.
 
 ## Migration Path
 
-Phased. Each phase is independently shippable, and each leaves the
-workspace green. No phase is a "rewrite everything" tier.
+Six phases. Each independently shippable; each leaves the workspace green.
 
-### Phase 0: Unblock bare ark (minimum viable patch, next session)
+### Phase 1: Types + supervisor + launch unblock (bundled)
 
-- Add an `"ark"` null-orchestrator + null-engine combo as a temporary
-  stopgap, with a TODO pointing at this spec. Factory matches "ark"
-  slugs, supervisor boot completes, bare `ark` launches. The
-  PTY smoke test goes green.
-- Explicitly mark as temporary scaffolding that Phase 1+ removes.
+Single phase covering all the type surgery plus supervisor refactor
+required to make bare `ark` launch succeed.
 
-### Phase 1: Supervisor main loop without orchestrator.run
+**Sub-areas** (drive the Cavekit build-site decomposition):
 
-- Add `Option<Box<dyn Orchestrator>>` to `run_supervisor_with`; if
-  None, step 13 is `world.cancel.cancelled().await`.
-- Bare launch passes `None`. Cavekit + claude-code still pass Some(…).
-- Remove step 15 dependency on a live engine (noop if engine is the
-  stub).
-- Integration tests for both paths.
+1. **Types migration** (`crates/types/`):
+   - `AgentSpec` → `SessionSpec`. `AgentStatus` → `SessionStatus`.
+     `AgentId::new(orch, name)` → `SessionId::new(name)` (ulid baked in).
+   - `AgentEvent` → `CoreEvent` with shrunk variant list + new
+     `Ext(ExtEvent)` variant.
+   - Delete `Phase`, `Outcome`, `Findings` from `ark-types`.
+   - Delete `ENGINES_V1` / `ORCHESTRATORS_V1` slug consts (keep
+     `MUX_V1`).
+2. **State layout:**
+   - Rename `StateLayout::agents*()` → `sessions*()`. Path leaf
+     `agents/` → `sessions/`.
+   - On supervisor boot, if `$STATE/agents/` exists, delete it
+     (nuke). Log a single INFO line.
+3. **Supervisor refactor** (`crates/supervisor/`):
+   - `run_supervisor_with` takes `orchestrator: Option<Box<dyn
+     Orchestrator>>`. `None` path skips steps 13 + 15; main loop is
+     `world.cancel.cancelled().await`.
+   - `engine: Option<Box<dyn Engine>>` similarly.
+   - `auto_close.rs` rewritten against `CoreEvent::SessionEnded`;
+     bare sessions default no-auto-close.
+   - `kill.rs` emits `CoreEvent::SessionEnded`, not a synthesised
+     `Outcome::Killed`.
+   - `scene_runtime.rs` — `CompiledScene.engine_launch` deleted.
+     Replaced in Phase 2 by scene-compile hook on extensions.
+4. **CLI/consumer updates:**
+   - `crates/cli/src/commands/list.rs` — drop `--orchestrator` flag +
+     `PHASE_NAMES` const + orchestrator/engine/phase columns. Minimal
+     row: `id name cwd uptime running?`.
+   - `crates/cli/src/id_resolver.rs` — reads `name` from `SessionSpec`.
+   - `crates/core/src/consumers/state_writer.rs` — rewrites against
+     `CoreEvent`. Per-ext rollup logic not yet present; scaffolded
+     stub for Phase 2.
+   - `crates/core/src/consumers/reaction_dispatcher.rs` — `OpNode::Acp*`
+     kept temporarily (deleted in Phase 3) but no longer trigger
+     `engine_compat`.
+5. **Bare launch path:**
+   - `crates/cli/src/commands/launch.rs` constructs a
+     `SessionSpec { name: "ark", scene: default, … }` and calls
+     `run_supervisor_with(spec, None, None, world)`.
+   - The launch-module trait surface (`Multiplexer`,
+     `SupervisorSpawner`) stays; `real.rs` drops the orchestrator
+     factory call.
+6. **Test posture:**
+   - PTY smoke test `real_zellij_accepts_compiled_default_layout`
+     goes green.
+   - Existing `launch_integration.rs` mock tests keep passing.
+   - `crates/orchestrators/cavekit/` + `claude-code/` keep compiling
+     against the new types (`Option<Orchestrator>` path = `Some(…)`
+     for these; they survive Phase 1 unchanged behaviour-wise).
 
-### Phase 2: SessionSpec vs AgentSpec
+**Out of scope for Phase 1:** extension-registered session-lifecycle
+hooks, ACP extraction, claude-code extraction, doctor refactor,
+picker. All deferred.
 
-- Introduce `SessionSpec` in `ark-types`. Derive from (or co-exist
-  with) `AgentSpec` during migration.
-- Supervisor takes `SessionSpec`. Orchestrators that need agent-level
-  fields receive them via their extension-specific state.
-- Update `ark list` / `ark kill` to operate on sessions, not "agents".
+**Execution:** Cavekit build-site. `/ck:sketch` the Phase 1 kit from
+this spec's Phase 1 sub-areas, `/ck:map` to generate a build graph
+(rough estimate: 25-35 tasks across 6-8 tiers), `/ck:make` to dispatch.
+Peer-review via Codex.
 
-### Phase 3: Extension supervisor hooks
+### Phase 2: Extension supervisor hooks
 
-- Extend the extension manifest with supervisor-side registration
-  points: `on_session_start`, `on_session_end`, `control_verbs`,
-  `permission_dispatcher`.
-- The `ark-ext-proto` crate grows; `ark-ext-derive` gets new
-  derive arms.
-- `ark-cavekit-orchestrator` becomes an extension, not a first-class
-  crate in the workspace.
+- Extend the `ArkExtension` trait with the new methods
+  (`on_session_start`, `on_session_end`, `control_verbs`,
+  `permission_dispatcher`, `scene_compile_hook`, `doctor_checks`,
+  `list_columns`). Single minor version bump.
+- `ark-ext-proto::ArkExtensionMetadata` surface grows; derive macro
+  (`ark-ext-derive`) picks up the new arms.
+- `ark list` columns + `ark doctor` checks become ext-fan-in.
+- Integration tests with a stub in-proc extension.
 
-### Phase 4: ACP → extension
+### Phase 3: ACP → `extensions/acp-client/`
 
-- `crates/acp-client/` and `crates/supervisor/src/permission.rs` and
-  `crates/supervisor/src/turn_inflight.rs` move into
-  `extensions/ext-acp-client/`.
+- Move `crates/acp-client/` + `crates/supervisor/src/permission.rs` +
+  `crates/supervisor/src/turn_inflight.rs` + scene `ext/{acp,permission,inflight,doctor}.rs`
+  + `ops/acp.rs` + `engine_compat.rs` + `intent.rs:AcpHandle` into
+  `extensions/acp-client/`.
 - Supervisor no longer depends on `acp-client`.
-- Engine resolution chain moves into `ext-acp-client`.
-- `ark doctor` learns to ask extensions for their own preflight
-  checks instead of hardcoding `claude` + `zellij`.
+- `reaction_dispatcher::OpNode::Acp*` variants removed; dispatcher
+  gets open-op-kind dispatch (ext-registered op handler trait).
+- `engine_resolution.rs` chain moves to `extensions/acp-client/`.
+- `ark doctor` uses ext-fan-in from Phase 2 for `check_acp`,
+  `check_claude`, etc.
 
-### Phase 5: Retire `Engine` / `Orchestrator` traits from core
+### Phase 4: Claude Code + Cavekit → extensions
 
-- Move the traits into `ext-acp-client` (or wherever they're still
-  useful). `ark-core` no longer exposes them.
-- `crates/orchestrators/{cavekit,claude-code}/` become
-  `extensions/ext-{cavekit,claude-code}/`.
-- Factory in supervisor reduces to `build_multiplexer`.
+- `crates/orchestrators/claude-code/` + `crates/hook/` (as `cc-hook`
+  binary) + `crates/types/src/permission.rs` (tool taxonomy) +
+  config's `[engine.claude_code]` / `[orchestrator.claude_code]`
+  schema sections merge into `extensions/claude-code/`.
+- `crates/orchestrators/cavekit/` → `extensions/cavekit/`. Worktree
+  cleanup (`Kill { remove_worktree }`) migrates to a cavekit-ext
+  kill-time hook.
+- `HookEntry.on_orchestrator` → `on_extension`.
+- Config sections per-extension — extensions register their own
+  schemas via the ext-proto surface.
 
-### Phase 6: Picker new-agent replacement
+### Phase 5: Delete `Engine` / `Orchestrator` from core
 
-- Picker gets its "spawn" capability back, but drives the *extension
-  that provides the agent* rather than `ark spawn`. Each extension
-  that provides spawnable things (agents, workflows) registers with
-  a picker-compatible surface — the UI shape is shared, the semantics
-  are extension-defined.
+- Delete `crates/core/src/engine.rs`, `orchestrator.rs`,
+  `engine_contract.rs`, `orchestrator_contract.rs`, re-exports at
+  `lib.rs:41-45`.
+- Delete `crates/supervisor/src/factory.rs` (only `build_multiplexer`
+  was still legitimate — fold into `crates/mux/`).
+- Delete `crates/supervisor/src/engine_resolution.rs` leftovers.
+- Delete `crates/types/src/spec.rs:OrchestratorSpec` alias.
+- Since Phase 1 made `Option<Orchestrator>` the supervisor's shape and
+  Phases 3-4 moved all Some(…) call-sites into extensions, Phase 5 is
+  mostly deletions + a final compile check.
 
-## Migration blind spots flagged in review
+### Phase 6: Picker spawn via extensions
 
-Per-phase risks the review surfaced:
+- Picker gets its spawn capability back, but it asks loaded extensions
+  for "spawnable things". Each extension that provides spawnable
+  things (agents, workflows, demos) registers a picker surface via
+  the ext-proto + returns spawn specs. Picker UI is generic; semantics
+  per-extension.
+- `ark spawn` CLI verb does not return. Use `ark ext <name> spawn …`
+  or equivalent ext-specific commands.
 
-### Phase 1
+## Migration blind spots (still-live risks)
 
-- `auto_close.rs` consumes `Outcome` off the bus. None-orchestrator
-  sessions emit no terminal `Done` event → tabs leak. Needs a
-  bare-session tab-tracking path OR Phase 1 ships with auto-close
-  disabled for bare sessions.
-- `kill.rs:166-170` always synthesises a fake `Outcome::Killed` event.
-  Under bare-ark this is a lie. Either conditionalise on whether the
-  session had an agent, or change the semantics.
-- `state_writer.rs:168` bootstraps every status to `Phase::Running`.
-  Bare sessions stay "running" forever until killed. `ark list` reads
-  misleadingly.
+Most Phase 1 blind spots from the initial draft are resolved by the
+bundle + nuke-state decisions. These remain:
 
 ### Phase 2
-
-- `StateLayout::spec_path = agent_dir/spec.json`. Legacy specs carry
-  orchestrator/engine/cmd/runner_config. Every removed field needs
-  `#[serde(default, skip_serializing_if)]` — not just `scene_path`
-  which is the only one that got the treatment.
-- `AgentEvent::Started { spec: AgentSpec }` embeds the full spec into
-  events.jsonl. Every v1 state dir's events.jsonl has the old spec
-  shape. Readers (`events_log::EventLogReader`) break if `AgentSpec`
-  changes. Either keep `AgentSpec` deserialisable forever OR version
-  the jsonl stream.
-- `id_resolver.rs` reads `spec.json` by name; `commands.rs::handle_rename`
-  rewrites `name` via raw JSON mutation. Migration-era specs may drift
-  field names — add a tolerant round-trip test before shipping.
+- `ark-ext-proto::ArkExtension` is method-per-op under a version policy
+  (R16 rule #3). Batch all new methods into one minor bump. Don't drip
+  them.
+- Existing in-proc extensions (`#[derive(Extension)]` users) auto-get
+  default impls for new methods. Subprocess extensions need to handle
+  `method not found` gracefully for older ext versions.
 
 ### Phase 3
-
-- `ark-ext-proto::ArkExtension` is a method-per-op trait under a
-  version policy (R16 rule #3). Each new supervisor-side registration
-  point = new method = minor version bump. Plan the hook surface as
-  a batch, not one method at a time.
-- `crates/ark-ext-proto/src/supervision.rs` already handles extension
-  subprocess lifecycle (stdin-close → SIGTERM → SIGKILL). It does NOT
-  yet expose the new session-lifecycle / control-verb /
-  permission-dispatcher surfaces.
+- `reaction_dispatcher::OpNode::Acp*` needs exhaustiveness break.
+  Introduce an open-dispatch pattern (trait-object op nodes OR
+  `OpNode::Ext { ext, kind, args: Value }`) before moving the ACP
+  variants.
+- `CoreEvent::Ext` payload matching in Rhai — need to confirm Rhai's
+  dynamic map inspection is ergonomic enough to replace the typed
+  `PermissionAsked { … }` short form. May need a helper binding
+  (`event.matches("permission.asked")`) in the scripting context.
 
 ### Phase 4
-
-- The scene's `AcpHandle` trait is load-bearing for `ops/acp.rs`.
-  Either scene declares a generic `AgentHandle` trait (ext-acp-client
-  impls it) or scene loses `ctx.acp` and ACP ops register through
-  ext-acp-client's own intent registry. Picking the latter is cleaner
-  and matches the spec's intent.
-- `reaction_dispatcher::OpNode::Acp*` variants need to move with ACP.
-  When they do, dispatcher loses exhaustiveness unless the enum becomes
-  open (via trait-object or tagged-extension dispatch).
-- `AgentEvent::PermissionAsked/PermissionResolved` variants are how
-  scene selectors currently observe permission activity. Keep them as
-  variants OR reroute permission events through `UserEvent` with a
-  reserved namespace (e.g. `ark.acp.permission.asked`) — the latter is
-  more principled but breaks every existing scene that uses the
-  short-form selector.
-- Scene's `PermissionRouter` and `TurnInflightTracker` are structurally
-  generic — `RequestRouter<K,V>` and `InflightTracker<K>`. Before moving
-  them to ext-acp-client, consider whether ext-pi / ext-subagents want
-  them too.
-
-### Phase 5
-
-- `ark-core` re-exports `Engine`, `EngineHandle`, `ApprovalPolicy`,
-  `Orchestrator`, `World`, contract suites at `lib.rs:41-45`. Every
-  crate that imports them breaks simultaneously. A compat shim crate
-  (`ark-legacy-engine`) keeps the workspace green mid-migration; delete
-  once all extensions are updated.
+- `HookEntry.on_orchestrator` → `on_extension` is a config schema
+  break. User config files need tolerant parsing + a one-time rewrite
+  on read (or, since state gets nuked, bless-and-forget for the first
+  migration boot).
 
 ### Phase 6
-
 - Picker control-socket call sites (`crates/plugins/picker/`) parse
-  `AgentStatus`. Phase 2's type changes hit here first. Audit before
-  Phase 2 ships.
+  `AgentStatus` via the NDJSON envelope. Phase 1 hits them;
+  Phase 6 re-uses the surface. Audit the parsing at Phase 1 time.
 
 ## Open Questions
 
-- **Outcome.** Where do `Success / Failed / Killed / Timeout / Crashed`
-  go? They're used by `pane::log` to format agent history. Probably
-  move to `ext-acp-client` or to a shared `ark-ext-agent-outcome`
-  crate that agent-providing extensions depend on.
-- **`Phase` enum.** Keep a generic `Phase { Starting, Running, Idle,
-  Terminated(kind) }` with opaque `TerminationKind`, OR delete from
-  core entirely and let each extension serialize its own phase into
-  `AgentStatus.ext_state: HashMap<String, Value>`.
-- **`PermissionDecision` + `Severity` enums** (`types/event.rs:191-213`)
-  — narrower than ACP/Cavekit, reusable by pure-UI scenes. Keep as
-  domain-neutral enums in `ark-types` rather than move.
-- **`StateLayout` path naming.** Currently every method uses `agents/`.
-  Rename to `sessions/` with a one-shot symlink migration, or keep
-  `agents/` and accept it as a legacy artefact.
-- **Session discriminator.** Once `ENGINES_V1`/`ORCHESTRATORS_V1`
-  lose their gatekeeper role, nothing distinguishes a bare-ark session
-  from one with an agent. Need `SessionKind::Bare | Agent(ext_name)`
-  on the persisted spec OR derive discriminator from which extensions
-  registered for the session.
-- **Bus event-type openness.** `AgentEvent` is a closed enum. Phase 4
-  shrinks it; extensions emit via `UserEvent { name, payload }`.
-  Confirm that scene selectors can target `UserEvent.name`
-  expressively enough (e.g. `on "ark.acp.permission.asked" { … }`
-  needs to be as ergonomic as today's `on PermissionAsked { … }`).
-- **Hot-reload of supervisor-side extension code.** Phase 3 extensions
-  run inside the supervisor process. Do we need a plugin-style
-  reload, or is extension reload = scene reload + supervisor restart?
+Narrowed considerably; remaining:
+
+- **Rhai ergonomics for open-namespace event selectors.** Concrete
+  goal: `on "claude-code.permission.asked" where="payload.tool ==
+  \"Read\"" { … }` must be as ergonomic as today's `on
+  PermissionAsked { … }`. Verify during Phase 1 sub-task "event bus
+  rework" — if Rhai's indexing is painful, add a `event.matches(glob)`
+  + `event.payload` binding.
 - **`ark-ext-proto` scope.** Today it's mostly scene-side metadata.
-  Phase 3 adds supervisor-side registration. Does it absorb all of
-  `ark-core::engine` + `ark-core::orchestrator`?
-- **"Stacks"** the user mentioned for subagent coordination. Needs its
-  own kit once Phase 3 is close. Probably a scene primitive that
-  composes extensions.
-- **Backwards compat for `spec.json`.** Millions (hundreds?) of existing
-  state dirs carry `orchestrator` + `engine` fields. Migration reader
-  has to tolerate both shapes.
+  Phase 2 adds supervisor-side registration. No plans to absorb the
+  old Engine/Orchestrator traits — they're deleted, not rehomed. But
+  any shared "session object" type that extensions need to reference
+  (e.g., `SessionSnapshot`) likely moves from `ark-types` into
+  `ark-ext-proto`. Decide during Phase 2.
+- **Auto-close defaults for bare sessions.** Phase 1 defaults to
+  no-auto-close for bare. Confirm this matches the intended UX once
+  the `ark list` + `ark kill` flow is re-tested by hand.
 
 ## Non-goals for this spec
 
 - No wire-format redesign for hooks or scenes.
 - No zellij refactor. The web client story comes from zellij, not
-  ark.
+  ark. Zellij stacks are a separate concern tracked elsewhere.
 - No new CLI verbs. Bare `ark` + existing subcommands cover it.
 - No cross-platform story for Windows — unix-only stays unix-only.
+- No WASM extension transport work — protocol allows it, impl
+  deferred.
 
 ## Explicitly in-core infrastructure (audit confirmed)
 
@@ -522,29 +682,54 @@ The adversarial pass flagged these as correctly core; calling them out
 so a reader doesn't over-extract them:
 
 - `crates/types/src/event_bus.rs` — `EventSink` / `EventReceiver`
-  infrastructure. The *channel* is core; the `AgentEvent` *payload*
-  is what shrinks.
+  infrastructure. The *channel* is core; the `CoreEvent` *payload* is
+  what shrinks (+ gains `Ext(ExtEvent)`).
 - `crates/scene/src/*` compile pipeline (parse / shape / compose /
   compile / layout lowering) — scene grammar minus the ACP-specific
   scene extensions.
 - `crates/mux/zellij/*` — substrate.
 - `crates/ark-ext-*` + `crates/ark-ext-derive/*` + `crates/ark-ext-proto/*`
-  — the extension framework itself.
+  — the extension framework itself. Phase 2 grows the trait surface
+  but the crates stay.
 - `crates/config/src/*` TOML plumbing — the parser stays; agent-aware
   section schemas shrink.
 - `crates/core/src/control_socket.rs` — NDJSON IPC envelope is pure
   plumbing.
 - `crates/core/src/events_log.rs` + `status_writer.rs` + `socket_paths.rs`
   — state-on-disk primitives.
-- `crates/types/src/state_dir.rs` — path layout. Consider renaming
-  leaf `agents/` → `sessions/` (open question above) but keep the
-  module.
+- `crates/types/src/state_dir.rs` — path layout. Phase 1 renames
+  `agents/` → `sessions/`; the module stays.
 
 ## What this unblocks
 
-- The "pi.dev extension with subagents via stacks" vision.
+- The "pi.dev extension with subagents" vision (on top of zellij
+  stacks, handled separately).
 - Third-party AI CLI integrations without core edits.
 - Bare `ark` as a legitimate first-class use (launching zellij with a
   scene, no agent attached — the "reactive IDE" experience).
 - Extensions that are pure-UI (a scene-based diff viewer, a tab
   navigator) without pretending to be orchestrators.
+
+## Execution
+
+Phase 1 runs via Cavekit:
+
+```
+/ck:sketch cavekit-soul-phase-1   # decompose Phase 1 sub-areas into R-numbered kits
+/ck:map                           # build the task DAG (~25-35 tasks, ~6-8 tiers)
+/ck:make                          # dispatch parallel agents, peer-review via Codex
+/ck:scan                          # verify built code matches kits
+```
+
+Phases 2-6 get their own sketch+map+make cycles. Each phase lands with:
+
+- Workspace green (`cargo check --workspace --tests` + `cargo test
+  --workspace`).
+- The PTY smoke test passing (from Phase 1 onward).
+- No residual `#[deprecated]` / `TODO(cavekit-soul)` markers past the
+  phase that was meant to fix them.
+
+Handoff commits follow session discipline:
+1. Types/layout rename commit (no behaviour change).
+2. Supervisor-loop refactor commit (types already migrated).
+3. Bare-launch wiring + PTY test commit (the green).
