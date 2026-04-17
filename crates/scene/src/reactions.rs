@@ -485,10 +485,16 @@ fn malformed_on_node(ir: &SceneIR, message: &str) -> SceneError {
 /// Match `selector` against a live [`CoreEvent`]. Returns the map of
 /// captured locals on match, or `None` on no-match.
 ///
-/// The event is flattened via [`FlatEvent`] first: `name` and `payload`
-/// fields are available for matching. For `Ext` selectors a bare field
-/// name falls through to `payload.<field>` (hybrid access equivalent
-/// to the old UserEvent behaviour).
+/// The event is flattened via [`FlatEvent`] first. The flat JSON has
+/// two top-level keys: `name` (the dotted event name) and `payload`
+/// (the event's own fields). Selector field patterns are resolved as
+/// follows:
+///
+/// 1. `name` → matches the flat `name` field (e.g. `"ark.core.error"`).
+/// 2. `payload` → matches the full payload JSON blob as a string.
+/// 3. `payload.X` → explicit lookup into `payload.X`.
+/// 4. Any other bare field → looked up in `payload` first; if absent,
+///    falls through to the top-level flat JSON (covers `name` fallback).
 pub fn match_selector(
     selector: &EventSelector,
     event: &CoreEvent,
@@ -499,7 +505,6 @@ pub fn match_selector(
     }
 
     let flat = FlatEvent::from(event);
-    let is_ext = matches!(event, CoreEvent::Ext(_));
 
     // Build JSON from the flat event for field lookup.
     let flat_json = serde_json::to_value(&flat).ok()?;
@@ -507,7 +512,7 @@ pub fn match_selector(
 
     let mut captures: BTreeMap<String, Dynamic> = BTreeMap::new();
     for (field, pattern) in &selector.field_patterns {
-        let lookup = lookup_field_value(field, &flat_json, payload_json.as_ref(), is_ext);
+        let lookup = lookup_field_value(field, &flat_json, payload_json.as_ref());
         let value_str = match lookup {
             Some(v) => v,
             None => return None, // field absent ⇒ no match
@@ -524,20 +529,26 @@ pub fn match_selector(
     Some(captures)
 }
 
-/// Resolve `field` against a flattened event JSON. For Ext selectors
-/// the lookup hybrid-accesses the payload:
+/// Resolve `field` against a flattened event JSON.
 ///
-/// 1. Reserved top-level keys (`name`, `payload`) bypass the payload redirect.
-/// 2. `payload.X` explicit prefix routes directly into the payload.
-/// 3. Bare field names on Ext events fall through to `payload.<field>`
-///    when not present at the top level.
+/// Lookup order:
+///
+/// 1. `name` → always resolves to the flat top-level `name` field
+///    (e.g. `"ark.core.error"` or `"myext.tool.use"`).
+/// 2. `payload.X` explicit prefix → directly into `payload.X`.
+/// 3. Bare field → try `payload.<field>` first (event-specific fields
+///    live here for all CoreEvent variants: `error`, `message`, `level`,
+///    `spec`, `terminated_at`, and extension payload keys).
+/// 4. Fall through to the flat JSON top-level.
 fn lookup_field_value(
     field: &str,
     flat_json: &serde_json::Value,
     payload_json: Option<&serde_json::Value>,
-    is_ext: bool,
 ) -> Option<String> {
-    const RESERVED: &[&str] = &["name", "payload"];
+    // `name` is a reserved top-level key — always the flat event name.
+    if field == "name" {
+        return flat_json.get("name").map(json_to_match_string);
+    }
 
     // Explicit `payload.X` escape hatch.
     if let Some(rest) = field.strip_prefix("payload.") {
@@ -546,15 +557,14 @@ fn lookup_field_value(
             .map(json_to_match_string);
     }
 
-    if is_ext && !RESERVED.contains(&field) {
-        // Hybrid access: try payload first.
-        if let Some(payload) = payload_json {
-            if let Some(v) = payload.get(field) {
-                return Some(json_to_match_string(v));
-            }
+    // Try payload first (all variant-specific fields live here).
+    if let Some(payload) = payload_json {
+        if let Some(v) = payload.get(field) {
+            return Some(json_to_match_string(v));
         }
     }
 
+    // Fall through to flat top-level.
     flat_json.get(field).map(json_to_match_string)
 }
 
@@ -920,9 +930,10 @@ scene "s" {
 
     #[test]
     fn when_predicate_can_see_captured_locals() {
+        // Use a glob field selector so the value is captured into locals.
         let src = r#"
 scene "s" {
-    on Error when="error.ends_with(\"boom\")" { }
+    on Error error="(glob)*boom*" when="error.ends_with(\"boom\")" { }
 }
 "#;
         let ir = crate::parse::parse_scene(src, "test.kdl").expect("parse");
@@ -935,6 +946,8 @@ scene "s" {
             error: "something boom".into(),
         };
         let locals = match_selector(&entry.selector, &evt).expect("match");
+        // `error` should be captured as a local from the glob match.
+        assert!(locals.contains_key("error"), "error not captured: {locals:?}");
         use crate::context::{SessionSnapshot, build_event_scope};
         use crate::rhai::eval_bool_in_scope;
         let session = SessionSnapshot::default();
