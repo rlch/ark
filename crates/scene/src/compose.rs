@@ -305,11 +305,13 @@ pub fn resolve_ext_includes(
         // Placeholder: extensions don't yet ship fragment files at runtime.
         // Once they do, this is where we'd load the fragment content from
         // the extension's package, parse it, and splice the body nodes.
-        return Err(SceneError::ExtFragmentNotFound {
-            ext: ext_ref.name,
-            fragment: ext_ref.fragment,
-            target,
-        });
+        tracing::warn!(
+            ext = ext_ref.name,
+            fragment = ext_ref.fragment,
+            "ext: fragment not yet available — skipping include"
+        );
+        i += 1;
+        continue;
     }
 
     Ok(())
@@ -777,7 +779,7 @@ layout {
     }
 
     #[test]
-    fn resolve_ext_includes_fragment_not_found_when_active() {
+    fn resolve_ext_includes_skips_fragment_with_warn_when_active() {
         use ark_ext_metadata_types::{
             CapabilitySet, ConfigSchema, ExtensionMetadata, StringNode,
         };
@@ -802,19 +804,13 @@ layout {
             target: "ext:git/status-bar".to_string(),
         })];
 
-        let err = resolve_ext_includes(&mut body, &registry).unwrap_err();
-        match &err {
-            SceneError::ExtFragmentNotFound {
-                ext,
-                fragment,
-                target,
-            } => {
-                assert_eq!(ext, "git");
-                assert_eq!(fragment, "status-bar");
-                assert_eq!(target, "ext:git/status-bar");
-            }
-            other => panic!("expected ExtFragmentNotFound, got {other:?}"),
-        }
+        // The include is from an active extension, so it should be skipped
+        // (warn-and-continue) rather than hard-erroring. The body node is
+        // left in place until extensions ship real fragment files.
+        resolve_ext_includes(&mut body, &registry)
+            .expect("active ext: include should warn and skip, not error");
+        // The Include node is retained (not spliced/removed) in the placeholder path.
+        assert_eq!(body.len(), 1, "body node should remain after skip");
     }
 
     #[test]

@@ -21,7 +21,7 @@ use ark_scene::compose::compose_scene;
 use ark_scene::parse::parse_scene;
 use ark_scene::rhai::Engine;
 use ark_scene::shape::detect_and_normalize;
-use ark_scene::view::ViewRegistry;
+use ark_scene::view::{RenderMode, ViewMeta, ViewRegistry, ViewSource};
 
 use crate::commands::session::{
     LayoutResolution, ZellijSpawn, build_switch_session_command, build_zellij_command,
@@ -61,7 +61,21 @@ fn resolve_scene_file(
         LayoutResolution::SceneExplicit { path } | LayoutResolution::SceneDefault { path } => {
             Some(path)
         }
-        LayoutResolution::Legacy => None,
+        // T-14.1: no scene file found at any rung — materialize the
+        // embedded default scene to a per-run temp file so the compile
+        // pipeline handles it the same as any other scene file.  The
+        // file is written to `$XDG_RUNTIME_DIR/ark/default-scene.kdl`
+        // (falling back to the OS temp dir), then compiled normally.
+        LayoutResolution::Legacy => {
+            let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
+                .unwrap_or_else(|_| std::env::temp_dir().display().to_string());
+            let default_path = PathBuf::from(runtime_dir).join("ark/default-scene.kdl");
+            if let Some(parent) = default_path.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            std::fs::write(&default_path, ark_scene::default_scene::DEFAULT_SCENE_KDL).ok();
+            Some(default_path)
+        }
     }
 }
 
@@ -151,7 +165,23 @@ pub fn run(
                         path.display()
                     ),
                 })?;
-            let registry = ViewRegistry::with_primitives();
+            // Populate the registry with primitives + shipped views.
+            // Shipped views (status, picker) are ark-bundled and always
+            // available; user/project extensions land in T-096+ once the
+            // extension loader is wired to the CLI context.
+            let mut registry = ViewRegistry::with_primitives();
+            registry.register(ViewMeta {
+                name: "status".to_string(),
+                source: ViewSource::Shipped,
+                render_mode: RenderMode::ZellijView,
+                config_schema: None,
+            });
+            registry.register(ViewMeta {
+                name: "picker".to_string(),
+                source: ViewSource::Shipped,
+                render_mode: RenderMode::ZellijView,
+                config_schema: None,
+            });
             let kdl_doc = compile_layout_kdl(layout, &registry).map_err(|e| {
                 CliError::Generic {
                     reason: format!("layout compile `{}`: {e}", path.display()),
@@ -165,6 +195,21 @@ pub fn run(
         }
         None => None,
     };
+
+    // TODO(T-supervisor-boot): Before attaching zellij the ark_supervisor
+    // daemon must be started (fork + daemonize) so that `ark list`, `ark
+    // kill`, plugin lifecycle, and hook dispatch work.  The supervisor
+    // bootstrap logic lives in `crates/cli/src/supervisor_handoff.rs`
+    // (`create_ready_pipe` + `wait_for_ready_default`) and the daemon
+    // entry point is in `crates/supervisor/src/lib.rs`.  The correct
+    // sequence is:
+    //   1. `create_ready_pipe()` → (read_fd, write_fd)
+    //   2. fork + daemonize, passing write_fd to the supervisor
+    //   3. supervisor calls `write_ack` once R3 step 11 is complete
+    //   4. parent calls `wait_for_ready_default(read_fd)` → blocks <5 s
+    //   5. only then drop into zellij attach below
+    // Skipping this step means the session runs without a supervising
+    // daemon, so session-management commands silently find nothing.
 
     let plan = ZellijSpawn {
         session: session.clone(),

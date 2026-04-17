@@ -235,13 +235,15 @@ impl LayoutApplier for ZellijCommandApplier {
             .executor
             .run("zellij", &args)
             .await
-            .map_err(|e| SceneError::RhaiEval {
+            .map_err(|e| SceneError::OpFailed {
+                op: "override-layout".to_string(),
                 message: format!("zellij action override-layout failed: {e}"),
             })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(SceneError::RhaiEval {
+            return Err(SceneError::OpFailed {
+                op: "override-layout".to_string(),
                 message: format!(
                     "zellij action override-layout exited non-zero: {}",
                     stderr.trim()
@@ -256,6 +258,18 @@ impl LayoutApplier for ZellijCommandApplier {
 // Debouncer (T-043)
 // ---------------------------------------------------------------------------
 
+/// Combined state for the [`Debouncer`], held under a single `Mutex` to
+/// eliminate the ABBA lock-ordering hazard that would arise from holding
+/// two separate mutexes (`dirty` and `last_mark`) across method calls.
+#[derive(Debug, Default)]
+struct DebouncerState {
+    /// Whether at least one reconciliation request has been recorded
+    /// since the last fire (or since construction).
+    dirty: bool,
+    /// Timestamp of the most recent [`Debouncer::mark_dirty`] call.
+    last_mark: Option<Instant>,
+}
+
 /// 200 ms debounce coalescer.
 ///
 /// Callers call [`Debouncer::mark_dirty`] every time a reconciliation is
@@ -266,8 +280,7 @@ impl LayoutApplier for ZellijCommandApplier {
 #[derive(Debug)]
 pub struct Debouncer {
     window: Duration,
-    last_mark: Mutex<Option<Instant>>,
-    dirty: Mutex<bool>,
+    state: Mutex<DebouncerState>,
 }
 
 impl Debouncer {
@@ -275,8 +288,7 @@ impl Debouncer {
     pub fn new(window: Duration) -> Self {
         Self {
             window,
-            last_mark: Mutex::new(None),
-            dirty: Mutex::new(false),
+            state: Mutex::new(DebouncerState::default()),
         }
     }
 
@@ -288,23 +300,23 @@ impl Debouncer {
     /// Record a reconciliation request. Callers use this on every
     /// predicate-input-change / file-edit signal.
     pub async fn mark_dirty(&self) {
-        *self.last_mark.lock().await = Some(Instant::now());
-        *self.dirty.lock().await = true;
+        let mut state = self.state.lock().await;
+        state.last_mark = Some(Instant::now());
+        state.dirty = true;
     }
 
     /// Should the reconciliation fire now? Fires exactly once per
     /// quiescent window, consuming the dirty flag when it does.
     pub async fn should_fire_now(&self) -> bool {
-        let mut dirty = self.dirty.lock().await;
-        if !*dirty {
+        let mut state = self.state.lock().await;
+        if !state.dirty {
             return false;
         }
-        let last = self.last_mark.lock().await;
-        let Some(t) = *last else {
+        let Some(t) = state.last_mark else {
             return false;
         };
         if t.elapsed() >= self.window {
-            *dirty = false;
+            state.dirty = false;
             true
         } else {
             false
@@ -313,12 +325,12 @@ impl Debouncer {
 
     /// Is a reconciliation request pending (dirty flag set)?
     pub async fn is_dirty(&self) -> bool {
-        *self.dirty.lock().await
+        self.state.lock().await.dirty
     }
 
     /// Manually clear the dirty flag — e.g. after a forced reconcile.
     pub async fn clear(&self) {
-        *self.dirty.lock().await = false;
+        self.state.lock().await.dirty = false;
     }
 }
 
@@ -425,7 +437,8 @@ impl Reconciler {
 
         let path = self
             .write_layout(&doc)
-            .map_err(|e| SceneError::RhaiEval {
+            .map_err(|e| SceneError::OpFailed {
+                op: "write-layout".to_string(),
                 message: format!("failed to write layout artifact: {e}"),
             })?;
 
@@ -471,7 +484,8 @@ impl Reconciler {
     /// Populates [`Self::mode_paths`]. Called once at scene bring-up.
     pub fn render_modes(&mut self) -> Result<(), SceneError> {
         let docs = compile_modes(&self.compiled.ir, &self.registry)?;
-        let paths = self.write_modes(&docs).map_err(|e| SceneError::RhaiEval {
+        let paths = self.write_modes(&docs).map_err(|e| SceneError::OpFailed {
+            op: "write-modes".to_string(),
             message: format!("failed to write mode artifacts: {e}"),
         })?;
         self.mode_paths = paths.into_iter().collect();
@@ -500,7 +514,8 @@ impl Reconciler {
             .mode_paths
             .get(mode_name)
             .cloned()
-            .ok_or_else(|| SceneError::RhaiEval {
+            .ok_or_else(|| SceneError::OpFailed {
+                op: "use_mode".to_string(),
                 message: format!("unknown mode `{mode_name}`"),
             })?;
 

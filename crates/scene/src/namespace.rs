@@ -15,6 +15,7 @@
 use crate::ast::ops::OpNode;
 use crate::ast::{OnNode, SceneBodyNode, SceneNode};
 use crate::error::SceneError;
+use crate::reactions::EventKind;
 
 /// Reserved namespace prefix. Any name starting with `ark.core.` is
 /// reserved for host-owned ops and events.
@@ -94,12 +95,24 @@ fn rewrite_ops(ops: &mut [OpNode], ctx: &NamespaceContext) -> Result<(), SceneEr
     Ok(())
 }
 
+/// Returns `true` when `kind` is a well-known `AgentEvent` kind (either
+/// PascalCase or snake_case spelling). Well-known kinds must NOT be
+/// namespace-qualified — they are `AgentEvent` discriminators, not user-
+/// or extension-owned event names.
+fn is_well_known_event(kind: &str) -> bool {
+    EventKind::parse(kind).is_some()
+}
+
 /// Walk an `on` node: rewrite the selector's event kind and any `emit`
 /// ops in the body.
 fn rewrite_on(on: &mut OnNode, ctx: &NamespaceContext) -> Result<(), SceneError> {
-    // Rewrite the event selector kind if present.
+    // Rewrite the event selector kind if present, but skip well-known
+    // AgentEvent kinds (FileEdited, ToolUse, etc.) — those are host-owned
+    // discriminators and must not be namespace-qualified.
     if let Some(selector) = &mut on.selector {
-        selector.kind = rewrite_name(&selector.kind, ctx)?;
+        if !is_well_known_event(&selector.kind) {
+            selector.kind = rewrite_name(&selector.kind, ctx)?;
+        }
     }
     // Rewrite ops inside the on block.
     rewrite_ops(&mut on.ops, ctx)
