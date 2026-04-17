@@ -80,9 +80,6 @@ ark-ext-metadata-types = { path = "../ark-ext-metadata-types" }
 ark-orchestrators-cavekit = { path = "../orchestrators/cavekit" }
 ark-orchestrators-claude-code = { path = "../orchestrators/claude-code" }
 ark-mux-zellij = { path = "../mux/zellij" }
-# T-ACP.6: `ark doctor` probes the ACP handshake via a live
-# AcpClient::spawn.
-acp-client = { path = "../acp-client" }
 clap = { workspace = true }
 facet = { workspace = true }
 kdl = { workspace = true }
