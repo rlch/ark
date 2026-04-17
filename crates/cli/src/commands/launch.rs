@@ -22,6 +22,7 @@ use ark_scene::parse::parse_scene;
 use ark_scene::rhai::Engine;
 use ark_scene::shape::detect_and_normalize;
 use ark_scene::view::{RenderMode, ViewMeta, ViewRegistry, ViewSource};
+use ark_types::{AgentId, AgentSpec, StateLayout};
 
 use crate::commands::session::{
     LayoutResolution, ZellijSpawn, build_switch_session_command, build_zellij_command,
@@ -29,6 +30,7 @@ use crate::commands::session::{
 };
 use crate::ctx::Ctx;
 use crate::error::CliError;
+use crate::supervisor_handoff::{create_ready_pipe, wait_for_ready_default};
 
 /// Determine whether a `--scene` value looks like a path (contains `/`
 /// or ends with `.kdl`) rather than a bare name.
@@ -196,20 +198,104 @@ pub fn run(
         None => None,
     };
 
-    // TODO(T-supervisor-boot): Before attaching zellij the ark_supervisor
-    // daemon must be started (fork + daemonize) so that `ark list`, `ark
-    // kill`, plugin lifecycle, and hook dispatch work.  The supervisor
-    // bootstrap logic lives in `crates/cli/src/supervisor_handoff.rs`
-    // (`create_ready_pipe` + `wait_for_ready_default`) and the daemon
-    // entry point is in `crates/supervisor/src/lib.rs`.  The correct
-    // sequence is:
-    //   1. `create_ready_pipe()` → (read_fd, write_fd)
-    //   2. fork + daemonize, passing write_fd to the supervisor
-    //   3. supervisor calls `write_ack` once R3 step 11 is complete
-    //   4. parent calls `wait_for_ready_default(read_fd)` → blocks <5 s
-    //   5. only then drop into zellij attach below
-    // Skipping this step means the session runs without a supervising
-    // daemon, so session-management commands silently find nothing.
+    // W-3 (bare-ark path): Fork + daemonize the supervisor BEFORE attaching
+    // zellij so that `ark list`, `ark kill`, plugin lifecycle, and hook
+    // dispatch all work for this session.
+    //
+    // We build a minimal AgentSpec from the bare-launch inputs:
+    //   - orchestrator = "ark"  (bare session, no agent-level orchestrator)
+    //   - engine       = "claude-code"  (default; unused by supervisor at boot)
+    //   - name/session = the derived session name
+    //   - cwd          = current working directory
+    //   - cmd          = []  (bare launch has no single engine command)
+    //   - scene_path   = the resolved scene file (if any)
+    //
+    // The daemonize + ready-pipe sequence mirrors spawn.rs W-3 exactly.
+    // SAFETY: `daemonize()` calls `fork(2)`. No tokio runtime or worker
+    // threads exist at this point — the compile pipeline above is purely
+    // synchronous. This satisfies the single-threaded fork precondition.
+    {
+        let agent_id = AgentId::new("ark", &session);
+        let mut spec = AgentSpec::new(
+            agent_id.clone(),
+            &session,
+            "ark",
+            "claude-code",
+            cwd.clone(),
+            vec![],
+        );
+        spec.session = session.clone();
+        spec.scene_path = scene_file.clone();
+
+        let state_layout = StateLayout::new(
+            ctx.state_dir.clone(),
+            ctx.runtime_dir.clone(),
+            ctx.config_dir.clone(),
+        );
+
+        let (ready_rfd, ready_wfd) = create_ready_pipe()?;
+
+        match ark_supervisor::daemonize(&state_layout, &agent_id) {
+            Err(e) => {
+                return Err(CliError::Internal {
+                    reason: format!("daemonize supervisor: {e}"),
+                });
+            }
+            Ok(ark_supervisor::DaemonizeOutcome::Daemon) => {
+                // Grandchild: supervisor process. Drop the parent's read end;
+                // wrap write end in ReadyWriter and drive supervisor_main.
+                drop(ready_rfd);
+                let writer = ark_supervisor::ReadyWriter::from_owned_fd(ready_wfd);
+                let config = ark_core::Config::placeholder();
+
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        tracing::error!(error = %e, "build tokio runtime in supervisor");
+                        std::process::exit(3);
+                    }
+                };
+
+                let outcome = runtime.block_on(ark_supervisor::supervisor_main(
+                    spec,
+                    ark_supervisor::SupervisorMode::Daemon,
+                    config,
+                    Some(writer),
+                    None,
+                ));
+                match outcome {
+                    Ok(o) => {
+                        tracing::info!(?o, "supervisor exited cleanly");
+                        std::process::exit(ark_supervisor::outcome_exit_code(&o));
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "supervisor returned Err");
+                        std::process::exit(3);
+                    }
+                }
+            }
+            Ok(ark_supervisor::DaemonizeOutcome::Parent { child_pid }) => {
+                // Original CLI process. Drop write end so EOF fires if
+                // the supervisor dies before sending ready.
+                drop(ready_wfd);
+                tracing::debug!(
+                    child_pid = %child_pid,
+                    "daemonized supervisor; waiting for ready"
+                );
+                if let Err(e) = wait_for_ready_default(ready_rfd) {
+                    tracing::warn!(
+                        child_pid = %child_pid,
+                        error = ?e,
+                        "supervisor failed to ready",
+                    );
+                    return Err(e);
+                }
+            }
+        }
+    }
 
     let plan = ZellijSpawn {
         session: session.clone(),
