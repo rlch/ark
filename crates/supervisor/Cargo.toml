@@ -20,9 +20,6 @@ ark-scene = { path = "../scene", package = "ark-scene" }
 ark-orchestrators-cavekit = { path = "../orchestrators/cavekit" }
 ark-orchestrators-claude-code = { path = "../orchestrators/claude-code" }
 ark-mux-zellij = { path = "../mux/zellij" }
-# T-ACP.5: permission dispatcher routes user decisions through the
-# ACP client's `permit` method.
-acp-client = { path = "../acp-client" }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 nix = { workspace = true }

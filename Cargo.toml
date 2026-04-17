@@ -1,12 +1,6 @@
 [workspace]
 resolver = "3"
 members = [
-    # T-ACP.2: ACP (agent-client-protocol) wire client. Spawns engine
-    # subprocesses, frames JSON-RPC over stdio, and translates
-    # session/update + permission/fs/terminal methods into ark's
-    # `AgentEvent::UserEvent` taxonomy. Consumed by supervisor once
-    # T-ACP.4a wires it into the per-agent runtime.
-    "crates/acp-client",
     "crates/cli",
     "crates/config",
     "crates/core",
