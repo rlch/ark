@@ -16,11 +16,8 @@ members = [
     # archived v2 crate as the canonical `ark-scene` package. Populated
     # incrementally by T-003..T-025+ per context/plans/build-site-scene.md.
     "crates/scene",
-    # Frozen v2 scene crate. Archived 2026-04-16 during v3 redraw; renamed
-    # to ark-scene-v2-archive so T-001 can claim the ark-scene name.
-    # Dependents alias back via `package = "ark-scene-v2-archive"` until
-    # they migrate. Delete once all dependents drop v2 imports.
-    "crates/scene-v2-archive",
+    # scene-v2-archive: REMOVED — all dependents migrated to v3 (2026-04-17).
+    # Crate directory retained on disk as historical reference only.
     "crates/supervisor",
     "crates/test-fixtures",
     "crates/types",
@@ -93,6 +90,7 @@ facet-kdl = "0.42"
 kdl = "6.5"
 miette = { version = "7", features = ["fancy"] }
 cel-interpreter = "0"
+rhai = { version = "1.19", default-features = false, features = ["sync"] }
 # T-2.3 (scene): RE2-safe glob matcher used by the CEL `glob(str, pattern)`
 # custom function. globset patterns are shell-style (`*`, `**`, `?`,
 # `[abc]`) and compile to a non-backtracking regex engine, so hostile
