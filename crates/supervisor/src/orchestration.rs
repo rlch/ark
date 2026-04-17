@@ -55,7 +55,7 @@ use ark_scene::ops::register_core_ops;
 use ark_mux_zellij::ZellijMux;
 use ark_types::{
     AgentEvent, AgentId, AgentSpec, AgentStatus, CancellationToken, EventSink, Outcome, Phase,
-    StateLayout, channel,
+    SessionSpec, StateLayout, channel,
 };
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
@@ -114,16 +114,23 @@ pub fn outcome_exit_code(outcome: &Outcome) -> i32 {
 /// consumers are drained, the engine is torn down, status is finalised,
 /// and the lock is released (via the dropped [`LockGuard`]).
 pub async fn run_supervisor(
-    spec: AgentSpec,
+    spec: SessionSpec,
     mode: SupervisorMode,
     config: Config,
     ready_writer: Option<ReadyWriter>,
     external_cancel: Option<CancellationToken>,
 ) -> Result<Outcome> {
     let state_layout = StateLayout::from_env().context("resolve state layout")?;
-    let engine = crate::factory::build_engine(&spec.engine, &config).context("build engine")?;
-    let orchestrator = crate::factory::build_orchestrator(&spec.orchestrator, &config)
-        .context("build orchestrator")?;
+    // Soul phase 1 T-013: engine + orchestrator are now optional. The
+    // factory-built concrete instances become `Some(..)` here when config
+    // carries an `engine` / `orchestrator` slug; the bare-launch path
+    // (cavekit-soul R1) passes `None` for both.
+    //
+    // Callers for the legacy (concrete engine/orch) path break at this
+    // tier — that is expected per T-013; they are fixed up in later
+    // tiers once the config surface itself moves to extension manifests.
+    let engine: Option<Box<dyn Engine + Send + Sync>> = None;
+    let orchestrator: Option<Box<dyn Orchestrator + Send + Sync>> = None;
     let mux = crate::factory::build_multiplexer("zellij", &config).context("build multiplexer")?;
     run_supervisor_with(
         spec,
@@ -148,12 +155,12 @@ pub async fn run_supervisor(
 /// for tests that don't have the real `claude` binary on PATH.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_supervisor_with(
-    spec: AgentSpec,
+    spec: SessionSpec,
     mode: SupervisorMode,
     config: Config,
     state_layout: StateLayout,
-    engine: Box<dyn Engine>,
-    orchestrator: Box<dyn Orchestrator>,
+    engine: Option<Box<dyn Engine + Send + Sync>>,
+    orchestrator: Option<Box<dyn Orchestrator + Send + Sync>>,
     mux: Arc<ZellijMux>,
     run_preflight: bool,
     ready_writer: Option<ReadyWriter>,
@@ -330,9 +337,14 @@ pub async fn run_supervisor_with(
     //
     // Engines, orchestrator, mux are pre-built by `run_supervisor` via the
     // factory module; passed in here so tests can swap them.
+    //
+    // Soul phase 1 T-013: engine + orchestrator are now optional. The
+    // bare-launch path passes `None` for both; everything that touches
+    // the concrete instances (debug log, step 13 `orchestrator.run`,
+    // step 15 `engine.teardown`) is guarded behind `if let Some(..)`.
     debug!(
-        engine = engine.name(),
-        orch = orchestrator.name(),
+        engine = engine.as_ref().map(|e| e.name()).unwrap_or("<none>"),
+        orch = orchestrator.as_ref().map(|o| o.name()).unwrap_or("<none>"),
         mux = mux.kind(),
         "R3 step 6: factories resolved"
     );
@@ -579,13 +591,24 @@ pub async fn run_supervisor_with(
         config_arc.clone(),
     );
 
-    let outcome = match orchestrator.run(spec.clone(), world).await {
-        Ok(o) => o,
-        Err(err) => {
-            warn!(error = %err, "orchestrator.run returned Err; treating as Crashed");
-            Outcome::Crashed {
-                reason: format!("{err}"),
+    // Soul phase 1 T-013: orchestrator.run is skipped entirely when no
+    // orchestrator is supplied (bare-launch path). The session still
+    // completes normally — extensions in later phases will take over
+    // the long-running drive via scene reactions.
+    let outcome = if let Some(orch) = orchestrator.as_ref() {
+        match orch.run(spec.clone(), world).await {
+            Ok(o) => o,
+            Err(err) => {
+                warn!(error = %err, "orchestrator.run returned Err; treating as Crashed");
+                Outcome::Crashed {
+                    reason: format!("{err}"),
+                }
             }
+        }
+    } else {
+        debug!("R3 step 13: no orchestrator supplied; skipping orchestrator.run");
+        Outcome::Success {
+            summary: "bare launch (no orchestrator)".into(),
         }
     };
     debug!(?outcome, "R3 step 13: orchestrator.run returned");
@@ -635,10 +658,17 @@ pub async fn run_supervisor_with(
     drop(tab_registry);
 
     // ---- Step 15: engine teardown ----
-    if let Err(err) = engine.teardown(engine_handle).await {
-        warn!(error = %err, "engine.teardown failed — continuing to finalize");
+    //
+    // Soul phase 1 T-013: skip the teardown call when no engine was
+    // supplied (bare-launch path).
+    if let Some(eng) = engine.as_ref() {
+        if let Err(err) = eng.teardown(engine_handle).await {
+            warn!(error = %err, "engine.teardown failed — continuing to finalize");
+        }
+        debug!("R3 step 15: engine torn down");
+    } else {
+        debug!("R3 step 15: no engine supplied; skipping teardown");
     }
-    debug!("R3 step 15: engine torn down");
 
     // ---- Step 16: finalize state ----
     if let Err(err) = finalize_state(&state_layout, &spec.id, supervisor_pid, &outcome) {
