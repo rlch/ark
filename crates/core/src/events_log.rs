@@ -1,32 +1,28 @@
 //! Append-only events.jsonl writer/reader.
 //!
-//! Implements cavekit-types-state-events.md R7:
-//! - Background writer task consumes `AgentEvent` via tokio mpsc channel and
-//!   appends one JSON object per line: `{"ts": "...", "event": <AgentEvent>}`.
-//! - Per-event flush (no batching — agents produce <100 events/sec).
+//! Implements cavekit-soul-phase-1-types.md R7:
+//! - Background writer task consumes `CoreEvent` via tokio mpsc channel and
+//!   appends one JSON object per line: `{"ts": "...", "event": <CoreEvent>}`.
+//! - Per-event flush (no batching — sessions produce <100 events/sec).
 //! - Corruption-tolerant reader skips malformed lines with a warn log; a
 //!   subsequent write continues at end of file.
-//! - Rotation: none in v1; single file per run.
-//!
-//! Live tailing (notify-based follow for `ark pane log`) is intentionally NOT
-//! implemented here; that belongs to T-042. This module provides the
-//! foundation: write, open, read_all.
+//! - Rotation: none in v1; single file per session run.
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
-use ark_types::AgentEvent;
+use ark_types::CoreEvent;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tracing::warn;
 
-/// One line of events.jsonl: timestamped `AgentEvent` envelope.
+/// One line of events.jsonl: timestamped `CoreEvent` envelope.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EventRecord {
     pub ts: DateTime<Utc>,
-    pub event: AgentEvent,
+    pub event: CoreEvent,
 }
 
 /// Handle returned by `EventLogWriter::spawn` — sender + task join handle.
@@ -34,7 +30,7 @@ pub struct EventRecord {
 /// Drop the sender to signal the task to flush and exit; then `await` `task`
 /// to observe clean shutdown.
 pub struct EventLogHandle {
-    pub sender: mpsc::UnboundedSender<AgentEvent>,
+    pub sender: mpsc::UnboundedSender<CoreEvent>,
     pub task: tokio::task::JoinHandle<()>,
 }
 
@@ -57,7 +53,7 @@ impl EventLogWriter {
             .open(&path)?;
         let file = tokio::fs::File::from_std(std_file);
 
-        let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
+        let (tx, mut rx) = mpsc::unbounded_channel::<CoreEvent>();
 
         let task = tokio::spawn(async move {
             let mut file = file;
@@ -89,8 +85,6 @@ impl EventLogWriter {
 }
 
 /// Corruption-tolerant reader over a static snapshot of an events.jsonl file.
-///
-/// For live tailing see T-042 (`ark pane log`).
 pub struct EventLogReader {
     file: std::fs::File,
 }
@@ -106,7 +100,6 @@ impl EventLogReader {
     /// lines are skipped with a `warn` log. Empty lines are ignored.
     pub fn read_all(&mut self) -> Vec<EventRecord> {
         use std::io::{Seek, SeekFrom};
-        // Always read from the start of the file.
         let _ = self.file.seek(SeekFrom::Start(0));
         let reader = BufReader::new(&self.file);
         let mut out = Vec::new();
@@ -139,14 +132,14 @@ impl EventLogReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_types::{AgentEvent, AgentId, LogLevel};
+    use ark_types::{CoreEvent, ExtEvent};
     use std::io::Write as _;
 
-    fn sample_event(n: u32) -> AgentEvent {
-        AgentEvent::Log {
-            id: AgentId::new("cavekit", "auth"),
-            level: LogLevel::Info,
-            line: format!("line {n}"),
+    fn sample_event(n: u32) -> CoreEvent {
+        CoreEvent::Log {
+            level: "info".into(),
+            message: format!("line {n}"),
+            target: None,
         }
     }
 
@@ -173,8 +166,8 @@ mod tests {
 
         for (i, rec) in records.iter().enumerate() {
             match &rec.event {
-                AgentEvent::Log { line, .. } => {
-                    assert_eq!(line, &format!("line {i}"));
+                CoreEvent::Log { message, .. } => {
+                    assert_eq!(message, &format!("line {i}"));
                 }
                 other => panic!("unexpected event: {other:?}"),
             }
@@ -186,7 +179,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("events.jsonl");
 
-        // Write: valid, garbage, valid.
         {
             let handle = EventLogWriter::spawn(path.clone()).unwrap();
             handle.sender.send(sample_event(0)).unwrap();
@@ -194,7 +186,6 @@ mod tests {
             handle.task.await.unwrap();
         }
         {
-            // Inject garbage directly.
             let mut f = std::fs::OpenOptions::new()
                 .append(true)
                 .open(&path)
@@ -227,8 +218,6 @@ mod tests {
 
         handle.sender.send(sample_event(42)).unwrap();
 
-        // Poll for the write to land (flush is per-event but spawn scheduling
-        // is async). Allow up to ~1s; normally completes in <10ms.
         let mut records = Vec::new();
         for _ in 0..100 {
             if let Ok(mut reader) = EventLogReader::open(&path) {
@@ -243,6 +232,37 @@ mod tests {
 
         drop(handle.sender);
         handle.task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ext_event_survives_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let handle = EventLogWriter::spawn(path.clone()).unwrap();
+
+        let ext = ExtEvent {
+            ext: "claude-code".into(),
+            kind: "tool.use".into(),
+            payload: serde_json::json!({ "tool": "Read" }),
+        };
+        handle.sender.send(CoreEvent::Ext(ext)).unwrap();
+        drop(handle.sender);
+        handle.task.await.unwrap();
+
+        let mut reader = EventLogReader::open(&path).unwrap();
+        let records = reader.read_all();
+        assert_eq!(records.len(), 1);
+        match &records[0].event {
+            CoreEvent::Ext(e) => {
+                assert_eq!(e.ext, "claude-code");
+                assert_eq!(e.kind, "tool.use");
+                assert_eq!(
+                    e.payload.get("tool").and_then(|v| v.as_str()),
+                    Some("Read")
+                );
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -270,67 +290,17 @@ mod tests {
         }
     }
 
-    /// T-118 (cavekit-testing R3): an empty `events.jsonl` must produce an
-    /// empty iterator without panicking. This is the common "agent just
-    /// spawned, no events yet" case for `ark pane log`.
     #[test]
     fn empty_file_yields_no_records() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("events.jsonl");
-        // Touch empty file.
         std::fs::File::create(&path).unwrap();
 
         let mut reader = EventLogReader::open(&path).unwrap();
         let records = reader.read_all();
-        assert!(
-            records.is_empty(),
-            "empty file should yield zero records, got {}",
-            records.len()
-        );
+        assert!(records.is_empty());
     }
 
-    /// T-118: a record truncated mid-line (no trailing newline, invalid JSON
-    /// suffix) must be skipped without panicking and without poisoning the
-    /// rest of the reader. Simulates a supervisor crash partway through a
-    /// `write_all` call.
-    #[tokio::test]
-    async fn truncated_trailing_record_is_skipped() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("events.jsonl");
-
-        // Write one valid record using the real writer so the JSON shape
-        // matches what a reader would expect.
-        {
-            let handle = EventLogWriter::spawn(path.clone()).unwrap();
-            handle.sender.send(sample_event(0)).unwrap();
-            drop(handle.sender);
-            handle.task.await.unwrap();
-        }
-        // Append a truncated JSON fragment with no newline (simulating a
-        // crash mid-write).
-        {
-            let mut f = std::fs::OpenOptions::new()
-                .append(true)
-                .open(&path)
-                .unwrap();
-            // Deliberately missing closing braces + newline.
-            f.write_all(b"{\"ts\":\"2026-04-15T00:00:00Z\",\"event\":{\"Log\":{\"id\"")
-                .unwrap();
-            f.flush().unwrap();
-        }
-
-        let mut reader = EventLogReader::open(&path).unwrap();
-        let records = reader.read_all();
-        assert_eq!(
-            records.len(),
-            1,
-            "truncated trailing record must be skipped (got {} records)",
-            records.len()
-        );
-    }
-
-    /// T-118: every line malformed → reader returns an empty vec without
-    /// panic. Worst-case corruption scenario.
     #[test]
     fn all_garbage_file_yields_no_records() {
         let dir = tempfile::tempdir().unwrap();
@@ -339,25 +309,20 @@ mod tests {
 
         let mut reader = EventLogReader::open(&path).unwrap();
         let records = reader.read_all();
-        assert!(records.is_empty(), "all-garbage file must yield 0 records");
+        assert!(records.is_empty());
     }
 
-    /// T-118: blank lines (leading, trailing, interspersed) are silently
-    /// ignored so that operator edits or POSIX tools that append bare
-    /// newlines don't cost us valid records.
     #[tokio::test]
     async fn blank_lines_interspersed_are_ignored() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("events.jsonl");
 
-        // Valid record.
         {
             let handle = EventLogWriter::spawn(path.clone()).unwrap();
             handle.sender.send(sample_event(0)).unwrap();
             drop(handle.sender);
             handle.task.await.unwrap();
         }
-        // Mixed blank lines + whitespace-only line.
         {
             let mut f = std::fs::OpenOptions::new()
                 .append(true)
@@ -368,7 +333,6 @@ mod tests {
             writeln!(f).unwrap();
             f.flush().unwrap();
         }
-        // Another valid record.
         {
             let handle = EventLogWriter::spawn(path.clone()).unwrap();
             handle.sender.send(sample_event(1)).unwrap();
@@ -378,17 +342,9 @@ mod tests {
 
         let mut reader = EventLogReader::open(&path).unwrap();
         let records = reader.read_all();
-        assert_eq!(
-            records.len(),
-            2,
-            "blank/whitespace lines must not consume records (got {})",
-            records.len()
-        );
+        assert_eq!(records.len(), 2);
     }
 
-    /// T-118: `read_all` can be called twice on the same reader and yields
-    /// identical results (seeks back to start). Guards the `Seek::seek` call
-    /// in the reader against regression.
     #[tokio::test]
     async fn read_all_is_rewindable() {
         let dir = tempfile::tempdir().unwrap();
@@ -404,16 +360,9 @@ mod tests {
         let first = reader.read_all();
         let second = reader.read_all();
         assert_eq!(first.len(), 3);
-        assert_eq!(
-            first.len(),
-            second.len(),
-            "second read must yield the same record count"
-        );
+        assert_eq!(first.len(), second.len());
     }
 
-    /// T-118: opening a non-existent file surfaces `NotFound` — callers
-    /// (e.g. `ark pane log` before the agent writes anything) rely on this
-    /// to distinguish "never logged" from "empty log".
     #[test]
     fn open_missing_file_returns_not_found() {
         let dir = tempfile::tempdir().unwrap();

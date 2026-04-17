@@ -174,8 +174,8 @@ mod tests {
         );
         assert!(engine.transcript_path(Path::new("/tmp")).is_none());
 
-        let (sink, _rx) = tokio::sync::broadcast::channel::<ark_types::AgentEvent>(8);
-        let id = AgentId::new("cavekit", "mock");
+        let (sink, _rx) = tokio::sync::broadcast::channel::<ark_types::CoreEvent>(8);
+        let id = SessionId::new("mock");
         let handle = engine
             .install_observability(&id, Path::new("/tmp/cwd"), sink)
             .await

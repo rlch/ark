@@ -555,7 +555,7 @@ fn emit_telemetry(rec: &TelemetryRecord, message: &'static str) {
 mod tests {
     use super::*;
     use ark_scene::ast::ops::{EmitOp as AstEmitOp, SetStatusOp as AstSetStatusOp};
-    use ark_scene::ast::selector::{EventSelector, FieldPattern, MatchType};
+    use ark_scene::ast::selector::EventSelector;
     use ark_scene::context::SessionSnapshot;
     use ark_scene::id::SceneId;
     use ark_scene::intent::IntentContext;

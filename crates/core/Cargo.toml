@@ -10,12 +10,11 @@ rust-version.workspace = true
 [dependencies]
 ark-types = { path = "../types" }
 ark-config = { path = "../config" }
-# Soul phase 1 T-020: scene + test-fixtures deps removed temporarily —
-# they reach into the deleted AgentEvent/AgentSpec surface and the
-# consumer modules they back are cordoned off in `lib.rs`. Both deps
-# return once those consumer modules re-compile (later tiers).
-# ark-scene = { path = "../scene", package = "ark-scene" }
-# ark-test-fixtures = { path = "../test-fixtures" }
+# Soul phase 1 T-025 / T-026 / uncordon (2026-04-17): ark-scene powers
+# reaction_dispatcher's OpNode match surface, and ark-test-fixtures
+# feeds the engine contract suite.
+ark-scene = { path = "../scene", package = "ark-scene" }
+ark-test-fixtures = { path = "../test-fixtures" }
 # `test-support` is enabled unconditionally so the publicly-exported
 # `orchestrator_contract_suite` can construct a scripted `ZellijMux`. The
 # surface this exposes is a pair of constructor fns; cost is a few hundred
