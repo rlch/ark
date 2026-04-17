@@ -683,6 +683,55 @@ pub enum SceneError {
         /// The `request_id` that could not be correlated.
         request_id: String,
     },
+
+    /// An `include "ext:<name>/…"` references an extension that was not
+    /// activated via `use "<name>"` in the scene (T-075).
+    #[error("include references extension `{ext}` which is not activated via `use`")]
+    #[diagnostic(
+        code = "scene/ext-not-used",
+        severity(Error),
+        help("Add `use \"{ext}\"` to the scene before including its fragments.")
+    )]
+    ExtNotUsed {
+        /// Extension name parsed from the `ext:<name>/<fragment>` target.
+        ext: String,
+        /// The full include target as authored.
+        target: String,
+    },
+
+    /// An `include "ext:<name>/<fragment>"` resolved to a valid extension
+    /// but the named fragment could not be loaded — either the extension
+    /// does not declare such a fragment, or the fragment file is missing
+    /// from the extension package (T-075).
+    #[error("extension `{ext}` has no fragment `{fragment}`")]
+    #[diagnostic(
+        code = "scene/ext-fragment-not-found",
+        severity(Error),
+        help("Check the extension's manifest for declared fragment names. The extension may need updating, or the fragment name may be misspelled.")
+    )]
+    ExtFragmentNotFound {
+        /// Extension name.
+        ext: String,
+        /// Fragment identifier that could not be resolved.
+        fragment: String,
+        /// The full include target as authored.
+        target: String,
+    },
+
+    /// An `include "ext:…"` target has an invalid format — it must be
+    /// `ext:<name>/<fragment>` (T-075).
+    #[error("invalid ext include format `{target}`: {reason}")]
+    #[diagnostic(
+        code = "scene/ext-include-invalid",
+        severity(Error),
+        help("Extension includes must follow the format `ext:<name>/<fragment>`. Both name and fragment are required.")
+    )]
+    ExtIncludeInvalid {
+        /// The raw include target as authored.
+        target: String,
+        /// Human-readable parse failure.
+        reason: String,
+    },
 }
 
 #[cfg(test)]
@@ -1016,5 +1065,33 @@ mod tests {
             request_id: "req-42".into(),
         };
         assert_code(&err, "acp/permission-not-found");
+    }
+
+    #[test]
+    fn ext_not_used_code() {
+        let err = SceneError::ExtNotUsed {
+            ext: "git".into(),
+            target: "ext:git/status-bar".into(),
+        };
+        assert_code(&err, "scene/ext-not-used");
+    }
+
+    #[test]
+    fn ext_fragment_not_found_code() {
+        let err = SceneError::ExtFragmentNotFound {
+            ext: "git".into(),
+            fragment: "status-bar".into(),
+            target: "ext:git/status-bar".into(),
+        };
+        assert_code(&err, "scene/ext-fragment-not-found");
+    }
+
+    #[test]
+    fn ext_include_invalid_code() {
+        let err = SceneError::ExtIncludeInvalid {
+            target: "ext:git".into(),
+            reason: "missing `/<fragment>` after extension name".into(),
+        };
+        assert_code(&err, "scene/ext-include-invalid");
     }
 }

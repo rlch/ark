@@ -4,14 +4,16 @@ use std::path::{Path, PathBuf};
 use crate::ast::layout::{LayoutChild, TabNode};
 use crate::ast::{LayoutNode, ModeNode, SceneBodyNode};
 use crate::error::SceneError;
+use crate::ext::ExtensionRegistry;
 use crate::parse::{parse_scene, SceneIR};
 
 /// Resolve all `include "<path>"` nodes by reading, parsing, and splicing
 /// fragment body nodes at each include point. Detects handle conflicts
 /// across fragments (T-077) and include cycles (T-076).
 ///
-/// `ext:` includes are preserved as-is (resolved in T-075 once the extension
-/// registry is available).
+/// `ext:` includes are preserved as-is at this stage. Call
+/// [`resolve_ext_includes`] after composition to resolve them against the
+/// extension registry (T-075).
 pub fn compose_scene(mut ir: SceneIR) -> Result<SceneIR, SceneError> {
     let canon_path = ir.path.canonicalize().unwrap_or_else(|_| ir.path.clone());
     let root_dir = canon_path
@@ -192,6 +194,125 @@ fn parse_fragment(content: &str, path: &Path, target: &str) -> Result<SceneIR, S
         target: target.to_string(),
         message: e.to_string(),
     })
+}
+
+/// Parsed components of an `ext:<name>/<fragment>` include target.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ExtIncludeRef {
+    /// Extension name (e.g. `"git"`).
+    pub name: String,
+    /// Fragment identifier (e.g. `"status-bar"`).
+    pub fragment: String,
+}
+
+/// Parse an `ext:<name>/<fragment>` include target into its components.
+///
+/// Returns `Err` with a descriptive reason if the format is invalid.
+/// Valid formats: `ext:git/status-bar`, `ext:my-ext/my-fragment`.
+/// Invalid: `ext:`, `ext:git`, `ext:git/`, `ext:/fragment`, `ext:git/a/b`.
+pub fn parse_ext_include(target: &str) -> Result<ExtIncludeRef, SceneError> {
+    let rest = target
+        .strip_prefix("ext:")
+        .ok_or_else(|| SceneError::ExtIncludeInvalid {
+            target: target.to_string(),
+            reason: "must start with `ext:`".to_string(),
+        })?;
+
+    if rest.is_empty() {
+        return Err(SceneError::ExtIncludeInvalid {
+            target: target.to_string(),
+            reason: "missing `<name>/<fragment>` after `ext:`".to_string(),
+        });
+    }
+
+    let slash_pos = rest.find('/').ok_or_else(|| SceneError::ExtIncludeInvalid {
+        target: target.to_string(),
+        reason: "missing `/<fragment>` after extension name".to_string(),
+    })?;
+
+    let name = &rest[..slash_pos];
+    let fragment = &rest[slash_pos + 1..];
+
+    if name.is_empty() {
+        return Err(SceneError::ExtIncludeInvalid {
+            target: target.to_string(),
+            reason: "extension name is empty".to_string(),
+        });
+    }
+
+    if fragment.is_empty() {
+        return Err(SceneError::ExtIncludeInvalid {
+            target: target.to_string(),
+            reason: "fragment identifier is empty".to_string(),
+        });
+    }
+
+    if fragment.contains('/') {
+        return Err(SceneError::ExtIncludeInvalid {
+            target: target.to_string(),
+            reason: "fragment identifier must not contain `/`".to_string(),
+        });
+    }
+
+    Ok(ExtIncludeRef {
+        name: name.to_string(),
+        fragment: fragment.to_string(),
+    })
+}
+
+/// Resolve `ext:` includes using extension metadata.
+///
+/// Called after path-based includes are resolved by [`compose_scene`].
+/// Walks `body`, finds remaining `Include` nodes whose target starts with
+/// `ext:`, parses the `ext:<name>/<fragment>` format, and validates that
+/// the referenced extension is activated in the registry.
+///
+/// Fragment loading is a placeholder until extensions ship actual fragment
+/// files at runtime — currently returns [`SceneError::ExtFragmentNotFound`]
+/// for any valid, activated extension reference.
+pub fn resolve_ext_includes(
+    body: &mut Vec<SceneBodyNode>,
+    registry: &ExtensionRegistry,
+) -> Result<(), SceneError> {
+    let mut i = 0;
+    while i < body.len() {
+        let should_resolve = matches!(
+            &body[i],
+            SceneBodyNode::Include(inc) if inc.target.starts_with("ext:")
+        );
+
+        if !should_resolve {
+            i += 1;
+            continue;
+        }
+
+        // Extract the target string before further borrowing.
+        let target = match &body[i] {
+            SceneBodyNode::Include(inc) => inc.target.clone(),
+            _ => unreachable!(),
+        };
+
+        let ext_ref = parse_ext_include(&target)?;
+
+        // Validate that the extension is activated via `use`.
+        if !registry.is_active(&ext_ref.name) {
+            return Err(SceneError::ExtNotUsed {
+                ext: ext_ref.name,
+                target,
+            });
+        }
+
+        // Placeholder: extensions don't yet ship fragment files at runtime.
+        // Once they do, this is where we'd load the fragment content from
+        // the extension's package, parse it, and splice the body nodes.
+        return Err(SceneError::ExtFragmentNotFound {
+            ext: ext_ref.name,
+            fragment: ext_ref.fragment,
+            target,
+        });
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -579,5 +700,158 @@ layout {
         let ir = parse_scene(fs::read_to_string(&scene_path).unwrap(), &scene_path).unwrap();
         let composed = compose_scene(ir).unwrap();
         assert_eq!(composed.scene.body.len(), 2);
+    }
+
+    // --- T-075: ext:<name>/<fragment> include resolution ---
+
+    #[test]
+    fn parse_ext_include_valid() {
+        let r = parse_ext_include("ext:git/status-bar").unwrap();
+        assert_eq!(r.name, "git");
+        assert_eq!(r.fragment, "status-bar");
+    }
+
+    #[test]
+    fn parse_ext_include_with_dashes_and_dots() {
+        let r = parse_ext_include("ext:my-ext/my-fragment").unwrap();
+        assert_eq!(r.name, "my-ext");
+        assert_eq!(r.fragment, "my-fragment");
+    }
+
+    #[test]
+    fn parse_ext_include_missing_fragment() {
+        let err = parse_ext_include("ext:git").unwrap_err();
+        assert!(
+            matches!(err, SceneError::ExtIncludeInvalid { .. }),
+            "expected ExtIncludeInvalid, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_ext_include_empty_name() {
+        let err = parse_ext_include("ext:/fragment").unwrap_err();
+        assert!(matches!(err, SceneError::ExtIncludeInvalid { .. }));
+    }
+
+    #[test]
+    fn parse_ext_include_empty_fragment() {
+        let err = parse_ext_include("ext:git/").unwrap_err();
+        assert!(matches!(err, SceneError::ExtIncludeInvalid { .. }));
+    }
+
+    #[test]
+    fn parse_ext_include_nested_slash() {
+        let err = parse_ext_include("ext:git/a/b").unwrap_err();
+        assert!(matches!(err, SceneError::ExtIncludeInvalid { .. }));
+    }
+
+    #[test]
+    fn parse_ext_include_bare_ext() {
+        let err = parse_ext_include("ext:").unwrap_err();
+        assert!(matches!(err, SceneError::ExtIncludeInvalid { .. }));
+    }
+
+    #[test]
+    fn parse_ext_include_not_ext_prefix() {
+        let err = parse_ext_include("notext:git/bar").unwrap_err();
+        assert!(matches!(err, SceneError::ExtIncludeInvalid { .. }));
+    }
+
+    #[test]
+    fn resolve_ext_includes_ext_not_used() {
+        use crate::ast::IncludeNode;
+
+        let mut body = vec![SceneBodyNode::Include(IncludeNode {
+            target: "ext:git/status-bar".to_string(),
+        })];
+        let registry = ExtensionRegistry::new();
+
+        let err = resolve_ext_includes(&mut body, &registry).unwrap_err();
+        match &err {
+            SceneError::ExtNotUsed { ext, target } => {
+                assert_eq!(ext, "git");
+                assert_eq!(target, "ext:git/status-bar");
+            }
+            other => panic!("expected ExtNotUsed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_ext_includes_fragment_not_found_when_active() {
+        use ark_ext_metadata_types::{
+            CapabilitySet, ConfigSchema, ExtensionMetadata, StringNode,
+        };
+        use crate::ast::IncludeNode;
+
+        let mut registry = ExtensionRegistry::new();
+        let meta = ExtensionMetadata {
+            name: StringNode::new("git"),
+            version: StringNode::new("0.1.0"),
+            ark_range: StringNode::default(),
+            zellij_range: StringNode::default(),
+            requires: vec![],
+            intents: vec![],
+            events: vec![],
+            views: vec![],
+            config: ConfigSchema::default(),
+            capabilities: CapabilitySet::default(),
+        };
+        registry.activate("git", &meta).unwrap();
+
+        let mut body = vec![SceneBodyNode::Include(IncludeNode {
+            target: "ext:git/status-bar".to_string(),
+        })];
+
+        let err = resolve_ext_includes(&mut body, &registry).unwrap_err();
+        match &err {
+            SceneError::ExtFragmentNotFound {
+                ext,
+                fragment,
+                target,
+            } => {
+                assert_eq!(ext, "git");
+                assert_eq!(fragment, "status-bar");
+                assert_eq!(target, "ext:git/status-bar");
+            }
+            other => panic!("expected ExtFragmentNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_ext_includes_skips_non_ext_nodes() {
+        use crate::ast::IncludeNode;
+
+        // Body with only non-ext: nodes should pass through cleanly.
+        let mut body = vec![SceneBodyNode::Include(IncludeNode {
+            target: "local.kdl".to_string(),
+        })];
+        let registry = ExtensionRegistry::new();
+
+        // No error — non-ext includes are left alone.
+        resolve_ext_includes(&mut body, &registry).unwrap();
+        assert_eq!(body.len(), 1);
+    }
+
+    #[test]
+    fn resolve_ext_includes_empty_body_ok() {
+        let mut body: Vec<SceneBodyNode> = vec![];
+        let registry = ExtensionRegistry::new();
+        resolve_ext_includes(&mut body, &registry).unwrap();
+    }
+
+    #[test]
+    fn resolve_ext_includes_invalid_format_errors() {
+        use crate::ast::IncludeNode;
+
+        let mut body = vec![SceneBodyNode::Include(IncludeNode {
+            target: "ext:git".to_string(),
+        })];
+        let registry = ExtensionRegistry::new();
+
+        let err = resolve_ext_includes(&mut body, &registry).unwrap_err();
+        assert!(
+            matches!(err, SceneError::ExtIncludeInvalid { .. }),
+            "expected ExtIncludeInvalid, got {err:?}"
+        );
     }
 }
