@@ -81,7 +81,7 @@ pub struct PluginDecl {
     /// Mount target (e.g. `"floating"`, `"status-bar"`).
     pub mount: Option<String>,
 }
-use ark_types::event::AgentEvent;
+use ark_types::event::{CoreEvent, ExtEvent};
 use ark_types::EventSink;
 #[cfg(test)]
 use kdl::KdlDocument;
@@ -456,11 +456,11 @@ fn emit_failure_event(event_bus: &EventSink, plugin: &str, reason: &str) {
         "plugin": plugin,
         "reason": reason,
     });
-    let event = AgentEvent::UserEvent {
-        name: PLUGIN_FAILED_EVENT.to_string(),
+    let event = CoreEvent::Ext(ExtEvent {
+        ext: FAILURE_EVENT_SOURCE.to_string(),
+        kind: PLUGIN_FAILED_EVENT.to_string(),
         payload,
-        source: FAILURE_EVENT_SOURCE.to_string(),
-    };
+    });
     if let Err(err) = event_bus.send(event) {
         warn!(
             target = "plugin",
@@ -550,17 +550,13 @@ mod tests {
         ));
         let event = rx.try_recv().expect("one event");
         match event {
-            AgentEvent::UserEvent {
-                name,
-                payload,
-                source,
-            } => {
-                assert_eq!(name, PLUGIN_FAILED_EVENT);
-                assert_eq!(source, FAILURE_EVENT_SOURCE);
-                assert_eq!(payload["plugin"], "foo");
-                assert_eq!(payload["reason"], "wasm load error");
+            CoreEvent::Ext(ext) => {
+                assert_eq!(ext.kind, PLUGIN_FAILED_EVENT);
+                assert_eq!(ext.ext, FAILURE_EVENT_SOURCE);
+                assert_eq!(ext.payload["plugin"], "foo");
+                assert_eq!(ext.payload["reason"], "wasm load error");
             }
-            other => panic!("expected UserEvent, got {other:?}"),
+            other => panic!("expected CoreEvent::Ext, got {other:?}"),
         }
     }
 
@@ -675,11 +671,11 @@ mod tests {
         // Bus received an ark.plugin.failed event.
         let event = rx.try_recv().expect("failure event");
         match event {
-            AgentEvent::UserEvent { name, payload, .. } => {
-                assert_eq!(name, PLUGIN_FAILED_EVENT);
-                assert_eq!(payload["plugin"], "failing");
+            CoreEvent::Ext(ext) => {
+                assert_eq!(ext.kind, PLUGIN_FAILED_EVENT);
+                assert_eq!(ext.payload["plugin"], "failing");
             }
-            other => panic!("expected UserEvent, got {other:?}"),
+            other => panic!("expected CoreEvent::Ext, got {other:?}"),
         }
     }
 

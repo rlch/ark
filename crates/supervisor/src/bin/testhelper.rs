@@ -17,7 +17,7 @@ use std::path::PathBuf;
 
 use ark_supervisor::daemon::setup_supervisor_log;
 use ark_supervisor::lock::{LockError, acquire_lock};
-use ark_types::{AgentId, StateLayout};
+use ark_types::{SessionId, StateLayout};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -64,7 +64,7 @@ fn parse_layout(args: &mut impl Iterator<Item = String>) -> StateLayout {
     StateLayout::new(base, runtime, config)
 }
 
-fn parse_id(args: &mut impl Iterator<Item = String>) -> AgentId {
+fn parse_id(args: &mut impl Iterator<Item = String>) -> SessionId {
     let id_str = args.next().expect("id");
-    AgentId::parse(&id_str).expect("parse id")
+    SessionId::parse(&id_str).expect("parse id")
 }

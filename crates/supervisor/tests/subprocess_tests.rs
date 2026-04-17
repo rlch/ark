@@ -12,7 +12,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use ark_supervisor::lock::{LockError, acquire_lock};
-use ark_types::{AgentId, StateLayout};
+use ark_types::{SessionId, StateLayout};
 use tempfile::tempdir;
 
 fn helper_bin() -> PathBuf {
@@ -23,7 +23,7 @@ fn layout_at(base: &Path) -> StateLayout {
     StateLayout::new(base.join("state"), base.join("rt"), base.join("cfg"))
 }
 
-fn lock_args(mode: &str, layout: &StateLayout, id: &AgentId) -> Vec<String> {
+fn lock_args(mode: &str, layout: &StateLayout, id: &SessionId) -> Vec<String> {
     vec![
         mode.to_string(),
         layout.base().display().to_string(),
@@ -33,7 +33,7 @@ fn lock_args(mode: &str, layout: &StateLayout, id: &AgentId) -> Vec<String> {
     ]
 }
 
-fn spawn_lock_holder(layout: &StateLayout, id: &AgentId) -> Child {
+fn spawn_lock_holder(layout: &StateLayout, id: &SessionId) -> Child {
     Command::new(helper_bin())
         .args(lock_args("lock-hold-and-sleep", layout, id))
         .stdin(Stdio::piped())
@@ -43,7 +43,7 @@ fn spawn_lock_holder(layout: &StateLayout, id: &AgentId) -> Child {
         .expect("spawn lock holder")
 }
 
-fn run_lock_acquirer(layout: &StateLayout, id: &AgentId) -> i32 {
+fn run_lock_acquirer(layout: &StateLayout, id: &SessionId) -> i32 {
     Command::new(helper_bin())
         .args(lock_args("lock-acquire-and-exit", layout, id))
         .stdin(Stdio::null())
@@ -67,7 +67,7 @@ fn read_pid(path: &Path) -> Option<i32> {
 fn lock_contention_from_other_process_returns_already_locked() {
     let tmp = tempdir().expect("tempdir");
     let layout = layout_at(tmp.path());
-    let id = AgentId::new("cavekit", "contend");
+    let id = SessionId::new("contend");
 
     let mut child = spawn_lock_holder(&layout, &id);
 
@@ -109,7 +109,7 @@ fn lock_contention_from_other_process_returns_already_locked() {
 fn lock_drop_releases_and_another_process_can_acquire() {
     let tmp = tempdir().expect("tempdir");
     let layout = layout_at(tmp.path());
-    let id = AgentId::new("cavekit", "reacquire");
+    let id = SessionId::new("reacquire");
 
     // Hold-and-drop in this process.
     {

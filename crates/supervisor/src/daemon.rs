@@ -27,7 +27,7 @@ use std::io;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 
-use ark_types::{AgentId, StateLayout};
+use ark_types::{SessionId, StateLayout};
 use nix::unistd::{ForkResult, Pid, dup2, fork, setsid};
 use thiserror::Error;
 
@@ -80,9 +80,9 @@ pub enum DaemonizeError {
 /// can't accidentally continue executing caller code.
 pub fn daemonize(
     state_layout: &StateLayout,
-    agent_id: &AgentId,
+    agent_id: &SessionId,
 ) -> Result<DaemonizeOutcome, DaemonizeError> {
-    let log_path = state_layout.supervisor_log_path(agent_id);
+    let log_path = state_layout.session_supervisor_log_path(agent_id);
 
     // First fork — parent returns, child continues.
     // SAFETY: fork() on a single-threaded program is safe. Callers invoke
@@ -192,8 +192,8 @@ fn redirect_stdio(_log_path: &Path, log_file: &File) -> Result<(), DaemonizeErro
 /// [`StateLayout`] + [`AgentId`] pair. Unused by the fork path (it uses
 /// the private helpers directly) but handy for T-063's `--no-detach`
 /// future work which needs to redirect without forking.
-pub fn supervisor_log_for(state_layout: &StateLayout, agent_id: &AgentId) -> PathBuf {
-    state_layout.supervisor_log_path(agent_id)
+pub fn supervisor_log_for(state_layout: &StateLayout, agent_id: &SessionId) -> PathBuf {
+    state_layout.session_supervisor_log_path(agent_id)
 }
 
 #[cfg(test)]
@@ -213,10 +213,10 @@ mod tests {
             tmp.path().join("rt"),
             tmp.path().join("cfg"),
         );
-        let id = AgentId::new("cavekit", "auth");
+        let id = SessionId::new("auth");
         assert_eq!(
             supervisor_log_for(&layout, &id),
-            layout.supervisor_log_path(&id)
+            layout.session_supervisor_log_path(&id)
         );
     }
 
@@ -233,7 +233,7 @@ mod tests {
             tmp.path().join("rt"),
             tmp.path().join("cfg"),
         );
-        let id = AgentId::new("cavekit", "test");
+        let id = SessionId::new("test");
         let outcome = daemonize(&layout, &id).expect("daemonize");
         match outcome {
             DaemonizeOutcome::Parent { .. } => {

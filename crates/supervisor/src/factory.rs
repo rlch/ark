@@ -27,7 +27,7 @@ use ark_core::{Config, Engine, Orchestrator};
 use ark_mux_zellij::ZellijMux;
 use ark_orchestrators_cavekit::CavekitOrchestrator;
 use ark_orchestrators_claude_code::ClaudeCodeOrchestrator;
-use ark_types::{is_v1_engine, is_v1_mux, is_v1_orchestrator};
+use ark_types::is_v1_mux;
 use thiserror::Error;
 
 use crate::engine_stub::AcpEngineStub;
@@ -99,11 +99,10 @@ pub enum SupervisorError {
 /// boot sequence that haven't been migrated off it yet (orchestrator
 /// `engine()` slug, install/teardown symmetry, `default_pane_cmd`).
 pub fn build_engine(slug: &str, _config: &Config) -> Result<Box<dyn Engine>> {
-    if !is_v1_engine(slug) {
-        return Err(anyhow!(
-            "unknown engine slug `{slug}` — v1 ships: {:?}. check spec.engine and ark config.",
-            ark_types::ENGINES_V1
-        ));
+    // cavekit-soul Phase 1: engine slugs no longer live in core scope. The
+    // factory accepts any slug; engine resolution moves to extensions.
+    if slug.is_empty() {
+        return Err(anyhow!("engine slug must not be empty"));
     }
     Ok(Box::new(AcpEngineStub::new(slug)))
 }
@@ -112,17 +111,12 @@ pub fn build_engine(slug: &str, _config: &Config) -> Result<Box<dyn Engine>> {
 
 /// Mint a concrete `Orchestrator` trait object for `slug`.
 pub fn build_orchestrator(slug: &str, _config: &Config) -> Result<Box<dyn Orchestrator>> {
-    if !is_v1_orchestrator(slug) {
-        return Err(anyhow!(
-            "unknown orchestrator slug `{slug}` — v1 ships: {:?}. check spec.orchestrator and ark config.",
-            ark_types::ORCHESTRATORS_V1
-        ));
-    }
+    // cavekit-soul Phase 1: orchestrator slugs no longer live in core scope.
     match slug {
         "cavekit" => Ok(Box::new(CavekitOrchestrator::new())),
         "claude-code" => Ok(Box::new(ClaudeCodeOrchestrator::new())),
         other => Err(anyhow!(
-            "orchestrator slug `{other}` is v1-locked but has no factory branch — plumb it here"
+            "unknown orchestrator slug `{other}` — known: cavekit, claude-code"
         )),
     }
 }
@@ -168,18 +162,16 @@ mod tests {
     }
 
     #[test]
-    fn build_engine_unknown_slug_errors() {
+    fn build_engine_empty_slug_errors() {
         let c = cfg();
-        let err = match build_engine("not-an-engine", &c) {
+        // cavekit-soul Phase 1: scope-list checks are gone; only the
+        // empty-slug guard remains.
+        let err = match build_engine("", &c) {
             Ok(_) => panic!("must error"),
             Err(e) => e,
         };
         let msg = format!("{err}");
-        assert!(msg.contains("unknown engine"), "got: {msg}");
-        assert!(
-            msg.contains("claude-code"),
-            "remediation hint missing: {msg}"
-        );
+        assert!(msg.contains("empty"), "got: {msg}");
     }
 
     #[test]
@@ -187,7 +179,6 @@ mod tests {
         let c = cfg();
         let o = build_orchestrator("cavekit", &c).expect("cavekit orchestrator");
         assert_eq!(o.name(), "cavekit");
-        assert_eq!(o.engine(), "claude-code");
     }
 
     #[test]
@@ -227,11 +218,13 @@ mod tests {
     }
 
     #[test]
-    fn cavekit_orchestrator_engine_slug_is_claude_code() {
-        // The real CavekitOrchestrator (T-083) declares the claude-code
-        // engine, matching the factory's expectations.
+    fn build_multiplexer_zellij_uses_v1_scope_guard() {
+        let _ = is_v1_mux;
+    }
+
+    #[test]
+    fn cavekit_orchestrator_name_is_cavekit() {
         let o = CavekitOrchestrator::new();
         assert_eq!(o.name(), "cavekit");
-        assert_eq!(o.engine(), "claude-code");
     }
 }

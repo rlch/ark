@@ -7,7 +7,7 @@
 //!
 //! 1. **Path resolution** — the per-agent `.sock` path is resolved via
 //!    [`ark_types::StateLayout::agent_socket_path`] + the runtime dir is
-//!    tightened to mode `0700` via [`ark_core::socket_paths::ensure_agents_dir`].
+//!    tightened to mode `0700` via [`ark_core::socket_paths::ensure_sessions_dir`].
 //! 2. **Bind + accept loop** — spawns the accept loop on an internal
 //!    [`tokio::task::JoinSet`] and dispatches each inbound connection to a
 //!    pluggable [`ControlCommandHandler`].
@@ -28,8 +28,8 @@ use anyhow::Context;
 use ark_core::control_socket::{
     ControlListener, Response, handle_single_request, unlink_if_exists,
 };
-use ark_core::socket_paths::ensure_agents_dir;
-use ark_types::{AgentId, StateLayout};
+use ark_core::socket_paths::ensure_sessions_dir;
+use ark_types::{SessionId, StateLayout};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -110,7 +110,7 @@ impl ControlSocketHandle {
 ///
 /// 1. Resolve path via [`StateLayout::agent_socket_path`].
 /// 2. Ensure `$runtime/agents/` exists at mode `0700` via
-///    [`ensure_agents_dir`].
+///    [`ensure_sessions_dir`].
 /// 3. Bind a [`ControlListener`] with `try_overwrite(true)` +
 ///    `reclaim_name(true)` + `mode(0o600)` on the socket file.
 /// 4. Spawn the accept loop onto the returned [`JoinSet`]; each inbound
@@ -125,18 +125,18 @@ impl ControlSocketHandle {
 /// outside a Tokio runtime context").
 pub async fn bind_control_socket(
     state_layout: &StateLayout,
-    agent_id: &AgentId,
+    agent_id: &SessionId,
     handler: Arc<dyn ControlCommandHandler>,
 ) -> anyhow::Result<ControlSocketHandle> {
     // Resolve path + ensure parent dir is 0700.
     let runtime_root = state_layout.runtime();
-    ensure_agents_dir(runtime_root).with_context(|| {
+    ensure_sessions_dir(runtime_root).with_context(|| {
         format!(
-            "ensure agents dir at {} (mode 0700)",
+            "ensure sessions dir at {} (mode 0700)",
             runtime_root.display()
         )
     })?;
-    let path = state_layout.agent_socket_path(agent_id);
+    let path = state_layout.session_socket_path(agent_id);
 
     // Bind listener. Any failure here is fatal — surface as Err.
     let listener = ControlListener::bind(&path)
@@ -264,7 +264,7 @@ pub async fn shutdown(mut handle: ControlSocketHandle) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_types::AgentId;
+    use ark_types::SessionId;
     use interprocess::local_socket::traits::tokio::Stream as _;
     use interprocess::local_socket::{ConnectOptions, GenericFilePath, ToFsName};
     use std::os::unix::fs::PermissionsExt;
@@ -325,7 +325,7 @@ mod tests {
     async fn bind_creates_socket_with_correct_modes() {
         let tmp = short_tempdir();
         let layout = layout_at(tmp.path());
-        let id = AgentId::new("cavekit", "bindmode");
+        let id = SessionId::new("bindmode");
 
         let handle = bind_control_socket(&layout, &id, Arc::new(NoopHandler))
             .await
@@ -355,7 +355,7 @@ mod tests {
     async fn noop_handler_responds_to_any_request() {
         let tmp = short_tempdir();
         let layout = layout_at(tmp.path());
-        let id = AgentId::new("cavekit", "noop");
+        let id = SessionId::new("noop");
 
         let handle = bind_control_socket(&layout, &id, Arc::new(NoopHandler))
             .await
@@ -379,7 +379,7 @@ mod tests {
         // first carries garbage, the second a valid request.
         let tmp = short_tempdir();
         let layout = layout_at(tmp.path());
-        let id = AgentId::new("cavekit", "malformed");
+        let id = SessionId::new("malformed");
 
         let handle = bind_control_socket(&layout, &id, Arc::new(NoopHandler))
             .await
@@ -409,7 +409,7 @@ mod tests {
     async fn shutdown_cancels_drains_and_unlinks_socket_file() {
         let tmp = short_tempdir();
         let layout = layout_at(tmp.path());
-        let id = AgentId::new("cavekit", "shutdown");
+        let id = SessionId::new("shutdown");
 
         let handle = bind_control_socket(&layout, &id, Arc::new(NoopHandler))
             .await
@@ -433,10 +433,10 @@ mod tests {
         // the agent socket path. try_overwrite(true) must replace it.
         let tmp = short_tempdir();
         let layout = layout_at(tmp.path());
-        let id = AgentId::new("cavekit", "stale");
+        let id = SessionId::new("stale");
 
         // Pre-create runtime dir + plant a stale file at the target.
-        let agents = ensure_agents_dir(layout.runtime()).unwrap();
+        let agents = ensure_sessions_dir(layout.runtime()).unwrap();
         let stale_path = agents.join(format!("{}.sock", id.as_str()));
         std::fs::write(&stale_path, b"leftover").unwrap();
         assert!(stale_path.exists());
@@ -466,7 +466,7 @@ mod tests {
         let rt_as_file = tmp.path().join("rt");
         std::fs::write(&rt_as_file, b"").unwrap();
         let layout = StateLayout::new(tmp.path().join("state"), rt_as_file, tmp.path().join("cfg"));
-        let id = AgentId::new("cavekit", "badparent");
+        let id = SessionId::new("badparent");
 
         let err = bind_control_socket(&layout, &id, Arc::new(NoopHandler))
             .await
@@ -498,7 +498,7 @@ mod tests {
     async fn custom_handler_replaces_noop() {
         let tmp = short_tempdir();
         let layout = layout_at(tmp.path());
-        let id = AgentId::new("cavekit", "echo");
+        let id = SessionId::new("echo");
 
         let handle = bind_control_socket(&layout, &id, Arc::new(EchoHandler))
             .await

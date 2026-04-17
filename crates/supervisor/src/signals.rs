@@ -23,7 +23,7 @@
 use std::path::PathBuf;
 
 use anyhow::Context;
-use ark_core::unlink_if_exists;
+use ark_core::control_socket::unlink_if_exists;
 use futures::stream::StreamExt;
 use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook_tokio::Signals;
@@ -309,7 +309,7 @@ mod tests {
             tmp.path().join("rt"),
             tmp.path().join("cfg"),
         );
-        let id = ark_types::AgentId::new("cavekit", "guard");
+        let id = ark_types::SessionId::new("guard");
         let handle = crate::bind_control_socket(&layout, &id, Arc::new(crate::NoopHandler))
             .await
             .expect("bind");
@@ -334,7 +334,7 @@ mod tests {
             tmp.path().join("rt"),
             tmp.path().join("cfg"),
         );
-        let id = ark_types::AgentId::new("cavekit", "guarddrop");
+        let id = ark_types::SessionId::new("guarddrop");
         let handle = crate::bind_control_socket(&layout, &id, Arc::new(crate::NoopHandler))
             .await
             .expect("bind");

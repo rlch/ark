@@ -216,7 +216,7 @@ mod tests {
     async fn orchestrator_returns_before_grace_no_session_ended() {
         let cancel = CancellationToken::new();
         let done = CancellationToken::new();
-        let (tx, mut rx) = channel::<CoreEvent>(16);
+        let (tx, mut rx) = channel(16);
         let (mux, stub) = mux_with_n_ok_closes(0).await;
         let registry = new_tab_registry();
 
@@ -257,7 +257,7 @@ mod tests {
     async fn grace_expiry_emits_session_ended_and_closes_tabs() {
         let cancel = CancellationToken::new();
         let done = CancellationToken::new();
-        let (tx, mut rx) = channel::<CoreEvent>(32);
+        let (tx, mut rx) = channel(32);
         let (mux, stub) = mux_with_n_ok_closes(2).await;
 
         let tab_a = TabHandle::new("ark-kill", 1, "builder");
@@ -305,7 +305,7 @@ mod tests {
     async fn closed_tab_is_removed_from_registry() {
         let cancel = CancellationToken::new();
         let done = CancellationToken::new();
-        let (tx, _rx) = channel::<CoreEvent>(16);
+        let (tx, _rx) = channel(16);
         let (mux, stub) = mux_with_n_ok_closes(0).await;
         let registry = new_tab_registry();
         let tab = TabHandle::new("ark-kill", 1, "builder");

@@ -41,7 +41,7 @@ use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-use ark_types::{AgentId, StateLayout};
+use ark_types::{SessionId, StateLayout};
 use chrono::Utc;
 use serde_json::{Value as JsonValue, json};
 
@@ -81,7 +81,7 @@ impl AuditLogger {
     ///   `PIPE_BUF`.
     pub fn record(
         &self,
-        agent_id: &AgentId,
+        agent_id: &SessionId,
         cmd: &JsonValue,
         response: &JsonValue,
     ) -> io::Result<()> {
@@ -143,7 +143,7 @@ mod tests {
         let tmp = short_tempdir();
         let state = tmp.path().join("state");
         let logger = AuditLogger::new(state.clone());
-        let id = AgentId::new("cavekit", "log1");
+        let id = SessionId::new("log1");
 
         logger
             .record(
@@ -173,7 +173,7 @@ mod tests {
         let state = tmp.path().join("deep").join("state");
         assert!(!state.exists());
         let logger = AuditLogger::new(state.clone());
-        let id = AgentId::new("cavekit", "mkdir");
+        let id = SessionId::new("mkdir");
 
         logger
             .record(&id, &json!({}), &json!({}))
@@ -189,7 +189,7 @@ mod tests {
         let tmp = short_tempdir();
         let state = tmp.path().join("state");
         let logger = AuditLogger::new(state.clone());
-        let id = AgentId::new("cavekit", "chmod");
+        let id = SessionId::new("chmod");
 
         logger.record(&id, &json!({}), &json!({})).unwrap();
 
@@ -203,7 +203,7 @@ mod tests {
         let tmp = short_tempdir();
         let state = tmp.path().join("state");
         let logger = AuditLogger::new(state.clone());
-        let id = AgentId::new("cavekit", "mono");
+        let id = SessionId::new("mono");
 
         for i in 0..5 {
             logger
@@ -234,7 +234,7 @@ mod tests {
         let tmp = short_tempdir();
         let state = tmp.path().join("state");
         let logger = Arc::new(AuditLogger::new(state.clone()));
-        let id = Arc::new(AgentId::new("cavekit", "concurrent"));
+        let id = Arc::new(SessionId::new("concurrent"));
 
         let mut handles = Vec::new();
         for task_num in 0..2 {

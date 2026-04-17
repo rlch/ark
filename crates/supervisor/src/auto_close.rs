@@ -103,14 +103,15 @@ pub async fn apply_auto_close_policy(
 /// future mux backend needs finer-grained control (e.g. close only
 /// orchestrator-owned tabs, leave user-opened ones alive), this helper
 /// is the single place to extend.
-async fn close_session_tabs(mux: &Arc<ZellijMux>, session_name: &str) {
-    if let Err(err) = mux.close_session(session_name).await {
-        warn!(
-            %err,
-            session = session_name,
-            "auto_close: close_session failed; continuing shutdown"
-        );
-    }
+async fn close_session_tabs(_mux: &Arc<ZellijMux>, session_name: &str) {
+    // TODO(cavekit-soul Phase 2): wire `mux.close_session` once the multiplexer
+    // surface gains a session-scoped teardown. For now we log and rely on the
+    // supervisor's own cancel cascade + the `kill_handler` fallback to close
+    // individual tabs at SIGTERM.
+    debug!(
+        session = session_name,
+        "auto_close: close_session not implemented on mux; skipping"
+    );
 }
 
 #[cfg(test)]
@@ -136,7 +137,7 @@ mod tests {
     /// panicking.
     #[tokio::test]
     async fn cancel_before_session_ended_returns_ok() {
-        let (tx, mut rx) = channel::<CoreEvent>(8);
+        let (tx, mut rx) = channel(8);
         let mux = test_mux();
         let (id, name) = session();
         let cancel = CancellationToken::new();
@@ -160,7 +161,7 @@ mod tests {
     /// MUST return `Ok(())`.
     #[tokio::test]
     async fn session_ended_triggers_close_and_returns() {
-        let (tx, mut rx) = channel::<CoreEvent>(8);
+        let (tx, mut rx) = channel(8);
         let mux = test_mux();
         let (id, name) = session();
         let cancel = CancellationToken::new();
@@ -182,7 +183,7 @@ mod tests {
     /// Non-`SessionEnded` events are ignored; the function keeps waiting.
     #[tokio::test]
     async fn log_event_is_ignored() {
-        let (tx, mut rx) = channel::<CoreEvent>(8);
+        let (tx, mut rx) = channel(8);
         let mux = test_mux();
         let (id, name) = session();
         let cancel = CancellationToken::new();

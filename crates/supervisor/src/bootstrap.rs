@@ -33,7 +33,7 @@
 
 use anyhow::Result;
 use ark_core::Config;
-use ark_types::{AgentSpec, CancellationToken};
+use ark_types::{CancellationToken, SessionSpec};
 use tracing::{error, info};
 
 use crate::orchestration::SupervisorMode;
@@ -68,7 +68,7 @@ use crate::ready_signal::ReadyWriter;
 /// infrastructure itself could not start or could not complete (lock,
 /// socket, scene compile, etc.). See cavekit-soul-phase-1-supervisor.md R3.
 pub async fn supervisor_main(
-    spec: AgentSpec,
+    spec: SessionSpec,
     mode: SupervisorMode,
     config: Config,
     ready_writer: Option<ReadyWriter>,
@@ -103,18 +103,19 @@ pub async fn supervisor_main(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_types::{AgentId, AgentSpec};
+    use ark_types::{SessionId, SessionSpec};
+    use std::collections::BTreeMap;
 
-    fn sample_spec() -> AgentSpec {
-        let id = AgentId::new("cavekit", "bootstrap");
-        AgentSpec::new(
-            id,
-            "bootstrap",
-            "cavekit",
-            "stub-engine",
-            std::path::PathBuf::from("/tmp"),
-            vec!["stub".to_string()],
-        )
+    fn sample_spec() -> SessionSpec {
+        SessionSpec {
+            id: SessionId::new("bootstrap"),
+            name: "bootstrap".to_string(),
+            scene_path: None,
+            cwd: std::path::PathBuf::from("/tmp"),
+            env: BTreeMap::new(),
+            created_at: chrono::Utc::now(),
+            ext_config: BTreeMap::new(),
+        }
     }
 
     /// supervisor_main propagates Ok(()) from a successful run.

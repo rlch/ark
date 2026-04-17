@@ -42,7 +42,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use ark_types::{AgentId, StateLayout};
+use ark_types::{SessionId, StateLayout};
 use tracing::Dispatch;
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::SubscriberExt;
@@ -57,7 +57,7 @@ pub struct ForegroundCtx {
     /// Resolved `$STATE/agents/{id}/supervisor.log` path.
     pub log_path: PathBuf,
     /// The agent id this foreground supervisor is running for.
-    pub agent_id: AgentId,
+    pub agent_id: SessionId,
 }
 
 /// Run the supervisor in foreground (`--no-detach`) mode.
@@ -74,14 +74,14 @@ pub struct ForegroundCtx {
 /// On success, returns after the closure's future resolves (no fork).
 pub fn run_foreground<F, Fut>(
     state_layout: &StateLayout,
-    agent_id: &AgentId,
+    agent_id: &SessionId,
     agent_run: F,
 ) -> anyhow::Result<()>
 where
     F: FnOnce(ForegroundCtx) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<()>> + Send,
 {
-    let log_path = state_layout.supervisor_log_path(agent_id);
+    let log_path = state_layout.session_supervisor_log_path(agent_id);
     let ctx = ForegroundCtx {
         log_path: log_path.clone(),
         agent_id: agent_id.clone(),
@@ -229,8 +229,8 @@ mod tests {
     fn dispatch_writes_to_both_file_and_injected_writer() {
         let tmp = TempDir::new().unwrap();
         let layout = layout_at(tmp.path());
-        let id = AgentId::new("cavekit", "fg-plumb");
-        let log = layout.supervisor_log_path(&id);
+        let id = SessionId::new("fg-plumb");
+        let log = layout.session_supervisor_log_path(&id);
 
         let shared = SharedWriter::new();
         let dispatch = build_foreground_dispatch(&log, shared.clone()).expect("dispatch");
@@ -272,7 +272,7 @@ mod tests {
     fn run_foreground_completes_with_closure_ok() {
         let tmp = TempDir::new().unwrap();
         let layout = layout_at(tmp.path());
-        let id = AgentId::new("cavekit", "fg-ok");
+        let id = SessionId::new("fg-ok");
         let expected_id = id.as_str().to_string();
         let result = run_foreground(&layout, &id, |ctx| {
             let expected = expected_id.clone();
@@ -284,7 +284,7 @@ mod tests {
         });
         result.expect("run_foreground");
         // Log file must have been created + written to.
-        let log = layout.supervisor_log_path(&id);
+        let log = layout.session_supervisor_log_path(&id);
         let content = fs::read_to_string(&log).expect("read log");
         assert!(
             content.contains("inside-closure"),
@@ -299,7 +299,7 @@ mod tests {
         // wouldn't return here at all.
         let tmp = TempDir::new().unwrap();
         let layout = layout_at(tmp.path());
-        let id = AgentId::new("cavekit", "fg-early");
+        let id = SessionId::new("fg-early");
         let start = std::time::Instant::now();
         run_foreground(&layout, &id, |_ctx| async move { Ok(()) }).expect("run");
         let elapsed = start.elapsed();
@@ -313,7 +313,7 @@ mod tests {
     fn run_foreground_propagates_closure_error() {
         let tmp = TempDir::new().unwrap();
         let layout = layout_at(tmp.path());
-        let id = AgentId::new("cavekit", "fg-err");
+        let id = SessionId::new("fg-err");
         let err = run_foreground(&layout, &id, |_ctx| async move {
             Err(anyhow::anyhow!("closure-error-token"))
         })
@@ -333,7 +333,7 @@ mod tests {
         // still possible AFTER the call — i.e. the fd wasn't replaced.
         let tmp = TempDir::new().unwrap();
         let layout = layout_at(tmp.path());
-        let id = AgentId::new("cavekit", "fg-nostdio");
+        let id = SessionId::new("fg-nostdio");
         // (We don't actually emit here; the test harness's own stderr
         // capture does the heavy lifting.)
         run_foreground(&layout, &id, |_ctx| async move { Ok(()) }).expect("run");

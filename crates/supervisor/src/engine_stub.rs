@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use ark_core::engine::{ApprovalPolicy, Engine, EngineHandle};
-use ark_types::{AgentId, AgentSpec, EventSink};
+use ark_types::{EventSink, SessionId, SessionSpec};
 use async_trait::async_trait;
 
 /// Generic ACP-engine adapter.
@@ -78,7 +78,7 @@ impl Engine for AcpEngineStub {
 
     async fn install_observability(
         &self,
-        _id: &AgentId,
+        _id: &SessionId,
         _cwd: &Path,
         _sink: EventSink,
     ) -> Result<EngineHandle> {
@@ -131,27 +131,14 @@ pub struct AcpEngineHandleMarker;
 /// Returns `Ok(())` when the command is on PATH OR is an absolute
 /// path that exists. Returns an `anyhow::Error` with a clean
 /// message when the binary is missing.
-pub fn preflight(spec: &AgentSpec) -> Result<()> {
-    // `spec.engine` is the engine slug (e.g. "claude-code",
-    // "codex"). The resolved `EngineLaunch.command` is the real
-    // argv0, but by this point in the boot sequence we haven't
-    // surfaced it here — so we fall back to the v0.3 heuristic of
-    // checking whether `claude` (or the slug itself as a binary
-    // name) resolves. This is a soft preflight; `ark doctor` is
-    // the canonical place for engine probing (T-ACP.6).
-    let candidate = match spec.engine.as_str() {
-        "claude-code" => "claude",
-        "gemini-cli" => "gemini",
-        other => other,
-    };
-    if which(candidate) {
-        Ok(())
-    } else {
-        anyhow::bail!(
-            "ACP engine `{candidate}` not on PATH — install claude CLI (or set `--engine` to a binary that is on PATH)"
-        )
-    }
+pub fn preflight(_spec: &SessionSpec) -> Result<()> {
+    // cavekit-soul Phase 1: engine resolution moves to extensions; the
+    // SessionSpec no longer carries an `engine` slug. Preflight is a
+    // no-op here — extensions own per-engine PATH probes.
+    Ok(())
 }
+
+#[allow(dead_code)]
 
 fn which(name: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else {
@@ -198,7 +185,7 @@ mod tests {
     async fn install_teardown_roundtrip_is_noop() {
         let engine = AcpEngineStub::new("claude");
         let (sink, _rx) = ark_types::channel(4);
-        let id = AgentId::new("cavekit", "stub-test");
+        let id = SessionId::new("stub_test");
         let handle = engine
             .install_observability(&id, Path::new("/tmp"), sink)
             .await

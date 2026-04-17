@@ -36,7 +36,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
-use ark_types::{AgentId, StateLayout};
+use ark_types::{SessionId, StateLayout};
 use fd_lock::RwLock;
 use thiserror::Error;
 
@@ -139,7 +139,7 @@ pub enum LockError {
 /// docs), since flock(2) itself is file-descriptor-scoped.
 pub fn acquire_lock(
     state_layout: &StateLayout,
-    agent_id: &AgentId,
+    agent_id: &SessionId,
 ) -> Result<LockGuard, LockError> {
     let locks_dir = state_layout.locks_dir();
     if !locks_dir.exists() {
@@ -241,7 +241,7 @@ mod tests {
     fn fresh_acquire_creates_lock_file_with_pid() {
         let tmp = tempdir().expect("tempdir");
         let layout = layout_at(tmp.path());
-        let id = AgentId::new("cavekit", "fresh");
+        let id = SessionId::new("fresh");
         let guard = acquire_lock(&layout, &id).expect("acquire");
         let path = guard.path().to_path_buf();
         assert!(path.exists(), "lock file should exist");
@@ -259,7 +259,7 @@ mod tests {
     fn second_acquire_same_process_is_idempotent() {
         let tmp = tempdir().expect("tempdir");
         let layout = layout_at(tmp.path());
-        let id = AgentId::new("cavekit", "idem");
+        let id = SessionId::new("idem");
         let g1 = acquire_lock(&layout, &id).expect("first acquire");
         let g2 = acquire_lock(&layout, &id).expect("second acquire");
         // Both guards point at the same on-disk path.
@@ -276,7 +276,7 @@ mod tests {
         // Note: we deliberately do NOT create tmp/state beforehand.
         let layout = layout_at(tmp.path());
         assert!(!layout.locks_dir().exists(), "precondition");
-        let id = AgentId::new("cavekit", "mkdirs");
+        let id = SessionId::new("mkdirs");
         let _guard = acquire_lock(&layout, &id).expect("acquire creates dirs");
         assert!(layout.locks_dir().is_dir(), "locks dir created");
         // Sanity: mode 0700 on the newly-created locks_dir.
@@ -294,7 +294,7 @@ mod tests {
     fn drop_unlinks_lock_file_when_last_handle_released() {
         let tmp = tempdir().expect("tempdir");
         let layout = layout_at(tmp.path());
-        let id = AgentId::new("cavekit", "dropunlink");
+        let id = SessionId::new("dropunlink");
         let guard = acquire_lock(&layout, &id).expect("acquire");
         let path = guard.path().to_path_buf();
         assert!(path.exists(), "file present while held");
