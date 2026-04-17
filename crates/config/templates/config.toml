@@ -72,24 +72,17 @@
 # default_layout_dir = "~/.config/ark/layouts"
 
 # ---------------------------------------------------------------------------
-# [acp] — Agent Client Protocol runtime (cavekit-scene R17)
-# ---------------------------------------------------------------------------
-# [acp]
-# permission_timeout_ms = 300000   # 5 min; 0 = disabled (auto-picked when
-#                                  # ARK_NONINTERACTIVE=1 or stdin is non-TTY)
-
-# ---------------------------------------------------------------------------
-# [engines.<name>] — ACP engine launch specs (T-ACP.4a / T-ACP.8)
+# [engines.<name>] — engine launch specs
 #
-# Each entry declares how to spawn a named ACP engine. Resolved by the
+# Each entry declares how to spawn a named engine. Resolved by the
 # supervisor at spawn time through this precedence chain:
 #   1. --engine NAME  (CLI flag)
 #   2. scene `engine { }` block
-#   3. `use "engine-*"` extension (R17 rung 3)
+#   3. `use "engine-*"` extension
 #   4. [engines.<name>] here, keyed on `defaults.engine`
-#   5. hardcoded default: claude --acp
+#   5. hardcoded default
 #
-# The three engines below are the shipped defaults (T-ACP.8). Uncomment to
+# The three engines below are the shipped defaults. Uncomment to
 # override their argv or add `env = { KEY = "VAL" }` — all three also
 # resolve WITHOUT any entry because they're baked into the supervisor's
 # `shipped_engine()` table.

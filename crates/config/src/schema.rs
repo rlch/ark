@@ -14,8 +14,7 @@
 //! [orchestrator.claude_code]
 //! [mux.zellij]            # multiplexer-specific
 //! [[hooks]]               # repeatable hook definitions
-//! [acp]                   # ACP behaviour knobs (T-ACP.5b timeout)
-//! [engines.<name>]        # ACP engine launch specs (T-ACP.4a rung 4)
+//! [engines.<name>]        # engine launch specs
 //! [scene]                 # scene hot-reload knobs (T-11.6 watcher)
 //! ```
 //!
@@ -93,15 +92,6 @@ pub const DEFAULT_SCENE_WATCH: bool = false;
 /// Default `[scene] watch_debounce_ms`. 200 ms matches T-11.6 spec.
 pub const DEFAULT_SCENE_WATCH_DEBOUNCE_MS: u64 = 200;
 
-/// Default `[acp] permission_timeout_ms` (interactive).
-///
-/// T-ACP.5b: picker picks the permission prompt by default; the dispatcher
-/// auto-rejects with `option_id = "timeout"` after this many milliseconds
-/// when the scene hasn't supplied an auto-allow / auto-deny rule. The spec
-/// defines `0` as "no timeout" — used automatically when the process is
-/// non-interactive (`ARK_NONINTERACTIVE=1` or non-TTY stdin).
-pub const DEFAULT_ACP_PERMISSION_TIMEOUT_MS: u64 = 300_000;
-
 // ---------------------------------------------------------------------------
 // Top-level
 // ---------------------------------------------------------------------------
@@ -127,10 +117,7 @@ pub struct Config {
     /// Repeatable hook definitions. Empty by default — users opt in.
     #[serde(default)]
     pub hooks: Vec<HookEntry>,
-    /// `[acp]` — Agent Client Protocol runtime knobs (T-ACP.5b).
-    #[serde(default)]
-    pub acp: AcpSection,
-    /// `[engines.<name>]` — ACP engine launch specs keyed by name
+    /// `[engines.<name>]` — engine launch specs keyed by name
     /// (T-ACP.4a rung 4). Empty when the user hasn't defined any;
     /// built-in defaults are merged in separately at engine-resolution
     /// time so a missing `[engines.claude]` still resolves to the shipped
@@ -161,7 +148,6 @@ impl Config {
             orchestrator: OrchestratorSection::default(),
             mux: MuxSection::default(),
             hooks: Vec::new(),
-            acp: AcpSection::default(),
             engines: BTreeMap::new(),
             scene: SceneSection::default(),
         }
@@ -196,39 +182,6 @@ impl Default for SceneSection {
         Self {
             watch: DEFAULT_SCENE_WATCH,
             watch_debounce_ms: DEFAULT_SCENE_WATCH_DEBOUNCE_MS,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// [acp]
-// ---------------------------------------------------------------------------
-
-/// `[acp]` section — Agent Client Protocol runtime knobs.
-///
-/// Today only the permission-timeout knob (T-ACP.5b) lives here; future
-/// ACP-wide knobs (default session-mode, `allow-unstable`, …) slot in
-/// as new fields with `#[serde(default)]`.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct AcpSection {
-    /// Permission-request timeout in milliseconds. When the agent sends
-    /// `session/request_permission` and no scene rule or picker
-    /// decision arrives inside this window, the dispatcher auto-rejects
-    /// with `option_id = "timeout"` (T-ACP.5b).
-    ///
-    /// Default `300_000` (5 minutes). `0` disables the timeout
-    /// entirely — useful for automation or when the scene always
-    /// supplies an auto-rule. When `ARK_NONINTERACTIVE=1` or stdin is
-    /// non-TTY, the supervisor overrides the effective value to `0`
-    /// regardless of the configured value.
-    pub permission_timeout_ms: u64,
-}
-
-impl Default for AcpSection {
-    fn default() -> Self {
-        Self {
-            permission_timeout_ms: DEFAULT_ACP_PERMISSION_TIMEOUT_MS,
         }
     }
 }
@@ -475,36 +428,7 @@ mod tests {
         providers::{Format, Toml},
     };
 
-    // ----- T-ACP.5b: permission timeout + engines map -----------------
-
-    #[test]
-    fn acp_section_defaults_to_five_minute_timeout() {
-        let s = AcpSection::default();
-        assert_eq!(
-            s.permission_timeout_ms,
-            DEFAULT_ACP_PERMISSION_TIMEOUT_MS
-        );
-        assert_eq!(s.permission_timeout_ms, 300_000);
-    }
-
-    #[test]
-    fn acp_section_accepts_zero_for_disable() {
-        Jail::expect_with(|jail| {
-            jail.create_file(
-                "c.toml",
-                r#"
-                [acp]
-                permission_timeout_ms = 0
-                "#,
-            )?;
-            let cfg: Config = Figment::new()
-                .merge(Toml::file(jail.directory().join("c.toml")))
-                .extract()
-                .expect("parse");
-            assert_eq!(cfg.acp.permission_timeout_ms, 0);
-            Ok(())
-        });
-    }
+    // ----- engines map -----------------
 
     #[test]
     fn engines_map_parses_with_multiple_entries() {
@@ -539,24 +463,6 @@ mod tests {
                 codex.env.get("MY_KEY").map(|s| s.as_str()),
                 Some("value")
             );
-            Ok(())
-        });
-    }
-
-    #[test]
-    fn unknown_key_in_acp_rejected() {
-        Jail::expect_with(|jail| {
-            jail.create_file(
-                "c.toml",
-                r#"
-                [acp]
-                permisson_timeout_ms = 42
-                "#,
-            )?;
-            let res: Result<Config, _> = Figment::new()
-                .merge(Toml::file(jail.directory().join("c.toml")))
-                .extract();
-            assert!(res.is_err(), "typo in [acp] must error; got {res:?}");
             Ok(())
         });
     }

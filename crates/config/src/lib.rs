@@ -60,7 +60,7 @@ pub mod schema;
 
 pub use hooks::{HookContext, HookEntry};
 pub use schema::{
-    AcpSection, Config, DEFAULT_ACP_PERMISSION_TIMEOUT_MS, DefaultsSection, DiffSection,
+    Config, DefaultsSection, DiffSection,
     EngineClaudeCodeSection, EngineLaunchSpec, EngineSection, MuxSection, MuxZellijSection,
     OrchestratorCavekitSection, OrchestratorClaudeCodeSection, OrchestratorSection,
 };
@@ -664,8 +664,6 @@ mod tests {
             "[orchestrator.claude_code]",
             "[mux.zellij]",
             "[[hooks]]",
-            // T-ACP.5b + T-ACP.8: [acp] + engine launch specs.
-            "[acp]",
             "[engines.claude]",
             "[engines.codex]",
             "[engines.gemini-cli]",
