@@ -46,7 +46,7 @@ pub struct ExtEvent {
 /// The core event stream. Narrow by design — five variants only. Anything
 /// methodology- or extension-flavoured rides in `Ext(ExtEvent)`.
 #[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum CoreEvent {
     /// Free-form log line emitted by core or (via `Ext`) an extension that
     /// prefers the core log channel.
