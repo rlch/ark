@@ -2,23 +2,23 @@
 //!
 //! The binary serves two distinct call sites (`cavekit-hook-ipc.md` R1):
 //!
-//! 1. **Legacy hook-event sidecar** — `ark-hook --id <AgentId> --event <EVENT_NAME>`,
+//! 1. **Legacy hook-event sidecar** — `ark-hook --id <SessionId> --event <EVENT_NAME>`,
 //!    invoked by Claude Code's hook config. Reads stdin JSON, translates to
 //!    `AgentEvent`s, persists JSONL, pipes to zellij. This is the original
 //!    skeleton entry point and stays the *no-subcommand* default to keep
 //!    Claude-Code-injected hook configs working unchanged.
 //!
 //! 2. **Scene bridge subcommands** (T-6.2, T-6.3, T-6.4 + ACP):
-//!    - `ark-hook intent --id <AgentId> --json '<{name, args}>'` — connects
+//!    - `ark-hook intent --id <SessionId> --json '<{name, args}>'` — connects
 //!      to the per-agent control socket (`cavekit-hook-ipc.md` R5) and
 //!      dispatches a named intent through the supervisor's
 //!      [`ark_scene::intent::IntentRegistry`]. Used by `ark-bus` for
 //!      keybind dispatch via the hidden-command-pane bridge.
-//!    - `ark-hook emit --id <AgentId> --json '<{event, payload, source}>'` —
+//!    - `ark-hook emit --id <SessionId> --json '<{event, payload, source}>'` —
 //!      broadcasts a synthetic `UserEvent` through the supervisor's event
 //!      bus. Used by `ark-bus` for forwarding zellij pane-lifecycle events
 //!      (T-6.3).
-//!    - `ark-hook permit --id <AgentId> --request-id <str> --outcome <…>` —
+//!    - `ark-hook permit --id <SessionId> --request-id <str> --outcome <…>` —
 //!      responds to an outstanding ACP `session/request_permission`. Used
 //!      by picker plugin modals (T-ACP follow-ups).
 //!
@@ -37,7 +37,7 @@
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use ark_types::AgentId;
+use ark_types::SessionId;
 
 use crate::event::HookEvent;
 
@@ -67,9 +67,9 @@ pub struct Cli {
     pub command: Option<Command>,
 
     /// Target agent id. Required when no subcommand is given (legacy
-    /// hook flow). Validated via [`AgentId::from_str`].
+    /// hook flow). Validated via [`SessionId::from_str`].
     #[arg(long = "id", value_parser = parse_agent_id, global = false)]
-    pub id: Option<AgentId>,
+    pub id: Option<SessionId>,
 
     /// Hook event name (e.g. `PostToolUse`, `Stop`, `PermissionRequest`).
     /// Required when no subcommand is given.
@@ -87,7 +87,7 @@ impl Cli {
 
     /// Resolve the legacy `--id` argument. Returns `None` only when the
     /// caller has used a subcommand instead.
-    pub fn legacy_id(&self) -> Option<&AgentId> {
+    pub fn legacy_id(&self) -> Option<&SessionId> {
         self.id.as_ref()
     }
 
@@ -105,7 +105,7 @@ impl Cli {
         let id = self
             .id
             .clone()
-            .ok_or_else(|| "missing required argument: --id <AgentId>".to_string())?;
+            .ok_or_else(|| "missing required argument: --id <SessionId>".to_string())?;
         let event = self
             .event
             .ok_or_else(|| "missing required argument: --event <EVENT_NAME>".to_string())?;
@@ -123,7 +123,7 @@ impl Cli {
 #[derive(Debug, Clone)]
 pub struct LegacyCli {
     /// Target agent id.
-    pub id: AgentId,
+    pub id: SessionId,
     /// Hook event name.
     pub event: HookEvent,
 }
@@ -137,18 +137,18 @@ pub struct LegacyCli {
 /// surfaces failures back to the operator.
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
-    /// `ark-hook intent --id <AgentId> --json '<{name, args}>'` — dispatch
+    /// `ark-hook intent --id <SessionId> --json '<{name, args}>'` — dispatch
     /// a named intent through the supervisor's intent registry (R5
     /// `Intent` command). Used by `ark-bus` for keybind dispatch.
     Intent(BridgeArgs),
 
-    /// `ark-hook emit --id <AgentId> --json '<{event, payload, source}>'`
+    /// `ark-hook emit --id <SessionId> --json '<{event, payload, source}>'`
     /// — broadcast a synthetic `UserEvent` (R5 `Emit` command). Used by
     /// `ark-bus` to forward zellij pane-lifecycle events onto the ark
     /// event bus.
     Emit(BridgeArgs),
 
-    /// `ark-hook permit --id <AgentId> --request-id <str> --outcome <…>`
+    /// `ark-hook permit --id <SessionId> --request-id <str> --outcome <…>`
     /// — respond to an outstanding ACP `session/request_permission` (R5
     /// `Permit` command). Used by picker plugin modals.
     Permit(PermitArgs),
@@ -166,7 +166,7 @@ pub struct BridgeArgs {
     /// supervisor in every spawned child process) when omitted, per R1
     /// last bullet.
     #[arg(long = "id", value_parser = parse_agent_id)]
-    pub id: Option<AgentId>,
+    pub id: Option<SessionId>,
 
     /// JSON document to send. The exact schema depends on the
     /// subcommand:
@@ -187,7 +187,7 @@ pub struct BridgeArgs {
 pub struct PermitArgs {
     /// Target agent id. Falls back to `$ARK_AGENT_ID` when omitted.
     #[arg(long = "id", value_parser = parse_agent_id)]
-    pub id: Option<AgentId>,
+    pub id: Option<SessionId>,
 
     /// ACP `session/request_permission` request id this response
     /// resolves.
@@ -233,27 +233,27 @@ impl PermitOutcome {
     }
 }
 
-/// Wrapper around `AgentId::from_str` that returns a `String` error so
-/// clap can render it. Without this clap would require the error type
-/// to implement specific traits we'd otherwise need to add to AgentId.
-fn parse_agent_id(raw: &str) -> Result<AgentId, String> {
-    raw.parse::<AgentId>().map_err(|e| e.to_string())
+/// Wrapper around `SessionId::parse` that returns a `String` error so
+/// clap can render it.
+fn parse_agent_id(raw: &str) -> Result<SessionId, String> {
+    SessionId::parse(raw)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use ark_types::AgentId;
+    use ark_types::SessionId;
 
-    fn fresh_id() -> AgentId {
-        AgentId::new("cavekit", "hooktest")
+    fn fresh_id() -> SessionId {
+        SessionId::new("hooktest")
     }
 
     #[test]
     fn parses_legacy_hook_form() {
         let id = fresh_id();
-        let cli = Cli::try_parse_from(["ark-hook", "--id", id.as_str(), "--event", "PostToolUse"])
+        let id_str = id.as_str();
+        let cli = Cli::try_parse_from(["ark-hook", "--id", &id_str, "--event", "PostToolUse"])
             .expect("legacy form parses");
         assert!(cli.is_legacy_hook());
         assert_eq!(cli.legacy_id().unwrap(), &id);
@@ -263,6 +263,7 @@ mod tests {
     #[test]
     fn legacy_form_parses_each_known_event() {
         let id = fresh_id();
+        let id_str = id.as_str();
         for ev in [
             "PostToolUse",
             "Stop",
@@ -271,37 +272,19 @@ mod tests {
             "SessionEnd",
             "TaskCompleted",
         ] {
-            Cli::try_parse_from(["ark-hook", "--id", id.as_str(), "--event", ev])
+            Cli::try_parse_from(["ark-hook", "--id", &id_str, "--event", ev])
                 .unwrap_or_else(|e| panic!("event {ev} should parse: {e}"));
         }
     }
 
     #[test]
-    fn rejects_invalid_agent_id() {
-        let err = Cli::try_parse_from([
-            "ark-hook",
-            "--id",
-            "not a real id",
-            "--event",
-            "PostToolUse",
-        ])
-        .expect_err("malformed id should be rejected");
-        let msg = err.to_string();
-        assert!(
-            msg.to_lowercase().contains("agent")
-                || msg.to_lowercase().contains("unsafe")
-                || msg.to_lowercase().contains("id"),
-            "unexpected error message: {msg}"
-        );
-    }
-
-    #[test]
     fn rejects_unknown_event() {
         let id = fresh_id();
+        let id_str = id.as_str();
         let err = Cli::try_parse_from([
             "ark-hook",
             "--id",
-            id.as_str(),
+            &id_str,
             "--event",
             "TotallyMadeUpEvent",
         ])
@@ -313,11 +296,12 @@ mod tests {
     #[test]
     fn intent_subcommand_parses_with_explicit_id() {
         let id = fresh_id();
+        let id_str = id.as_str();
         let cli = Cli::try_parse_from([
             "ark-hook",
             "intent",
             "--id",
-            id.as_str(),
+            &id_str,
             "--json",
             r#"{"name":"ark.core.open_tab","args":{}}"#,
         ])

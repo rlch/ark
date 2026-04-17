@@ -41,7 +41,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ark_types::{AgentId, StateLayout};
+use ark_types::{SessionId, StateLayout};
 
 use crate::cli::{BridgeArgs, PermitArgs};
 
@@ -67,7 +67,7 @@ pub const ARK_AGENT_ID_ENV: &str = "ARK_AGENT_ID";
 pub enum BridgeError {
     /// `--id` was omitted AND `$ARK_AGENT_ID` is unset / invalid. The
     /// caller has not told us which agent to target.
-    AgentIdUnresolved(String),
+    SessionIdUnresolved(String),
     /// Failed to resolve the runtime root via [`StateLayout::from_env`].
     /// Usually `HOME` unset in the spawning environment.
     RuntimeUnresolved(String),
@@ -89,7 +89,7 @@ pub enum BridgeError {
 impl std::fmt::Display for BridgeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BridgeError::AgentIdUnresolved(msg) => write!(f, "agent-id unresolved: {msg}"),
+            BridgeError::SessionIdUnresolved(msg) => write!(f, "agent-id unresolved: {msg}"),
             BridgeError::RuntimeUnresolved(msg) => write!(f, "runtime dir unresolved: {msg}"),
             BridgeError::Io(msg) => write!(f, "control socket IO failed: {msg}"),
             BridgeError::ProtocolError(msg) => write!(f, "protocol error: {msg}"),
@@ -120,18 +120,18 @@ pub struct BridgeOutcome {
 /// `cavekit-hook-ipc.md` R1: "when omitted, `ark-hook` reads
 /// `ARK_AGENT_ID` from env (set by supervisor in all spawned child
 /// processes including zellij)."
-pub fn resolve_agent_id(explicit: Option<&AgentId>) -> Result<AgentId, BridgeError> {
+pub fn resolve_agent_id(explicit: Option<&SessionId>) -> Result<SessionId, BridgeError> {
     if let Some(id) = explicit {
         return Ok(id.clone());
     }
     let raw = env::var(ARK_AGENT_ID_ENV).map_err(|_| {
-        BridgeError::AgentIdUnresolved(format!(
+        BridgeError::SessionIdUnresolved(format!(
             "neither --id nor ${ARK_AGENT_ID_ENV} is set"
         ))
     })?;
-    raw.parse::<AgentId>().map_err(|e| {
-        BridgeError::AgentIdUnresolved(format!(
-            "${ARK_AGENT_ID_ENV} = {raw:?} is not a valid AgentId: {e}"
+    SessionId::parse(&raw).map_err(|e| {
+        BridgeError::SessionIdUnresolved(format!(
+            "${ARK_AGENT_ID_ENV} = {raw:?} is not a valid SessionId: {e}"
         ))
     })
 }
@@ -141,17 +141,17 @@ pub fn resolve_agent_id(explicit: Option<&AgentId>) -> Result<AgentId, BridgeErr
 ///
 /// Path resolution failures (no `HOME`, no writable runtime) become
 /// [`BridgeError::RuntimeUnresolved`].
-pub fn resolve_socket_path(id: &AgentId) -> Result<PathBuf, BridgeError> {
+pub fn resolve_socket_path(id: &SessionId) -> Result<PathBuf, BridgeError> {
     let layout = StateLayout::from_env()
         .map_err(|e| BridgeError::RuntimeUnresolved(e.to_string()))?;
-    Ok(layout.agent_socket_path(id))
+    Ok(layout.session_socket_path(id))
 }
 
 /// Override hook for tests: resolve the socket via an explicit
 /// [`StateLayout`] rather than from the environment. Production
 /// callers always go through [`resolve_socket_path`].
-pub fn resolve_socket_path_with(layout: &StateLayout, id: &AgentId) -> PathBuf {
-    layout.agent_socket_path(id)
+pub fn resolve_socket_path_with(layout: &StateLayout, id: &SessionId) -> PathBuf {
+    layout.session_socket_path(id)
 }
 
 /// `ark-hook intent` — dispatch a named intent through the supervisor's
@@ -307,15 +307,15 @@ fn escape_json_string(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_types::AgentId;
+    use ark_types::SessionId;
     use std::io::{BufRead as _, BufReader, Write as _};
     use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
     use std::sync::mpsc;
     use std::thread;
 
-    fn fresh_id() -> AgentId {
-        AgentId::new("cavekit", "bridgetest")
+    fn fresh_id() -> SessionId {
+        SessionId::new("bridgetest")
     }
 
     /// Allocate a short tempdir under `/tmp` so the rendered socket
@@ -365,12 +365,13 @@ mod tests {
         // Note: we don't unset because other tests may parallelise; use
         // a unique scope-local env var name? The spec says ARK_AGENT_ID,
         // so we set + clear that.
-        let id = AgentId::new("cavekit", "envvar");
+        let id = SessionId::new("envvar");
+        let id_str = id.as_str();
         // SAFETY: `set_var` mutates the process env, which is unsafe in
         // multithreaded contexts. Tests in this module guard via the
         // unique tag in the env value to avoid collision; the cargo test
         // harness rarely contends on this var.
-        unsafe { env::set_var(ARK_AGENT_ID_ENV, id.as_str()) };
+        unsafe { env::set_var(ARK_AGENT_ID_ENV, &id_str) };
         let got = resolve_agent_id(None);
         // Clean up before asserting so a panic doesn't leak the env var.
         unsafe { env::remove_var(ARK_AGENT_ID_ENV) };
@@ -384,8 +385,8 @@ mod tests {
         unsafe { env::remove_var(ARK_AGENT_ID_ENV) };
         let err = resolve_agent_id(None).expect_err("must error");
         match err {
-            BridgeError::AgentIdUnresolved(_) => {}
-            other => panic!("expected AgentIdUnresolved, got {other:?}"),
+            BridgeError::SessionIdUnresolved(_) => {}
+            other => panic!("expected SessionIdUnresolved, got {other:?}"),
         }
     }
 

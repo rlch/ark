@@ -43,7 +43,7 @@ pub use bridge::{
 };
 pub use cli::{BridgeArgs, Cli, Command, LegacyCli, PermitArgs, PermitOutcome};
 pub use event::HookEvent;
-pub use payload::{FILE_EDIT_TOOLS, HookPayload, SUMMARY_MAX_CHARS, payload_to_events};
+pub use payload::{EXT_NAME, FILE_EDIT_TOOLS, HookPayload, SUMMARY_MAX_CHARS, payload_to_events};
 pub use pipe::{
     PIPE_PAYLOAD_MAX_BYTES, TARGET_ARK_PICKER, TARGET_ARK_STATUS, pipe_to_zellij, pipe_with,
 };

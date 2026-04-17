@@ -53,7 +53,7 @@ fn main() -> ExitCode {
                     // Top-level fail-open: log the error chain and exit 0
                     // so we never block claude (kit R3, R1 exit-code clause).
                     error!(
-                        agent = %legacy.id,
+                        session = %legacy.id.as_str(),
                         event = %legacy.event,
                         error = %e,
                         "ark-hook failed; fail-open with exit 0"
