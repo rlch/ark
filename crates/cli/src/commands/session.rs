@@ -216,3 +216,104 @@ pub fn resolve_layout_source(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn invocation(session: &str, layout: Option<&str>) -> ZellijInvocation {
+        ZellijInvocation {
+            session: session.to_string(),
+            layout: layout.map(String::from),
+        }
+    }
+
+    fn argv(cmd: &Command) -> Vec<String> {
+        std::iter::once(cmd.get_program().to_string_lossy().into_owned())
+            .chain(cmd.get_args().map(|a| a.to_string_lossy().into_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn build_zellij_command_with_layout() {
+        let cmd = build_zellij_command(&invocation("work", Some("/tmp/layout.kdl")));
+        assert_eq!(
+            argv(&cmd),
+            vec!["zellij", "-s", "work", "--layout", "/tmp/layout.kdl"]
+        );
+    }
+
+    #[test]
+    fn build_zellij_command_without_layout_omits_layout_arg() {
+        let cmd = build_zellij_command(&invocation("work", None));
+        assert_eq!(argv(&cmd), vec!["zellij", "-s", "work"]);
+        assert!(!argv(&cmd).iter().any(|a| a == "--layout"));
+    }
+
+    #[test]
+    fn build_zellij_command_never_uses_external_setsid() {
+        // F-526 regression guard: macOS doesn't ship `setsid(1)`.
+        // Detach is handled via pre_exec, not an external binary.
+        let cmd = build_zellij_command(&invocation("s", None));
+        assert_eq!(cmd.get_program(), "zellij");
+        assert!(!argv(&cmd).iter().any(|a| a == "setsid"));
+    }
+
+    #[test]
+    fn build_switch_session_command_with_layout() {
+        let cmd = build_switch_session_command(&invocation("work", Some("/tmp/l.kdl")));
+        assert_eq!(
+            argv(&cmd),
+            vec![
+                "zellij",
+                "action",
+                "switch-session",
+                "--layout",
+                "/tmp/l.kdl",
+                "work",
+            ]
+        );
+    }
+
+    #[test]
+    fn build_switch_session_command_without_layout() {
+        let cmd = build_switch_session_command(&invocation("work", None));
+        assert_eq!(argv(&cmd), vec!["zellij", "action", "switch-session", "work"]);
+    }
+
+    #[test]
+    fn build_switch_session_never_includes_create_flag() {
+        // cavekit-mux-zellij R1 / Q5: `--create` exists on `attach`,
+        // NOT on `switch-session`. Smuggling it onto switch-session
+        // is a known regression.
+        let cmd = build_switch_session_command(&invocation("s", Some("/tmp/l.kdl")));
+        assert!(
+            !argv(&cmd).iter().any(|a| a == "--create"),
+            "switch-session must NOT pass --create; argv: {:?}",
+            argv(&cmd)
+        );
+    }
+
+    #[test]
+    fn inside_zellij_true_for_set_env() {
+        let getter = |k: &str| match k {
+            "ZELLIJ" => Some("0.44.1".to_string()),
+            _ => None,
+        };
+        assert!(inside_zellij(getter));
+    }
+
+    #[test]
+    fn inside_zellij_false_for_empty_env() {
+        let getter = |k: &str| match k {
+            "ZELLIJ" => Some(String::new()),
+            _ => None,
+        };
+        assert!(!inside_zellij(getter));
+    }
+
+    #[test]
+    fn inside_zellij_false_for_unset_env() {
+        assert!(!inside_zellij(|_| None));
+    }
+}
