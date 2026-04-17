@@ -99,9 +99,9 @@ pub use kill::{DEFAULT_KILL_GRACE, TabRegistry, apply_tab_event, kill_handler, n
 pub mod crash;
 pub use crash::{adjust_status_if_crashed, detect_crashed, is_pid_alive};
 
-// T-072: auto-close policy on outcome (cavekit-supervisor R6).
+// T-072 / cavekit-soul-phase-1 T-017: auto-close on CoreEvent::SessionEnded.
 pub mod auto_close;
-pub use auto_close::{AutoClosePolicy, apply_auto_close_policy, collect_opened_tabs};
+pub use auto_close::apply_auto_close_policy;
 
 // W-2: parent ↔ daemon ready handshake (cavekit-supervisor R3 step 12).
 pub mod ready_signal;
