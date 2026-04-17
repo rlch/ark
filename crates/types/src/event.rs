@@ -96,7 +96,6 @@ pub enum AgentEvent {
     ReviewComment {
         id: AgentId,
         reviewer: AgentId,
-        severity: Severity,
         path: PathBuf,
         line: Option<u32>,
         body: String,
@@ -126,7 +125,6 @@ pub enum AgentEvent {
     },
     Done {
         id: AgentId,
-        outcome: Outcome,
     },
     /// Namespaced, free-form event emitted by scenes, extensions, hooks, the ACP
     /// agent, or ark-core. Carries an arbitrary JSON `payload` and a `source` tag
@@ -174,25 +172,6 @@ pub enum TabRole {
     Reviewer,
     Log,
     Custom(String),
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum Outcome {
-    Success { artifacts: Vec<PathBuf> },
-    Failed { reason: String },
-    Killed,
-    Timeout,
-    Crashed { reason: String },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, Ord, PartialOrd)]
-#[serde(rename_all = "snake_case")]
-pub enum Severity {
-    P0,
-    P1,
-    P2,
-    P3,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

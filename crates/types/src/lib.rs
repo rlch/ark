@@ -9,9 +9,7 @@ pub mod state_dir;
 pub mod status;
 
 pub use env_paths::{EnvPaths, EnvPathsError};
-pub use event::{
-    AgentEvent, LogLevel, MessageRole, PermissionDecision, TabHandle, TabRole,
-};
+pub use event::{AgentEvent, LogLevel, MessageRole, PermissionDecision, TabHandle, TabRole};
 pub use event_bus::{DEFAULT_CAPACITY, EventReceiver, EventSink, channel, default_channel};
 pub use id::SessionId;
 pub use permission::{
