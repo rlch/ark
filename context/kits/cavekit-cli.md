@@ -14,7 +14,7 @@ The `ark` binary's command-line interface — 6 user-facing top-level subcommand
 **Description:** The user-facing commands, minimal and memorable.
 **Acceptance Criteria:**
 - [ ] Binary name: `ark`
-- [ ] Top-level subcommands: `spawn`, `list`, `kill`, `doctor`, `config`, `pane`
+- [ ] Top-level subcommands: `list`, `kill`, `doctor`, `config`, `pane` (bare `ark` is the default session launcher; no `spawn` subcommand)
 - [ ] Global flags: `--version | -V`, `--help | -h`
 - [ ] No `status` subcommand — folded into `list [ID]`
 - [ ] No `logs` subcommand — folded into `ark pane log --id <ID>`
@@ -26,27 +26,12 @@ The `ark` binary's command-line interface — 6 user-facing top-level subcommand
 - [ ] `--help` text is <80 columns, groups examples per subcommand
 **Dependencies:** none
 
-### R2: `ark spawn`
-**Description:** Create a new agent in a dedicated zellij session.
-**Acceptance Criteria:**
-- [ ] Signature: `ark spawn [OPTIONS] -- <CMD>...`
-- [ ] Options:
-  - `--orchestrator <R>` — `auto | cavekit | claude-code` (default: `auto`)
-  - `--engine <E>` — only `claude-code` in v1 (accepted but single-valued; flag exists for end-state)
-  - `--cwd <DIR>` — worktree path (default: `.`)
-  - `--name <N>` — human label (default: derived from cwd basename)
-  - `--layout <NAME|PATH>` — KDL stem (e.g., `builder`) or absolute path (default: orchestrator's choice)
-  - `--env KEY=VAL` — environment pass-through (repeatable)
-  - `--detach / --no-detach` — (default: `detach`)
-  - `--hook EVENT=CMD` — hook on event (repeatable; see hooks kit)
-- [ ] Positional `-- <CMD>...` = agent pane command (usually `claude --resume` or similar)
-- [ ] Auto-detect: if `--orchestrator auto`, scan cwd — has `context/sites/` → `cavekit`, else → `claude-code`
-- [ ] On success: prints `spawned {id} -> Ctrl+o w to switch` and exits 0 if `--detach`; stays foreground with log stream if `--no-detach`
-- [ ] On failure: prints reason + exits nonzero (see R6 exit codes)
-- [ ] Spawn acquires file lock `$STATE/locks/{id}.lock` — aborts if another process holds it
-- [ ] Spawn writes `spec.json` before forking supervisor
-- [ ] If `$ZELLIJ` set: supervisor dispatches `zellij action switch-session [--layout {path}] {session}` over the caller's live socket (create-if-missing is the default; there is no `--create` flag on `switch-session`). Else: allocate a pty pair and spawn `zellij -s {session} --layout {path}` with the slave as the child's controlling TTY (setsid via pre_exec). The `setsid + null stdio` shortcut is FORBIDDEN — zellij's client cannot boot without a real TTY (F-730; see cavekit-mux-zellij R1).
-**Dependencies:** cavekit-supervisor, cavekit-mux-zellij, cavekit-orchestrator-cavekit, cavekit-orchestrator-claude-code
+### R2: ~~`ark spawn`~~ — REMOVED in v3
+**Description:** Removed per scene v3 (R10). Bare `ark` with `--scene`/`--session` flags replaces `ark spawn`. See R1 for the new launch interface.
+
+> **Archived for cross-reference.** Other kits may reference R2 by number. The original acceptance criteria described a `spawn` subcommand that created a new agent in a dedicated zellij session. That surface has been folded into bare `ark` invocation with `--scene <SCENE>`, `--session <NAME>`, `--cwd <DIR>`, `--engine <E>`, `--env KEY=VAL`, `--detach / --no-detach` flags. The orchestrator-selection flag (`--orchestrator`) is replaced by scene activation (`use "claude-code"` etc.).
+
+**Dependencies:** (archived) cavekit-supervisor, cavekit-mux-zellij, cavekit-scene
 
 ### R3: `ark list`
 **Description:** Show active and archived agents. Doubles as single-agent status.
@@ -136,10 +121,10 @@ The `ark` binary's command-line interface — 6 user-facing top-level subcommand
 ## Example invocations
 ```bash
 # Typical cavekit session from a worktree
-ark spawn --orchestrator cavekit --cwd . -- claude --resume
+ark --scene cavekit --cwd .
 
-# Quick passthrough
-ark spawn --orchestrator claude-code --cwd . -- claude
+# Quick passthrough (scene activates claude-code extension)
+ark --cwd .
 
 # See everything
 ark list

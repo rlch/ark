@@ -280,7 +280,7 @@ fn engine_names_in_config(config: &Config) -> Vec<String> {
 mod tests {
     use super::*;
     use ark_config::schema::{Config, EngineLaunchSpec};
-    use ark_ext_metadata_types::{ConfigSchema, ExtensionMetadata, StringNode};
+    use ark_ext_metadata_types::{CapabilitySet, ConfigSchema, ExtensionMetadata, StringNode};
     use ark_scene::parse::parse_scene;
     use ark_scene::use_resolution::{MergedUse, ResolvedUse};
     use std::path::PathBuf;
@@ -301,8 +301,9 @@ mod tests {
                     requires: Vec::new(),
                     intents: Vec::new(),
                     events: Vec::new(),
+                    views: Vec::new(),
                     config: ConfigSchema::default(),
-                    capabilities: Vec::new(),
+                    capabilities: CapabilitySet::default(),
                 },
                 root_path: None,
                 sidecar_scene: None,

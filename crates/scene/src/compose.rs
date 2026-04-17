@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::ast::layout::{LayoutChild, TabNode};
@@ -14,15 +14,18 @@ use crate::parse::{parse_scene, SceneIR};
 /// registry is available).
 pub fn compose_scene(mut ir: SceneIR) -> Result<SceneIR, SceneError> {
     let canon_path = ir.path.canonicalize().unwrap_or_else(|_| ir.path.clone());
-    let mut visited = HashSet::new();
-    visited.insert(canon_path);
+    let root_dir = canon_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .to_path_buf();
+    let mut stack = vec![canon_path];
 
     let scene_source = ir.path.display().to_string();
     let mut handles: HashMap<String, String> = HashMap::new();
     collect_handles_from_body(&ir.scene.body, &scene_source, &mut handles)?;
 
     let composed_body =
-        resolve_includes(&ir.scene.body, &ir.path, &mut visited, &mut handles)?;
+        resolve_includes(&ir.scene.body, &ir.path, &root_dir, &mut stack, &mut handles)?;
     ir.scene.body = composed_body;
     Ok(ir)
 }
@@ -30,7 +33,8 @@ pub fn compose_scene(mut ir: SceneIR) -> Result<SceneIR, SceneError> {
 fn resolve_includes(
     body: &[SceneBodyNode],
     parent_path: &Path,
-    visited: &mut HashSet<PathBuf>,
+    root_dir: &Path,
+    stack: &mut Vec<PathBuf>,
     handles: &mut HashMap<String, String>,
 ) -> Result<Vec<SceneBodyNode>, SceneError> {
     let parent_dir = parent_path.parent().unwrap_or(Path::new("."));
@@ -47,10 +51,20 @@ fn resolve_includes(
                     }
                 })?;
 
-                if !visited.insert(canonical.clone()) {
+                // F-0022: path sandboxing — include must stay within root dir
+                if !canonical.starts_with(root_dir) {
+                    return Err(SceneError::IncludeEscape {
+                        target: inc.target.clone(),
+                        root: root_dir.display().to_string(),
+                    });
+                }
+
+                // F-0018: cycle detection uses the DFS stack, not a flat set.
+                // Diamond includes (same file via independent paths) are allowed.
+                if stack.contains(&canonical) {
                     return Err(SceneError::IncludeCycle {
                         target: inc.target.clone(),
-                        stack: visited.iter().cloned().collect(),
+                        stack: stack.clone(),
                     });
                 }
 
@@ -65,8 +79,10 @@ fn resolve_includes(
                 let fragment_source = canonical.display().to_string();
                 check_handle_conflicts(&fragment_ir.scene.body, &fragment_source, handles)?;
 
+                stack.push(canonical.clone());
                 let nested =
-                    resolve_includes(&fragment_ir.scene.body, &canonical, visited, handles)?;
+                    resolve_includes(&fragment_ir.scene.body, &canonical, root_dir, stack, handles)?;
+                stack.pop();
                 result.extend(nested);
             }
             other => result.push(other.clone()),
@@ -384,15 +400,19 @@ layout {
         assert!(matches!(err, SceneError::IncludeFragmentParse { .. }));
     }
 
+    /// Diamond includes (same file via independent paths) are NOT cycles.
+    /// The handle-clash detector catches duplicate handles separately.
     #[test]
-    fn same_file_included_twice_from_siblings_is_cycle() {
+    fn same_file_included_twice_from_siblings_is_diamond_not_cycle() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
 
+        // Use unique handles so handle-clash doesn't fire — we're testing
+        // that the cycle detector no longer rejects diamonds.
         write_file(
             dir,
             "shared.kdl",
-            r#"layout { tab "@shared" { pane "@sp" } }"#,
+            r#"bind "Alt s" { close "@p1" }"#,
         );
 
         let scene_path = write_file(
@@ -405,8 +425,33 @@ layout {
         );
 
         let ir = parse_scene(fs::read_to_string(&scene_path).unwrap(), &scene_path).unwrap();
+        let composed = compose_scene(ir).unwrap();
+        // Fragment body spliced twice
+        assert_eq!(composed.scene.body.len(), 2);
+    }
+
+    #[test]
+    fn include_escape_detected() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+
+        // Create an "outside" file above the scene root
+        let outside = tmp.path().join("outside.kdl");
+        fs::write(&outside, r#"layout { tab "@x" { pane "@y" } }"#).unwrap();
+
+        fs::create_dir_all(dir.join("scenes")).unwrap();
+        let scene_path = write_file(
+            dir,
+            "scenes/main.kdl",
+            r#"scene "dev" { include "../outside.kdl" }"#,
+        );
+
+        let ir = parse_scene(fs::read_to_string(&scene_path).unwrap(), &scene_path).unwrap();
         let err = compose_scene(ir).unwrap_err();
-        assert!(matches!(err, SceneError::IncludeCycle { .. }));
+        assert!(
+            matches!(err, SceneError::IncludeEscape { .. }),
+            "expected IncludeEscape, got {err:?}"
+        );
     }
 
     // --- T-077: Include conflict detection ---

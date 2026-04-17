@@ -285,6 +285,7 @@ extension {{
     ark-range "{ark}"
     zellij-range ""
     config {{ }}
+    capabilities {{ }}
 }}
 "#
         )

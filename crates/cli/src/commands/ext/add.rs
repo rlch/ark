@@ -767,6 +767,7 @@ extension {{
     ark-range ">=0.1"
     zellij-range ""
     config {{ }}
+    capabilities {{ }}
 }}
 "#
         )

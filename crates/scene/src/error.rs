@@ -639,6 +639,21 @@ pub enum SceneError {
         message: String,
     },
 
+    /// An `include` target resolved to a path outside the scene file's
+    /// root directory tree (path traversal guard — F-0022).
+    #[error("include `{target}` escapes scene directory")]
+    #[diagnostic(
+        code = "scene/include-escape",
+        severity(Error),
+        help("Include targets must resolve within the scene root directory ({root}). Remove `..` segments or symlinks that escape the scene tree.")
+    )]
+    IncludeEscape {
+        /// The raw include target as authored.
+        target: String,
+        /// The canonicalized scene root directory.
+        root: String,
+    },
+
     /// Duplicate `@handle` across included fragments (R11 — no merge, conflicts = error).
     #[error("handle `@{handle}` defined in both `{first}` and `{second}`")]
     #[diagnostic(
@@ -984,6 +999,15 @@ mod tests {
             span: (5, 7).into(),
         };
         assert_code(&err, "scene/invalid-chord");
+    }
+
+    #[test]
+    fn include_escape_code() {
+        let err = SceneError::IncludeEscape {
+            target: "../evil.kdl".into(),
+            root: "/home/user/scenes".into(),
+        };
+        assert_code(&err, "scene/include-escape");
     }
 
     #[test]

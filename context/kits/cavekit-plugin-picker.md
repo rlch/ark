@@ -85,7 +85,7 @@ Mirrors zellij's `default-plugins/session-manager/` in Zellij repo. Uses SingleS
 **Dependencies:** R4
 
 ### R6: New-agent form (W3 wireframe)
-**Description:** `Ctrl+n` opens a spawn form; submit `exec`s `ark spawn` as a subprocess (NOT a socket command — agent doesn't exist yet, so no socket exists yet).
+**Description:** `Ctrl+n` opens a spawn form; submit `exec`s `ark` as a subprocess (NOT a socket command — agent doesn't exist yet, so no socket exists yet).
 **Acceptance Criteria:**
 - [ ] Fields:
   - Orchestrator (radio: `cavekit | claude-code`)
@@ -94,21 +94,21 @@ Mirrors zellij's `default-plugins/session-manager/` in Zellij repo. Uses SingleS
   - Layout (dropdown from shipped + user layouts)
   - Cmd (text; default = `claude --resume`)
 - [ ] Tab/Shift+Tab cycle fields; Enter submits
-- [ ] Submission: plugin uses zellij-tile `run_command` to exec `ark spawn --orchestrator <o> --cwd <c> --name <n> --layout <l> -- <cmd>` as a detached subprocess. `ark spawn` itself double-forks (cavekit-supervisor.md R1) and returns the new agent-id on stdout
+- [ ] Submission: plugin uses zellij-tile `run_command` to exec `ark --scene <o> --cwd <c> --session <n>` as a detached subprocess. `ark` itself double-forks (cavekit-supervisor.md R1) and returns the new agent-id on stdout
 - [ ] On exec failure (binary missing, validation error): plugin transitions to `Error(stderr)` screen
 - [ ] On success: plugin returns to List screen; new agent appears once its socket binds and supervisors pipe their first event (typically <500ms)
 - [ ] **Why subprocess not socket:** "no agents alive → no socket → can't spawn" deadlock is removed at the cost of fork+exec latency (~10ms, irrelevant for human-triggered actions). Precedent: wezterm `wezterm cli`'s connect-or-spawn pattern, coarsened.
 **Dependencies:** cavekit-hook-ipc R4
 
 ### R7: Kill + rename + resurrect + detach
-**Description:** Administrative actions on selected agent. Live actions (Kill/Rename/Forget) connect to that agent's per-supervisor socket. Resurrect (dead supervisor) execs `ark spawn`.
+**Description:** Administrative actions on selected agent. Live actions (Kill/Rename/Forget) connect to that agent's per-supervisor socket. Resurrect (dead supervisor) execs `ark`.
 **Acceptance Criteria:**
 - [ ] `Del`: enters `ConfirmKill` screen showing `[y] kill  [Y] kill + remove worktree  [n] cancel`
 - [ ] `y`: connect to `${XDG_RUNTIME_DIR}/ark-$UID/agents/{id}.sock`, send `{"cmd":"Kill","args":{"remove_worktree":false}}`; supervisor SIGTERMs itself
 - [ ] `Shift+Y`: same as above with `"remove_worktree":true`; supervisor removes worktree before exiting
 - [ ] `Ctrl+r`: rename flow — prompt for new name; connect to agent socket, send `{"cmd":"Rename","args":{"new_name":"..."}}`; supervisor rewrites `spec.json.name`
 - [ ] `Ctrl+d`: detach — connect to agent socket, send `{"cmd":"Forget","args":{}}`; supervisor writes `{"hide":true}` to status.json. Picker removes from display; agent continues running.
-- [ ] `r` on a crashed agent (no live socket): plugin reads `$STATE/agents/{id}/spec.json`, then `run_command`s `ark spawn` with the same params (same path as R6 New-agent). Old agent's state dir archived to `$STATE/archive/{date}/{id}/` first.
+- [ ] `r` on a crashed agent (no live socket): plugin reads `$STATE/agents/{id}/spec.json`, then `run_command`s `ark` with the same params (same path as R6 New-agent). Old agent's state dir archived to `$STATE/archive/{date}/{id}/` first.
 - [ ] All confirmations in-place; no leaving the picker
 - [ ] On socket connect failure mid-flow (supervisor died between list refresh and action): plugin shows "agent no longer alive — refresh? [y/n]" and re-runs R3 bootstrap on `y`
 **Dependencies:** R4, cavekit-hook-ipc R4 + R5

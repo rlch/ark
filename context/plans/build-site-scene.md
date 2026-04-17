@@ -282,9 +282,24 @@ This site supersedes `archive-build-site-scene-v2.md` and maps every acceptance 
 
 ---
 
+## Tier 16 — Peer review fixes (2026-04-17)
+
+| Task | Title | Cavekit / criterion | blockedBy | Effort |
+|------|-------|---------------------|-----------|--------|
+| T-141 | Fix `reload_scene` to return `(CompiledScene, ReloadResult)` instead of dropping the compiled scene. | R14 (reconcile algorithm); F-0015 P0 | T-127 | S |
+| T-142 | Fix `trigger_reconcile` to return `true` for `Partial` status (not just `Ok`). | R14 (reconcile algorithm); F-0017 P1 | T-127 | S |
+| T-143 | Include path sandboxing: reject absolute paths and `..`-escaping includes with `error[scene/include-escape]`. | R11 (include sandboxing); F-0022 P2 | T-074 | S |
+| T-144 | Fix include diamond detection: distinguish diamond (same file from two paths) from cycle. Use DFS gray/black or `scene/include-duplicate` error. | R11 (include composition); F-0018 P2 | T-074 | S |
+| T-145 | File watcher: add `ignore_prefixes` to config with `.#` default for Emacs lock files. | R14 (file-watcher temp-file ignore); F-0019 P2 | T-133 | S |
+| T-146 | Wire structural `diff_reactions`/`diff_keybinds` into `compute_delta` (replace count-based diff). | R14 (subscription-set diff); F-0023 P2 | T-130, T-131 | S |
+| T-147 | Fix `shape.rs` span lookup to use KDL node spans instead of `str::find`. | R12 (diagnostics); F-0020 P3 | T-112 | S |
+| T-148 | Replace `Debug`-based reaction hashing with field-by-field `Hash` impl. | R14 (AST-structural hashing); F-0021 P3 | T-130 | S |
+
+---
+
 ## Summary
 
-- **Total tasks:** 140
+- **Total tasks:** 148
 - **Total tiers:** 16 (Tier 0 through Tier 15)
 - **Tasks per milestone:**
   - **v0.1 — Scene DSL + Reconciler:** T-001 … T-068, T-110 … T-114, T-118, T-119, T-124, T-140 — 73 tasks

@@ -70,7 +70,7 @@ Building, packaging, and shipping ark. Cargo workspace layout, `cargo-dist` rele
 - [ ] Ark always launches the bundled binary by absolute path (no PATH lookup); this prevents accidental downgrade if user has an older zellij on PATH.
 - [ ] `ARK_USE_SYSTEM_ZELLIJ=1` env var overrides to use system `zellij` from PATH — for dev iteration only, not a supported end-user workflow. When set, emit a debug log at spawn naming the resolved binary.
 - [ ] `ark doctor` reports bundled-zellij version + checks for version skew against user's `~/.config/zellij/config.kdl` (warns if user config uses a feature newer than bundled zellij; zellij merges additively, so generally compatible).
-- [ ] Homebrew formula depends on `zellij` *as well* (some users prefer the tap, and system zellij remains useful for `ark spawn --no-scene` fallback paths); the bundled copy takes precedence at runtime.
+- [ ] Homebrew formula depends on `zellij` *as well* (some users prefer the tap, and system zellij remains useful for `ark --no-scene` fallback paths); the bundled copy takes precedence at runtime.
 **Dependencies:** R1, R2, cavekit-mux-zellij
 
 ### R4c: ACP crate pin
@@ -131,7 +131,7 @@ Next steps:
          }
      }
 
-  3. Try: ark spawn --orchestrator cavekit --cwd . -- claude --resume
+  3. Try: ark --scene cavekit --cwd .
 ```
 
 ## Out of Scope

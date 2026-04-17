@@ -6,17 +6,17 @@ last_edited: "2026-04-14T00:00:00Z"
 # Spec: Supervisor + Lifecycle
 
 ## Scope
-The ephemeral per-agent supervisor process. Forked from the `ark spawn` CLI call, detaches from the controlling terminal, runs a tokio runtime owning the event bus, engine handle, orchestrator future, mux reference, and state directory writer. Responsible for fork/detach, crash resilience, kill semantics, and auto-close behavior.
+The ephemeral per-agent supervisor process. Forked from the bare `ark` CLI call, detaches from the controlling terminal, runs a tokio runtime owning the event bus, engine handle, orchestrator future, mux reference, and state directory writer. Responsible for fork/detach, crash resilience, kill semantics, and auto-close behavior.
 
 ## Requirements
 
 ### R1: Fork + detach
-**Description:** `ark spawn` forks a supervisor child that survives the parent's exit.
+**Description:** `ark` forks a supervisor child that survives the parent's exit.
 **Acceptance Criteria:**
 - [ ] Use the `nix` crate for platform-correct POSIX fork
 - [ ] Double-fork + `setsid` to detach from controlling terminal (classic daemon pattern)
 - [ ] Supervisor's stdin/stdout/stderr redirected to `$STATE/agents/{id}/supervisor.log` (append mode, tracing-subscriber formatted)
-- [ ] Parent `ark spawn` returns promptly (< 1s typical) with the supervisor's PID in stdout
+- [ ] Parent `ark` returns promptly (< 1s typical) with the supervisor's PID in stdout
 - [ ] `--no-detach` variant keeps supervisor as a child of parent, stays in foreground, streams events to parent's stderr
 **Dependencies:** cavekit-cli
 
@@ -51,7 +51,7 @@ The ephemeral per-agent supervisor process. Forked from the `ark spawn` CLI call
   13. **Registers always-on plugins** from scene lifecycle manifest via `launch-or-focus-plugin`; registers summon + event-mount plugins as dormant subscribers.
   14. Calls `engine.install_observability(cwd, tx.clone()).await?` (legacy) → stores EngineHandle. v0.3+: ACP client's `session/update` stream feeds `UserEvent:ark.acp.<kind>` events onto the bus.
   15. Emits `Started { spec }`
-  16. Signals readiness to parent CLI (parent `ark spawn` returns at this point; agent-id printed to its stdout)
+  16. Signals readiness to parent CLI (parent `ark` returns at this point; agent-id printed to its stdout)
   17. Calls `orchestrator.run(spec, world).await` — long-running
   18. On return: awaits all consumer tasks to drain the final events (scene reaction in-flight drain per scene R14)
   19. `engine.teardown(handle).await` (legacy) OR graceful ACP shutdown sequence: `session/cancel` any live turns → await final `stopReason` → engine `shutdown` request.
@@ -70,6 +70,7 @@ The ephemeral per-agent supervisor process. Forked from the `ark spawn` CLI call
   - If orchestrator stalls, sends `Kill` event, tears down engine, closes tabs via mux, exits with `Outcome::Killed`
 - [ ] SIGKILL escapes the above — parent data loss minimized by event_writer's per-event flush
 - [ ] `ark kill {id}` sends SIGTERM to the PID in `$STATE/agents/{id}/pid`
+
 - [ ] `ark kill {id} --force` sends SIGKILL; `ark doctor --fix` later cleans orphans
 - [ ] Kill cascades: if orchestrator opened child tabs (review, subagents), supervisor closes them all in `world.cancel` handling
 **Dependencies:** R3, cavekit-cli
@@ -97,7 +98,7 @@ The ephemeral per-agent supervisor process. Forked from the `ark spawn` CLI call
 ### R7: Control socket lifecycle
 **Description:** Each supervisor owns its own per-agent unix socket for picker/CLI commands (Kill, Rename, Forget, Status, Ping). No daemon. See cavekit-hook-ipc.md R4 for the full kakoune-model rationale.
 **Acceptance Criteria:**
-- [ ] Socket bound in step 3 of R3, immediately after StateDir + lock acquisition (before any potentially-slow engine work) so picker can reach the agent as soon as `ark spawn` returns
+- [ ] Socket bound in step 3 of R3, immediately after StateDir + lock acquisition (before any potentially-slow engine work) so picker can reach the agent as soon as `ark` returns
 - [ ] Path: `${XDG_RUNTIME_DIR:-/tmp}/ark-$UID/agents/{id}.sock`. Parent dir mode 0700, socket mode 0700.
 - [ ] Crate pin: `interprocess = { version = "2.4", features = ["tokio"] }` (latest 2.x; 8M+ downloads; used by zellij itself, mistral.rs, caligula, ssh-agent-lib)
 - [ ] Listener constructed via `ListenerOptions::new().name(name).mode(0o600).try_overwrite(true).reclaim_name(true).create_tokio()?`

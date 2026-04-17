@@ -267,10 +267,11 @@ One scene file = one composed configuration for one `ark` session.
 - [ ] `wasm` — zellij plugin runtime. Loaded by zellij. Ark protocol via pipe through ark-bus.
 
 **Resolution (no central registry file):**
-- [ ] `use "<name>"` resolves by scanning:
-  1. Compiled-in registry (auto-registered at boot).
+- [ ] `use "<name>"` resolves by scanning (project-local wins, XDG convention):
+  1. Project-local: `.ark/extensions/<name>/`.
   2. User-installed: `~/.local/share/ark/extensions/<name>/`.
-  3. Project-local: `.ark/extensions/<name>/`.
+  3. System directories.
+  4. Compiled-in registry (auto-registered at boot).
 - [ ] Missing extension = `error[ext/missing]` with Levenshtein suggestions.
 
 **Activation:**
@@ -305,6 +306,7 @@ One scene file = one composed configuration for one `ark` session.
 - [ ] `clear-bind "<chord>"` removes matching keybind from included fragments.
 - [ ] `disable-extension "<name>"` prevents an extension from activating.
 - [ ] Load order: extensions (topo order) → includes (source order) → user scene (last). Reactions additive in load order. Keybinds last-wins per chord.
+- [ ] Include path sandboxing: include targets MUST resolve within the scene file's directory tree. Absolute paths and `..`-escaping paths rejected with `error[scene/include-escape]`. `ext:` includes exempt (resolved separately).
 
 ### R12: Diagnostics
 

@@ -1,6 +1,6 @@
 //! The `ark` top-level [`Cli`] struct.
 //!
-//! Wires the 6 subcommands from `crate::commands` and the global flags
+//! Wires the subcommands from `crate::commands` and the global flags
 //! specified by cavekit-cli R1:
 //!
 //! - `--version | -V` (auto, via `#[command(version)]`)
@@ -22,7 +22,6 @@ use crate::commands::Commands;
 ///   ark                          # launch default session
 ///   ark --scene myproject        # launch with named scene
 ///   ark --session work           # attach-or-create named session
-///   ark spawn --orchestrator cavekit --cwd . -- claude --resume
 ///   ark list
 ///   ark kill myfeat
 ///   ark doctor --fix
@@ -42,7 +41,7 @@ use crate::commands::Commands;
                   zellij session.\n\
                   \n\
                   Subcommands cover the full lifecycle:\n\
-                  spawn, list, kill, doctor, config, pane.\n\
+                  list, kill, doctor, config, pane.\n\
                   Run `ark <cmd> --help` for per-command examples.",
     max_term_width = 80,
     term_width = 80,
@@ -98,32 +97,7 @@ fn apply_term_width_recursive(cmd: clap::Command, width: usize) -> clap::Command
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::{
-        Commands, config::ConfigCommand, pane::PaneCommand, spawn::OrchestratorChoice,
-    };
-
-    #[test]
-    fn parses_spawn_subcommand() {
-        let cli = Cli::try_parse_from([
-            "ark",
-            "spawn",
-            "--orchestrator",
-            "cavekit",
-            "--cwd",
-            ".",
-            "--",
-            "claude",
-            "--resume",
-        ])
-        .expect("parse");
-        match cli.command {
-            Some(Commands::Spawn(args)) => {
-                assert_eq!(args.orchestrator, OrchestratorChoice::Cavekit);
-                assert_eq!(args.cmd, vec!["claude", "--resume"]);
-            }
-            other => panic!("expected Spawn, got {other:?}"),
-        }
-    }
+    use crate::commands::{Commands, config::ConfigCommand, pane::PaneCommand};
 
     #[test]
     fn parses_list_subcommand_no_id() {
@@ -262,14 +236,16 @@ mod tests {
     }
 
     #[test]
-    fn help_flag_lists_all_six_subcommands() {
+    fn help_flag_lists_subcommands() {
         use clap::error::ErrorKind;
         let err = Cli::try_parse_from(["ark", "--help"]).expect_err("help exits");
         assert_eq!(err.kind(), ErrorKind::DisplayHelp);
         let msg = err.to_string();
-        for cmd in ["spawn", "list", "kill", "doctor", "config", "pane"] {
+        for cmd in ["list", "kill", "doctor", "config", "pane"] {
             assert!(msg.contains(cmd), "help missing `{cmd}`:\n{msg}");
         }
+        // T-115: spawn is removed.
+        assert!(!msg.contains("spawn"), "help should not list `spawn`:\n{msg}");
     }
 
     #[test]
@@ -302,7 +278,7 @@ mod tests {
         // The recursive term-width pass in command_with_no_color_aware
         // should wrap help for each subcommand as well (R1).
         let mut root = Cli::command_with_no_color_aware(true);
-        for name in ["spawn", "list", "kill", "doctor", "config", "pane"] {
+        for name in ["list", "kill", "doctor", "config", "pane"] {
             let sub = root
                 .find_subcommand_mut(name)
                 .unwrap_or_else(|| panic!("subcommand `{name}` missing"));
@@ -323,19 +299,19 @@ mod tests {
     fn subcommand_help_has_examples() {
         // Per R1: "`--help` text is <80 columns, groups examples per
         // subcommand". Each subcommand's long_about / about carries the
-        // examples block. Spot-check one here; the others follow the
+        // examples block. Spot-check `list` here; the others follow the
         // same pattern via their per-module `#[command(about=...)]`.
         use clap::error::ErrorKind;
-        let err = Cli::try_parse_from(["ark", "spawn", "--help"]).expect_err("help exits");
+        let err = Cli::try_parse_from(["ark", "list", "--help"]).expect_err("help exits");
         assert_eq!(err.kind(), ErrorKind::DisplayHelp);
         let msg = err.to_string();
-        assert!(msg.contains("ark spawn"), "spawn help missing usage: {msg}");
+        assert!(msg.contains("ark list"), "list help missing usage: {msg}");
     }
 
     #[test]
-    fn all_six_subcommands_help_parses() {
+    fn all_subcommands_help_parses() {
         use clap::error::ErrorKind;
-        for cmd in ["spawn", "list", "kill", "doctor", "config", "pane"] {
+        for cmd in ["list", "kill", "doctor", "config", "pane"] {
             let err = Cli::try_parse_from(["ark", cmd, "--help"]).expect_err("help exits");
             assert_eq!(
                 err.kind(),

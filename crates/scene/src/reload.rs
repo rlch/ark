@@ -33,9 +33,11 @@ use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::ast::ops::OpNode;
 use crate::ast::{BindNode, OnNode};
 use crate::compile::{compile_scene, CompiledScene};
 use crate::compose::compose_scene;
+use crate::error::SceneError;
 use crate::parse::parse_scene;
 use crate::rhai::Engine;
 use crate::shape::detect_and_normalize;
@@ -133,13 +135,10 @@ impl Drop for ReloadLock<'_> {
 /// Re-reads `scene_path` from disk and runs the full pipeline:
 /// shape-detect → parse → compose → compile. Returns `None` if the
 /// guard could not be acquired (another reload in progress), otherwise
-/// returns `Some(Ok(..))` with the new [`CompiledScene`] and a
-/// [`ReloadResult`] delta summary, or `Some(Err(..))` only for
-/// unrecoverable I/O errors.
-///
-/// On parse/compile failure the function returns a [`ReloadResult`] with
-/// [`ReloadStatus::Failed`] rather than an `Err` — this allows callers
-/// to keep the old scene while still surfacing the error to the user.
+/// returns `Some(Ok((compiled, result)))` with the new [`CompiledScene`]
+/// and a [`ReloadResult`] delta summary, or `Some(Err(..))` on
+/// parse/compile failure so callers can keep the old scene while still
+/// surfacing the error.
 ///
 /// The `prev` parameter provides the previous compiled scene for delta
 /// computation. Pass `None` on first load.
@@ -148,7 +147,7 @@ pub fn reload_scene(
     guard: &ReloadGuard,
     engine: &Engine,
     prev: Option<&CompiledScene>,
-) -> Option<ReloadResult> {
+) -> Option<Result<(CompiledScene, ReloadResult), SceneError>> {
     let _lock = guard.try_acquire()?;
     let start = std::time::Instant::now();
 
@@ -156,73 +155,39 @@ pub fn reload_scene(
     let content = match std::fs::read_to_string(scene_path) {
         Ok(c) => c,
         Err(e) => {
-            return Some(ReloadResult {
-                status: ReloadStatus::Failed(format!(
-                    "failed to read {}: {e}",
-                    scene_path.display()
-                )),
-                duration_ms: start.elapsed().as_millis() as u64,
-                reactions_added: 0,
-                reactions_removed: 0,
-                keybinds_changed: 0,
-            });
+            return Some(Err(SceneError::Parse {
+                message: format!("failed to read {}: {e}", scene_path.display()),
+                src: miette::NamedSource::new(
+                    scene_path.display().to_string(),
+                    String::new(),
+                ),
+                span: (0, 0).into(),
+            }));
         }
     };
 
     // ── Step 2: shape detect + normalize ───────────────────────────
     let normalized = match detect_and_normalize(&content, scene_path) {
         Ok(n) => n,
-        Err(e) => {
-            return Some(ReloadResult {
-                status: ReloadStatus::Failed(format!("{e}")),
-                duration_ms: start.elapsed().as_millis() as u64,
-                reactions_added: 0,
-                reactions_removed: 0,
-                keybinds_changed: 0,
-            });
-        }
+        Err(e) => return Some(Err(e)),
     };
 
     // ── Step 3: parse ──────────────────────────────────────────────
     let ir = match parse_scene(normalized, scene_path) {
         Ok(ir) => ir,
-        Err(e) => {
-            return Some(ReloadResult {
-                status: ReloadStatus::Failed(format!("{e}")),
-                duration_ms: start.elapsed().as_millis() as u64,
-                reactions_added: 0,
-                reactions_removed: 0,
-                keybinds_changed: 0,
-            });
-        }
+        Err(e) => return Some(Err(e)),
     };
 
     // ── Step 4: compose (resolve includes) ─────────────────────────
     let ir = match compose_scene(ir) {
         Ok(ir) => ir,
-        Err(e) => {
-            return Some(ReloadResult {
-                status: ReloadStatus::Failed(format!("{e}")),
-                duration_ms: start.elapsed().as_millis() as u64,
-                reactions_added: 0,
-                reactions_removed: 0,
-                keybinds_changed: 0,
-            });
-        }
+        Err(e) => return Some(Err(e)),
     };
 
     // ── Step 5: compile ────────────────────────────────────────────
     let compiled = match compile_scene(engine, ir) {
         Ok(c) => c,
-        Err(e) => {
-            return Some(ReloadResult {
-                status: ReloadStatus::Failed(format!("{e}")),
-                duration_ms: start.elapsed().as_millis() as u64,
-                reactions_added: 0,
-                reactions_removed: 0,
-                keybinds_changed: 0,
-            });
-        }
+        Err(e) => return Some(Err(e)),
     };
 
     // ── Step 6: diff against previous scene ────────────────────────
@@ -230,70 +195,83 @@ pub fn reload_scene(
         compute_delta(prev, &compiled)
     } else {
         // First load — everything is "new".
-        let new_reactions = count_reactions(&compiled);
-        let new_binds = count_keybinds(&compiled);
+        let new_reactions = extract_on_nodes(&compiled).len();
+        let new_binds = extract_bind_nodes(&compiled).len();
         (new_reactions, 0, new_binds)
     };
 
     let duration_ms = start.elapsed().as_millis() as u64;
 
-    Some(ReloadResult {
-        status: ReloadStatus::Ok,
-        duration_ms,
-        reactions_added,
-        reactions_removed,
-        keybinds_changed,
-    })
+    Some(Ok((
+        compiled,
+        ReloadResult {
+            status: ReloadStatus::Ok,
+            duration_ms,
+            reactions_added,
+            reactions_removed,
+            keybinds_changed,
+        },
+    )))
 }
 
 // ── Delta helpers ──────────────────────────────────────────────────────
 
 use crate::ast::SceneBodyNode;
 
-/// Count `on` (reaction) nodes in a compiled scene body.
-fn count_reactions(scene: &CompiledScene) -> usize {
+/// Extract all `OnNode` reactions from a compiled scene body.
+fn extract_on_nodes(scene: &CompiledScene) -> Vec<&OnNode> {
     scene
         .ir
         .scene
         .body
         .iter()
-        .filter(|n| matches!(n, SceneBodyNode::On(_)))
-        .count()
+        .filter_map(|n| match n {
+            SceneBodyNode::On(on) => Some(on),
+            _ => None,
+        })
+        .collect()
 }
 
-/// Count `bind` (keybind) nodes in a compiled scene body.
-fn count_keybinds(scene: &CompiledScene) -> usize {
+/// Extract all `BindNode` keybinds from a compiled scene body.
+fn extract_bind_nodes(scene: &CompiledScene) -> Vec<&BindNode> {
     scene
         .ir
         .scene
         .body
         .iter()
-        .filter(|n| matches!(n, SceneBodyNode::Bind(_)))
-        .count()
+        .filter_map(|n| match n {
+            SceneBodyNode::Bind(b) => Some(b),
+            _ => None,
+        })
+        .collect()
 }
 
-/// Compute delta between a previous and new compiled scene.
+/// Compute delta between a previous and new compiled scene using
+/// structural diffs ([`diff_reactions`] / [`diff_keybinds`]).
 ///
 /// Returns `(reactions_added, reactions_removed, keybinds_changed)`.
-/// This is a coarse count-based diff — a finer structural diff can be
-/// layered on top using `SceneId` content hashes when needed.
 fn compute_delta(
     prev: &CompiledScene,
     next: &CompiledScene,
 ) -> (usize, usize, usize) {
-    let prev_reactions = count_reactions(prev);
-    let next_reactions = count_reactions(next);
-    let prev_binds = count_keybinds(prev);
-    let next_binds = count_keybinds(next);
+    let prev_reactions: Vec<&OnNode> = extract_on_nodes(prev);
+    let next_reactions: Vec<&OnNode> = extract_on_nodes(next);
+    let prev_binds: Vec<&BindNode> = extract_bind_nodes(prev);
+    let next_binds: Vec<&BindNode> = extract_bind_nodes(next);
 
-    let reactions_added = next_reactions.saturating_sub(prev_reactions);
-    let reactions_removed = prev_reactions.saturating_sub(next_reactions);
-    let keybinds_changed = if prev_binds != next_binds {
-        prev_binds.abs_diff(next_binds)
-    } else {
-        // Same count — check if content hash changed (coarse).
-        if prev.ir.id != next.ir.id { prev_binds } else { 0 }
-    };
+    // Collect owned copies for the diff functions that expect slices of
+    // owned nodes. Clone is cheap — these are small AST fragments.
+    let prev_on: Vec<OnNode> = prev_reactions.into_iter().cloned().collect();
+    let next_on: Vec<OnNode> = next_reactions.into_iter().cloned().collect();
+    let prev_kb: Vec<BindNode> = prev_binds.into_iter().cloned().collect();
+    let next_kb: Vec<BindNode> = next_binds.into_iter().cloned().collect();
+
+    let rdiff = diff_reactions(&prev_on, &next_on);
+    let kdiff = diff_keybinds(&prev_kb, &next_kb);
+
+    let reactions_added = rdiff.added.len();
+    let reactions_removed = rdiff.removed.len();
+    let keybinds_changed = kdiff.added.len() + kdiff.removed.len() + kdiff.changed.len();
 
     (reactions_added, reactions_removed, keybinds_changed)
 }
@@ -364,12 +342,40 @@ pub struct ReactionDiff {
     pub removed: Vec<usize>,
 }
 
+/// Hash a single [`OpNode`] by variant discriminant + key fields,
+/// avoiding `Debug`-based formatting which is fragile across refactors.
+fn hash_op_node(op: &OpNode, h: &mut impl Hasher) {
+    std::mem::discriminant(op).hash(h);
+    match op {
+        OpNode::Focus(o) => { o.handle.hash(h); o.when.hash(h); }
+        OpNode::Close(o) => { o.handle.hash(h); o.when.hash(h); }
+        OpNode::Rename(o) => { o.handle.hash(h); o.to.hash(h); o.when.hash(h); }
+        OpNode::Resize(o) => { o.handle.hash(h); o.direction.hash(h); o.by.hash(h); o.when.hash(h); }
+        OpNode::Move(o) => { o.handle.hash(h); o.to.hash(h); o.when.hash(h); }
+        OpNode::Pin(o) => { o.handle.hash(h); o.when.hash(h); }
+        OpNode::Unpin(o) => { o.handle.hash(h); o.when.hash(h); }
+        OpNode::Spawn(o) => { o.handle.hash(h); o.when.hash(h); }
+        OpNode::NewTab(o) => { o.handle.hash(h); o.name.hash(h); o.cwd.hash(h); o.when.hash(h); }
+        OpNode::UseMode(o) => { o.mode.hash(h); o.when.hash(h); }
+        OpNode::Pipe(o) => { o.from.hash(h); o.to.hash(h); o.payload.hash(h); o.when.hash(h); }
+        OpNode::Emit(o) => { o.event_name.hash(h); o.when.hash(h); }
+        OpNode::SetStatus(o) => { o.text.hash(h); o.severity.hash(h); o.ttl_ms.hash(h); o.when.hash(h); }
+        OpNode::AcpPrompt(o) => { o.text.hash(h); o.when.hash(h); }
+        OpNode::AcpCancel(o) => { o.when.hash(h); }
+        OpNode::AcpPermit(o) => { o.request_id.hash(h); o.outcome.hash(h); o.when.hash(h); }
+        OpNode::AcpSetMode(o) => { o.mode.hash(h); o.when.hash(h); }
+        OpNode::Exec(o) => { o.script.hash(h); o.shell.hash(h); o.timeout_ms.hash(h); o.when.hash(h); }
+        OpNode::ReloadScene(o) => { o.when.hash(h); }
+        OpNode::Unknown { verb, .. } => { verb.hash(h); }
+    }
+}
+
 /// Hash a single [`OnNode`] to a stable `u64` for diff detection.
 ///
 /// The hash covers the selector (kind + field patterns), the `when`
-/// predicate source, and the op list (via `Debug`, which is stable for
-/// facet-derived types). Two reactions with the same hash are
-/// considered identical for reload-diff purposes.
+/// predicate source, and the op list (field-by-field per variant).
+/// Two reactions with the same hash are considered identical for
+/// reload-diff purposes.
 fn hash_reaction(on: &OnNode) -> u64 {
     let mut h = DefaultHasher::new();
     if let Some(sel) = &on.selector {
@@ -383,7 +389,7 @@ fn hash_reaction(on: &OnNode) -> u64 {
     on.when.hash(&mut h);
     on.ops.len().hash(&mut h);
     for op in &on.ops {
-        format!("{op:?}").hash(&mut h);
+        hash_op_node(op, &mut h);
     }
     h.finish()
 }
@@ -461,7 +467,7 @@ fn hash_bind_ops(bind: &BindNode) -> u64 {
     let mut h = DefaultHasher::new();
     bind.ops.len().hash(&mut h);
     for op in &bind.ops {
-        format!("{op:?}").hash(&mut h);
+        hash_op_node(op, &mut h);
     }
     h.finish()
 }
@@ -527,16 +533,17 @@ pub fn diff_keybinds(old: &[BindNode], new: &[BindNode]) -> KeybindDiff {
 ///
 /// Returns `true` to indicate that a reconcile was requested.
 pub fn trigger_reconcile(reload: &ReloadResult) -> bool {
-    if matches!(reload.status, ReloadStatus::Ok) {
-        tracing::info!(
-            reactions_added = reload.reactions_added,
-            reactions_removed = reload.reactions_removed,
-            keybinds_changed = reload.keybinds_changed,
-            "hot-reload: triggering full reconcile"
-        );
-        true
-    } else {
-        false
+    match &reload.status {
+        ReloadStatus::Ok | ReloadStatus::Partial(_) => {
+            tracing::info!(
+                reactions_added = reload.reactions_added,
+                reactions_removed = reload.reactions_removed,
+                keybinds_changed = reload.keybinds_changed,
+                "hot-reload: triggering full reconcile"
+            );
+            true
+        }
+        ReloadStatus::Failed(_) => false,
     }
 }
 
@@ -557,6 +564,9 @@ pub struct FileWatcherConfig {
     /// File suffixes to ignore (e.g. editor swap files, backups).
     /// Matched against the full file name, not just the extension.
     pub ignore_suffixes: Vec<String>,
+    /// File-name prefixes to ignore (e.g. Emacs lock-files like `.#scene.kdl`).
+    /// Matched against the file *name* component only.
+    pub ignore_prefixes: Vec<String>,
 }
 
 impl Default for FileWatcherConfig {
@@ -568,16 +578,18 @@ impl Default for FileWatcherConfig {
                 .into_iter()
                 .map(String::from)
                 .collect(),
+            ignore_prefixes: vec![".#".to_string()],
         }
     }
 }
 
 /// Returns `true` if `path` should be ignored by the file watcher
-/// based on `config.ignore_suffixes`.
+/// based on `config.ignore_suffixes` and `config.ignore_prefixes`.
 ///
 /// Matching is against the file *name* component (not the full path),
-/// checking whether the name ends with any of the configured suffixes.
-/// Directories (paths with no file name component) are always ignored.
+/// checking whether the name ends with any configured suffix or starts
+/// with any configured prefix. Directories (paths with no file name
+/// component) are always ignored.
 pub fn should_ignore_path(path: &Path, config: &FileWatcherConfig) -> bool {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return true;
@@ -586,6 +598,10 @@ pub fn should_ignore_path(path: &Path, config: &FileWatcherConfig) -> bool {
         .ignore_suffixes
         .iter()
         .any(|suffix| name.ends_with(suffix.as_str()))
+        || config
+            .ignore_prefixes
+            .iter()
+            .any(|prefix| name.starts_with(prefix.as_str()))
 }
 
 // ---------------------------------------------------------------------------
@@ -713,7 +729,7 @@ mod tests {
     // ── reload_scene with missing file returns Failed ──────────────
 
     #[test]
-    fn reload_missing_file_returns_failed() {
+    fn reload_missing_file_returns_err() {
         let guard = ReloadGuard::new();
         let engine = Engine::new();
         let result = reload_scene(
@@ -723,10 +739,12 @@ mod tests {
             None,
         );
         let result = result.expect("should return Some when guard acquired");
+        assert!(result.is_err(), "expected Err for missing file");
+        let err = result.unwrap_err();
+        let msg = format!("{err}");
         assert!(
-            matches!(result.status, ReloadStatus::Failed(ref s) if s.contains("nonexistent")),
-            "expected Failed status for missing file, got: {:?}",
-            result.status
+            msg.contains("nonexistent"),
+            "expected error to mention 'nonexistent', got: {msg}"
         );
     }
 
@@ -947,7 +965,7 @@ mod tests {
     }
 
     #[test]
-    fn trigger_reconcile_skips_on_partial() {
+    fn trigger_reconcile_fires_on_partial() {
         let result = ReloadResult {
             status: ReloadStatus::Partial("warnings".into()),
             duration_ms: 5,
@@ -955,7 +973,7 @@ mod tests {
             reactions_removed: 0,
             keybinds_changed: 0,
         };
-        assert!(!trigger_reconcile(&result));
+        assert!(trigger_reconcile(&result));
     }
 
     // ── T-133: FileWatcherConfig + should_ignore_path ─────────────────
@@ -969,6 +987,7 @@ mod tests {
         assert!(cfg.ignore_suffixes.contains(&".tmp".to_string()));
         assert!(cfg.ignore_suffixes.contains(&"~".to_string()));
         assert!(cfg.ignore_suffixes.contains(&".bak".to_string()));
+        assert!(cfg.ignore_prefixes.contains(&".#".to_string()));
     }
 
     #[test]
@@ -1000,6 +1019,14 @@ mod tests {
             ..Default::default()
         };
         assert!(should_ignore_path(Path::new("scene.lock"), &cfg));
+        assert!(!should_ignore_path(Path::new("scene.kdl"), &cfg));
+    }
+
+    #[test]
+    fn should_ignore_emacs_lock_prefix() {
+        let cfg = FileWatcherConfig::default();
+        assert!(should_ignore_path(Path::new(".#scene.kdl"), &cfg));
+        assert!(should_ignore_path(Path::new("/tmp/.#foo.kdl"), &cfg));
         assert!(!should_ignore_path(Path::new("scene.kdl"), &cfg));
     }
 

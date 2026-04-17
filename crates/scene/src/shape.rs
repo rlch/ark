@@ -86,19 +86,12 @@ pub fn detect_and_normalize(src: &str, path: &Path) -> Result<String, SceneError
 
 /// Compute a `SourceSpan` covering a node's name in the source text.
 ///
-/// The `kdl` crate's `KdlNode` does not expose byte-offset spans directly in
-/// its public API, so we search for the node name in the source as a fallback.
-/// This is best-effort — if the name appears earlier in a comment we may point
-/// at the wrong occurrence, but for diagnostic purposes this is acceptable.
-fn node_name_span(src: &str, node: &kdl::KdlNode) -> SourceSpan {
-    let name = node.name().value();
-    // Try to find the node name in the source. We walk forward to reduce
-    // the chance of hitting a match inside a comment or string.
-    if let Some(offset) = src.find(name) {
-        SourceSpan::new(offset.into(), name.len())
-    } else {
-        SourceSpan::new(0.into(), src.len().min(1))
-    }
+/// Uses the parser-provided span from the `kdl` crate rather than a
+/// text search, so the span is always accurate even when the node name
+/// appears earlier in a comment or string literal.
+fn node_name_span(_src: &str, node: &kdl::KdlNode) -> SourceSpan {
+    let span = node.name().span();
+    SourceSpan::new(span.offset().into(), span.len())
 }
 
 #[cfg(test)]

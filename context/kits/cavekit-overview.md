@@ -20,10 +20,10 @@ Legacy vocabulary for reference:
 
 ## Principles
 1. **Zellij-native UX** — no custom TUI wrapper. Sessions, tabs, panes, plugins.
-2. **Session-per-run** — every `ark spawn` creates a new zellij session, never nests or joins existing. Users switch via zellij's session picker.
+2. **Session-per-run** — every `ark` invocation creates a new zellij session, never nests or joins existing. Users switch via zellij's session picker.
 3. **Observers, not orchestrators** — engines and orchestrator adapters observe upstream tools; they never fork or rewrite them. Cavekit stays external.
 4. **Filesystem-first state** — all state lives under `$XDG_STATE_HOME/ark/`. Restart-safe. `ark list` reads the directory.
-5. **No daemon, ever** — ephemeral per-agent supervisors. Per-supervisor control sockets (kakoune model: one socket per `kak -s`, picker enumerates via `read_dir`, dead sockets GC'd by reachability). Picker spawns new agents by `exec`ing `ark spawn` subprocess (wezterm "connect-or-spawn" coarsened) — no shared listener, no bootstrap dead zone.
+5. **No daemon, ever** — ephemeral per-agent supervisors. Per-supervisor control sockets (kakoune model: one socket per `kak -s`, picker enumerates via `read_dir`, dead sockets GC'd by reachability). Picker spawns new agents by `exec`ing `ark` subprocess (wezterm "connect-or-spawn" coarsened) — no shared listener, no bootstrap dead zone.
 6. **Compile-in default, subprocess escape hatch later** — blessed engines + orchestrators in-binary; third-party comes in v2.
 7. **XDG compliant** — state in `$XDG_STATE_HOME`, sockets in `$XDG_RUNTIME_DIR`, config in `$XDG_CONFIG_HOME`.
 8. **Textual aesthetic** — `delta` for diff rendering, syntect-backed. No ratatui for wasm plugins (zellij-tile instead). Ratatui reserved for native pane commands.
@@ -106,7 +106,7 @@ v1 ships in milestones — see `plans/build-site-scene.md` for tier-by-tier cove
 Zellij integration: `ZellijMux` (concrete type, no mux trait). Ark ships its own zellij (see cavekit-distribution).
 2 orchestrators: `CavekitOrchestrator`, `ClaudeCodeOrchestrator`.
 3 pane commands: `ark pane diff`, `ark pane git`, `ark pane log`.
-CLI subcommands: `spawn`, `list`, `kill`, `doctor`, `config`, `pane`, `scene {check|fmt|dry-run|graph|explain|reload}`, `ext {add|remove|list|update|info|inspect}`.
+CLI subcommands: `list`, `kill`, `doctor`, `config`, `pane`, `scene {check|fmt|dry-run|graph|explain|reload}`, `ext {add|remove|list|update|info|inspect}` (bare `ark` is the default session launcher).
 
 Explicitly deferred to v2+:
 - AiderEngine adapter extension, non-ACP engines (as first-class), CursorEngine

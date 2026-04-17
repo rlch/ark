@@ -88,8 +88,8 @@ Zellij plugins are `wasm32-wasip1` modules using `zellij-tile` primitives (Text,
 ║ ┌──────────────────────────────────┬──────────────────────────────────┐║
 ║ │ ark list --watch                 │ shell                            │║
 ║ │                                  │                                  │║
-║ │ ID          RUNNER    TASKS      │ $ ark spawn --orchestrator       │║
-║ │ ─────────── ───────── ─────      │   cavekit --cwd ../proj-myfeat   │║
+║ │ ID          RUNNER    TASKS      │ $ ark --scene cavekit             │║
+║ │ ─────────── ───────── ─────      │   --cwd ../proj-myfeat           │║
 ║ │ ⟳ myfeat    cavekit   5/8        │ spawned cavekit-myfeat-01JX…     │║
 ║ │ ⏸ payments  cavekit   2/4        │ → Ctrl+o w to switch             │║
 ║ │ ⟳ ui-refr.  claude-c. —          │                                  │║

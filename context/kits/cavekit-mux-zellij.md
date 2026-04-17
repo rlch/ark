@@ -11,7 +11,7 @@ last_edited: "2026-04-15T00:00:00Z"
 ## Requirements
 
 ### R1: Session-per-run
-**Description:** Every `ark spawn` creates a new zellij session named `ark-{orchestrator}-{name}`. Never nests or joins existing sessions.
+**Description:** Every `ark` invocation creates a new zellij session named `ark-{orchestrator}-{name}`. Never nests or joins existing sessions.
 **Acceptance Criteria:**
 - [ ] Session name derived from `AgentSpec.session` (set at spawn time per cavekit-types-state-events R1)
 - [ ] If session name collides with existing session, append `-{short-ulid}`
@@ -69,7 +69,7 @@ last_edited: "2026-04-15T00:00:00Z"
 ### R6: Preflight and diagnostics
 **Description:** Fail fast when zellij is absent or wrong version.
 **Acceptance Criteria:**
-- [ ] Preflight (called by `ark doctor` and `ark spawn`):
+- [ ] Preflight (called by `ark doctor` and `ark`):
   - `zellij --version` present
   - Version ≥ 0.44.1 (requires wasmi plugin host + switch-session action; 0.44.1 picks up web-client + scrollback fixes vs 0.44.0)
   - Required plugins locatable at configured paths

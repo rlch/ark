@@ -8,7 +8,7 @@ last_edited: "2026-04-14T00:00:00Z"
 ## Scope
 Two inter-process surfaces:
 1. **`ark-hook` sidecar binary** — invoked by Claude Code when a hook event fires, reads JSON from stdin, writes structured AgentEvent-shaped record to the agent's state dir and pipes to the status plugin.
-2. **Per-supervisor control sockets** — each supervisor binds a unix socket at `<runtime_root>/agents/{agent-id}.sock` where `runtime_root` resolves per R4 (ARK_RUNTIME_DIR → XDG_RUNTIME_DIR/ark-$UID → $TMPDIR/ark → /tmp/ark-$UID). Picker enumerates the directory and connects to per-agent sockets. No central daemon. Modeled on kakoune's session-per-socket pattern (`kak -s`/`kak -l`/`kak -p`). New-agent spawn does NOT use the socket — picker `exec`s `ark spawn` as a subprocess (wezterm "connect-or-spawn" pattern coarsened).
+2. **Per-supervisor control sockets** — each supervisor binds a unix socket at `<runtime_root>/agents/{agent-id}.sock` where `runtime_root` resolves per R4 (ARK_RUNTIME_DIR → XDG_RUNTIME_DIR/ark-$UID → $TMPDIR/ark → /tmp/ark-$UID). Picker enumerates the directory and connects to per-agent sockets. No central daemon. Modeled on kakoune's session-per-socket pattern (`kak -s`/`kak -l`/`kak -p`). New-agent spawn does NOT use the socket — picker `exec`s `ark --session <name> --scene <scene>` as a subprocess (wezterm "connect-or-spawn" pattern coarsened).
 
 ## Requirements — ark-hook sidecar
 
@@ -74,11 +74,11 @@ Two inter-process surfaces:
 - [ ] Cleanup (graceful): supervisor unlinks its socket via `Drop` guard + `signal_hook` SIGTERM/SIGINT handler. On SIGKILL or hard crash the socket file remains stale until GC.
 - [ ] **Stale socket GC:** any client (picker, CLI) that finds a `.sock` for which `connect()` returns `ECONNREFUSED` or `ENOENT`-during-handshake (50ms timeout) MUST `unlink()` it. This is the kakoune `kak -l` pattern.
 - [ ] **No file locks needed.** Per-socket scheme avoids bind-race entirely.
-- [ ] **`Spawn` is NOT a control-socket command.** Picker spawns new agents by `exec`ing `ark spawn <args>` as a detached subprocess (it then double-forks itself per cavekit-supervisor.md R1). This eliminates the bootstrap dead zone (zero supervisors → no socket → can still spawn the first agent via CLI). See R5 below for the command list.
+- [ ] **`Spawn` is NOT a control-socket command.** Picker spawns new agents by `exec`ing `ark --session <name> --scene <scene>` as a detached subprocess (it then double-forks itself per cavekit-supervisor.md R1). This eliminates the bootstrap dead zone (zero supervisors → no socket → can still spawn the first agent via CLI). See R5 below for the command list.
 - [ ] Protocol: newline-delimited JSON requests + responses
 - [ ] Errors: malformed requests get `{"ok": false, "error": "..."}`; connection remains open
 - [ ] Implementation: `interprocess` crate (`local_socket::Listener` with Tokio integration). Default name-reclamation-on-drop is fine here.
-- [ ] Optional belt-and-suspenders: an `fd-lock` flock on `${XDG_RUNTIME_DIR}/ark-$UID/spawn.lock` only around `ark spawn` if deterministic agent-id assignment under concurrent spawns matters; otherwise skip.
+- [ ] Optional belt-and-suspenders: an `fd-lock` flock on `${XDG_RUNTIME_DIR}/ark-$UID/spawn.lock` only around `ark` session launch if deterministic agent-id assignment under concurrent spawns matters; otherwise skip.
 **Dependencies:** cavekit-plugin-picker, cavekit-supervisor
 
 ### R5: Control protocol
@@ -99,8 +99,8 @@ Two inter-process surfaces:
     - `Emit { event: str, payload: map, source: str }` — broadcasts a `UserEvent` onto the supervisor's event bus. `source` MUST be one of the canonical values per scene R4 attribution convention (`core` / `ext:<n>` / `plugin:<n>` / `hook:<n>` / `scene`). Used by `ark-hook emit` subcommand for event forwarding from ark-bus.
     - `Permit { request_id: str, outcome: "allow"|"reject_once"|"reject_always", option_id?: str }` — responds to an outstanding ACP `session/request_permission` (scene R17 permission dispatch). Used by picker plugin modals + scene reactions invoking `acp/permit`.
 - [ ] **Out of socket protocol** (handled differently):
-  - `Spawn` — picker `exec`s `ark spawn <args>` subprocess (no socket; agent-id doesn't exist yet)
-  - `Resurrect` — picker reads crashed agent's `spec.json`, then `exec`s `ark spawn` with same params (semantically equivalent to Spawn)
+  - `Spawn` — picker `exec`s `ark --session <name> --scene <scene>` subprocess (no socket; agent-id doesn't exist yet)
+  - `Resurrect` — picker reads crashed agent's `spec.json`, then `exec`s `ark` with same params (semantically equivalent to Spawn)
   - `List` — picker scans state dir + socket dir directly (no central aggregator exists)
 - [ ] Authorization: local-only (unix socket + user perms); no tokens
 - [ ] Audit log: every command appended to `$STATE/control.log`
@@ -144,7 +144,7 @@ S: {"ok":true,"data":{"signaled":"SIGTERM"}}
 
 Picker spawns a new agent (NOT via socket):
 ```
-$ ark spawn --orchestrator cavekit --cwd /path -- claude --resume
+$ ark --scene cavekit --cwd /path
 spawned cavekit-newfeat-01JZ...
 ```
 

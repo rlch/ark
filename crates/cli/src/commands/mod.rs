@@ -1,14 +1,17 @@
 //! Top-level subcommand modules.
 //!
 //! Each module defines a `*Args` struct (via clap-derive) plus a `run`
-//! stub that T-084 leaves as "not yet wired". Wiring tasks:
+//! stub. Wiring tasks:
 //!
-//! - T-087 → [`spawn`]
 //! - T-088 → [`list`]
 //! - T-089 → [`kill`]
 //! - T-091 → [`doctor`]
 //! - T-090 → [`config`]
 //! - T-092 → [`pane`]
+//!
+//! T-115 removed the `spawn` subcommand — bare `ark` now handles
+//! session launch via [`launch`]. Shared zellij helpers live in
+//! [`session`].
 //!
 //! See cavekit-cli.md R2-R7 for the per-subcommand flag specs.
 
@@ -20,7 +23,7 @@ pub mod launch;
 pub mod list;
 pub mod pane;
 pub mod scene;
-pub mod spawn;
+pub mod session;
 
 use clap::Subcommand;
 
@@ -29,12 +32,9 @@ use crate::error::CliError;
 
 /// The user-facing top-level subcommands.
 ///
-/// Exactly six variants — matches cavekit-cli R1. No `status`, `logs`,
-/// `gc`, `plugin install`, or `attach` — all folded elsewhere (see R1).
+/// T-115 removed `Spawn` — bare `ark` handles session launch.
 #[derive(Debug, Subcommand)]
 pub enum Commands {
-    #[command(alias = "new")]
-    Spawn(spawn::SpawnArgs),
     List(list::ListArgs),
     Kill(kill::KillArgs),
     Doctor(doctor::DoctorArgs),
@@ -50,7 +50,6 @@ impl Commands {
     /// Dispatch to the matching subcommand's `run` stub.
     pub fn run(self, ctx: &Ctx) -> Result<(), CliError> {
         match self {
-            Commands::Spawn(args) => spawn::run(args, ctx),
             Commands::List(args) => list::run(args, ctx),
             Commands::Kill(args) => kill::run(args, ctx),
             Commands::Doctor(args) => doctor::run(args, ctx),

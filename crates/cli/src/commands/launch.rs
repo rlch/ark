@@ -14,11 +14,10 @@
 //!   `switch-session`; outside creates a new session.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
-use crate::commands::spawn::{
-    LayoutResolution, build_switch_session_command, build_zellij_command,
-    inside_zellij, require_zellij_on_path, resolve_layout_source, ZellijSpawn,
+use crate::commands::session::{
+    LayoutResolution, ZellijSpawn, build_switch_session_command, build_zellij_command,
+    inside_zellij, require_zellij_on_path, resolve_layout_source,
 };
 use crate::ctx::Ctx;
 use crate::error::CliError;

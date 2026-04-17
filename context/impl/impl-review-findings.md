@@ -1,6 +1,45 @@
 # Peer Review Findings
 
-## Latest Review: scene v3 Tiers 2-4 — 2026-04-17
+## Latest Review: scene v3 Tiers 8-15 — 2026-04-17
+
+**Base ref:** `d948c5d` (Tiers 5+6+7)
+**Head:** `9f0a69e` (Tiers 8-15: composition + extensions + ACP + CLI + hot reload + v1 freeze)
+**Reviewer:** Claude Opus 4.6 (ck:inspector + ck:surveyor)
+**Commits:** T-074..T-140 (composition, extensions, ACP, CLI, hot reload, v1 freeze).
+**Diff:** 9753 lines, 68 files.
+
+### Findings
+
+| # | Severity | File | Issue | Status |
+|---|----------|------|-------|--------|
+| F-0015 | P0 | crates/scene/src/reload.rs:146-247 | `reload_scene` compiles new scene but drops `CompiledScene` — return type `Option<ReloadResult>` has no scene. Hot reload non-functional. | NEW |
+| F-0016 | P1 | crates/ark-ext-metadata/src/search_path.rs:65-101 | Search order (project→user→system→built-in) contradicts R10 spec (compiled-in→user→project). Design decision needed. | WONTFIX — R10 spec updated to match code — project-local-first is intentional per XDG convention. |
+| F-0017 | P1 | crates/scene/src/reload.rs:529-541 | `trigger_reconcile` returns false for `Partial` status — successfully compiled parts aren't applied. | NEW |
+| F-0018 | P2 | crates/scene/src/compose.rs:15-55 | Include diamond (shared fragment from two paths) falsely reported as cycle. Flat `visited` set doesn't distinguish diamond from cycle. | NEW |
+| F-0019 | P2 | crates/scene/src/reload.rs:562-589 | File watcher config missing `.#` prefix check (Emacs lock files). Only suffix checks implemented. | NEW |
+| F-0022 | P2 | crates/scene/src/compose.rs:42 | No path sandboxing on `include` resolution. `../../etc/passwd` reads arbitrary files. Security risk for shared scenes. | NEW |
+| F-0023 | P2 | crates/scene/src/reload.rs:280-299 | `compute_delta` uses reaction/bind counts instead of structural `diff_reactions`/`diff_keybinds`. Reports incorrect deltas. | NEW |
+| F-0020 | P3 | crates/scene/src/shape.rs:93-102 | `node_name_span` uses `str::find` when KDL crate exposes `.span().offset()`. Diagnostics may point at wrong location. | NEW |
+| F-0021 | P3 | crates/scene/src/reload.rs:386 | Reaction hash uses `Debug` formatting — not stable across crate updates. T-130 specifies blake3. | NEW |
+
+### Disposition
+
+- **F-0015 (P0)**: Must fix immediately — return `(CompiledScene, ReloadResult)` from `reload_scene`.
+- **F-0016 (P1)**: Design decision — R10 spec order vs XDG convention. Recommend updating R10 to match code (project-local-first is more conventional).
+- **F-0017 (P1)**: Fix `trigger_reconcile` to return `true` for `Partial`.
+- **F-0018 (P2)**: Distinguish diamond (allow or use `scene/include-duplicate`) from cycle.
+- **F-0019 (P2)**: Add `ignore_prefixes` to `FileWatcherConfig` with `.#` default.
+- **F-0022 (P2)**: Add include path sandboxing — verify resolved path within scene dir tree.
+- **F-0023 (P2)**: Wire structural diff functions into `compute_delta`.
+- **F-0020, F-0021 (P3)**: Low priority cosmetic/stability fixes.
+
+### Proposed new requirement: R11-ext (Include Path Sandboxing)
+
+Include targets MUST resolve within scene file's directory tree. Absolute paths and `..` escapes rejected at compile time with `error[scene/include-escape]`.
+
+---
+
+## Prior Review: scene v3 Tiers 2-4 — 2026-04-17
 
 **Base ref:** `57488f7` (tier-1 peer-review fixes)
 **Head:** `53d4757` (Tier 4 scene: layout compile + modes + reconciler)

@@ -6,7 +6,7 @@ last_edited: "2026-04-15T00:00:00Z"
 # Spec: Core Architecture
 
 ## Scope
-Defines the two-layer adapter model that lets ark orchestrate any agent engine via any methodology. Specifies trait surfaces, ownership, and the flow from `ark spawn` to `ark kill`.
+Defines the two-layer adapter model that lets ark orchestrate any agent engine via any methodology. Specifies trait surfaces, ownership, and the flow from `ark` (session launch) to `ark kill`.
 
 ## Context
 
@@ -66,7 +66,7 @@ An orchestrator may use one engine and spawn additional sibling panes (e.g., Cav
 ### R5: Ownership rules
 **Description:** Who owns what at runtime.
 **Acceptance Criteria:**
-- [ ] One supervisor process per `ark spawn` — owns Engine, Orchestrator, Mux, event bus, state dir writes
+- [ ] One supervisor process per `ark` session — owns Engine, Orchestrator, Mux, event bus, state dir writes
 - [ ] Supervisor forks from CLI invocation, detaches (double-fork + setsid), runs tokio runtime
 - [ ] Engine and orchestrator run as tokio tasks inside the supervisor process
 - [ ] Subtasks (file watchers, transcript tailers, hook listeners) run as JoinSet children of either engine or orchestrator task
