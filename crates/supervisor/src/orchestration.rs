@@ -155,6 +155,15 @@ pub async fn run_supervisor_with(
     ready_writer: Option<ReadyWriter>,
     external_cancel: Option<CancellationToken>,
 ) -> Result<()> {
+    // ---- cavekit-soul-phase-1 T-019: nuke legacy `$STATE/agents/` ----
+    //
+    // The pre-soul supervisor wrote per-agent state under `$STATE/agents/{id}/`.
+    // Phase 1 migrates to `$STATE/sessions/{id}/`. On every supervisor boot
+    // (not just first boot) we aggressively remove the legacy directory if
+    // it exists so stale agents/ trees from older ark versions do not
+    // accumulate. This is idempotent: absence is a silent no-op.
+    nuke_legacy_agents_dir(&state_layout);
+
     // ---- Step 1: StateDir + spec.json + initial status.json ----
     let agent_dir = state_layout.agent_dir(&spec.id);
     StateLayout::ensure_dir_0700(&agent_dir).context("ensure agent state dir")?;
@@ -689,6 +698,48 @@ pub async fn run_supervisor_with(
     debug!("R3 step 18: lock released");
 
     Ok(())
+}
+
+/// cavekit-soul-phase-1 T-019: delete legacy `$STATE/agents/` on boot.
+///
+/// Phase 1 renames the per-session state root from `$STATE/agents/` to
+/// `$STATE/sessions/`. On every supervisor boot we remove the legacy
+/// path recursively if it exists so stale trees from older ark versions
+/// do not accumulate. Runs unconditionally and is idempotent: if the
+/// directory does not exist the function returns silently.
+///
+/// Lives in the supervisor (not in `StateLayout`) because StateLayout
+/// is intended to stay a pure path-resolution type. The one-shot
+/// migration delete belongs to whichever component boots — the
+/// supervisor — so `StateLayout` stays side-effect-free.
+fn nuke_legacy_agents_dir(layout: &StateLayout) {
+    let agents_path = layout.base().join("agents");
+    match agents_path.try_exists() {
+        Ok(true) => {
+            match std::fs::remove_dir_all(&agents_path) {
+                Ok(()) => info!(
+                    path = %agents_path.display(),
+                    "nuked legacy $STATE/agents/ directory (cavekit-soul Phase 1 migration)"
+                ),
+                Err(err) => warn!(
+                    path = %agents_path.display(),
+                    %err,
+                    "failed to remove legacy $STATE/agents/ directory; continuing"
+                ),
+            }
+        }
+        Ok(false) => {}
+        Err(err) => {
+            // try_exists only fails when `stat` itself errors (EACCES on the
+            // parent, bad permissions). Warn + continue — the rest of boot
+            // will surface the real problem.
+            warn!(
+                path = %agents_path.display(),
+                %err,
+                "legacy $STATE/agents/ existence check failed; skipping migration"
+            );
+        }
+    }
 }
 
 /// Write the authoritative `spec.json` under the agent state dir.
