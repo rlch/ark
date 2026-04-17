@@ -10,10 +10,10 @@ pub mod status;
 
 pub use env_paths::{EnvPaths, EnvPathsError};
 pub use event::{
-    AgentEvent, LogLevel, MessageRole, Outcome, PermissionDecision, Severity, TabHandle, TabRole,
+    AgentEvent, LogLevel, MessageRole, PermissionDecision, TabHandle, TabRole,
 };
 pub use event_bus::{DEFAULT_CAPACITY, EventReceiver, EventSink, channel, default_channel};
-pub use id::{AgentId, AgentIdParseError};
+pub use id::SessionId;
 pub use permission::{
     POLICY_FILE_NAME, ParsePermissionPolicyError, PermissionPolicy, READ_ONLY_TOOLS, decide,
     emit_permission_events, read_policy_file, read_policy_for_agent, write_policy_file,
@@ -21,9 +21,9 @@ pub use permission::{
 pub use scope::{
     ENGINES_V1, MUX_V1, ORCHESTRATORS_V1, is_v1_engine, is_v1_mux, is_v1_orchestrator,
 };
-pub use spec::{AgentSpec, OrchestratorSpec};
+pub use spec::SessionSpec;
 pub use state_dir::{StateLayout, StateLayoutError};
-pub use status::{AgentStatus, Findings, Phase};
+pub use status::AgentStatus;
 
 /// Re-export of [`tokio_util::sync::CancellationToken`] for cooperative
 /// cancellation across supervisor / engine / orchestrator tasks.
