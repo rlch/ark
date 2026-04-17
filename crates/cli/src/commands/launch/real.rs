@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use ark_types::{AgentSpec, StateLayout};
+use ark_types::{SessionSpec, StateLayout};
 
 use super::traits::{Multiplexer, SupervisorSpawner};
 use crate::commands::session::{
@@ -97,7 +97,7 @@ impl ForkSupervisor {
 impl SupervisorSpawner for ForkSupervisor {
     fn spawn_and_wait_for_ready(
         &self,
-        spec: AgentSpec,
+        spec: SessionSpec,
         state_layout: &StateLayout,
     ) -> Result<(), CliError> {
         let (ready_rfd, ready_wfd) = create_ready_pipe()?;

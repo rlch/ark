@@ -360,10 +360,11 @@ fn supervisor_receives_spec_with_matching_session_and_scene() {
 
     let calls = spawner.calls();
     let spec = &calls[0].spec;
-    assert_eq!(spec.session, "mywork");
+    assert_eq!(spec.name, "mywork");
     assert_eq!(spec.scene_path.as_ref(), Some(&scene));
-    assert_eq!(spec.orchestrator, "ark");
-    assert!(spec.cmd.is_empty());
+    assert_eq!(spec.id.name, "mywork");
+    assert!(spec.env.is_empty());
+    assert!(spec.ext_config.is_empty());
 }
 
 #[test]

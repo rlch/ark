@@ -15,7 +15,7 @@
 
 use std::path::Path;
 
-use ark_types::{AgentSpec, StateLayout};
+use ark_types::{SessionSpec, StateLayout};
 
 use crate::error::CliError;
 
@@ -70,7 +70,7 @@ pub trait SupervisorSpawner {
     /// this by keeping the pre-spawn pipeline purely synchronous.
     fn spawn_and_wait_for_ready(
         &self,
-        spec: AgentSpec,
+        spec: SessionSpec,
         state_layout: &StateLayout,
     ) -> Result<(), CliError>;
 }

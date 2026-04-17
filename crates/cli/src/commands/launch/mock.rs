@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use ark_types::{AgentSpec, StateLayout};
+use ark_types::{SessionSpec, StateLayout};
 
 use super::traits::{Multiplexer, SupervisorSpawner};
 use crate::error::CliError;
@@ -121,7 +121,7 @@ impl Multiplexer for MockMultiplexer {
 /// forked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpawnCall {
-    pub spec: AgentSpec,
+    pub spec: SessionSpec,
     pub state_base: PathBuf,
 }
 
@@ -172,7 +172,7 @@ impl InlineSupervisor {
 impl SupervisorSpawner for InlineSupervisor {
     fn spawn_and_wait_for_ready(
         &self,
-        spec: AgentSpec,
+        spec: SessionSpec,
         state_layout: &StateLayout,
     ) -> Result<(), CliError> {
         self.calls.lock().unwrap().push(SpawnCall {
@@ -236,27 +236,35 @@ mod tests {
         );
     }
 
+    fn sample_spec() -> SessionSpec {
+        use ark_types::SessionId;
+        use chrono::Utc;
+        use std::collections::BTreeMap;
+        SessionSpec {
+            id: SessionId::new("test"),
+            name: "test".to_string(),
+            scene_path: None,
+            cwd: PathBuf::from("/tmp/cwd"),
+            env: BTreeMap::new(),
+            created_at: Utc::now(),
+            ext_config: BTreeMap::new(),
+        }
+    }
+
     #[test]
     fn inline_supervisor_records_spec() {
-        use ark_types::AgentId;
-
         let spawner = InlineSupervisor::new();
-        let id = AgentId::new("ark", "test");
-        let spec = AgentSpec::new(
-            id.clone(),
-            "test",
-            "ark",
-            "claude-code",
-            PathBuf::from("/tmp/cwd"),
-            vec![],
-        );
+        let spec = sample_spec();
+        let id = spec.id.clone();
         let layout = StateLayout::new(
             PathBuf::from("/tmp/state"),
             PathBuf::from("/tmp/rt"),
             PathBuf::from("/tmp/cfg"),
         );
 
-        spawner.spawn_and_wait_for_ready(spec.clone(), &layout).unwrap();
+        spawner
+            .spawn_and_wait_for_ready(spec.clone(), &layout)
+            .unwrap();
 
         let calls = spawner.calls();
         assert_eq!(calls.len(), 1);
@@ -266,19 +274,10 @@ mod tests {
 
     #[test]
     fn inline_supervisor_fail_returns_err() {
-        use ark_types::AgentId;
-
         let spawner = InlineSupervisor::new().fail(CliError::Internal {
             reason: "supervisor died before ack".to_string(),
         });
-        let spec = AgentSpec::new(
-            AgentId::new("ark", "t"),
-            "t",
-            "ark",
-            "claude-code",
-            PathBuf::from("/tmp"),
-            vec![],
-        );
+        let spec = sample_spec();
         let layout = StateLayout::new(
             PathBuf::from("/tmp/s"),
             PathBuf::from("/tmp/r"),

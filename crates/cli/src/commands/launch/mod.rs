@@ -19,9 +19,11 @@
 //! takes trait objects so integration tests can swap in mocks (see
 //! [`traits`]).
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use ark_types::{AgentId, AgentSpec, StateLayout};
+use ark_types::{SessionId, SessionSpec, StateLayout};
+use chrono::Utc;
 
 use crate::commands::session::{LayoutResolution, resolve_layout_source};
 use crate::ctx::Ctx;
@@ -129,20 +131,18 @@ pub fn run_with(
     let scene_file = resolve_scene_file(&ctx.config_dir, &cwd, scene_flag);
     let compiled = compile::compile_scene_to_layout(scene_file.as_deref())?;
 
-    // Build the agent spec for the supervisor. Bare launch hardcodes
-    // orchestrator = "ark" (no agent-level orchestrator) and empty
-    // cmd (no single engine command).
-    let agent_id = AgentId::new("ark", &session);
-    let mut spec = AgentSpec::new(
-        agent_id.clone(),
-        &session,
-        "ark",
-        "claude-code",
-        cwd.clone(),
-        vec![],
-    );
-    spec.session = session.clone();
-    spec.scene_path = scene_file.clone();
+    // Build the session spec for the supervisor. Post-cavekit-soul Phase 1
+    // the bare launch constructs a plain `SessionSpec`; orchestrator /
+    // engine / cmd concepts have re-homed inside extensions.
+    let spec = SessionSpec {
+        id: SessionId::new(&session),
+        name: session.clone(),
+        scene_path: scene_file.clone(),
+        cwd: cwd.clone(),
+        env: BTreeMap::new(),
+        created_at: Utc::now(),
+        ext_config: BTreeMap::new(),
+    };
 
     let state_layout = StateLayout::new(
         ctx.state_dir.clone(),
