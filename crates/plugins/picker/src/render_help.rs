@@ -26,12 +26,10 @@ pub const HELP_BINDINGS: &[(&str, &str)] = &[
     ("Enter", "switch session / confirm"),
     ("/", "focus filter (type to filter)"),
     ("Backspace", "edit filter"),
-    ("Ctrl+n", "new agent form"),
     ("Ctrl+r", "rename selected agent"),
     ("Ctrl+d", "detach (Forget) selected agent"),
     ("Del", "kill selected agent"),
     ("Shift+Del", "kill all done/failed agents in view"),
-    ("r", "resurrect selected (crashed only)"),
     ("Tab", "cycle status filter preset"),
     ("?", "toggle this help overlay"),
     ("Esc / Ctrl+c", "close picker (or exit filter mode)"),
@@ -137,7 +135,6 @@ mod tests {
         // strings change cosmetically.
         for needle in [
             "Shift+Del",
-            "Ctrl+n",
             "Ctrl+r",
             "Ctrl+d",
             "Ctrl+c",

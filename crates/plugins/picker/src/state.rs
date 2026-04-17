@@ -6,7 +6,6 @@
 //! - T-101 populates [`PickerCache`] via the bootstrap state/socket scan.
 //! - T-102 upgrades [`filter_matches`] to nucleo-matcher and adds fuzzy scoring.
 //! - T-103 fetches the [`DetailState`] snapshot on demand.
-//! - T-104 wires keyboard focus cycling for [`NewAgentState`].
 //! - T-105 drives the [`ConfirmKill`] / [`Error`] transitions.
 //!
 //! Nothing in this module touches zellij-tile — it all compiles on the host
@@ -32,22 +31,16 @@ pub enum PickerScreen {
     /// Expanded detail for a single agent (R5). Only the id is stored;
     /// the full snapshot is fetched on-demand in T-103.
     Detail(DetailState),
-    /// New-agent spawn form (R6). Populated by T-104 keystrokes.
-    NewAgent(NewAgentState),
     /// Kill-confirmation modal (R7).
     ConfirmKill(ConfirmKillState),
     /// Rename prompt modal (R7 — `Ctrl+R` on a live agent). Captures the
     /// in-flight new-name buffer plus cursor position so typing keeps the
     /// same lossless round-trip behaviour the new-agent form gets.
     RenamePrompt(RenamePromptState),
-    /// Resurrect prompt modal (R8 — Enter on a Crashed/Done agent).
-    /// Asks the operator to confirm `y`/`n` before re-spawning via the
-    /// T-106 pipeline.
-    ResurrectPrompt(ResurrectPromptState),
     /// Help overlay (W5).
     Help,
-    /// Error banner — one-off message, cleared on next key (R6 exec
-    /// failure, R7 socket-connect failure, R3 permission denial).
+    /// Error banner — one-off message, cleared on next key (R7 socket-
+    /// connect failure, R3 permission denial).
     Error(ErrorState),
 }
 
@@ -128,115 +121,6 @@ pub struct DetailSnapshot {
     pub last_event: Option<String>,
 }
 
-/// Orchestrator choice for a spawn request (R6 first field).
-///
-/// Matches the `cavekit | claude-code` radio in W3. Kept as an enum so the
-/// form validator can reject invalid values at compile time instead of at
-/// `ark spawn` exec time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Orchestrator {
-    /// Cavekit-driven agents (`--orchestrator cavekit`).
-    Cavekit,
-    /// Raw Claude Code sessions (`--orchestrator claude-code`).
-    ClaudeCode,
-}
-
-impl Default for Orchestrator {
-    /// R6 W3 wireframe shows `[ cavekit ]` selected by default.
-    fn default() -> Self {
-        Orchestrator::Cavekit
-    }
-}
-
-/// Which field of the new-agent form currently holds keyboard focus.
-///
-/// Ordered top-to-bottom per W3 so `Tab` maps to the next variant via the
-/// enum's discriminant order. T-104 implements the actual cycling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FormField {
-    /// Orchestrator radio.
-    Orchestrator,
-    /// CWD text input. `Ctrl+f` overlay opens the filepicker plugin.
-    Cwd,
-    /// Agent name; default populated from `basename(cwd)` by T-104.
-    Name,
-    /// Zellij layout dropdown.
-    Layout,
-    /// Launch command, default `claude --resume`.
-    Cmd,
-    /// Submit button — Enter from here fires the spawn.
-    Submit,
-}
-
-impl Default for FormField {
-    /// Form opens with focus on the first field (R6 Tab-order origin).
-    fn default() -> Self {
-        FormField::Orchestrator
-    }
-}
-
-/// State for the `Ctrl+n` new-agent form (R6 / W3).
-///
-/// Fields mirror the five inputs in the wireframe. T-104 fills in the
-/// typing, cycling, and submission logic; this struct just holds the
-/// values so the state transition into/out of the form is lossless
-/// (users who tab away and back shouldn't lose partial input).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewAgentState {
-    /// Orchestrator choice.
-    pub orchestrator: Orchestrator,
-    /// Working directory passed as `ark spawn --cwd`.
-    pub cwd: String,
-    /// Agent name passed as `ark spawn --name`.
-    pub name: String,
-    /// Zellij layout name passed as `ark spawn --layout`.
-    pub layout: String,
-    /// Launch command after the `--` separator.
-    pub cmd: String,
-    /// Currently focused field for keyboard input.
-    pub focus: FormField,
-    /// Layouts known to the plugin; drives the dropdown cycler. Populated
-    /// on entering the NewAgent screen — defaults to
-    /// `["builder", "cavekit"]` when scanning the layouts dir isn't
-    /// available.
-    pub available_layouts: Vec<String>,
-    /// Stub flag raised when the user presses `Ctrl+F` on the Cwd field.
-    /// The real filepicker integration is deferred; host-side tests assert
-    /// this toggles.
-    pub open_filepicker: bool,
-}
-
-impl Default for NewAgentState {
-    fn default() -> Self {
-        Self {
-            orchestrator: Orchestrator::default(),
-            cwd: String::new(),
-            name: String::new(),
-            layout: "builder".to_string(),
-            cmd: "claude --resume".to_string(),
-            focus: FormField::default(),
-            available_layouts: vec!["builder".to_string(), "cavekit".to_string()],
-            open_filepicker: false,
-        }
-    }
-}
-
-impl NewAgentState {
-    /// Build a fresh `NewAgentState` seeded with `cwd`. `name` defaults to
-    /// `basename(cwd)`. Used by the wasm layer when `Ctrl+N` fires from
-    /// the list screen.
-    pub fn with_cwd(cwd: impl Into<String>) -> Self {
-        let cwd = cwd.into();
-        let name = crate::render_new_agent::basename_of(&cwd);
-        Self {
-            cwd,
-            name,
-            ..Self::default()
-        }
-    }
-}
-
 /// State for the Del confirmation modal (R7 W4).
 ///
 /// The kill-scope (`kill` vs `kill + remove worktree`) is captured at the
@@ -277,58 +161,7 @@ impl RenamePromptState {
     }
 }
 
-/// Reason variant carried alongside a resurrect prompt (R8).
-///
-/// `Crashed` fires for agents whose supervisor is no longer alive —
-/// the prompt wording is "crashed — resurrect?". `TerminatedPhase`
-/// fires for agents whose last published phase is `Done` / `Failed`
-/// / `Killed` / `Timeout`, where the prompt becomes "is {phase} — spawn
-/// a fresh replacement?". Keeping the discriminator on the state
-/// instead of computing it at render time means the key handler only
-/// looks at what's in hand, not at the cache it was built from.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ResurrectReason {
-    /// Supervisor unreachable / PID dead. Agent lives in the
-    /// resurrectable cache.
-    Crashed,
-    /// Agent's last phase was a terminal state (Done / Failed /
-    /// Killed / Timeout). Re-spawn replaces it. The carried string
-    /// is the raw phase value so the prompt can render it verbatim.
-    TerminatedPhase(String),
-}
-
-/// State for the `Enter`-on-crashed / `Enter`-on-terminal resurrect prompt
-/// (R8). Captures the agent id the prompt targets plus the reason variant
-/// used to drive the prompt's wording. The action handler only needs to
-/// know "confirm or cancel" — the lib.rs dispatcher looks up the cache
-/// entry to produce the resurrect argv via the T-106 pipeline.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResurrectPromptState {
-    /// Agent id whose spec will drive the resurrect.
-    pub agent_id: String,
-    /// Human-facing agent name (from the cache entry) used for the
-    /// prompt's banner line.
-    pub agent_name: String,
-    /// Why we're prompting — drives the wording variant.
-    pub reason: ResurrectReason,
-}
-
-impl ResurrectPromptState {
-    /// Build a fresh prompt for `agent_id` with the given name + reason.
-    pub fn new(
-        agent_id: impl Into<String>,
-        agent_name: impl Into<String>,
-        reason: ResurrectReason,
-    ) -> Self {
-        Self {
-            agent_id: agent_id.into(),
-            agent_name: agent_name.into(),
-            reason,
-        }
-    }
-}
-
-/// State for the transient error banner (R6 exec failure, etc.).
+/// State for the transient error banner (R7 socket-connect failure, etc.).
 ///
 /// Any key-press on the Error screen transitions back to List; that
 /// behaviour lives in T-105's key handler, so this struct carries only

@@ -4,7 +4,7 @@
 //! The binary reads a JSON script describing a sequence of Claude Code hook
 //! events and emits each event in turn, optionally sleeping between them to
 //! simulate latency. Tests place this binary's directory first on `PATH` so
-//! `ark spawn` invokes it in place of a real Claude session.
+//! ark's engine preflight finds it in place of a real Claude session.
 //!
 //! Two emission modes are supported:
 //! - `--output FILE`: JSONL-append each event envelope directly to `FILE`.

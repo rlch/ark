@@ -40,28 +40,28 @@ pub fn require_zellij_on_path() -> Result<(), CliError> {
 
 // --------------------------------------------------------- spawn plan ----
 
-/// A resolved zellij spawn plan: create a dedicated per-agent
-/// session via `setsid zellij -s <name> --layout <path>`.
+/// A resolved zellij invocation plan: create a dedicated per-session
+/// zellij via `zellij -s <name> --layout <path>`.
 ///
 /// F-516 / F-517: prior cycles branched on `$ZELLIJ` and emitted
 /// either `zellij action new-tab` (which only adds a tab to the
 /// caller's session, violating R2's 1:1 agent↔session mapping) or
 /// `zellij attach --create` (which needs a TTY — incompatible with
-/// `/dev/null` stdio + `spawn()`). Unifying on `setsid zellij -s`
-/// mirrors the canonical pattern in `crates/mux/zellij/src/mux.rs`
-/// and detaches cleanly from the caller's controlling terminal.
+/// `/dev/null` stdio + `spawn()`). Unifying on `zellij -s` mirrors
+/// the canonical pattern in `crates/mux/zellij/src/mux.rs` and
+/// detaches cleanly from the caller's controlling terminal via
+/// POSIX `setsid` installed as a `pre_exec` hook.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ZellijSpawn {
+pub struct ZellijInvocation {
     /// Session name (1:1 with agent id).
     pub session: String,
-    /// Layout path (stem or absolute) — required: R2 defines a
-    /// default layout for every spawn so this is never `None` in
-    /// practice, but we keep the type `Option` for forward-compat
-    /// with future layout-less spawn modes (e.g. `ark spawn --bare`).
+    /// Layout path (stem or absolute). Optional so callers can fall
+    /// through to zellij's own default-layout behaviour when no scene
+    /// resolves on disk.
     pub layout: Option<String>,
 }
 
-/// Build the command for a given [`ZellijSpawn`] plan.
+/// Build the command for a given [`ZellijInvocation`] plan.
 ///
 /// F-526: the argv is now pure `zellij -s <session> [--layout <path>]` —
 /// the external `setsid` binary was dropped because macOS does not ship
@@ -70,7 +70,7 @@ pub struct ZellijSpawn {
 /// the caller's controlling TTY is handled POSIX-natively by
 /// `apply_detach` via `pre_exec(nix::unistd::setsid)`, which works
 /// identically on Linux and macOS.
-pub fn build_zellij_command(plan: &ZellijSpawn) -> Command {
+pub fn build_zellij_command(plan: &ZellijInvocation) -> Command {
     let mut c = Command::new("zellij");
     c.arg("-s").arg(&plan.session);
     if let Some(p) = &plan.layout {
@@ -88,7 +88,7 @@ pub fn build_zellij_command(plan: &ZellijSpawn) -> Command {
 /// `Command::status()` blocks until the dispatch acks and returns.
 ///
 /// Mirrors the argv shape used by `crates/mux/zellij/src/mux.rs:266`.
-pub fn build_switch_session_command(plan: &ZellijSpawn) -> Command {
+pub fn build_switch_session_command(plan: &ZellijInvocation) -> Command {
     let mut c = Command::new("zellij");
     c.arg("action").arg("switch-session");
     if let Some(p) = &plan.layout {

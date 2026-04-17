@@ -51,17 +51,11 @@ pane name="tests" {
 
 ## Path pass-through
 
-`--layout` accepts both stems and absolute / relative paths:
-
-```bash
-ark spawn --layout focused
-ark spawn --layout ~/.config/ark/layouts/myreview.kdl
-ark spawn --layout ./local-experiment.kdl
-```
-
-When a path is given it is used verbatim after templating. The path
-**must end in `.kdl`** — zellij issue [#4994][zellij-4994] silently
-ignores other extensions when invoked with `--layout`.
+Layout resolution is driven by the scene file's `layout { … }` block,
+not a CLI flag. The scene compiler emits a KDL layout file and hands
+zellij the rendered path. A path in a scene reference **must end in
+`.kdl`** — zellij issue [#4994][zellij-4994] silently ignores other
+extensions when invoked with `--layout`.
 
 ## Shadowing shipped layouts
 

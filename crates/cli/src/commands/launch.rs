@@ -25,7 +25,7 @@ use ark_scene::view::{RenderMode, ViewMeta, ViewRegistry, ViewSource};
 use ark_types::{AgentId, AgentSpec, StateLayout};
 
 use crate::commands::session::{
-    LayoutResolution, ZellijSpawn, build_switch_session_command, build_zellij_command,
+    LayoutResolution, ZellijInvocation, build_switch_session_command, build_zellij_command,
     inside_zellij, require_zellij_on_path, resolve_layout_source,
 };
 use crate::ctx::Ctx;
@@ -38,8 +38,8 @@ fn is_scene_path(value: &str) -> bool {
     value.contains('/') || value.ends_with(".kdl")
 }
 
-/// Resolve scene to a file path on disk using the same five-rung
-/// precedence as `ark spawn`:
+/// Resolve scene to a file path on disk using the five-rung
+/// precedence chain:
 ///
 /// 1. `--scene` flag (name → `config_dir/scenes/<name>.kdl`; path → verbatim)
 /// 2. `ARK_SCENE` env var
@@ -297,7 +297,7 @@ pub fn run(
         }
     }
 
-    let plan = ZellijSpawn {
+    let plan = ZellijInvocation {
         session: session.clone(),
         layout: layout_path.map(|p| p.display().to_string()),
     };

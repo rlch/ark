@@ -80,25 +80,26 @@ It checks for `zellij`, `delta`, and the wasm plugins, and offers to
 install anything missing — see `context/kits/cavekit-distribution.md`
 for the exact flow.
 
-### Spawning an agent
+### Launching a session
 
-`ark spawn` works from either a bare shell or from inside a zellij
-session:
+Bare `ark` launches the default session — the one resolved through the
+scene precedence chain (CLI flag → `ARK_SCENE` → `./.ark/scene.kdl` →
+XDG default → built-in):
 
 ```sh
-# From a bare shell — ark allocates a pty, zellij forks its daemon,
-# and returns control to your shell. Attach with `zellij attach` or
-# via any other zellij client.
-ark spawn -- claude
+# From a bare shell — allocates a pty, zellij forks its daemon, and
+# returns control to your shell once the session is up.
+ark
 
-# From inside zellij — ark dispatches `zellij action switch-session`
-# over the existing socket, so your client is moved into the new
-# session (no client nesting).
-ark spawn -- claude
+# Launch with a named scene (resolves under
+# $ARK_CONFIG_DIR/scenes/<name>.kdl) or an explicit path.
+ark --scene myproject
+ark --scene ./scenes/review.kdl
 
-# Foreground mode (either context) — stdio inherited, Ctrl+P, D to
-# detach and return control.
-ark spawn --no-detach -- claude
+# Attach-or-create a named zellij session. Outside zellij this creates
+# the session; inside zellij it dispatches `switch-session` over the
+# existing socket (no client nesting).
+ark --session work
 ```
 
 ## Release maintainer bootstrap (one-time)

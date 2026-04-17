@@ -36,7 +36,7 @@
 //! hand-rolled accordingly. Do not pull those crates in to "clean up" the
 //! implementation — the wasm size budget depends on it.
 
-use crate::state::{AgentSummary, ListState, PickerCache, ResurrectPromptState, ResurrectReason};
+use crate::state::{AgentSummary, ListState, PickerCache};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 
 /// Actions the list screen can emit in response to a key press.
@@ -51,11 +51,6 @@ pub enum PickerAction {
     OpenSession(String),
     /// User pressed `Del` on an active agent; open the kill modal.
     ConfirmKill(String),
-    /// User pressed `r` on a resurrectable agent; exec `ark spawn` with
-    /// the archived spec.
-    Resurrect(String),
-    /// `Ctrl+N` or `N`: open the new-agent form.
-    NewAgent,
     /// `?`: open the help overlay.
     OpenHelp,
     /// `?` / `Esc` on the help overlay: return to the list screen.
@@ -77,13 +72,6 @@ pub enum PickerAction {
     ExpandDetail(String),
     /// Left / Tab / Esc on the detail screen: collapse back to the list.
     CollapseDetail,
-    /// Enter on the new-agent form — the wasm layer materialises the argv
-    /// via [`crate::render_new_agent::build_spawn_argv`] and fires
-    /// `run_command` as a detached subprocess (T-104).
-    SubmitNewAgent,
-    /// Esc on the new-agent form — transition back to the list without
-    /// spawning anything.
-    CancelNewAgent,
     /// User confirmed kill in the W4 modal. `keep_worktree` distinguishes
     /// the lowercase-`y` (keep) vs uppercase-`Y` (wipe) variants the R7
     /// wireframe calls out.
@@ -117,14 +105,6 @@ pub enum PickerAction {
     /// User pressed `Ctrl+R` on a live agent; open the rename prompt
     /// focused on that id.
     OpenRenamePrompt(String),
-    /// User pressed `Enter` on a resurrectable (crashed) or terminal-phase
-    /// (Done/Failed/Killed/Timeout) agent; open the R8 resurrect prompt.
-    /// The lib.rs dispatcher constructs the [`ResurrectPromptState`] from
-    /// this id + the cache before transitioning screens.
-    OpenResurrectPrompt(String),
-    /// User cancelled the resurrect prompt (`n` / Esc). Transition back
-    /// to the list without spawning anything.
-    CancelResurrect,
     /// Key ignored (no matching action).
     None,
 }
@@ -153,11 +133,6 @@ pub enum KeyInput {
     /// isn't bound elsewhere). Appended to the filter verbatim unless
     /// matched by a dedicated action below.
     Char(char),
-    /// `Ctrl+N` — open new-agent form. (`N` by itself also maps to this.)
-    CtrlN,
-    /// `Ctrl+F` — on the new-agent form's Cwd field, opens the filepicker
-    /// overlay (T-104 STUB: sets `NewAgentState::open_filepicker = true`).
-    CtrlF,
     /// `Ctrl+R` — on the list screen, opens the rename prompt for the
     /// currently selected live agent (T-105 R7).
     CtrlR,
@@ -212,7 +187,7 @@ pub fn build_header(active: usize, resurrectable: usize) -> String {
 /// R4: footer hints. Kept as one line so width-aware render can drop it
 /// gracefully in narrow terminals if needed (T-103 problem, not ours).
 pub fn build_footer() -> String {
-    "Enter: open │ N: new │ Del: kill │ r: resurrect │ ?: help │ Esc: close".to_string()
+    "Enter: open │ Del: kill │ ?: help │ Esc: close".to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -511,7 +486,9 @@ pub fn handle_list_key(state: &mut ListState, cache: &PickerCache, key: KeyInput
                 return PickerAction::None;
             }
             KeyInput::Char(c) if !c.is_control() => {
-                return append_to_filter(state, c);
+                state.filter.push(c);
+                state.selected = 0;
+                return PickerAction::FilterChanged;
             }
             KeyInput::Up | KeyInput::K => {
                 crate::state::move_selection_up(state, total);
@@ -558,20 +535,13 @@ pub fn handle_list_key(state: &mut ListState, cache: &PickerCache, key: KeyInput
         KeyInput::Question => PickerAction::OpenHelp,
         KeyInput::ShiftDel => PickerAction::KillAllDoneFailed,
         KeyInput::Enter => match selected_agent(cache, state) {
-            // R8 / T-107: Enter on an active (alive) agent switches
-            // directly to its zellij session. F-601: the wasm dispatcher
-            // passes `summary.session` — the real zellij session id,
+            // T-107: Enter on an active (alive) agent switches directly
+            // to its zellij session. F-601: the wasm dispatcher passes
+            // `summary.session` — the real zellij session id,
             // `ark-{orch}-{name}-{ulid8}` after F-522/F-600. Previously
             // this carried `summary.name` (the bare human label), which
             // named a session that does not exist.
             Some((id, false)) => match cache.active.get(id) {
-                Some(summary) if is_terminal_phase(&summary.phase) => {
-                    // Phase reported Done / Failed / Killed / Timeout —
-                    // the supervisor is technically still alive but the
-                    // agent is finished. Prompt before re-spawning so
-                    // the operator has a chance to back out.
-                    PickerAction::OpenResurrectPrompt(id.to_string())
-                }
                 Some(summary) => {
                     // F-601: fall back to name ONLY when session is empty,
                     // e.g. an older supervisor that pre-dates F-600 never
@@ -588,16 +558,16 @@ pub fn handle_list_key(state: &mut ListState, cache: &PickerCache, key: KeyInput
                 // id so we don't silently drop the keystroke.
                 None => PickerAction::OpenSession(id.to_string()),
             },
-            // R8: Enter on a resurrectable (crashed) agent opens the
-            // "resurrect?" prompt rather than firing the re-spawn
-            // immediately — operators can still cancel with `n`/Esc.
-            Some((id, true)) => PickerAction::OpenResurrectPrompt(id.to_string()),
+            // Enter on a resurrectable (crashed) agent is a no-op in the
+            // list-and-attach-only picker: there is no CLI surface for
+            // spawning arbitrary agents anymore, so crashed rows stay as
+            // read-only markers until the operator clears them manually.
+            Some((_id, true)) => PickerAction::None,
             None => PickerAction::None,
         },
         KeyInput::Delete => match selected_agent(cache, state) {
             Some((id, false)) => PickerAction::ConfirmKill(id.to_string()),
-            // Del on a resurrectable is a no-op; the kit reserves `r`
-            // for that flow. Returning None keeps the handler total.
+            // Del on a resurrectable is a no-op.
             _ => PickerAction::None,
         },
         KeyInput::Backspace => {
@@ -610,11 +580,8 @@ pub fn handle_list_key(state: &mut ListState, cache: &PickerCache, key: KeyInput
                 PickerAction::None
             }
         }
-        KeyInput::CtrlN => PickerAction::NewAgent,
         KeyInput::CtrlR => match selected_agent(cache, state) {
-            // R7: Ctrl+R opens the rename prompt on live agents only —
-            // renaming a crashed agent would race with the supervisor
-            // replay on resurrect.
+            // R7: Ctrl+R opens the rename prompt on live agents only.
             Some((id, false)) => PickerAction::OpenRenamePrompt(id.to_string()),
             _ => PickerAction::None,
         },
@@ -635,7 +602,6 @@ pub fn handle_list_key(state: &mut ListState, cache: &PickerCache, key: KeyInput
                     state.filter_active = true;
                     PickerAction::FilterChanged
                 }
-                'N' => PickerAction::NewAgent,
                 'j' => {
                     crate::state::move_selection_down(state, total);
                     PickerAction::MoveDown
@@ -649,89 +615,26 @@ pub fn handle_list_key(state: &mut ListState, cache: &PickerCache, key: KeyInput
                     _ => PickerAction::None,
                 },
                 'h' => PickerAction::CollapseDetail,
-                'r' => match selected_agent(cache, state) {
-                    Some((id, true)) => PickerAction::Resurrect(id.to_string()),
-                    // `r` on a non-crashed agent is a no-op in non-filter
-                    // mode — press `/` first to type a name containing `r`.
-                    _ => PickerAction::None,
-                },
                 // Any other char is ignored in navigation mode. Press
                 // `/` to enter filter capture.
                 _ => PickerAction::None,
             }
         }
-        // Tab/ShiftTab/CtrlF are meaningful on the detail / new-agent
-        // screens but ignored on the list screen itself.
-        KeyInput::Tab | KeyInput::ShiftTab | KeyInput::CtrlF | KeyInput::Other => {
-            PickerAction::None
-        }
+        // Tab/ShiftTab are meaningful on the detail screen but ignored on
+        // the list screen itself.
+        KeyInput::Tab | KeyInput::ShiftTab | KeyInput::Other => PickerAction::None,
     }
 }
 
-/// Append a char to the filter and reset selection — shared between the
-/// generic-char branch and the `r`-fallback branch above.
-fn append_to_filter(state: &mut ListState, c: char) -> PickerAction {
-    state.filter.push(c);
-    state.selected = 0;
-    PickerAction::FilterChanged
-}
-
-/// Return `true` when `phase` is a terminal state that should trigger the
-/// R8 "spawn a fresh replacement?" branch of the resurrect prompt instead
-/// of a plain session switch.
-///
-/// Matches the four values the kit calls out (`Done`, `Failed`, `Killed`,
-/// `Timeout`) plus their lowercased variants so orchestrators that publish
-/// free-form phase strings still hit the right branch.
+/// Return `true` when `phase` is a terminal state (Done / Failed / Killed /
+/// Timeout). Exposed for the wasm bulk-kill branch (Shift+Del) which
+/// iterates the active cache filtering on terminal phases. Matches the
+/// four values the kit calls out plus their lowercased variants.
 pub fn is_terminal_phase(phase: &str) -> bool {
     matches!(
         phase,
         "Done" | "done" | "Failed" | "failed" | "Killed" | "killed" | "Timeout" | "timeout"
     )
-}
-
-// ---------------------------------------------------------------------------
-// Resurrect prompt (R8)
-// ---------------------------------------------------------------------------
-
-/// Render the R8 resurrect-prompt modal as a short box. Wording differs
-/// between the "crashed — resurrect?" and "is {phase} — spawn a fresh
-/// replacement?" branches so the operator knows which transition they're
-/// about to trigger.
-pub fn render_resurrect_prompt(state: &ResurrectPromptState) -> Vec<String> {
-    let banner = match &state.reason {
-        ResurrectReason::Crashed => {
-            format!("Agent {} crashed — resurrect?", state.agent_name)
-        }
-        ResurrectReason::TerminatedPhase(phase) => {
-            format!(
-                "Agent {} is {} — spawn a fresh replacement?",
-                state.agent_name, phase
-            )
-        }
-    };
-    vec![
-        "┌─ Resurrect ─┐".to_string(),
-        banner,
-        "[y] confirm   [n] cancel".to_string(),
-        "└─────────────┘".to_string(),
-    ]
-}
-
-/// Pure key handler for the R8 resurrect prompt.
-///
-/// Bindings:
-/// * `y` → `Resurrect(agent_id)` — lib.rs reuses the T-106 pipeline.
-/// * `n` / `Esc` → `CancelResurrect` — transition back to the list.
-/// * anything else → `None` (prompt stays visible).
-pub fn handle_resurrect_prompt_key(state: &ResurrectPromptState, key: KeyInput) -> PickerAction {
-    match key {
-        KeyInput::Char('y') | KeyInput::Char('Y') => {
-            PickerAction::Resurrect(state.agent_id.clone())
-        }
-        KeyInput::Char('n') | KeyInput::Esc => PickerAction::CancelResurrect,
-        _ => PickerAction::None,
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1060,25 +963,28 @@ mod tests {
     }
 
     #[test]
-    fn key_enter_on_resurrectable_opens_resurrect_prompt() {
-        // T-107 / R8: Enter on a crashed agent opens the confirm prompt
-        // rather than firing Resurrect immediately.
+    fn key_enter_on_resurrectable_is_noop() {
+        // List-and-attach-only: crashed rows are read-only markers.
+        // There is no CLI surface to spawn arbitrary agents, so Enter
+        // on a resurrectable is a no-op.
         let mut st = ListState::default();
         let c = cache_of(&[], &[("z", "old")]);
         let action = handle_list_key(&mut st, &c, KeyInput::Enter);
-        assert_eq!(action, PickerAction::OpenResurrectPrompt("z".to_string()));
+        assert_eq!(action, PickerAction::None);
     }
 
     #[test]
-    fn key_enter_on_done_phase_opens_resurrect_prompt() {
-        // T-107 / R8: Enter on an agent whose phase is terminal (Done /
-        // Failed / Killed / Timeout) opens the prompt so a fresh
-        // replacement can be spawned on confirm.
+    fn key_enter_on_done_phase_opens_session() {
+        // Agents in terminal phases are still switchable; Enter just
+        // jumps to the session so the operator can inspect final state.
         let mut st = ListState::default();
         let mut c = cache_of(&[("a", "x")], &[]);
         c.active.get_mut("a").unwrap().phase = "Done".into();
         let action = handle_list_key(&mut st, &c, KeyInput::Enter);
-        assert_eq!(action, PickerAction::OpenResurrectPrompt("a".to_string()));
+        assert_eq!(
+            action,
+            PickerAction::OpenSession("ark-cavekit-x-ABCDEFGH".to_string())
+        );
     }
 
     #[test]
@@ -1090,68 +996,6 @@ mod tests {
         assert!(is_terminal_phase("done"));
         assert!(!is_terminal_phase("running"));
         assert!(!is_terminal_phase("stalled"));
-    }
-
-    // --- handle_resurrect_prompt_key --------------------------------------
-
-    fn rprompt_state(reason: ResurrectReason) -> ResurrectPromptState {
-        ResurrectPromptState::new("abc", "auth", reason)
-    }
-
-    #[test]
-    fn resurrect_prompt_y_execs() {
-        let st = rprompt_state(ResurrectReason::Crashed);
-        assert_eq!(
-            handle_resurrect_prompt_key(&st, KeyInput::Char('y')),
-            PickerAction::Resurrect("abc".into())
-        );
-    }
-
-    #[test]
-    fn resurrect_prompt_n_cancels() {
-        let st = rprompt_state(ResurrectReason::Crashed);
-        assert_eq!(
-            handle_resurrect_prompt_key(&st, KeyInput::Char('n')),
-            PickerAction::CancelResurrect
-        );
-    }
-
-    #[test]
-    fn resurrect_prompt_esc_cancels() {
-        let st = rprompt_state(ResurrectReason::Crashed);
-        assert_eq!(
-            handle_resurrect_prompt_key(&st, KeyInput::Esc),
-            PickerAction::CancelResurrect
-        );
-    }
-
-    #[test]
-    fn resurrect_prompt_other_noop() {
-        let st = rprompt_state(ResurrectReason::Crashed);
-        assert_eq!(
-            handle_resurrect_prompt_key(&st, KeyInput::Char('q')),
-            PickerAction::None
-        );
-    }
-
-    #[test]
-    fn render_resurrect_prompt_crashed_variant() {
-        let st = rprompt_state(ResurrectReason::Crashed);
-        let rows = render_resurrect_prompt(&st);
-        let blob = rows.join("\n");
-        assert!(blob.contains("auth"));
-        assert!(blob.contains("crashed"));
-        assert!(blob.contains("resurrect"));
-    }
-
-    #[test]
-    fn render_resurrect_prompt_terminal_phase_variant() {
-        let st = rprompt_state(ResurrectReason::TerminatedPhase("Done".into()));
-        let rows = render_resurrect_prompt(&st);
-        let blob = rows.join("\n");
-        assert!(blob.contains("auth"));
-        assert!(blob.contains("Done"));
-        assert!(blob.contains("fresh replacement"));
     }
 
     #[test]
@@ -1195,26 +1039,6 @@ mod tests {
     }
 
     #[test]
-    fn key_ctrl_n_emits_new_agent() {
-        let mut st = ListState::default();
-        let c = cache_of(&[], &[]);
-        assert_eq!(
-            handle_list_key(&mut st, &c, KeyInput::CtrlN),
-            PickerAction::NewAgent
-        );
-    }
-
-    #[test]
-    fn key_uppercase_n_emits_new_agent() {
-        let mut st = ListState::default();
-        let c = cache_of(&[], &[]);
-        assert_eq!(
-            handle_list_key(&mut st, &c, KeyInput::Char('N')),
-            PickerAction::NewAgent
-        );
-    }
-
-    #[test]
     fn key_question_mark_opens_help() {
         let mut st = ListState::default();
         let c = cache_of(&[], &[]);
@@ -1225,20 +1049,21 @@ mod tests {
     }
 
     #[test]
-    fn key_lowercase_r_on_resurrectable_resurrects() {
-        let mut st = ListState::default();
-        let c = cache_of(&[], &[("z", "old")]);
-        let action = handle_list_key(&mut st, &c, KeyInput::Char('r'));
-        assert_eq!(action, PickerAction::Resurrect("z".to_string()));
-    }
-
-    #[test]
     fn key_lowercase_r_on_active_is_noop_in_nav_mode() {
         let mut st = ListState::default();
         let c = cache_of(&[("a", "alpha")], &[]);
         let action = handle_list_key(&mut st, &c, KeyInput::Char('r'));
         assert_eq!(action, PickerAction::None);
         assert_eq!(st.filter, "");
+    }
+
+    #[test]
+    fn key_lowercase_r_on_resurrectable_is_noop_in_nav_mode() {
+        // List-and-attach-only: `r` no longer resurrects crashed agents.
+        let mut st = ListState::default();
+        let c = cache_of(&[], &[("z", "old")]);
+        let action = handle_list_key(&mut st, &c, KeyInput::Char('r'));
+        assert_eq!(action, PickerAction::None);
     }
 
     #[test]

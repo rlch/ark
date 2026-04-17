@@ -921,7 +921,7 @@ mod tests {
         assert_eq!(truncate(s, 100), "hello world");
         assert_eq!(truncate(s, 5), "hello…");
         // Multi-byte boundary.
-        let emoji = "a".to_string() + &"é".repeat(50);
+        let emoji = format!("a{}", "é".repeat(50));
         let t = truncate(&emoji, 10);
         assert!(t.is_char_boundary(t.len() - "…".len()));
     }

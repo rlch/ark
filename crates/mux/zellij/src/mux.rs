@@ -114,7 +114,7 @@ impl ZellijMux {
     }
 
     /// R6 — fail fast when zellij is absent or too old. Called from
-    /// `ark doctor` and `ark spawn`.
+    /// `ark doctor` and bare-ark launch.
     pub async fn preflight(&self) -> anyhow::Result<()> {
         let output = self.executor.run("zellij", &["--version"]).await.map_err(|e| {
             anyhow!(

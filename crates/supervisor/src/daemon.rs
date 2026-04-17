@@ -8,7 +8,7 @@
 //! Classic POSIX daemon:
 //!
 //! 1. **First fork** — the original parent returns immediately (so the
-//!    calling shell / `ark spawn` CLI can print the agent id and exit).
+//!    bare-ark CLI can print the agent id and exit).
 //! 2. The child calls [`nix::unistd::setsid`] to detach from the
 //!    controlling terminal and become a new session leader.
 //! 3. **Second fork** — the session leader exits so the final grandchild
@@ -33,17 +33,17 @@ use thiserror::Error;
 
 /// Result of a successful [`daemonize`] call.
 ///
-/// The parent branch is returned to the caller that invoked
-/// `ark spawn` — the caller should print the agent id and then
-/// `std::process::exit(0)` so the shell regains control immediately
-/// (cavekit-supervisor R1: "parent `ark spawn` returns promptly <1s").
+/// The parent branch is returned to the bare-ark CLI — the caller
+/// should print the agent id and then `std::process::exit(0)` so the
+/// shell regains control immediately
+/// (cavekit-supervisor R1: "parent CLI returns promptly <1s").
 ///
 /// The daemon branch is returned inside the final grandchild — that's the
 /// long-running supervisor process, with stdio redirected and a tracing
 /// subscriber already installed.
 #[derive(Debug)]
 pub enum DaemonizeOutcome {
-    /// Original `ark spawn` process. Contains the PID of the immediate
+    /// Original CLI (bare-ark) process. Contains the PID of the immediate
     /// child — the session leader that itself will fork once more and
     /// exit. We expose it for observability (logging) only; the actual
     /// supervisor PID is written to `$STATE/agents/{id}/pid` by the
@@ -86,9 +86,9 @@ pub fn daemonize(
 
     // First fork — parent returns, child continues.
     // SAFETY: fork() on a single-threaded program is safe. Callers invoke
-    // `daemonize` from `ark spawn` before any tokio runtime is built, so
-    // we have not yet spawned helper threads. This matches the cavekit
-    // contract: daemonize is the FIRST thing the CLI calls after
+    // `daemonize` from the bare-ark launch path before any tokio runtime is
+    // built, so we have not yet spawned helper threads. This matches the
+    // cavekit contract: daemonize is the FIRST thing the CLI calls after
     // computing the spec.
     match unsafe { fork() }.map_err(DaemonizeError::Fork)? {
         ForkResult::Parent { child } => Ok(DaemonizeOutcome::Parent { child_pid: child }),

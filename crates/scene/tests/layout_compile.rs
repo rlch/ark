@@ -28,6 +28,7 @@ fn shell_pane(handle: &str) -> PaneNode {
         min: None,
         max: None,
         when: None,
+        overlay: None,
         view: ViewRef {
             alias: "shell".to_string(),
             config_block: None,

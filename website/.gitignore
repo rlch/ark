@@ -1,0 +1,4 @@
+node_modules/
+.astro/
+# dist/ is committed (static-site artifact). Remove this line if you
+# migrate to a CI-built deployment.

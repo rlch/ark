@@ -4,8 +4,7 @@
 //! Pure host Rust — the wasm `render` method in [`crate`] calls these
 //! helpers and hands the resulting strings to `Text::new(...)` /
 //! `print_text_with_coordinates`. Mirrors the split already established by
-//! [`crate::render_list`] and [`crate::render_new_agent`] — one module per
-//! screen, all logic host-testable.
+//! [`crate::render_list`] — one module per screen, all logic host-testable.
 //!
 //! # Acceptance criteria mapping (`cavekit-plugin-picker.md` R7)
 //!

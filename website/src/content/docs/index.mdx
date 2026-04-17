@@ -1,0 +1,33 @@
+---
+title: ark
+description: Zellij-native agent orchestration
+template: splash
+hero:
+  tagline: Spawn AI coding agents into dedicated zellij sessions with live diff, git status, and progress panes.
+  actions:
+    - text: Get Started
+      link: /learn/install/
+      icon: right-arrow
+      variant: primary
+    - text: Tour
+      link: /learn/tour/
+    - text: Scene Reference
+      link: /scenes/overview/
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+<CardGrid>
+  <Card title="Scenes" icon="puzzle">
+    Reactive KDL config that declaratively defines your agent's workspace — panes, keybinds, reactions, extensions.
+  </Card>
+  <Card title="Extensions" icon="information">
+    Three delivery modes (compiled-in, subprocess, WASM) sharing one JSON-RPC 2.0 intent protocol.
+  </Card>
+  <Card title="ACP" icon="rocket">
+    First-class Agent Client Protocol support. Any ACP-speaking agent (claude-code, codex, gemini-cli) works out of the box.
+  </Card>
+  <Card title="Hot Reload" icon="rocket">
+    Edit your scene KDL and see changes applied instantly — no respawn, no lost state.
+  </Card>
+</CardGrid>

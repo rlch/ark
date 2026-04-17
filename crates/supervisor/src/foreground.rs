@@ -91,9 +91,8 @@ where
     let dispatch = build_foreground_dispatch(&log_path, StderrSink)?;
 
     // Install as scoped default so the subscriber unwinds cleanly after
-    // run_foreground returns — crucial because the caller (e.g. CLI
-    // `ark spawn --no-detach`) may follow this with other subscribers
-    // or further `run_foreground` calls.
+    // run_foreground returns — crucial because the caller may follow
+    // this with other subscribers or further `run_foreground` calls.
     let _guard = tracing::dispatcher::set_default(&dispatch);
 
     // Drive the closure on a current-thread runtime.

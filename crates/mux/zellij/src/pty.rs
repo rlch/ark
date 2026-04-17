@@ -18,8 +18,6 @@
 //!
 //! This module is the single owner of the pty-zellij pattern. It is
 //! consumed by:
-//! - `crates/cli/src/commands/spawn.rs` — the `ark spawn` outside-
-//!   zellij detach path (F-730).
 //! - `crates/mux/zellij/src/mux.rs` — `ZellijMux::create_tab` for the
 //!   first tab of an outside-zellij session (F-731). Replaced the
 //!   broken `setsid zellij ...` external-binary call.

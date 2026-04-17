@@ -12,7 +12,6 @@
 //! | 3    | `NotFound`       | Agent / resource ID not found             |
 //! | 4    | `OrphanOrDead`   | Orphan or already-dead agent              |
 //! | 5    | `ConfigError`    | Config parse or validation error          |
-//! | 7    | `NotYetWired`    | Subcommand stub not yet implemented       |
 //! | 99   | `Internal`       | Internal / unexpected error               |
 
 /// Exit codes emitted by the `ark` binary.
@@ -34,8 +33,6 @@ pub enum ExitCode {
     OrphanOrDead = 4,
     /// Config parse or validation error (5).
     ConfigError = 5,
-    /// Subcommand stub not yet wired (7).
-    NotYetWired = 7,
     /// Internal / unexpected error (99).
     Internal = 99,
 }
@@ -83,11 +80,6 @@ mod tests {
     }
 
     #[test]
-    fn not_yet_wired_is_seven() {
-        assert_eq!(ExitCode::NotYetWired.code(), 7);
-    }
-
-    #[test]
     fn internal_is_ninety_nine() {
         assert_eq!(ExitCode::Internal.code(), 99);
     }
@@ -101,7 +93,6 @@ mod tests {
             ExitCode::NotFound.code(),
             ExitCode::OrphanOrDead.code(),
             ExitCode::ConfigError.code(),
-            ExitCode::NotYetWired.code(),
             ExitCode::Internal.code(),
         ];
         let expected_len = codes.len();
