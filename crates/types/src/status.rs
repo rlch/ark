@@ -1,46 +1,65 @@
-//! Session status snapshot rolled up from the event stream.
+//! Session status snapshot.
 //!
 //! See cavekit-soul-phase-1-types.md R4. Written atomically to `status.json`.
-//! Phase 1 keeps `AgentStatus` as a thin placeholder; the Soul Phase 1
-//! `SessionStatus` rework + deletion of agent-methodology fields lands in
-//! a later tier. For now this module no longer defines `Phase`, `Outcome`,
-//! `Findings`, or `Severity` — those are deleted outright from core
-//! (cavekit-soul-phase-1-types.md R5).
+//! Per-extension status rollup data lives in `ext_state` under the extension
+//! name. Core writes nothing into those buckets — extensions own their
+//! entries. `Phase`, `Outcome`, `Findings`, and `Severity` are gone entirely
+//! (cavekit-soul-phase-1-types.md R5); methodology concepts re-home inside
+//! extensions in Phase 4.
+
+use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::event::TabHandle;
-use crate::spec::SessionSpec;
+use crate::id::SessionId;
 
-/// Snapshot of a session's state at the time of the most recent event.
+/// Snapshot of a session's state. Persisted to `status.json`.
 ///
-/// Persisted to `status.json` after every event.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentStatus {
-    pub spec: SessionSpec,
-    pub last_event_at: DateTime<Utc>,
-    pub last_event_summary: String,
-    pub tab_handles: Vec<TabHandle>,
-    pub supervisor_pid: u32,
-    pub stalled_since: Option<DateTime<Utc>>,
-    /// Picker-hide flag toggled by the `Forget` control-socket command.
-    #[serde(default)]
-    pub hide: bool,
+/// Fields are deliberately minimal: core tracks only lifecycle timestamps and
+/// the session id. Everything methodology-flavoured (phase, findings, tab
+/// handles, supervisor pid) lives in `ext_state` under the owning extension's
+/// manifest name.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SessionStatus {
+    /// Session identity.
+    pub id: SessionId,
+    /// Wall-clock time the session was launched.
+    pub started_at: DateTime<Utc>,
+    /// Wall-clock time the session terminated, if it has.
+    pub terminated_at: Option<DateTime<Utc>>,
+    /// Per-extension status rollup. `BTreeMap` for deterministic order on
+    /// disk. Core never writes into this map; each extension owns its entry
+    /// under its manifest name.
+    pub ext_state: BTreeMap<String, serde_json::Value>,
 }
 
-impl AgentStatus {
-    /// Initial status for a freshly-spawned session. `last_event_at` is set to
-    /// "now" — the supervisor overwrites it as events arrive.
-    pub fn new(spec: SessionSpec, supervisor_pid: u32) -> Self {
-        Self {
-            spec,
-            last_event_at: Utc::now(),
-            last_event_summary: String::new(),
-            tab_handles: Vec::new(),
-            supervisor_pid,
-            stalled_since: None,
-            hide: false,
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_status_serde_roundtrip() {
+        let mut ext_state = BTreeMap::new();
+        ext_state.insert(
+            "claude-code".to_string(),
+            serde_json::json!({ "phase": "running" }),
+        );
+        ext_state.insert(
+            "acp-client".to_string(),
+            serde_json::json!({ "connected": true }),
+        );
+        let status = SessionStatus {
+            id: SessionId::new("foo"),
+            started_at: Utc::now(),
+            terminated_at: None,
+            ext_state,
+        };
+        let json = serde_json::to_string(&status).expect("ser");
+        let back: SessionStatus = serde_json::from_str(&json).expect("de");
+        assert_eq!(back.id, status.id);
+        assert_eq!(back.started_at, status.started_at);
+        assert_eq!(back.terminated_at, status.terminated_at);
+        assert_eq!(back.ext_state, status.ext_state);
     }
 }

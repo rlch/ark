@@ -19,7 +19,7 @@ pub use permission::{
 pub use scope::{MUX_V1, is_v1_mux};
 pub use spec::SessionSpec;
 pub use state_dir::{StateLayout, StateLayoutError};
-pub use status::AgentStatus;
+pub use status::SessionStatus;
 
 /// Re-export of [`tokio_util::sync::CancellationToken`] for cooperative
 /// cancellation across supervisor / engine / orchestrator tasks.
