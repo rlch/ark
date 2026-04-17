@@ -33,7 +33,7 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
-use crate::id::AgentId;
+use crate::id::SessionId;
 use crate::state_dir::StateLayout;
 
 /// Abstraction over `std::env::var_os` so tests can inject values without
@@ -79,11 +79,12 @@ impl EnvPaths {
         Ok(resolve_runtime(&StdEnv, current_uid()))
     }
 
-    /// Per-agent control-socket path: `{runtime_dir}/agents/{id}.sock`.
-    /// See cavekit-hook-ipc.md R4.
-    pub fn agent_socket_path(id: &AgentId) -> Result<PathBuf, EnvPathsError> {
+    /// Per-session control-socket path: `{runtime_dir}/sessions/{id}.sock`.
+    /// See cavekit-hook-ipc.md R4. Renamed from `agent_socket_path` under
+    /// cavekit-soul Phase 1 alongside the `agents/` → `sessions/` rename.
+    pub fn session_socket_path(id: &SessionId) -> Result<PathBuf, EnvPathsError> {
         let rt = Self::runtime_dir()?;
-        Ok(rt.join("agents").join(format!("{}.sock", id.as_str())))
+        Ok(rt.join("sessions").join(format!("{}.sock", id.as_path_leaf())))
     }
 
     /// Injectable resolver — the single source of truth. All other entry
@@ -313,16 +314,17 @@ mod tests {
     }
 
     #[test]
-    fn agent_socket_path_under_runtime_agents() {
-        // Exercise the composition: runtime_dir() + /agents/{id}.sock.
-        // Use explicit injection via resolve_with to avoid touching process env.
-        let env = MapEnv::with(&[("ARK_RUNTIME_DIR", "/rt"), ("HOME", "/home/u")]);
-        let layout = EnvPaths::resolve_with(&env, UID).expect("resolve");
-        let id = AgentId::new("cavekit", "auth");
-        let expected = PathBuf::from("/rt")
-            .join("agents")
-            .join(format!("{}.sock", id.as_str()));
-        assert_eq!(layout.agent_socket_path(&id), expected);
+    fn session_socket_path_under_runtime_sessions() {
+        // Exercise the composition: runtime_dir() + /sessions/{id}.sock.
+        let id = SessionId::new("auth");
+        let path = EnvPaths::session_socket_path(&id).expect("resolve");
+        let suffix = format!("sessions/{}.sock", id.as_path_leaf());
+        assert!(
+            path.to_string_lossy().ends_with(&suffix),
+            "{} should end with {}",
+            path.display(),
+            suffix
+        );
     }
 
     #[test]

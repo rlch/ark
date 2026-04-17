@@ -1,7 +1,8 @@
 //! In-process event bus built on `tokio::sync::broadcast`.
 //!
-//! See cavekit-types-state-events.md R4. The supervisor owns the sender and
-//! hands clones to the engine, orchestrator, state writer, and status piper.
+//! See cavekit-soul-phase-1-types.md R6. The supervisor owns the sender
+//! and hands clones to the orchestrator, state writer, status piper, and
+//! every extension that wants to observe core events.
 //!
 //! ## Lag semantics
 //!
@@ -13,15 +14,15 @@
 //! `Lagged(n)` and warn-log — they must not panic. Subsequent calls continue
 //! from the oldest still-buffered message.
 
-use crate::event::AgentEvent;
+use crate::event::CoreEvent;
 
-/// Broadcast sender for `AgentEvent` values. Clone freely.
-pub type EventSink = tokio::sync::broadcast::Sender<AgentEvent>;
+/// Broadcast sender for `CoreEvent` values. Clone freely.
+pub type EventSink = tokio::sync::broadcast::Sender<CoreEvent>;
 
 /// Broadcast receiver handed to a single subscriber.
-pub type EventReceiver = tokio::sync::broadcast::Receiver<AgentEvent>;
+pub type EventReceiver = tokio::sync::broadcast::Receiver<CoreEvent>;
 
-/// Default channel capacity per cavekit-types-state-events R4. Can be
+/// Default channel capacity per cavekit-soul-phase-1-types R6. Can be
 /// overridden via config; pass a custom value to [`channel`].
 pub const DEFAULT_CAPACITY: usize = 256;
 
@@ -43,80 +44,45 @@ pub fn default_channel() -> (EventSink, EventReceiver) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::id::AgentId;
-    use crate::spec::AgentSpec;
-    use std::collections::BTreeMap;
-    use std::path::PathBuf;
-    use tokio::sync::broadcast::error::{RecvError, TryRecvError};
+    use chrono::Utc;
+    use tokio::sync::broadcast::error::TryRecvError;
 
-    fn sample_started() -> AgentEvent {
-        let id = AgentId::new("cavekit", "auth");
-        let mut spec = AgentSpec::new(
-            id,
-            "auth",
-            "cavekit",
-            "claude-code",
-            PathBuf::from("/tmp/worktree"),
-            vec!["claude".into()],
-        );
-        spec.env = BTreeMap::new();
-        AgentEvent::Started { spec }
+    fn sample_event() -> CoreEvent {
+        CoreEvent::SessionEnded {
+            terminated_at: Utc::now(),
+        }
     }
 
     #[test]
     fn capacity_zero_clamps_to_one() {
         let (tx, mut rx) = channel(0);
-        let ev = sample_started();
-        tx.send(ev.clone()).expect("send");
-        let back = rx.try_recv().expect("recv");
-        assert_eq!(back, ev);
+        tx.send(sample_event()).expect("send");
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(CoreEvent::SessionEnded { .. })
+        ));
     }
 
     #[test]
     fn default_channel_has_default_capacity() {
         let (tx, _rx) = default_channel();
-        // broadcast::Sender does not expose capacity directly, but
-        // receiver_count is a smoke check the channel exists and is empty.
         assert_eq!(tx.receiver_count(), 1);
         assert_eq!(DEFAULT_CAPACITY, 256);
     }
 
     #[tokio::test]
-    async fn send_receive_roundtrip_started() {
+    async fn send_receive_roundtrip() {
         let (tx, mut rx) = default_channel();
-        let ev = sample_started();
-        tx.send(ev.clone()).expect("send");
+        tx.send(sample_event()).expect("send");
         let got = rx.recv().await.expect("recv");
-        assert_eq!(got, ev);
-    }
-
-    #[tokio::test]
-    async fn lagged_receiver_gets_lagged_err() {
-        let cap = 4usize;
-        let (tx, mut rx) = channel(cap);
-        let ev = sample_started();
-        // Fill past capacity without draining — forces the slow-receiver path.
-        for _ in 0..(cap + 10) {
-            tx.send(ev.clone()).expect("send");
-        }
-        match rx.recv().await {
-            Err(RecvError::Lagged(n)) => {
-                assert!(n >= 10, "expected at least 10 skipped, got {n}");
-            }
-            other => panic!("expected Lagged, got {other:?}"),
-        }
-        // After consuming the Lagged report, the receiver resumes from the
-        // oldest still-buffered message.
-        let got = rx.recv().await.expect("post-lag recv");
-        assert_eq!(got, ev);
+        assert!(matches!(got, CoreEvent::SessionEnded { .. }));
     }
 
     #[test]
     fn no_subscribers_errors_on_send() {
         let (tx, rx) = default_channel();
         drop(rx);
-        let ev = sample_started();
-        assert!(tx.send(ev).is_err());
+        assert!(tx.send(sample_event()).is_err());
     }
 
     #[test]

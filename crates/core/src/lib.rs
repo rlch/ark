@@ -23,25 +23,23 @@
 //!   (cavekit-types-state-events.md R6).
 
 pub mod config;
-pub mod consumers;
-pub mod control_socket;
+// Soul phase 1 T-020: consumers / control_socket / engine_contract /
+// orchestrator_contract / events_log / status_writer / socket_paths still
+// reference the deleted AgentEvent/AgentSpec/Phase/Outcome surface and
+// will be rewritten in later tiers (T-021..T-031). Until then, only
+// the minimum surface the new Orchestrator trait + cavekit/claude-code
+// orchestrator crates need is exposed here.
+//
+// pub mod consumers;
+// pub mod control_socket;
 pub mod engine;
-pub mod engine_contract;
-pub mod events_log;
+// pub mod engine_contract;
+// pub mod events_log;
 pub mod orchestrator;
-pub mod orchestrator_contract;
-pub mod socket_paths;
-pub mod status_writer;
+// pub mod orchestrator_contract;
+// pub mod socket_paths;
+// pub mod status_writer;
 
 pub use config::Config;
-pub use consumers::{ReactionDispatcherCtx, reaction_dispatcher, state_writer};
-pub use control_socket::{
-    ControlListener, Response, gc_stale_socket, handle_single_request, unlink_if_exists,
-};
 pub use engine::{ApprovalPolicy, Engine, EngineHandle};
-pub use engine_contract::engine_contract_suite;
-pub use events_log::{EventLogHandle, EventLogReader, EventLogWriter, EventRecord};
 pub use orchestrator::{Orchestrator, World};
-pub use orchestrator_contract::{OrchestratorFixtures, orchestrator_contract_suite};
-pub use socket_paths::{agent_socket_path, ensure_agents_dir, runtime_root};
-pub use status_writer::{read_status, write_status_atomic};
