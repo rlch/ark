@@ -62,7 +62,7 @@ fn compile_minimal_layout() {
     )]);
     let doc = compile_layout_kdl(&layout, &ViewRegistry::with_primitives()).unwrap();
     let text = doc.to_string();
-    KdlDocument::parse_v2(&text).expect("output must re-parse");
+    KdlDocument::parse(&text).expect("output must re-parse");
     assert!(text.contains("layout"));
     assert!(text.contains("tab"));
     assert!(text.contains("ARK_HANDLE=@m"));
@@ -225,7 +225,7 @@ fn write_layout_artifact_roundtrips_through_kdl_parser() {
     let path = write_layout_artifact(&doc, &id).expect("write ok");
     assert!(path.exists());
     let text = std::fs::read_to_string(&path).unwrap();
-    let reparsed = KdlDocument::parse_v2(&text).expect("on-disk KDL must re-parse");
+    let reparsed = KdlDocument::parse(&text).expect("on-disk KDL must re-parse");
     assert!(!reparsed.nodes().is_empty());
 }
 
@@ -249,7 +249,7 @@ fn full_parse_and_compile_from_source() {
             let doc =
                 compile_layout_kdl(l, &ViewRegistry::with_primitives()).expect("compile");
             let text = doc.to_string();
-            KdlDocument::parse_v2(&text).expect("output must re-parse");
+            KdlDocument::parse(&text).expect("output must re-parse");
             assert!(text.contains("tab"));
             // Fallback alias populates ARK_HANDLE via the shell path.
             assert!(text.contains("ARK_HANDLE"));
@@ -289,7 +289,7 @@ fn integer_values_round_trip() {
     let layout = layout_from_ast(vec![tab_with("t", vec![LayoutChild::Pane(pane)])]);
     let doc = compile_layout_kdl(&layout, &ViewRegistry::with_primitives()).unwrap();
     let text = doc.to_string();
-    let parsed = KdlDocument::parse_v2(&text).unwrap();
+    let parsed = KdlDocument::parse(&text).unwrap();
     // Walk and confirm at least one integer entry with value 30.
     let mut saw = false;
     walk_entries(&parsed, &mut |e| {

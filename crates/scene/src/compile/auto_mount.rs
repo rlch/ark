@@ -287,7 +287,7 @@ scene "s" {
         );
         assert!(text.contains("hidden"), "expected mount target: {text}");
         // And the doc still re-parses as valid KDL.
-        KdlDocument::parse_v2(&text).expect("rendered doc must re-parse");
+        KdlDocument::parse(&text).expect("rendered doc must re-parse");
     }
 
     #[test]

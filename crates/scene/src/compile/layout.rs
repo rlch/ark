@@ -44,7 +44,7 @@
 
 use std::path::PathBuf;
 
-use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
+use kdl::{KdlDocument, KdlEntry, KdlEntryFormat, KdlNode, KdlValue};
 use miette::{NamedSource, SourceSpan};
 
 use crate::ast::LayoutNode;
@@ -147,6 +147,12 @@ pub fn compile_layout_kdl_with_terminal(
     layout_node.set_children(layout_body);
     doc.nodes_mut().push(layout_node);
     doc.autoformat();
+    // `autoformat` canonicalises the document to KDL v2 syntax
+    // (`focus=#true`, bare identifier strings). zellij 0.44.1's layout
+    // parser is KDL v1, so we flip the whole tree back to v1 after
+    // autoformatting. This is what actually produces `focus=true` and
+    // `name="shell"` in the emitted file.
+    doc.ensure_v1();
     Ok(doc)
 }
 
@@ -175,12 +181,12 @@ impl<'a> LayoutCompileCtx<'a> {
         // Zellij `name="…"` — use the user-set `name` when provided,
         // otherwise fall back to the bare handle identifier.
         let display_name = tab.name.clone().unwrap_or_else(|| handle.name().to_string());
-        tab_node.push(KdlEntry::new_prop("name", display_name));
+        tab_node.push(str_prop("name", &display_name));
         if let Some(cwd) = &tab.cwd {
-            tab_node.push(KdlEntry::new_prop("cwd", cwd.clone()));
+            tab_node.push(str_prop("cwd", cwd));
         }
         if matches!(tab.focus.as_deref(), Some("true")) {
-            tab_node.push(KdlEntry::new_prop("focus", true));
+            tab_node.push(bool_prop("focus", true));
         }
 
         // Split top-level children into tiled body + overlay list; zellij
@@ -274,7 +280,7 @@ impl<'a> LayoutCompileCtx<'a> {
         out: &mut KdlDocument,
     ) -> Result<(), SceneError> {
         let mut node = KdlNode::new("pane");
-        node.push(KdlEntry::new_prop("split_direction", direction));
+        node.push(str_prop("split_direction", direction));
         push_sizing(
             &mut node,
             SizingInput {
@@ -301,7 +307,7 @@ impl<'a> LayoutCompileCtx<'a> {
         out: &mut KdlDocument,
     ) -> Result<(), SceneError> {
         let mut node = KdlNode::new("pane");
-        node.push(KdlEntry::new_prop("split_direction", "vertical"));
+        node.push(str_prop("split_direction", "vertical"));
         push_sizing(
             &mut node,
             SizingInput {
@@ -336,7 +342,7 @@ impl<'a> LayoutCompileCtx<'a> {
             }
         })?;
         let mut node = KdlNode::new("pane");
-        node.push(KdlEntry::new_prop("name", handle.name().to_string()));
+        node.push(str_prop("name", handle.name()));
         push_sizing(
             &mut node,
             SizingInput {
@@ -369,13 +375,13 @@ impl<'a> LayoutCompileCtx<'a> {
         let (x, y, w, h) = anchor_overlay(pos, size, self.term);
 
         let mut node = KdlNode::new("pane");
-        node.push(KdlEntry::new_prop("name", handle.name().to_string()));
+        node.push(str_prop("name", handle.name()));
         node.push(KdlEntry::new_prop("x", i128::from(x)));
         node.push(KdlEntry::new_prop("y", i128::from(y)));
         node.push(KdlEntry::new_prop("width", i128::from(w)));
         node.push(KdlEntry::new_prop("height", i128::from(h)));
         if matches!(overlay_attrs.sticky.as_deref(), Some("true")) {
-            node.push(KdlEntry::new_prop("pinned", true));
+            node.push(bool_prop("pinned", true));
         }
         self.apply_view(handle, &pane.view, &mut node)?;
         out.nodes_mut().push(node);
@@ -717,7 +723,8 @@ pub struct LayoutArtifact {
 ///
 /// - Sets file mode `0600` + parent dir mode `0700`.
 /// - Validates that the serialised KDL re-parses through
-///   [`KdlDocument::parse_v2`] before returning.
+///   [`KdlDocument::parse`] (v2 + v1 fallback — emitted KDL targets
+///   zellij 0.44.1's KDL v1 parser) before returning.
 pub fn write_layout_artifact(
     kdl: &KdlDocument,
     scene_id: &SceneId,
@@ -742,8 +749,10 @@ pub fn write_layout_artifact_in(
     let text = kdl.to_string();
 
     // Round-trip the text through the parser so a corrupt serializer
-    // can't hand zellij an unparseable file (R3.17).
-    if let Err(e) = KdlDocument::parse_v2(&text) {
+    // can't hand zellij an unparseable file (R3.17). Uses
+    // [`KdlDocument::parse`] (v2 + v1 fallback) because we deliberately
+    // emit KDL v1 syntax for zellij 0.44.1's parser.
+    if let Err(e) = KdlDocument::parse(&text) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("rendered layout KDL does not re-parse: {e}"),
@@ -830,6 +839,36 @@ fn entry_as_string(v: &KdlValue) -> String {
         KdlValue::Bool(b) => b.to_string(),
         KdlValue::Null => String::new(),
     }
+}
+
+/// Build a KDL property with an explicitly-quoted string value.
+/// kdl 6.x (KDL v2) omits quotes for identifier-shaped strings; zellij's
+/// KDL v1 parser rejects unquoted string values. `autoformat_keep` is
+/// set so the forced quoting survives [`KdlDocument::autoformat`].
+fn str_prop(key: &str, value: &str) -> KdlEntry {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    let mut entry = KdlEntry::new_prop(key, KdlValue::String(value.to_string()));
+    entry.set_format(KdlEntryFormat {
+        value_repr: format!("\"{}\"", escaped),
+        leading: " ".into(),
+        autoformat_keep: true,
+        ..Default::default()
+    });
+    entry
+}
+
+/// Build a KDL property with a KDL v1 boolean (`focus=true` not `focus=#true`).
+/// `autoformat_keep` is set so the v1 form survives
+/// [`KdlDocument::autoformat`].
+fn bool_prop(key: &str, value: bool) -> KdlEntry {
+    let mut entry = KdlEntry::new_prop(key, KdlValue::Bool(value));
+    entry.set_format(KdlEntryFormat {
+        value_repr: value.to_string(),
+        leading: " ".into(),
+        autoformat_keep: true,
+        ..Default::default()
+    });
+    entry
 }
 
 // ---------------------------------------------------------------------------
@@ -950,8 +989,9 @@ mod tests {
         };
         let doc = compile_layout_kdl(&layout, &registry()).expect("minimal compile");
         let text = doc.to_string();
-        // Round-trips through the parser.
-        KdlDocument::parse_v2(&text).expect("rendered KDL must re-parse");
+        // Round-trips through the parser (v2 + v1 fallback — output is
+        // KDL v1 for zellij 0.44.1).
+        KdlDocument::parse(&text).expect("rendered KDL must re-parse");
         assert!(text.contains("layout"));
         assert!(text.contains("tab"));
         assert!(text.contains("ARK_HANDLE"));
@@ -1233,7 +1273,7 @@ mod tests {
         let path = write_layout_artifact(&doc, &id).expect("write artifact");
         assert!(path.exists());
         let text = std::fs::read_to_string(&path).unwrap();
-        KdlDocument::parse_v2(&text).expect("on-disk KDL must re-parse");
+        KdlDocument::parse(&text).expect("on-disk KDL must re-parse");
 
         // Parent dir is 0700, file is 0600.
         use std::os::unix::fs::PermissionsExt;
@@ -1273,15 +1313,16 @@ mod tests {
         };
         let doc = compile_layout_kdl(&layout, &registry()).unwrap();
         let text = doc.to_string();
-        // KDL 2.0 autoformat emits bare identifiers where legal and
-        // falls back to quoted strings when the value contains special
-        // chars (`/`, leading digit, etc.). Assertions accept either
-        // form so autoformat tweaks don't break the test.
-        assert!(text.contains("name=Main") || text.contains("name=\"Main\""));
-        assert!(text.contains("cwd=\"/src\"") || text.contains("cwd=/src"));
-        assert!(text.contains("focus=#true"));
-        // And it must round-trip through the parser.
-        KdlDocument::parse_v2(&text).expect("layout must re-parse");
+        // Output is KDL v1 (zellij 0.44.1 parser target). `/` becomes
+        // `\/` in v1 since it's an escaped char in v1 strings.
+        assert!(text.contains("name=\"Main\""), "text = {text}");
+        assert!(
+            text.contains("cwd=\"\\/src\"") || text.contains("cwd=\"/src\""),
+            "text = {text}"
+        );
+        assert!(text.contains("focus=true"), "text = {text}");
+        // And it must round-trip through the parser (v2 + v1 fallback).
+        KdlDocument::parse(&text).expect("layout must re-parse");
     }
 
     // F-0009: overlay attrs wired through PaneNode
@@ -1331,9 +1372,9 @@ mod tests {
         };
         let doc = compile_layout_kdl(&layout, &registry()).unwrap();
         let text = doc.to_string();
-        KdlDocument::parse_v2(&text).expect("overlay layout must re-parse");
+        KdlDocument::parse(&text).expect("overlay layout must re-parse");
         assert!(text.contains("floating_panes"), "must contain floating_panes block: {text}");
-        assert!(text.contains("pinned=#true"), "sticky=true maps to pinned: {text}");
+        assert!(text.contains("pinned=true"), "sticky=true maps to pinned (v1): {text}");
     }
 
     // F-0010: command/args use KDL child nodes, not properties
@@ -1344,7 +1385,7 @@ mod tests {
         };
         let doc = compile_layout_kdl(&layout, &registry()).unwrap();
         let text = doc.to_string();
-        KdlDocument::parse_v2(&text).expect("must re-parse");
+        KdlDocument::parse(&text).expect("must re-parse");
         // Zellij-idiomatic: `command "env"` (or `command env` after
         // autoformat) as a child node — NOT `command="env"` property.
         assert!(
