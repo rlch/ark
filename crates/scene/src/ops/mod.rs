@@ -33,7 +33,6 @@
 //! | `exec`        | always side-effect                   |
 //! | `reload_scene`| noop when no reloader installed      |
 
-pub mod acp;
 pub mod control;
 pub mod messaging;
 pub mod panes;
@@ -68,11 +67,6 @@ pub const CORE_OP_NAMES: &[&str] = &[
     // Control
     "ark.core.exec",
     "ark.core.reload_scene",
-    // ACP (T-105)
-    "ark.acp.prompt",
-    "ark.acp.cancel",
-    "ark.acp.permit",
-    "ark.acp.set_mode",
 ];
 
 /// Register every `ark.core.*` op into `registry`.
@@ -105,11 +99,6 @@ pub fn register_core_ops(registry: &mut IntentRegistry) {
         Arc::new(control::ReloadSceneOp),
     );
 
-    // ACP (T-105)
-    registry.register("ark.acp.prompt", Arc::new(acp::AcpPromptOp));
-    registry.register("ark.acp.cancel", Arc::new(acp::AcpCancelOp));
-    registry.register("ark.acp.permit", Arc::new(acp::AcpPermitOp));
-    registry.register("ark.acp.set_mode", Arc::new(acp::AcpSetModeOp));
 }
 
 #[cfg(test)]
@@ -127,8 +116,8 @@ mod tests {
     fn core_op_names_all_ark_prefixed() {
         for name in CORE_OP_NAMES {
             assert!(
-                name.starts_with("ark.core.") || name.starts_with("ark.acp."),
-                "op {name:?} is not ark.core.* or ark.acp.* prefixed"
+                name.starts_with("ark.core."),
+                "op {name:?} is not ark.core.* prefixed"
             );
         }
     }

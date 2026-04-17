@@ -75,6 +75,5 @@ pub mod resolve_path;
 // T-127 + T-129: scene reload op + re-entry guard.
 pub mod reload;
 // Compatibility shims: v2 supervisor → v3 scene migration.
-pub mod engine_compat;
 pub mod hook_compat;
 pub mod plugin_compat;
