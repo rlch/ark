@@ -32,7 +32,6 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use ark_scene::default_scene::DEFAULT_SCENE_KDL;
-use crate::engine_resolution::EngineLaunch;
 use ark_scene::hook_compat::{HookEntry as SceneHookEntry, extend_registry_with_hooks};
 use ark_scene::id::SceneId;
 use ark_scene::parse::SceneIR;
@@ -91,11 +90,6 @@ pub struct CompiledScene {
     /// Resolved `max-cascade-depth` for this scene (R4). Defaults to
     /// [`DEFAULT_MAX_CASCADE_DEPTH`] when absent.
     pub max_cascade_depth: u32,
-    /// Resolved ACP engine launch spec for this agent
-    /// (T-ACP.4a/4b). `None` when the supervisor didn't thread a
-    /// runtime config through — legacy test paths fall back to
-    /// spawning via the old engine trait.
-    pub engine_launch: Option<EngineLaunch>,
 }
 
 impl CompiledScene {
@@ -175,18 +169,7 @@ pub fn compile_scene_for_runtime(
         scene_id,
         registry: Arc::new(registry),
         max_cascade_depth,
-        engine_launch: None,
     })
-}
-
-impl CompiledScene {
-    /// T-ACP.4a: install a resolved [`EngineLaunch`] on the compiled
-    /// scene. Builder-style so the boot path can chain
-    /// `compile_scene_for_runtime(...).with_engine_launch(launch)`.
-    pub fn with_engine_launch(mut self, launch: EngineLaunch) -> Self {
-        self.engine_launch = Some(launch);
-        self
-    }
 }
 
 /// Load the KDL source for the scene the supervisor should compile.

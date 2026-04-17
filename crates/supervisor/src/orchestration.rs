@@ -216,46 +216,10 @@ pub async fn run_supervisor_with(
         &hook_entries,
     ) {
         Ok(c) => {
-            // T-ACP.4a: resolve the engine launch spec now that we
-            // have a parsed scene. Uses the shipped default config
-            // plus the `--engine` flag we stashed on
-            // `runner_config.acp_engine_flag` in the CLI. Non-fatal:
-            // resolution errors downgrade to a warn + default launch
-            // so legacy (non-ACP) spawns keep booting. T-ACP.5 wires
-            // the actual `AcpClient::spawn` call on top of this.
-            let flag = spec
-                .runner_config
-                .get("acp_engine_flag")
-                .and_then(|v| v.as_str());
-            // Rung 3 needs the resolved `use`s; that's T-ACP.4b wiring
-            // and runs through the scene compile pipeline. For now
-            // pass an empty slice (skips rung 3) and let later tiers
-            // extend this.
-            let cfg = ark_config::schema::Config::defaults();
-            let launch = match crate::engine_resolution::resolve_engine(
-                flag,
-                &c.ir,
-                &cfg,
-                &[],
-            ) {
-                Ok(l) => l,
-                Err(err) => {
-                    warn!(
-                        target: "supervisor::engine_resolution",
-                        error = %err,
-                        "engine resolution failed; falling back to hardcoded default `claude --acp`"
-                    );
-                    crate::engine_resolution::default_engine_launch()
-                }
-            };
-            debug!(
-                target: "supervisor::engine_resolution",
-                name = %launch.name,
-                command = %launch.command,
-                args = ?launch.args,
-                "T-ACP.4a: ACP engine resolved"
-            );
-            let c = c.with_engine_launch(launch);
+            // T-005 (cavekit-soul): the `CompiledScene.engine_launch`
+            // field is gone. Extensions that want to launch agent
+            // subprocesses on scene compile register a scene-compile
+            // hook in Phase 2 and do it themselves.
             debug!(
                 source = %c.source.display(),
                 reactions = c.registry.len(),
