@@ -51,7 +51,8 @@ use crate::ast::LayoutNode;
 use crate::ast::layout::{ColNode, Handle, LayoutChild, PaneNode, RowNode, TabNode, ViewRef};
 use crate::error::SceneError;
 use crate::id::SceneId;
-use crate::view::{RenderMode, ViewRegistry};
+use crate::suggest::format_suggestions;
+use crate::view::{ViewRegistry, resolve_or_suggest};
 
 // ---------------------------------------------------------------------------
 // Terminal size defaults used for overlay anchor math (R3.8–R3.12)
@@ -121,6 +122,18 @@ pub fn compile_layout_kdl_with_terminal(
     registry: &ViewRegistry,
     term: TerminalSize,
 ) -> Result<KdlDocument, SceneError> {
+    // Reject empty layouts — zellij requires at least one tab.
+    // This catches both static empty layouts and post-predicate-filtering
+    // layouts where all tabs were excluded by `when=` guards (F-0012).
+    if layout.tabs.is_empty() {
+        return Err(SceneError::MisplacedNode {
+            node: "layout (empty)".to_string(),
+            parent: "layout contains zero tabs — zellij requires at least one".to_string(),
+            src: NamedSource::new("<layout>", String::new()),
+            span: SourceSpan::new(0.into(), 1),
+        });
+    }
+
     let ctx = LayoutCompileCtx { registry, term };
     let mut doc = KdlDocument::new();
 
@@ -385,23 +398,35 @@ impl<'a> LayoutCompileCtx<'a> {
         // so downstream output remains valid zellij KDL.
         let effective = if alias.is_empty() { "shell" } else { alias };
 
-        let meta = self.registry.resolve(effective);
-        let render_mode = meta.map(|m| m.render_mode.clone());
-
         match effective {
             "shell" => emit_shell(handle, node),
             "command" => emit_command(handle, view, node),
             "edit" => emit_edit(view, node),
             other => {
-                // Unknown views fall back to shell with an ARK_HANDLE
-                // wrapper — this is a stopgap. Real unknown-view
-                // diagnostics surface from the compile-pass in T-031.
-                if render_mode == Some(RenderMode::CommandView) {
-                    emit_shell(handle, node);
-                } else {
-                    // Non-command views — emit a placeholder `plugin`
-                    // entry so the KDL is still structurally valid.
-                    node.push(KdlEntry::new_prop("plugin", other.to_string()));
+                // Validate via the registry; surface UnknownView with
+                // suggestions when the alias is unrecognised (F-0011).
+                match resolve_or_suggest(self.registry, other) {
+                    Ok(meta) => {
+                        use crate::view::RenderMode;
+                        if meta.render_mode == RenderMode::CommandView {
+                            emit_command(handle, view, node);
+                        } else {
+                            emit_shell(handle, node);
+                        }
+                    }
+                    Err(suggestions) => {
+                        let names = self.registry.all_names();
+                        let avail = names.join(", ");
+                        let hint = format_suggestions(&suggestions);
+                        return Err(SceneError::UnknownView {
+                            view: other.to_string(),
+                            help: format!(
+                                "Available views: {avail}{hint}"
+                            ),
+                            src: NamedSource::new("<layout>", String::new()),
+                            span: SourceSpan::new(0.into(), 1),
+                        });
+                    }
                 }
             }
         }
@@ -414,10 +439,13 @@ impl<'a> LayoutCompileCtx<'a> {
 // ---------------------------------------------------------------------------
 
 fn emit_shell(handle: &Handle, node: &mut KdlNode) {
-    node.push(KdlEntry::new_prop("command", "env"));
-    let args = KdlValue::String(format!("ARK_HANDLE={}", handle.raw()));
-    let shell = KdlValue::String("$SHELL".to_string());
-    push_args(node, vec![args, shell]);
+    let mut body = KdlDocument::new();
+    push_command_child(&mut body, "env");
+    push_args_child(&mut body, vec![
+        format!("ARK_HANDLE={}", handle.raw()),
+        "$SHELL".to_string(),
+    ]);
+    node.set_children(body);
 }
 
 fn emit_command(handle: &Handle, view: &ViewRef, node: &mut KdlNode) {
@@ -444,16 +472,17 @@ fn emit_command(handle: &Handle, view: &ViewRef, node: &mut KdlNode) {
         }
     }
     // Always emit `command "env"` + ARK_HANDLE prefix (R3 env wrapper).
-    node.push(KdlEntry::new_prop("command", "env"));
-    let mut all_args: Vec<KdlValue> = Vec::new();
-    all_args.push(KdlValue::String(format!("ARK_HANDLE={}", handle.raw())));
+    // Zellij-idiomatic: child nodes `command "env"` / `args "…" "…"`.
+    let mut body = KdlDocument::new();
+    push_command_child(&mut body, "env");
+    let mut all_args: Vec<String> = Vec::new();
+    all_args.push(format!("ARK_HANDLE={}", handle.raw()));
     if !cmd.is_empty() {
-        all_args.push(KdlValue::String(cmd));
+        all_args.push(cmd);
     }
-    for a in user_args {
-        all_args.push(KdlValue::String(a));
-    }
-    push_args(node, all_args);
+    all_args.extend(user_args);
+    push_args_child(&mut body, all_args);
+    node.set_children(body);
 }
 
 fn emit_edit(view: &ViewRef, node: &mut KdlNode) {
@@ -530,18 +559,17 @@ struct RawOverlayAttrs {
     sticky: Option<String>,
 }
 
-/// Poor-man's overlay-attr access: the current AST stores overlay attrs
-/// as a bundle on `SpawnOp`, not on layout-tier `PaneNode`. For Tier 4
-/// we conservatively treat any pane carrying raw `pos=…` / `size=…` /
-/// `sticky=…` properties (populated by T-037's parse hook, not yet
-/// wired) as an overlay candidate. Returns `None` for tiled panes.
-fn pane_overlay_attrs(_pane: &PaneNode) -> Option<RawOverlayAttrs> {
-    // Placeholder: until T-037's parse hook threads overlay attrs onto
-    // the typed PaneNode, we can only detect overlays when the caller
-    // provides them through a yet-to-land accessor. Returning None means
-    // `pane_is_overlay` always says false today, and the tiled path is
-    // taken. Tests exercise overlay math via `anchor_overlay` directly.
-    None
+/// Extract overlay attributes from a [`PaneNode`]. Returns `None` for
+/// tiled panes (no `overlay` field), `Some` for floating overlays
+/// whose `pos` + `size` attributes are threaded onto the AST by
+/// T-037's parse hook.
+fn pane_overlay_attrs(pane: &PaneNode) -> Option<RawOverlayAttrs> {
+    let ov = pane.overlay.as_ref()?;
+    Some(RawOverlayAttrs {
+        pos: ov.pos.clone(),
+        size: ov.size.clone(),
+        sticky: ov.sticky.clone(),
+    })
 }
 
 fn pane_is_overlay(pane: &PaneNode) -> bool {
@@ -773,19 +801,25 @@ fn set_mode(path: &std::path::Path, mode: u32) -> std::io::Result<()> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn push_args(node: &mut KdlNode, args: Vec<KdlValue>) {
-    // Zellij's `pane` node accepts `args` as an array-valued property:
-    // `args "A" "B"`. Upstream `kdl` 6.5 has no multi-valued property
-    // type — we express the list as a positional argument sequence
-    // after the `command` property instead, which zellij also accepts.
-    // Emit as a single property with a value array-approximation: in
-    // KDL 2.0, repeated entries under the same key are illegal, so we
-    // emit `args` as successive positional values. Zellij's layout
-    // parser treats the first positional on a `pane` as the `command`
-    // and subsequent ones as arguments.
-    for v in args {
-        node.push(KdlEntry::new(v));
+/// Emit `command "value"` as a KDL child node — the zellij-idiomatic
+/// shape per `crates/mux/zellij/layouts/*.kdl`.
+fn push_command_child(doc: &mut KdlDocument, value: &str) {
+    let mut cmd = KdlNode::new("command");
+    cmd.push(KdlEntry::new(KdlValue::String(value.to_string())));
+    doc.nodes_mut().push(cmd);
+}
+
+/// Emit `args "a" "b" …` as a KDL child node — the zellij-idiomatic
+/// shape per `crates/mux/zellij/layouts/*.kdl`.
+fn push_args_child(doc: &mut KdlDocument, args: Vec<String>) {
+    if args.is_empty() {
+        return;
     }
+    let mut args_node = KdlNode::new("args");
+    for a in args {
+        args_node.push(KdlEntry::new(KdlValue::String(a)));
+    }
+    doc.nodes_mut().push(args_node);
 }
 
 fn entry_as_string(v: &KdlValue) -> String {
@@ -827,6 +861,7 @@ mod tests {
                 min: None,
                 max: None,
                 when: None,
+                overlay: None,
                 view: ViewRef {
                     alias: "shell".to_string(),
                     config_block: None,
@@ -939,6 +974,7 @@ mod tests {
                         min: None,
                         max: None,
                         when: None,
+                        overlay: None,
                         view: ViewRef {
                             alias: "shell".to_string(),
                             config_block: None,
@@ -974,6 +1010,7 @@ mod tests {
                         min: None,
                         max: None,
                         when: None,
+                        overlay: None,
                         view: ViewRef {
                             alias: "shell".to_string(),
                             config_block: None,
@@ -1010,6 +1047,7 @@ mod tests {
                             min: None,
                             max: None,
                             when: None,
+                            overlay: None,
                             view: ViewRef {
                                 alias: "shell".to_string(),
                                 config_block: None,
@@ -1022,6 +1060,7 @@ mod tests {
                             min: None,
                             max: None,
                             when: None,
+                            overlay: None,
                             view: ViewRef {
                                 alias: "shell".to_string(),
                                 config_block: None,
@@ -1034,6 +1073,7 @@ mod tests {
                             min: None,
                             max: None,
                             when: None,
+                            overlay: None,
                             view: ViewRef {
                                 alias: "shell".to_string(),
                                 config_block: None,
@@ -1072,6 +1112,7 @@ mod tests {
                     min: None,
                     max: None,
                     when: None,
+                    overlay: None,
                     view: ViewRef {
                         alias: "shell".to_string(),
                         config_block: None,
@@ -1101,6 +1142,7 @@ mod tests {
                     min: None,
                     max: None,
                     when: None,
+                    overlay: None,
                     view: ViewRef {
                         alias: "edit".to_string(),
                         config_block: Some(cfg),
@@ -1135,6 +1177,7 @@ mod tests {
                             min: None,
                             max: None,
                             when: None,
+                            overlay: None,
                             view: ViewRef {
                                 alias: "shell".to_string(),
                                 config_block: None,
@@ -1147,6 +1190,7 @@ mod tests {
                             min: None,
                             max: None,
                             when: None,
+                            overlay: None,
                             view: ViewRef {
                                 alias: "shell".to_string(),
                                 config_block: None,
@@ -1219,6 +1263,7 @@ mod tests {
                     min: None,
                     max: None,
                     when: None,
+                    overlay: None,
                     view: ViewRef {
                         alias: "shell".to_string(),
                         config_block: None,
@@ -1237,5 +1282,124 @@ mod tests {
         assert!(text.contains("focus=#true"));
         // And it must round-trip through the parser.
         KdlDocument::parse_v2(&text).expect("layout must re-parse");
+    }
+
+    // F-0009: overlay attrs wired through PaneNode
+    #[test]
+    fn overlay_pane_emits_floating_panes_block() {
+        use crate::ast::layout::OverlayAttrs;
+        let layout = LayoutNode {
+            tabs: vec![TabNode {
+                handle: "@main".to_string(),
+                cwd: None,
+                name: None,
+                focus: None,
+                when: None,
+                body: vec![
+                    LayoutChild::Pane(PaneNode {
+                        handle: "@tiled".to_string(),
+                        span: None,
+                        cells: None,
+                        min: None,
+                        max: None,
+                        when: None,
+                        overlay: None,
+                        view: ViewRef {
+                            alias: "shell".to_string(),
+                            config_block: None,
+                        },
+                    }),
+                    LayoutChild::Pane(PaneNode {
+                        handle: "@float".to_string(),
+                        span: None,
+                        cells: None,
+                        min: None,
+                        max: None,
+                        when: None,
+                        overlay: Some(OverlayAttrs {
+                            pos: "top-right".to_string(),
+                            size: "20x10".to_string(),
+                            sticky: Some("true".to_string()),
+                        }),
+                        view: ViewRef {
+                            alias: "shell".to_string(),
+                            config_block: None,
+                        },
+                    }),
+                ],
+            }],
+        };
+        let doc = compile_layout_kdl(&layout, &registry()).unwrap();
+        let text = doc.to_string();
+        KdlDocument::parse_v2(&text).expect("overlay layout must re-parse");
+        assert!(text.contains("floating_panes"), "must contain floating_panes block: {text}");
+        assert!(text.contains("pinned=#true"), "sticky=true maps to pinned: {text}");
+    }
+
+    // F-0010: command/args use KDL child nodes, not properties
+    #[test]
+    fn command_pane_emits_child_node_args() {
+        let layout = LayoutNode {
+            tabs: vec![tab_with_shell("cmd_test")],
+        };
+        let doc = compile_layout_kdl(&layout, &registry()).unwrap();
+        let text = doc.to_string();
+        KdlDocument::parse_v2(&text).expect("must re-parse");
+        // Zellij-idiomatic: `command "env"` (or `command env` after
+        // autoformat) as a child node — NOT `command="env"` property.
+        assert!(
+            !text.contains("command="),
+            "command must be a child node, not a property: {text}"
+        );
+        // `command env` or `command "env"` — the node name "command"
+        // must appear in the body.
+        assert!(
+            text.contains("command env") || text.contains("command \"env\""),
+            "command child node must be present: {text}"
+        );
+        // `args` as a child node containing ARK_HANDLE.
+        assert!(
+            text.contains("args \"ARK_HANDLE=") || text.contains("args ARK_HANDLE="),
+            "args must be a child node: {text}"
+        );
+    }
+
+    // F-0011: unknown view surfaces SceneError::UnknownView
+    #[test]
+    fn unknown_view_returns_error() {
+        let layout = LayoutNode {
+            tabs: vec![TabNode {
+                handle: "@main".to_string(),
+                cwd: None,
+                name: None,
+                focus: None,
+                when: None,
+                body: vec![LayoutChild::Pane(PaneNode {
+                    handle: "@p".to_string(),
+                    span: None,
+                    cells: None,
+                    min: None,
+                    max: None,
+                    when: None,
+                    overlay: None,
+                    view: ViewRef {
+                        alias: "mystery_view".to_string(),
+                        config_block: None,
+                    },
+                })],
+            }],
+        };
+        let err = compile_layout_kdl(&layout, &registry())
+            .expect_err("unknown view must error");
+        assert!(matches!(err, SceneError::UnknownView { .. }));
+    }
+
+    // F-0012: empty layout rejected
+    #[test]
+    fn empty_layout_rejected() {
+        let layout = LayoutNode { tabs: vec![] };
+        let err = compile_layout_kdl(&layout, &registry())
+            .expect_err("empty layout must error");
+        assert!(matches!(err, SceneError::MisplacedNode { .. }));
     }
 }

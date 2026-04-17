@@ -293,6 +293,14 @@ pub struct PaneNode {
     #[facet(kdl::property, default)]
     pub when: Option<String>,
 
+    /// Overlay attributes when this pane is a floating overlay (R3
+    /// `pane @h overlay pos=… size=… { … }`). `None` for tiled panes.
+    /// Populated by T-037's parse hook; when present, the layout
+    /// compiler emits the pane inside `floating_panes { … }` instead
+    /// of the tiled body.
+    #[facet(opaque, default)]
+    pub overlay: Option<OverlayAttrs>,
+
     /// The view that fills this pane (R6 views). Exactly one view per
     /// pane; zero or multiple view child nodes = compile error (R3).
     /// Defaults to an empty `ViewRef` during facet-kdl deserialization

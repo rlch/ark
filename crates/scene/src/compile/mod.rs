@@ -241,6 +241,24 @@ impl<'a> CompileCtx<'a> {
 
     fn walk_pane(&mut self, pane: &PaneNode, path: &str) -> Result<(), SceneError> {
         self.compile_when(&pane.when, RhaiScope::Spawn, &format!("{path}.when"))?;
+        // Visit view config block for `{Rhai}` interpolation holes (F-0013).
+        // View config string values (e.g. `cmd "{project.root}/bin/run"`)
+        // are interpolated in the spawn scope.
+        if let Some(cfg) = &pane.view.config_block {
+            for node in cfg.nodes().iter() {
+                for (j, entry) in node.entries().iter().enumerate() {
+                    if let ::kdl::KdlValue::String(s) = entry.value() {
+                        if s.contains('{') {
+                            let entry_path = format!(
+                                "{path}.view.{}.entries[{j}]",
+                                node.name().value(),
+                            );
+                            self.compile_interp_str(s, RhaiScope::Spawn, &entry_path)?;
+                        }
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -458,5 +476,108 @@ scene "s" {
         let src = r#"scene "s" { bind "Alt q" { set_status text="x {payload.name}" } }"#;
         let cs = compile(src).expect("bind body should compile");
         assert!(!cs.interps.is_empty());
+    }
+
+    // F-0013: view config Rhai holes are compiled
+    #[test]
+    fn pane_view_config_rhai_holes_compiled() {
+        use crate::ast::layout::{LayoutChild, PaneNode, TabNode, ViewRef};
+        use crate::ast::{LayoutNode, SceneBodyNode, SceneNode};
+        use std::path::PathBuf;
+
+        let cfg_src = r#"cmd "{project.root}/bin/serve""#;
+        let cfg = ::kdl::KdlDocument::parse_v2(cfg_src).unwrap();
+
+        let ir = SceneIR {
+            scene: SceneNode {
+                name: "s".to_string(),
+                max_cascade_depth: None,
+                body: vec![SceneBodyNode::Layout(LayoutNode {
+                    tabs: vec![TabNode {
+                        handle: "@main".to_string(),
+                        cwd: None,
+                        name: None,
+                        focus: None,
+                        when: None,
+                        body: vec![LayoutChild::Pane(PaneNode {
+                            handle: "@p".to_string(),
+                            span: None,
+                            cells: None,
+                            min: None,
+                            max: None,
+                            when: None,
+                            overlay: None,
+                            view: ViewRef {
+                                alias: "command".to_string(),
+                                config_block: Some(cfg),
+                            },
+                        })],
+                    }],
+                })],
+            },
+            path: PathBuf::from("test.kdl"),
+            src: String::new(),
+            id: crate::id::SceneId::new("test.kdl", b"x"),
+            kdl_doc: None,
+        };
+
+        let engine = Engine::new();
+        let cs = compile_scene(&engine, ir).expect("view config holes should compile");
+        assert!(
+            cs.interps.iter().any(|(k, _)| k.contains("view.cmd")),
+            "expected interp for view config cmd hole; got keys: {:?}",
+            cs.interps.iter().map(|(k, _)| k).collect::<Vec<_>>()
+        );
+    }
+
+    // F-0013: literal view config values with no holes are not collected
+    #[test]
+    fn pane_view_config_literal_not_collected() {
+        use crate::ast::layout::{LayoutChild, PaneNode, TabNode, ViewRef};
+        use crate::ast::{LayoutNode, SceneBodyNode, SceneNode};
+        use std::path::PathBuf;
+
+        let cfg_src = r#"cmd "/usr/bin/htop""#;
+        let cfg = ::kdl::KdlDocument::parse_v2(cfg_src).unwrap();
+
+        let ir = SceneIR {
+            scene: SceneNode {
+                name: "s".to_string(),
+                max_cascade_depth: None,
+                body: vec![SceneBodyNode::Layout(LayoutNode {
+                    tabs: vec![TabNode {
+                        handle: "@main".to_string(),
+                        cwd: None,
+                        name: None,
+                        focus: None,
+                        when: None,
+                        body: vec![LayoutChild::Pane(PaneNode {
+                            handle: "@p".to_string(),
+                            span: None,
+                            cells: None,
+                            min: None,
+                            max: None,
+                            when: None,
+                            overlay: None,
+                            view: ViewRef {
+                                alias: "command".to_string(),
+                                config_block: Some(cfg),
+                            },
+                        })],
+                    }],
+                })],
+            },
+            path: PathBuf::from("test.kdl"),
+            src: String::new(),
+            id: crate::id::SceneId::new("test.kdl", b"x"),
+            kdl_doc: None,
+        };
+
+        let engine = Engine::new();
+        let cs = compile_scene(&engine, ir).expect("literal view config should compile");
+        assert!(
+            cs.interps.is_empty(),
+            "literal-only config values should not produce interps"
+        );
     }
 }

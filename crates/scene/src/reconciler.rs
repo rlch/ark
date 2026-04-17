@@ -629,6 +629,7 @@ impl Reconciler {
                     min: pane.min,
                     max: pane.max,
                     when: None,
+                    overlay: pane.overlay.clone(),
                     view: pane.view.clone(),
                 }))
             }
