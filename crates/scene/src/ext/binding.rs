@@ -151,6 +151,8 @@ mod tests {
                 .collect(),
             config: ConfigSchema::default(),
             capabilities: CapabilitySet::from_strs(caps),
+            config_sections: vec![],
+            reload_gates: vec![],
         }
     }
 

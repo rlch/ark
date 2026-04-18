@@ -332,6 +332,7 @@ dependencies = [
 name = "ark-ext-proto"
 version = "0.1.0"
 dependencies = [
+ "ark-view",
  "async-trait",
  "facet",
  "futures",
@@ -463,6 +464,7 @@ dependencies = [
  "ark-ext-metadata-types",
  "ark-mux-zellij",
  "ark-types",
+ "ark-view",
  "async-trait",
  "blake3",
  "chrono",
@@ -536,6 +538,16 @@ dependencies = [
  "tokio",
  "tokio-util",
  "ulid",
+]
+
+[[package]]
+name = "ark-view"
+version = "0.1.0"
+dependencies = [
+ "facet",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

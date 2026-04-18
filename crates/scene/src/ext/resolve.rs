@@ -163,6 +163,8 @@ mod tests {
             views: vec![],
             config: ConfigSchema::default(),
             capabilities: CapabilitySet::default(),
+            config_sections: vec![],
+            reload_gates: vec![],
         }
     }
 

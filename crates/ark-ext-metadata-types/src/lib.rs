@@ -141,6 +141,22 @@ pub struct ExtensionMetadata {
     /// See [`CapabilitySet`] for the vocabulary and semantics.
     #[facet(kdl::child, default)]
     pub capabilities: CapabilitySet,
+
+    /// Named config sub-sections the extension exposes (cavekit-soul-
+    /// phase-2-ext-surface.md R4). Each section has an independent
+    /// schema, letting the extension partition user-facing config into
+    /// named groups (e.g. `editor`, `telemetry`, `keybindings`) that
+    /// scene consumers address via `use "<ext>" { config { <section>
+    /// { … } } }`.
+    #[facet(kdl::children, default)]
+    pub config_sections: Vec<ConfigSectionDecl>,
+
+    /// Named reload gates the extension registers; queried by ark's
+    /// scene reload machinery before commit (cavekit-soul-phase-2-ext-
+    /// surface.md R4 + host-dispatch R5). A gate refusal aborts the
+    /// reload with the gate's human-readable description.
+    #[facet(kdl::children, default)]
+    pub reload_gates: Vec<ReloadGateDecl>,
 }
 
 /// v0.4 capability vocabulary (T-13.3 in `build-site-scene.md`).
@@ -430,6 +446,56 @@ pub struct ViewDecl {
     pub component: StringNode,
 }
 
+/// Declaration of a named config sub-section exposed by the extension
+/// (cavekit-soul-phase-2-ext-surface.md R4).
+///
+/// The `name` is the scene-facing section key used in
+/// `use "<ext>" { config { <section> { … } } }`. The `schema` carries
+/// a serialized JSON-Schema document describing the section's allowed
+/// keys; sub-kits may later replace this with a facet SHAPE reference
+/// once the reflection-driven config pipeline lands, so authors should
+/// treat the schema as an opaque string at this tier.
+///
+/// Serialised as `section "<name>" { schema "<json>" }`.
+#[derive(Facet, Debug, Clone)]
+pub struct ConfigSectionDecl {
+    /// Section key used by scene's `config.<section>` accessor. Node's
+    /// first positional argument: `section "name" { … }`.
+    #[facet(kdl::argument)]
+    pub name: String,
+
+    /// JSON-Schema describing the section's allowed keys (serialized).
+    /// Same stringification convention as [`IntentDecl::args_schema`]
+    /// and [`EventDecl::payload_schema`].
+    #[facet(kdl::child)]
+    pub schema: StringNode,
+}
+
+/// Declaration of a reload gate the extension contributes (cavekit-
+/// soul-phase-2-ext-surface.md R4 + host-dispatch R5).
+///
+/// Ark queries the gate before committing a scene reload; a refusal
+/// aborts the reload and surfaces the gate's description to the
+/// operator. Extensions receive the gate `name` back in the gate-
+/// invocation RPC so a single extension can route among multiple gates
+/// (e.g. `"unsaved-buffers"`, `"in-flight-agent"`).
+///
+/// Serialised as `gate "<name>" { description "<text>" }`.
+#[derive(Facet, Debug, Clone)]
+pub struct ReloadGateDecl {
+    /// Gate identifier. Node's first positional argument: `gate "name"
+    /// { … }`. Surfaces back to the extension in the gate-invocation
+    /// RPC payload for routing.
+    #[facet(kdl::argument)]
+    pub name: String,
+
+    /// Human-readable description shown in `ark doctor` / reload logs
+    /// when the gate refuses a reload. Child node: `description
+    /// "<text>"`.
+    #[facet(kdl::child)]
+    pub description: StringNode,
+}
+
 /// Declarative config schema for an extension.
 ///
 /// v0.1 shape: flat list of fields, each with a name + type-name +
@@ -634,6 +700,8 @@ mod tests {
             views: vec![],
             config: ConfigSchema::default(),
             capabilities: CapabilitySet::default(),
+            config_sections: vec![],
+            reload_gates: vec![],
         };
         let doc = ExtensionManifest::new(m);
         assert_eq!(doc.extension.name.value, "a");
@@ -668,6 +736,8 @@ mod tests {
                 }],
             },
             capabilities: CapabilitySet::from_strs(&["exec"]),
+            config_sections: vec![],
+            reload_gates: vec![],
         };
         assert_eq!(m.name.value, "demo");
         assert_eq!(m.intents.len(), 1);
@@ -696,6 +766,8 @@ mod tests {
             views: vec![],
             config: ConfigSchema::default(),
             capabilities: CapabilitySet::from_strs(caps),
+            config_sections: vec![],
+            reload_gates: vec![],
         }
     }
 
@@ -858,6 +930,8 @@ mod tests {
             ],
             config: ConfigSchema::default(),
             capabilities: CapabilitySet::default(),
+            config_sections: vec![],
+            reload_gates: vec![],
         };
         assert_eq!(m.views.len(), 2);
         assert_eq!(m.views[0].name, "viewer.main");
@@ -949,6 +1023,8 @@ mod tests {
                 entries: vec![StringNode::new("agent")],
                 agent: Some(agent_cap("acp", "claude", &["--acp"])),
             },
+            config_sections: vec![],
+            reload_gates: vec![],
         };
         let ac = m.agent_capability().unwrap();
         assert_eq!(ac.speaks.value, "acp");

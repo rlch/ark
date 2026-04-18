@@ -320,6 +320,8 @@ mod tests {
                 component: StringNode::new("MainView"),
             }],
             capabilities: CapabilitySet::from_strs(&["exec"]),
+            config_sections: vec![],
+            reload_gates: vec![],
         }
     }
 
@@ -411,6 +413,8 @@ mod tests {
                 views: vec![],
                 config: ConfigSchema::default(),
                 capabilities: CapabilitySet::default(),
+                config_sections: vec![],
+                reload_gates: vec![],
             }
         }
 

@@ -156,6 +156,8 @@ mod tests {
             views: vec![],
             config: ConfigSchema::default(),
             capabilities: CapabilitySet::default(),
+            config_sections: vec![],
+            reload_gates: vec![],
         };
         let kdl = extension_metadata_kdl_string(&meta).unwrap();
         let wasm = wasm_with_metadata(&kdl);
@@ -203,6 +205,8 @@ mod tests {
             views: vec![],
             config: ConfigSchema::default(),
             capabilities: CapabilitySet::default(),
+            config_sections: vec![],
+            reload_gates: vec![],
         };
 
         let kdl_text = extension_metadata_kdl_string(&original).unwrap();

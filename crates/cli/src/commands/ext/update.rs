@@ -662,6 +662,8 @@ extension {{
             views: vec![],
             config: ConfigSchema::default(),
             capabilities: CapabilitySet::from_strs(&["exec", "pipe"]),
+            config_sections: vec![],
+            reload_gates: vec![],
         };
         let got = capabilities_of(&Some(meta));
         assert_eq!(got, vec!["exec".to_string(), "pipe".to_string()]);

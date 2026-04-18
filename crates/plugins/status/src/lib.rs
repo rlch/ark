@@ -94,6 +94,8 @@ pub fn status_metadata() -> ark_ext_metadata::ExtensionMetadata {
         views: vec![],
         config: ConfigSchema::default(),
         capabilities: CapabilitySet::from_strs(&["ui.status-bar"]),
+        config_sections: vec![],
+        reload_gates: vec![],
     }
 }
 
