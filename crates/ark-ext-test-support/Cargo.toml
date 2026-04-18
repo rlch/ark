@@ -1,0 +1,27 @@
+[package]
+name = "ark-ext-test-support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false # test-support crate — never publish
+
+# T-037 (soul phase 2 cavekit-tests R1): stub `ArkExtension` harness used
+# by Phase 2 conformance tests. Crate-level isolation: production crates
+# (ark-supervisor, ark-cli, …) may depend on this ONLY under
+# `[dev-dependencies]`. Not reachable from any release binary.
+
+[dependencies]
+ark-ext-proto = { path = "../ark-ext-proto" }
+ark-ext-metadata-types = { path = "../ark-ext-metadata-types" }
+ark-types = { path = "../types" }
+ark-view = { path = "../ark-view" }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+# Self-tests only — tokio already pulled via `[dependencies]` above.

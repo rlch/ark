@@ -26,6 +26,12 @@ members = [
     # T-089: `#[derive(Extension)]` proc macro — generates
     # `inventory::submit!(ExtensionMeta { … })` from struct attributes.
     "crates/ark-ext-derive",
+    # T-037 (soul phase 2 cavekit-tests R1): stub `ArkExtension` harness
+    # for Phase 2 conformance tests. Crate-level isolation — production
+    # crates (ark-supervisor, ark-cli, …) may depend on this ONLY under
+    # `[dev-dependencies]`, never as a regular dependency. Not reachable
+    # from release binaries.
+    "crates/ark-ext-test-support",
     # T-001 (soul phase 2 cavekit R1): typed `Handle` surface shared by
     # `ark-ext-proto` and `ark-scene`. Sits below both in the DAG; dep
     # budget is `facet` + `serde` + `serde_json` + `thiserror` only.

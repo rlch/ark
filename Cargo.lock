@@ -350,6 +350,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ark-ext-test-support"
+version = "0.1.0"
+dependencies = [
+ "ark-ext-metadata-types",
+ "ark-ext-proto",
+ "ark-types",
+ "ark-view",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "ark-hook"
 version = "0.1.0"
 dependencies = [
