@@ -40,12 +40,20 @@ use miette::{NamedSource, SourceSpan};
 // `use ark_scene::compile::{compile_layout_kdl, compile_modes}`.
 pub mod layout;
 pub mod modes;
+// Tier 6 (soul phase 2) — view-type symbol table + manifest-set blake3
+// hash (T-034). Scene validation queries the table to reject unknown
+// `pane @h { view "..." }` references + stack/pane kind mismatches.
+pub mod view_types;
 
 pub use layout::{
     compile_layout_kdl, compile_layout_kdl_with_terminal, write_layout_artifact,
     write_layout_artifact_in,
 };
 pub use modes::{compile_modes, write_mode_artifacts, write_mode_artifacts_in};
+pub use view_types::{
+    SourceLocation, ViewEntry, ViewTypeError, ViewTypeErrorKind, ViewTypeTable, ViewTypeToken,
+    manifest_set_hash, validate_view_reference,
+};
 
 /// Upper bound on the source length of any single Rhai expression (T-024).
 pub const MAX_EXPR_LEN: usize = 4096;
