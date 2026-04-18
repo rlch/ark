@@ -97,3 +97,21 @@ fn find_registration(type_name: &str) -> Option<&'static ViewRegistration> {
         .into_iter()
         .find(|reg| reg.component == type_name)
 }
+
+/// F-014 regression test: derives on generic targets must preserve
+/// generics via split_for_impl(). `PhantomData<fn() -> T>` gives
+/// Send + Sync regardless of T so the View: Send + Sync + 'static
+/// bound is satisfied without adding bounds on T.
+#[derive(View)]
+#[allow(dead_code)]
+struct Generic<T: 'static>(std::marker::PhantomData<fn() -> T>);
+
+#[test]
+fn derive_view_preserves_generics() {
+    // Compile-gate: presence of this test file in the suite proves the
+    // derive emitted `impl<T: 'static> View for Generic<T>` with T
+    // propagated. If generics were lost, compilation fails with E0107.
+    fn asserts_view<T: ark_view::View>() {}
+    asserts_view::<Generic<String>>();
+    asserts_view::<Generic<u32>>();
+}

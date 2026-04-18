@@ -6,7 +6,11 @@
 //! Generates `inventory::submit!` blocks that register
 //! [`ark_ext_metadata_types::ExtensionMeta`] and
 //! [`ark_ext_metadata_types::ViewRegistration`] values from
-//! `#[extension(…)]` / `#[view(…)]` attributes on structs.
+//! `#[extension(…)]` / `#[ark_view(…)]` attributes on structs.
+//!
+//! Phase 2 (T-025) renamed the old `#[view(…)]` helper to
+//! `#[ark_view(…)]` for namespace consistency with `#[ark_intent(…)]`.
+//! No production users of the old spelling existed at rename time.
 //!
 //! # One crate = one extension
 //!
@@ -150,6 +154,7 @@ fn derive_extension_inner(input: &DeriveInput) -> syn::Result<proc_macro2::Token
     let ark_range = ark_range.unwrap_or_default();
 
     let struct_ident = &input.ident;
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
 
     // T-027: stamp the capability list as a hidden inherent const on
     // the annotated type. The scene compiler / host-dispatch loader
@@ -187,7 +192,7 @@ fn derive_extension_inner(input: &DeriveInput) -> syn::Result<proc_macro2::Token
 
         #[doc(hidden)]
         #[allow(dead_code, non_upper_case_globals)]
-        impl #struct_ident {
+        impl #impl_generics #struct_ident #ty_generics #where_clause {
             /// Capability flags advertised by this extension (T-027).
             ///
             /// Populated from `#[extension(capabilities = "...")]`.
@@ -336,6 +341,7 @@ fn derive_view_inner(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStrea
 
     let component = input.ident.to_string();
     let struct_ident = &input.ident;
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
     // Auto-derive name from struct when `#[ark_view(name = "…")]` omitted.
     // PascalCase → kebab-case (mirrors snake-to-kebab convention used by
     // `#[ark_intent]` for method identifiers, only adapted for struct
@@ -361,7 +367,7 @@ fn derive_view_inner(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStrea
         }
 
         #[automatically_derived]
-        impl ::ark_view::View for #struct_ident {}
+        impl #impl_generics ::ark_view::View for #struct_ident #ty_generics #where_clause {}
     })
 }
 
@@ -403,9 +409,10 @@ fn derive_view_inner(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStrea
 pub fn derive_command_view(input: TokenStream) -> TokenStream {
     let ast = parse_macro_input!(input as DeriveInput);
     let name = &ast.ident;
+    let (impl_generics, ty_generics, where_clause) = ast.generics.split_for_impl();
     quote! {
         #[automatically_derived]
-        impl ::ark_view::CommandView for #name {}
+        impl #impl_generics ::ark_view::CommandView for #name #ty_generics #where_clause {}
     }
     .into()
 }
@@ -430,9 +437,10 @@ pub fn derive_command_view(input: TokenStream) -> TokenStream {
 pub fn derive_zellij_view(input: TokenStream) -> TokenStream {
     let ast = parse_macro_input!(input as DeriveInput);
     let name = &ast.ident;
+    let (impl_generics, ty_generics, where_clause) = ast.generics.split_for_impl();
     quote! {
         #[automatically_derived]
-        impl ::ark_view::ZellijView for #name {}
+        impl #impl_generics ::ark_view::ZellijView for #name #ty_generics #where_clause {}
     }
     .into()
 }
