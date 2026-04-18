@@ -25,3 +25,13 @@ proc-macro = true
 syn = { version = "2", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"
+
+# Integration tests only: `ark-ext-metadata-types` hosts the
+# `ViewRegistration` struct the derive stamps; `inventory` backs the
+# collection the test walks to verify the submitted records. These
+# stay `dev-dependencies` so the proc-macro crate itself carries no
+# runtime deps — the derive emits fully-qualified paths that the
+# expansion site resolves from the downstream crate's deps.
+[dev-dependencies]
+ark-ext-metadata-types = { path = "../ark-ext-metadata-types" }
+inventory = { workspace = true }

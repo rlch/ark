@@ -302,6 +302,8 @@ dependencies = [
 name = "ark-ext-derive"
 version = "0.1.0"
 dependencies = [
+ "ark-ext-metadata-types",
+ "inventory",
  "proc-macro2",
  "quote",
  "syn 2.0.117",

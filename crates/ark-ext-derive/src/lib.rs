@@ -148,32 +148,57 @@ fn extract_str_lit(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Result<String>
 }
 
 // =========================================================================
-// #[derive(View)] — T-090
+// #[derive(View)] — T-025 (phase-2 ext-surface R7)
 // =========================================================================
 
 /// Derive macro that generates `inventory::submit!(ViewRegistration { … })`
-/// from `#[view(…)]` attributes.
+/// from `#[ark_view(…)]` attributes.
 ///
-/// # Required fields
+/// # View name derivation
 ///
-/// - `name` — view identifier used in scene source (e.g. `"edit"`,
-///   `"git-status"`).
+/// By default the struct name is converted from `PascalCase` to
+/// `kebab-case` (e.g. `MyPanel` → `"my-panel"`, `GitStatus` →
+/// `"git-status"`). An explicit name overrides this:
+///
+/// ```ignore
+/// #[derive(View)]
+/// #[ark_view(name = "custom-name")]
+/// struct SomeView;
+/// ```
+///
+/// This mirrors the name-derivation convention used by the
+/// [`macro@ark_intent`] attribute so the extension surface reads the
+/// same whether a developer is writing an intent handler or declaring a
+/// view.
 ///
 /// # Optional fields
 ///
+/// - `name` — view identifier used in scene source. Defaults to the
+///   struct name converted from PascalCase to kebab-case.
 /// - `description` — human-readable description shown in `ark ext info`.
+///
+/// # Kind discriminant
+///
+/// The v1 derive stamps pane-kind views only. `#[derive(CommandView)]`
+/// / `#[derive(ZellijView)]` marker derives (T-026, not yet landed)
+/// will extend `#[derive(View)]` to route a `kind` discriminant through
+/// the submitted record once `ViewRegistration` in
+/// `ark-ext-metadata-types` grows a `kind` field. Until then the
+/// derive submits the existing scalar fields and leaves kind routing
+/// for T-026.
 ///
 /// # Example
 ///
 /// ```ignore
 /// use ark_ext_derive::View;
 ///
+/// // Name auto-derived from struct: "my-panel".
 /// #[derive(View)]
-/// #[view(name = "edit")]
-/// struct EditView;
+/// struct MyPanel;
 ///
+/// // Explicit override.
 /// #[derive(View)]
-/// #[view(name = "git-status", description = "Git status sidebar")]
+/// #[ark_view(name = "git-status", description = "Git status sidebar")]
 /// struct GitStatusView;
 /// ```
 ///
@@ -184,14 +209,14 @@ fn extract_str_lit(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Result<String>
 /// ```ignore
 /// inventory::submit! {
 ///     ark_ext_metadata_types::ViewRegistration {
-///         name: "edit",
-///         component: "EditView",
+///         name: "my-panel",
+///         component: "MyPanel",
 ///         description: "",
 ///         module_path: module_path!(),
 ///     }
 /// }
 /// ```
-#[proc_macro_derive(View, attributes(view))]
+#[proc_macro_derive(View, attributes(ark_view))]
 pub fn derive_view(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     match derive_view_inner(&input) {
@@ -205,9 +230,9 @@ fn derive_view_inner(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStrea
     let mut name: Option<String> = None;
     let mut description: Option<String> = None;
 
-    // Walk `#[view(…)]` attributes on the struct.
+    // Walk `#[ark_view(…)]` attributes on the struct.
     for attr in &input.attrs {
-        if !attr.path().is_ident("view") {
+        if !attr.path().is_ident("ark_view") {
             continue;
         }
         attr.parse_nested_meta(|meta| {
@@ -221,7 +246,7 @@ fn derive_view_inner(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStrea
                 "description" => description = Some(value),
                 other => {
                     return Err(meta.error(format!(
-                        "unknown view attribute `{other}`; \
+                        "unknown ark_view attribute `{other}`; \
                          expected one of: name, description"
                     )));
                 }
@@ -230,22 +255,36 @@ fn derive_view_inner(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStrea
         })?;
     }
 
-    let name = name.ok_or_else(|| {
-        syn::Error::new_spanned(&input.ident, "missing required `name` in #[view(…)]")
-    })?;
-    let description = description.unwrap_or_default();
     let component = input.ident.to_string();
+    // Auto-derive name from struct when `#[ark_view(name = "…")]` omitted.
+    // PascalCase → kebab-case (mirrors snake-to-kebab convention used by
+    // `#[ark_intent]` for method identifiers, only adapted for struct
+    // identifiers that carry uppercase word-boundaries).
+    let view_name = name.unwrap_or_else(|| to_kebab_case(&component));
+    let description = description.unwrap_or_default();
 
     Ok(quote! {
         ::inventory::submit! {
             ::ark_ext_metadata_types::ViewRegistration {
-                name: #name,
+                name: #view_name,
                 component: #component,
                 description: #description,
                 module_path: ::core::module_path!(),
             }
         }
     })
+}
+
+/// Convert a PascalCase identifier to kebab-case.
+///
+/// Shares the word-boundary logic with [`to_snake_case`] and simply
+/// joins with `-` instead of `_`. Examples:
+/// - `MyPanel` → `my-panel`
+/// - `HTTPRequest` → `http-request`
+/// - `GitStatus` → `git-status`
+/// - `A` → `a`
+fn to_kebab_case(s: &str) -> String {
+    to_snake_case(s).replace('_', "-")
 }
 
 // =========================================================================
