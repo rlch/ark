@@ -132,6 +132,14 @@ pub use ext_dispatch::{
 pub mod host_capabilities;
 pub use host_capabilities::{HOST_PHASE_2_CAPABILITIES, host_phase_2_capabilities};
 
+// T-036 / cavekit-soul-phase-2-host-dispatch R9: session-scoped
+// user-close suppression storage. Stores `(SceneHandleName,
+// ParamsHash)` pairs for scene-declared panes the user manually
+// closed; reconciler consults on every tick to decide spawn/skip/
+// evict. Lifetime = supervisor session (restart = empty map).
+pub mod user_close_suppression;
+pub use user_close_suppression::{ClosedByUserMap, SpawnDecision, consult};
+
 // T-030 / cavekit-soul-phase-2-host-dispatch R8: extension load
 // sequence orchestrator. Implements the 7-step pipeline (manifest-read,
 // handshake, validate_capabilities, register_intents, register_views,
