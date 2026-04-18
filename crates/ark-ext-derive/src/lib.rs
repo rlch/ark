@@ -1,5 +1,7 @@
 //! Proc-macro crate for `#[derive(Extension)]` (T-089),
-//! `#[derive(View)]` (T-090), and `#[ark_intent]` (T-092).
+//! `#[derive(View)]` (T-090), `#[derive(CommandView)]` /
+//! `#[derive(ZellijView)]` marker derives (T-026), and
+//! `#[ark_intent]` (T-092).
 //!
 //! Generates `inventory::submit!` blocks that register
 //! [`ark_ext_metadata_types::ExtensionMeta`] and
@@ -69,6 +71,16 @@ use syn::{DeriveInput, Expr, ExprLit, Lit, Token, parse_macro_input};
 /// - `description` — human-readable description shown in `ark ext list`.
 /// - `ark_range` — semver range of supported ark protocol versions
 ///   (e.g. `">=0.1, <1.0"`). Empty string = "no constraint".
+/// - `capabilities` — comma-separated capability-flag list (T-027).
+///   Stamps a hidden `Self::ARK_CAPABILITIES: &'static [&'static str]`
+///   associated constant on the annotated type, which host-dispatch
+///   can surface into the ext's manifest at load time. Example:
+///   `#[extension(name = "…", version = "…", capabilities =
+///   "view.pane.v1,ext.lifecycle.v1")]`. The derive does NOT validate
+///   the flag values — `ark-ext-derive` has no dep on `ark-ext-proto`
+///   by design; the author-maintained `extension.kdl` remains the
+///   authoritative surface, and the derive is a convenience per kit
+///   R7 ("derive is a convenience, not a gate").
 #[proc_macro_derive(Extension, attributes(extension))]
 pub fn derive_extension(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -84,6 +96,8 @@ fn derive_extension_inner(input: &DeriveInput) -> syn::Result<proc_macro2::Token
     let mut version: Option<String> = None;
     let mut description: Option<String> = None;
     let mut ark_range: Option<String> = None;
+    // T-027: capability-flag advertisement. Empty list => no flags.
+    let mut capabilities: Vec<String> = Vec::new();
 
     // Walk `#[extension(…)]` attributes on the struct.
     for attr in &input.attrs {
@@ -95,16 +109,30 @@ fn derive_extension_inner(input: &DeriveInput) -> syn::Result<proc_macro2::Token
                 .path
                 .get_ident()
                 .ok_or_else(|| meta.error("expected identifier"))?;
-            let value = extract_str_lit(&meta)?;
             match ident.to_string().as_str() {
-                "name" => name = Some(value),
-                "version" => version = Some(value),
-                "description" => description = Some(value),
-                "ark_range" => ark_range = Some(value),
+                "name" => name = Some(extract_str_lit(&meta)?),
+                "version" => version = Some(extract_str_lit(&meta)?),
+                "description" => description = Some(extract_str_lit(&meta)?),
+                "ark_range" => ark_range = Some(extract_str_lit(&meta)?),
+                // `capabilities = "flag1,flag2,..."` — comma-separated
+                // list of capability-flag strings (T-027). The derive
+                // doesn't validate the tokens against
+                // `PHASE_2_CAPABILITY_FLAGS` (ark-ext-derive has no dep
+                // on ark-ext-proto by design — extensions in downstream
+                // crates own the taxonomy in their manifests). Empty
+                // entries are filtered. Whitespace is trimmed.
+                "capabilities" => {
+                    let raw = extract_str_lit(&meta)?;
+                    capabilities = raw
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                }
                 other => {
                     return Err(meta.error(format!(
                         "unknown extension attribute `{other}`; \
-                         expected one of: name, version, description, ark_range"
+                         expected one of: name, version, description, ark_range, capabilities"
                     )));
                 }
             }
@@ -121,6 +149,31 @@ fn derive_extension_inner(input: &DeriveInput) -> syn::Result<proc_macro2::Token
     let description = description.unwrap_or_default();
     let ark_range = ark_range.unwrap_or_default();
 
+    let struct_ident = &input.ident;
+
+    // T-027: stamp the capability list as a hidden inherent const on
+    // the annotated type. The scene compiler / host-dispatch loader
+    // (T-030 and beyond) can surface this via type-name lookup. We
+    // avoid submitting into a new `inventory` collection because that
+    // would require adding a record to `ark-ext-metadata-types`, which
+    // this task is not allowed to touch. The const form is a minimal
+    // opt-in: if the author writes
+    // `#[extension(capabilities = "view.pane.v1")]`, the const is
+    // populated; if they omit it, the const holds an empty slice.
+    //
+    // NOTE (R7 caveat): proc macros cannot see sibling `impl` blocks
+    // to auto-detect overridden `ArkExtension` methods. The kit says
+    // "derive is a convenience, not a gate" — the author writes the
+    // flag explicitly in `extension.kdl` (or passes `capabilities =
+    // "..."` here) when auto-detection is impractical. This path
+    // implements the convenience surface; cross-derive inventory
+    // scanning is NOT viable because `inventory::iter` is a runtime
+    // surface, not a macro-expansion one.
+    let cap_literals: Vec<proc_macro2::TokenStream> = capabilities
+        .iter()
+        .map(|c| quote! { #c })
+        .collect();
+
     Ok(quote! {
         ::inventory::submit! {
             ::ark_ext_metadata_types::ExtensionMeta {
@@ -130,6 +183,21 @@ fn derive_extension_inner(input: &DeriveInput) -> syn::Result<proc_macro2::Token
                 ark_range: #ark_range,
                 module_path: ::core::module_path!(),
             }
+        }
+
+        #[doc(hidden)]
+        #[allow(dead_code, non_upper_case_globals)]
+        impl #struct_ident {
+            /// Capability flags advertised by this extension (T-027).
+            ///
+            /// Populated from `#[extension(capabilities = "...")]`.
+            /// Empty slice when the attribute is omitted. Host-dispatch
+            /// reads this to build `ExtensionMetadata.capabilities` at
+            /// load time without requiring the author to maintain
+            /// `extension.kdl` by hand for simple cases.
+            pub const ARK_CAPABILITIES: &'static [&'static str] = &[
+                #( #cap_literals ),*
+            ];
         }
     })
 }
@@ -180,12 +248,23 @@ fn extract_str_lit(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Result<String>
 /// # Kind discriminant
 ///
 /// The v1 derive stamps pane-kind views only. `#[derive(CommandView)]`
-/// / `#[derive(ZellijView)]` marker derives (T-026, not yet landed)
-/// will extend `#[derive(View)]` to route a `kind` discriminant through
-/// the submitted record once `ViewRegistration` in
-/// `ark-ext-metadata-types` grows a `kind` field. Until then the
-/// derive submits the existing scalar fields and leaves kind routing
-/// for T-026.
+/// / `#[derive(ZellijView)]` marker derives (T-026, PATH A — body-less)
+/// emit `impl CommandView for T {}` / `impl ZellijView for T {}`
+/// respectively. They do NOT currently coordinate with
+/// `#[derive(View)]` to stamp a `kind = HandleKind::Pane` discriminant
+/// on the submitted record, because proc macros have no cross-derive
+/// visibility at macro-expansion time. When `ViewRegistration` in
+/// `ark-ext-metadata-types` grows a `kind` field (separate infra
+/// work), the `#[derive(View)]` codegen above can be extended to
+/// accept `#[ark_view(kind = "pane"|"stack")]` and route it through.
+///
+/// # Auto-`impl View`
+///
+/// `#[derive(View)]` also emits `impl ::ark_view::View for T {}` so
+/// the marker derives above (which require the `View` supertrait) can
+/// compose without hand-written impls. If the struct already has a
+/// manual `impl View for T {}` the derive's emitted impl will collide
+/// at compile time — pick one or the other.
 ///
 /// # Example
 ///
@@ -256,6 +335,7 @@ fn derive_view_inner(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStrea
     }
 
     let component = input.ident.to_string();
+    let struct_ident = &input.ident;
     // Auto-derive name from struct when `#[ark_view(name = "…")]` omitted.
     // PascalCase → kebab-case (mirrors snake-to-kebab convention used by
     // `#[ark_intent]` for method identifiers, only adapted for struct
@@ -263,6 +343,13 @@ fn derive_view_inner(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStrea
     let view_name = name.unwrap_or_else(|| to_kebab_case(&component));
     let description = description.unwrap_or_default();
 
+    // Also emit `impl ::ark_view::View for T {}` so the marker derives
+    // (`#[derive(CommandView)]`, `#[derive(ZellijView)]`, and any
+    // downstream refinement trait `X: View`) find their required
+    // `View` supertrait without forcing the author to hand-write it.
+    // This mirrors the convention of the ark-view kit R3 where `View`
+    // is a pure marker — no method bodies to fill, just a type-level
+    // classification.
     Ok(quote! {
         ::inventory::submit! {
             ::ark_ext_metadata_types::ViewRegistration {
@@ -272,7 +359,82 @@ fn derive_view_inner(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStrea
                 module_path: ::core::module_path!(),
             }
         }
+
+        #[automatically_derived]
+        impl ::ark_view::View for #struct_ident {}
     })
+}
+
+// =========================================================================
+// #[derive(CommandView)] / #[derive(ZellijView)] — T-026
+// (phase-2 ext-surface R7)
+// =========================================================================
+
+/// Marker-only derive that emits `impl ark_view::CommandView for T {}`.
+///
+/// # Composition with `#[derive(View)]`
+///
+/// `CommandView: View` — the supertrait bound must be satisfied. The
+/// simplest path is to co-derive `View` and `CommandView` on the same
+/// struct:
+///
+/// ```ignore
+/// use ark_ext_derive::{CommandView, View};
+///
+/// #[derive(View, CommandView)]
+/// struct MyCommand;
+/// ```
+///
+/// `#[derive(View)]` emits `impl ::ark_view::View for T {}`;
+/// `#[derive(CommandView)]` emits `impl ::ark_view::CommandView for T
+/// {}`. Hand-rolled `impl View for T {}` works equally well — the
+/// marker derive only cares that the supertrait is in scope.
+///
+/// # Scope (v1 = PATH A)
+///
+/// Per kit R7 + build-site T-026: this derive is body-less — it does
+/// NOT coordinate with a sibling `#[derive(View)]` to stamp a `kind =
+/// HandleKind::Pane` discriminant, because proc macros run in
+/// isolation per-attribute (no cross-derive visibility at macro time).
+/// When `ViewRegistration` grows a `kind` field (separate infra work)
+/// this derive can be extended — the author can explicitly specify
+/// kind via the existing `#[ark_view(...)]` attribute family.
+#[proc_macro_derive(CommandView)]
+pub fn derive_command_view(input: TokenStream) -> TokenStream {
+    let ast = parse_macro_input!(input as DeriveInput);
+    let name = &ast.ident;
+    quote! {
+        #[automatically_derived]
+        impl ::ark_view::CommandView for #name {}
+    }
+    .into()
+}
+
+/// Marker-only derive that emits `impl ark_view::ZellijView for T {}`.
+///
+/// # Composition with `#[derive(View)]`
+///
+/// `ZellijView: View` — supertrait bound is satisfied by co-deriving
+/// `View` or writing `impl View for T {}` by hand:
+///
+/// ```ignore
+/// use ark_ext_derive::{View, ZellijView};
+///
+/// #[derive(View, ZellijView)]
+/// struct MyPlugin;
+/// ```
+///
+/// See [`macro@CommandView`] for the rationale behind the PATH A
+/// body-less shape.
+#[proc_macro_derive(ZellijView)]
+pub fn derive_zellij_view(input: TokenStream) -> TokenStream {
+    let ast = parse_macro_input!(input as DeriveInput);
+    let name = &ast.ident;
+    quote! {
+        #[automatically_derived]
+        impl ::ark_view::ZellijView for #name {}
+    }
+    .into()
 }
 
 /// Convert a PascalCase identifier to kebab-case.

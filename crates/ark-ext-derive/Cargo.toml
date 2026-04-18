@@ -35,3 +35,9 @@ proc-macro2 = "1"
 [dev-dependencies]
 ark-ext-metadata-types = { path = "../ark-ext-metadata-types" }
 inventory = { workspace = true }
+# T-026: marker derives `#[derive(CommandView)]` / `#[derive(ZellijView)]`
+# expand to `impl ::ark_view::{CommandView,ZellijView} for T {}`.
+# Expansion sites resolve the paths against their own deps — user
+# crates own the runtime dep. Here we only need `ark-view` to compile
+# the fixtures that exercise the derives in-crate.
+ark-view = { path = "../ark-view" }

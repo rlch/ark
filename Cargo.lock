@@ -303,6 +303,7 @@ name = "ark-ext-derive"
 version = "0.1.0"
 dependencies = [
  "ark-ext-metadata-types",
+ "ark-view",
  "inventory",
  "proc-macro2",
  "quote",
