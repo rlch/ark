@@ -6,6 +6,24 @@ last_edited: "2026-04-18"
 
 Append-only. Newest wave on top.
 
+## Wave 3 — Tier 2 + Phase 4 green gate (T-006 + T-007)
+
+- T-006 delete `crates/types/src/permission.rs`; drop `pub mod permission` + the 4-line `pub use permission::{…}` re-export from `crates/types/src/lib.rs` (added a deletion-note comment in place).
+- T-007 green gate:
+  - `cargo check --workspace --tests` → **0 errors** (22 crates post-delete — +1 over Wave 2's 21 because scene's test harness pulls ark-ext-proto explicitly).
+  - `cargo build -p ark-cli` → **0 errors**.
+  - `cargo test --workspace --tests` → **2164 passed / 4 ignored / 0 failed** (69 suites, 34.46s).
+  - `cargo fmt --all -- --check` → **clean**.
+- Final grep audit (crates/):
+  - `ark_hook` = **0**
+  - `ark_orchestrators` = **0**
+  - `CavekitOrchestrator` = **0**
+  - `ClaudeCodeOrchestrator` = **0**
+  - `ark_types::permission` = **0**
+  - `PermissionPolicy|PolicyDecision|READ_ONLY_TOOLS|POLICY_FILE_NAME` = **0**
+- `extensions/` intentionally excluded from grep gate — the salvaged copies live there and are the canonical source-of-truth post-pivot.
+- Packet A COMPLETE. Packet B (T-008..T-012 — factory.rs deletion, `run_supervisor_with` signature simplification, Engine/Orchestrator trait removal) queued next.
+
 ## Wave 2 — Tier 1 (T-003 + T-004 + T-005)
 
 - `crates/orchestrators/cavekit/` + `crates/orchestrators/claude-code/` + `crates/hook/` deleted (`rm -rf`).

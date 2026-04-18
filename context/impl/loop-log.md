@@ -4,6 +4,14 @@ last_edited: "2026-04-19"
 ---
 # Loop Log
 
+### Wave cleanup-A-Tier2 — 2026-04-19 — cavekit-soul cleanup Packet A Tier 2 + Phase 4 green gate (T-006 + T-007) — PACKET A COMPLETE
+
+- T-006 DEL permission.rs. `crates/types/src/permission.rs` gone; `pub mod permission` + 4-line `pub use permission::{…}` dropped from lib.rs; Cargo.toml unchanged. only pre-cleanup consumer was `crates/hook/src/run.rs` (deleted in Wave 2); ext side carries its own re-declared copy per kit non-goals.
+- T-007 GREEN GATE. `cargo check --workspace --tests` = 0 err. `cargo build -p ark-cli` = 0 err. `cargo test --workspace --tests` = 2164 pass / 4 ignored / 0 fail (69 suites, 34.46s — **was 2260 pre-cleanup**; net -96 is the deleted hook + orchestrator contract suites from the removed crates). `cargo fmt --all --check` = clean.
+- FINAL GREP (crates/): ark_hook=0, ark_orchestrators=0, CavekitOrchestrator=0, ClaudeCodeOrchestrator=0, ark_types::permission=0, PermissionPolicy=0, PolicyDecision=0, READ_ONLY_TOOLS=0, POLICY_FILE_NAME=0. extensions/ intentionally excluded (salvage home).
+- commits this packet: `e2fffcd` (Tier 0), `df7206f` (Tier 1), `<pending>` (Tier 2). 7 tasks T-001..T-007 complete.
+- carry-forward for Packet B (T-008..T-012): factory.rs (neutralised but still present) + engine_stub.rs + run_supervisor_with signature + ark-core Engine/Orchestrator trait removal. factory.rs comments still contain `TODO(cleanup-T-008)` markers for the tests + prod fn. NO live code references `CavekitOrchestrator`/`ClaudeCodeOrchestrator`/`ark_hook`/`ark_orchestrators_*` types anywhere in crates/.
+
 ### Wave cleanup-A-Tier1 — 2026-04-19 — cavekit-soul cleanup Packet A Tier 1 (T-003 + T-004 + T-005)
 
 - scope: `crates/orchestrators/` + `crates/hook/` deleted outright. workspace Cargo.toml members trimmed; cli + supervisor dep entries dropped; orchestrators/* glob comment-replaced.

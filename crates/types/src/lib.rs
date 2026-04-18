@@ -2,7 +2,10 @@ pub mod env_paths;
 pub mod event;
 pub mod event_bus;
 pub mod id;
-pub mod permission;
+// Cleanup P4-R7: `permission` module removed — policy types were
+// salvaged to `extensions/claude-code/src/lib.rs` (re-declared locally)
+// per the 2026-04-18 v0.1 pivot. ark-core no longer defines permission
+// policy.
 pub mod scope;
 pub mod spec;
 pub mod state_dir;
@@ -12,10 +15,6 @@ pub use env_paths::{EnvPaths, EnvPathsError};
 pub use event::{CoreEvent, ExitReason, ExtEvent, FlatEvent, LogLevel};
 pub use event_bus::{DEFAULT_CAPACITY, EventReceiver, EventSink, channel, default_channel};
 pub use id::SessionId;
-pub use permission::{
-    POLICY_FILE_NAME, ParsePermissionPolicyError, PermissionPolicy, PolicyDecision,
-    READ_ONLY_TOOLS, decide, read_policy_file, write_policy_file,
-};
 pub use scope::{MUX_V1, is_v1_mux};
 pub use spec::SessionSpec;
 pub use state_dir::{StateLayout, StateLayoutError};
