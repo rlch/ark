@@ -4,6 +4,14 @@ last_edited: "2026-04-18"
 ---
 # Loop Log
 
+### Wave T-040 — 2026-04-18 — Tier 7 (tests R4)
+- T-040 (soul phase 2 tests R4): capability-gate matrix. DONE. 4 cells (3 pass, 1 ignore per decision #4c).
+- New file `crates/supervisor/tests/capability_gate_matrix.rs` (548 LOC). `GatedClient` wrapper: `should_dispatch` gate → `serde_json::to_vec` → trait dispatch; byte-counter `AtomicUsize` tracks serialized output.
+- Cells: (a) advertised+called → stub call-log records; (b) not-advertised → 0 stub calls + 0 bytes; (c) advertised-but-unimplemented → WARN with method+cap, opt-out sticks (second `should_dispatch` = false, no RPC), session lives; (d) removed-in-MAJOR → `#[ignore]` with TODO citing decision #4c.
+- Tracing capture via `tracing-subscriber` Registry + custom Layer with Visit; `target` match on `ark.supervisor.ext_dispatch`.
+- Dev-deps added to `crates/supervisor/Cargo.toml`: `ark-ext-test-support`, `ark-ext-proto`, `ark-view`, `futures` — all `path = "../.."`. Production code untouched; F-015 opt-out path landed T-029.
+- Validation: `cargo test -p ark-supervisor --test capability_gate_matrix` → 3 pass, 1 ignore. `cargo build --workspace` clean.
+
 ### Wave T-039 — 2026-04-18 — Tier 7 (tests R3)
 - T-039 (soul phase 2 tests R3): version-mismatch matrix. DONE. 5 cells all green.
 - New file `crates/ark-ext-test-support/tests/version_mismatch.rs` — drives `ExtensionClient::handshake` against `StubExtension::builder().with_protocol_version(...)` to exercise 5 (client × ext) (MAJOR.MINOR) pairings.

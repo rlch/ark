@@ -55,6 +55,14 @@ kdl = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 ark-mux-zellij = { path = "../mux/zellij", features = ["test-support"] }
+# T-040 (cavekit-soul-phase-2-tests R4): capability-gate matrix exercises
+# `ext_dispatch::should_dispatch` + `warn_advertised_but_unimplemented`
+# using the R1 `StubExtension` fixture. Test-only; never linked into
+# production supervisor binaries.
+ark-ext-test-support = { path = "../ark-ext-test-support" }
+ark-ext-proto = { path = "../ark-ext-proto" }
+ark-view = { path = "../ark-view" }
+futures = { workspace = true }
 
 # Tiny helper binary exercised by the lock + daemon tests. It's a dev-
 # only fixture — kept inside the crate (rather than in tests/) so the

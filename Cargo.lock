@@ -528,6 +528,8 @@ dependencies = [
  "ark-config",
  "ark-core",
  "ark-ext-metadata-types",
+ "ark-ext-proto",
+ "ark-ext-test-support",
  "ark-mux-zellij",
  "ark-orchestrators-cavekit",
  "ark-orchestrators-claude-code",
