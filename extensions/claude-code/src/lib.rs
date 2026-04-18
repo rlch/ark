@@ -57,25 +57,97 @@
 #![deny(missing_docs)]
 
 use ark_ext_proto::{
-    ArkExtension, ExtResult, OnSessionEndRequest, OnSessionEndResponse, OnSessionStartRequest,
-    OnSessionStartResponse,
+    ArkExtension, ControlVerbsRequest, ControlVerbsResponse, ExtResult, OnSessionEndRequest,
+    OnSessionEndResponse, OnSessionStartRequest, OnSessionStartResponse, OpaqueJson,
 };
 use ark_types::{CoreEvent, EventSink};
 use async_trait::async_trait;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 pub mod hook_event;
 pub mod hook_payload;
+pub mod settings_json;
 pub mod socket;
 pub mod transcript;
 
 pub use hook_event::{HookEvent, UnknownHookEvent};
 pub use hook_payload::{EXT_NAME, HookPayload, NdjsonLine, flat_event_name, payload_to_ext_event};
+pub use settings_json::{
+    ARK_MANAGED_KEY, CC_HOOK_BIN_NAME, DEFAULT_SETTINGS_REL_PATH, InstallOutcome, ReconcileOutcome,
+    SettingsFile, SettingsJsonError, cc_hook_install_path, default_settings_path,
+    install_cc_hook_at, install_cc_hook_default,
+};
 pub use socket::{
     BRIDGE_VERSION_MISMATCH_SENTINEL, BridgeVersionMismatch, CRATE_VERSION, CcHookSocket,
     CcHookSocketError, SocketEvent, record_mismatch_sentinel,
 };
 pub use transcript::{TailCursor, TranscriptEvent, TranscriptWatcher, encode_cwd, start_watcher};
+
+/// Basename of the T-020 sentinel file dropped next to the cc-hook
+/// socket when `on_session_start` cannot reconcile `settings.json`.
+/// `ark doctor` (T-042) reads this path directly so the warning
+/// surfaces without a live API into the supervisor.
+pub const SETTINGS_UNWRITABLE_SENTINEL: &str = "claude-code.settings_unwritable.json";
+
+/// On-disk shape of the T-020 settings-unwritable sentinel. Kept flat
+/// so doctor can parse with `serde_json::from_slice` without pulling
+/// this crate.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct SettingsUnwritable {
+    /// Absolute path to the settings.json that could not be written.
+    pub path: std::path::PathBuf,
+    /// Wire error code (mirror of [`SettingsJsonError::code`]).
+    pub code: String,
+    /// Human-readable failure message (stringified source).
+    pub message: String,
+    /// RFC 3339 timestamp at first observation.
+    pub first_seen_at: String,
+}
+
+impl SettingsJsonError {
+    /// Stable wire error code used by the T-020 sentinel + doctor
+    /// rendering.
+    pub fn code(&self) -> &'static str {
+        match self {
+            SettingsJsonError::Read { .. } => "claude-code/settings-read",
+            SettingsJsonError::Parse { .. } => "claude-code/settings-parse",
+            SettingsJsonError::Write { .. } => "claude-code/settings-write",
+        }
+    }
+}
+
+/// Write the T-020 settings-unwritable sentinel under `session_dir`.
+/// Atomic via tmp + rename in the same directory. Errors during the
+/// sentinel write itself are best-effort — a cascading failure here
+/// means doctor loses context but the session still launches.
+pub fn record_settings_unwritable_sentinel(
+    session_dir: &std::path::Path,
+    err: &SettingsJsonError,
+    path: &std::path::Path,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(session_dir)?;
+    let payload = SettingsUnwritable {
+        path: path.to_path_buf(),
+        code: err.code().to_string(),
+        message: err.to_string(),
+        first_seen_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let bytes = serde_json::to_vec_pretty(&payload)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    let final_path = session_dir.join(SETTINGS_UNWRITABLE_SENTINEL);
+    let mut tmp = final_path.clone();
+    let mut name = tmp
+        .file_name()
+        .map(|s| s.to_os_string())
+        .unwrap_or_else(|| std::ffi::OsString::from(SETTINGS_UNWRITABLE_SENTINEL));
+    name.push(".tmp");
+    tmp.set_file_name(name);
+    let _ = std::fs::remove_file(&tmp);
+    std::fs::write(&tmp, &bytes)?;
+    std::fs::rename(&tmp, &final_path)?;
+    Ok(())
+}
 
 /// T-008a stub: embedded `cc-hook` binary bytes for `doctor --fix` to
 /// extract to `$XDG_BIN_HOME/cc-hook` at mode `0755`.
@@ -206,6 +278,23 @@ impl ArkExtension for ClaudeCodeExtension {
         };
 
         let sid = spec.id.clone();
+
+        // T-020 / T-024 scene-use detection. Absence of a dedicated
+        // "declared uses" field on SessionSpec forces a proxy: the
+        // scene compile step writes the ext's config bucket into
+        // `spec.ext_config` for every `use "<ext>"` directive (with or
+        // without a config block). Presence of the `"claude-code"`
+        // key is therefore the canonical signal that the scene
+        // declared `use "claude-code"`. Absent → T-024 path: we do
+        // not bind the socket AND do not touch settings.json.
+        if !spec.ext_config.contains_key(EXT_NAME) {
+            debug!(
+                session = %sid.as_path_leaf(),
+                "claude-code: scene does not declare `use \"claude-code\"`; skipping bind + settings reconciliation"
+            );
+            return Ok(OnSessionStartResponse::default());
+        }
+
         let sock = match socket::CcHookSocket::bind(&layout, &sid).await {
             Ok(s) => s,
             Err(e) => {
@@ -218,6 +307,19 @@ impl ArkExtension for ClaudeCodeExtension {
             session = %sid.as_path_leaf(),
             path = %sock.path().display(),
             "claude-code: cc-hook socket bound"
+        );
+
+        // T-020 + T-021: reconcile `~/.claude/settings.json` to route
+        // all 10 hook kinds at the installed cc-hook binary + this
+        // session's socket path. Any failure is surfaced via a doctor
+        // sentinel — NEVER promoted to a session-fatal error (T-021:
+        // graceful degradation).
+        reconcile_settings_for_session(
+            &sid,
+            sock.path(),
+            sock.session_dir(),
+            /* override_settings_path */ None,
+            /* override_cc_hook_path */ None,
         );
 
         // T-014: if a construction-time `EventSink` was provided,
@@ -266,5 +368,226 @@ impl ArkExtension for ClaudeCodeExtension {
         // tracking; for now the default-ish response is sufficient and
         // correct.
         Ok(OnSessionEndResponse::default())
+    }
+
+    /// T-022 + T-023: advertise the two control verbs this extension
+    /// contributes to `ark control`:
+    ///
+    /// * `install-hooks` — reconcile `~/.claude/settings.json` outside
+    ///   a live session. Uses a placeholder session id + socket path
+    ///   so that cc-hook invocations before ark launches fail-open
+    ///   (T-009). The user runs this to repair drift.
+    /// * `reinstall-hook-binary` — re-extract [`crate::CC_HOOK_BYTES`]
+    ///   to `$XDG_BIN_HOME/cc-hook` with mode `0755`.
+    ///
+    /// # Wiring gap (T-046)
+    ///
+    /// `ControlVerbsResponse.verbs` is `OpaqueJson` — the supervisor
+    /// collects these specs but no end-to-end `ark ext <ext> <verb>`
+    /// CLI dispatcher exists yet (that's Tier 8 / T-046 hot-reload
+    /// surface). For today, the verb handler entry points are
+    /// [`ClaudeCodeExtension::run_install_hooks_verb`] +
+    /// [`ClaudeCodeExtension::run_reinstall_hook_binary_verb`] — the
+    /// CLI can invoke them directly once routing exists. The control
+    /// verb list lives in `ControlVerbsResponse.verbs` as a
+    /// `{"verbs": [{"name", "description", "args"}, …]}` JSON shape
+    /// compatible with the forthcoming VerbSpec pin.
+    async fn control_verbs(&self, _req: ControlVerbsRequest) -> ExtResult<ControlVerbsResponse> {
+        let verbs = serde_json::json!({
+            "verbs": [
+                {
+                    "name": "install-hooks",
+                    "description": "Reconcile ~/.claude/settings.json to route Claude Code hooks through ark.",
+                    "args": [],
+                },
+                {
+                    "name": "reinstall-hook-binary",
+                    "description": "Re-extract the embedded cc-hook binary to $XDG_BIN_HOME/cc-hook (mode 0755).",
+                    "args": [],
+                },
+            ],
+        });
+        // OpaqueJson is a `String` type alias — store the serialised
+        // JSON document (the host decodes on the receive side).
+        let contributions: OpaqueJson =
+            serde_json::to_string(&verbs).unwrap_or_else(|_| "{\"verbs\":[]}".to_string());
+        Ok(ControlVerbsResponse {
+            verbs: contributions,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Control verb handler entry points (T-022, T-023)
+// ---------------------------------------------------------------------------
+
+impl ClaudeCodeExtension {
+    /// T-022: reconcile `~/.claude/settings.json` outside a live
+    /// session. Uses the placeholder session-id `__latest__` and
+    /// `$STATE/sessions/__latest__/cc-hook.sock` as the socket path,
+    /// so cc-hook's fail-open branch (T-009) is the no-op path until a
+    /// real session binds the real socket. Intended to be invoked via
+    /// `ark ext claude-code install-hooks` once the CLI routing lands
+    /// (T-046 gap).
+    ///
+    /// Returns the [`ReconcileOutcome`] so callers can surface
+    /// structured counts to the user.
+    pub fn run_install_hooks_verb(
+        &self,
+        settings_override: Option<&std::path::Path>,
+        cc_hook_override: Option<&std::path::Path>,
+    ) -> Result<ReconcileOutcome, SettingsJsonError> {
+        let settings_path: std::path::PathBuf = match settings_override {
+            Some(p) => p.to_path_buf(),
+            None => match default_settings_path() {
+                Some(p) => p,
+                None => {
+                    return Err(SettingsJsonError::Write {
+                        path: std::path::PathBuf::from(DEFAULT_SETTINGS_REL_PATH),
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            "$HOME unset; cannot resolve ~/.claude/settings.json",
+                        ),
+                    });
+                }
+            },
+        };
+
+        let cc_hook_path = cc_hook_override
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(cc_hook_install_path);
+
+        // Placeholder session id + socket path for no-session-mode.
+        // cc-hook will fail-open against the missing socket until a
+        // real session binds; this matches R1 acceptance criterion
+        // "cc-hook being invoked without a live socket is a no-op".
+        let session_id = "__latest__";
+        let sock_path = std::path::PathBuf::from(format!(
+            "/tmp/ark/sessions/{sid}/cc-hook.sock",
+            sid = session_id
+        ));
+
+        let mut sf = SettingsFile::load(&settings_path)?;
+        let outcome = sf.reconcile_ark_hooks(session_id, &sock_path, &cc_hook_path);
+        match &outcome {
+            ReconcileOutcome::Written { .. } => {
+                sf.save_atomic()?;
+            }
+            ReconcileOutcome::NoChange => {}
+            ReconcileOutcome::Unwritable(_) => {
+                // `reconcile_ark_hooks` never returns Unwritable today
+                // (that variant is reserved for callers who want to
+                // signal upstream IO failure); treat defensively.
+            }
+        }
+        info!(
+            path = %settings_path.display(),
+            outcome = ?outcome,
+            "claude-code: install-hooks reconciliation complete"
+        );
+        Ok(outcome)
+    }
+
+    /// T-023: re-extract [`crate::CC_HOOK_BYTES`] to the resolved
+    /// install path (or the caller-supplied override). Intended to be
+    /// invoked via `ark ext claude-code reinstall-hook-binary`.
+    pub fn run_reinstall_hook_binary_verb(
+        &self,
+        path_override: Option<&std::path::Path>,
+    ) -> InstallOutcome {
+        let target = path_override
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(cc_hook_install_path);
+        install_cc_hook_at(&target)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// T-020 + T-021 helper — reconcile-on-session-start wrapper
+// ---------------------------------------------------------------------------
+
+/// Shared implementation between `on_session_start` and (future)
+/// direct-call callers. Arguments kept explicit so tests can drive it
+/// with synthetic paths.
+///
+/// * `session_id` — path-leaf form suitable for command-line interpolation.
+/// * `socket_path` — absolute path to the bound cc-hook socket.
+/// * `session_dir` — where to drop the [`SETTINGS_UNWRITABLE_SENTINEL`]
+///   on failure.
+/// * `override_settings_path` — test hook to redirect away from
+///   `~/.claude/settings.json`.
+/// * `override_cc_hook_path` — test hook to pin the written binary
+///   path (otherwise [`cc_hook_install_path`]).
+pub fn reconcile_settings_for_session(
+    session_id: &ark_types::SessionId,
+    socket_path: &std::path::Path,
+    session_dir: &std::path::Path,
+    override_settings_path: Option<&std::path::Path>,
+    override_cc_hook_path: Option<&std::path::Path>,
+) {
+    // Resolve settings.json path. Missing $HOME without an explicit
+    // override is effectively "no settings.json in this env" — we
+    // still run the reconciler so the sentinel surfaces the miss
+    // instead of silently dropping reconciliation.
+    let settings_path = match override_settings_path {
+        Some(p) => p.to_path_buf(),
+        None => match default_settings_path() {
+            Some(p) => p,
+            None => {
+                warn!(
+                    "claude-code: $HOME unset; cannot resolve ~/.claude/settings.json; skipping reconciliation"
+                );
+                let err = SettingsJsonError::Write {
+                    path: std::path::PathBuf::from(DEFAULT_SETTINGS_REL_PATH),
+                    source: std::io::Error::new(std::io::ErrorKind::NotFound, "$HOME unset"),
+                };
+                let _ = record_settings_unwritable_sentinel(
+                    session_dir,
+                    &err,
+                    std::path::Path::new(DEFAULT_SETTINGS_REL_PATH),
+                );
+                return;
+            }
+        },
+    };
+
+    let cc_hook_path = override_cc_hook_path
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(cc_hook_install_path);
+
+    let result = (|| -> Result<ReconcileOutcome, SettingsJsonError> {
+        let mut sf = SettingsFile::load(&settings_path)?;
+        let leaf = session_id.as_path_leaf();
+        let outcome = sf.reconcile_ark_hooks(&leaf, socket_path, &cc_hook_path);
+        if matches!(outcome, ReconcileOutcome::Written { .. }) {
+            sf.save_atomic()?;
+        }
+        Ok(outcome)
+    })();
+
+    match result {
+        Ok(outcome) => {
+            debug!(
+                session = %session_id.as_path_leaf(),
+                path = %settings_path.display(),
+                outcome = ?outcome,
+                "claude-code: settings.json reconciled on session start"
+            );
+        }
+        Err(err) => {
+            warn!(
+                session = %session_id.as_path_leaf(),
+                path = %settings_path.display(),
+                error = %err,
+                "claude-code: settings.json reconciliation failed; dropping sentinel for doctor"
+            );
+            if let Err(e) = record_settings_unwritable_sentinel(session_dir, &err, &settings_path) {
+                warn!(
+                    session_dir = %session_dir.display(),
+                    error = %e,
+                    "claude-code: failed to record settings-unwritable sentinel"
+                );
+            }
+        }
     }
 }
