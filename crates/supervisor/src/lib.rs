@@ -119,3 +119,10 @@ pub use ext_dispatch::{
     warn_advertised_but_unimplemented,
 };
 
+// T-029 / cavekit-soul-phase-2-host-dispatch R7: host-declared Phase-2
+// capability slate. Deterministic, sorted, constant at supervisor
+// startup; consumed by the extension load sequence (T-030) when it
+// builds the `InitializeRequest.client_capabilities` payload.
+pub mod host_capabilities;
+pub use host_capabilities::{HOST_PHASE_2_CAPABILITIES, host_phase_2_capabilities};
+

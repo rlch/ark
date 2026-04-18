@@ -263,6 +263,7 @@ dependencies = [
 name = "ark-config"
 version = "0.1.0"
 dependencies = [
+ "ark-ext-metadata-types",
  "ark-types",
  "figment",
  "serde",

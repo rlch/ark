@@ -9,6 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 ark-types = { path = "../types" }
+ark-ext-metadata-types = { path = "../ark-ext-metadata-types" }
 figment = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
