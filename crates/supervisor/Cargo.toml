@@ -11,6 +11,10 @@ rust-version.workspace = true
 ark-types = { path = "../types" }
 ark-core = { path = "../core" }
 ark-config = { path = "../config" }
+# T-030 (cavekit-soul-phase-2-host-dispatch R8): extension load sequence
+# consumes pre-parsed `ExtensionMetadata` values. Types-only crate, no
+# I/O or KDL parsing pulled in.
+ark-ext-metadata-types = { path = "../ark-ext-metadata-types" }
 # T-5.7: hook_dispatcher migration. Supervisor now compiles legacy
 # `[[hooks]]` config into a synthetic ReactionRegistry via
 # `ark_scene::hook_compat`, builds the IntentRegistry + IntentContext

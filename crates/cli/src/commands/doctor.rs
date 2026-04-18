@@ -22,6 +22,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::os::unix::net::UnixStream;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -145,6 +146,124 @@ impl CheckResult {
         self.fix = Some(fix);
         self
     }
+}
+
+// --- T-032: extension check provider surface ---------------------
+//
+// `ark doctor` gathers diagnostic results from two tiers:
+//
+// 1. CORE checks — the existing `CheckResult`-producing suite
+//    (zellij / claude / writability / plugin install / etc.).
+//    Rendered first, grouped as the synthetic `core` group.
+//
+// 2. EXTENSION checks — each loaded extension advertising
+//    `ext.doctor.v1` contributes a flat list of `ExtCheck`
+//    rows via the [`ExtensionCheckProvider`] trait. Collection
+//    is panic-isolated per extension: one ext blowing up must
+//    not mask another ext's checks, and must not crash the
+//    whole `ark doctor` invocation.
+//
+// JSON emission follows cavekit-soul-phase-2-host-dispatch R2:
+// extension rows serialize as `{group, check_id, status,
+// message}` with `status ∈ {"ok","warn","fail","skipped"}`.
+//
+// For v0.1-pre-T-030 no dispatcher is wired; the provider is
+// `None` by default and output matches the pre-Phase-2 behavior
+// exactly. A future task (T-030 follow-up) wires a real
+// provider backed by the supervisor's extension RPC client.
+
+/// Extension-check status (superset of [`Status`] — adds `Skipped`
+/// per kit R2: an extension's subsequent checks may be `Skipped`
+/// when an earlier check panicked, with the panic reason carried
+/// in the message).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CheckStatus {
+    /// Passed.
+    Ok,
+    /// Passed with warning.
+    Warn,
+    /// Failed.
+    Fail,
+    /// Not run (e.g. panic in a sibling check or capability gate).
+    Skipped,
+}
+
+/// One extension-contributed check result.
+///
+/// Serialized JSON shape:
+/// `{"group": "<ext>", "check_id": "<id>", "status": "<ok|warn|fail|skipped>", "message": "<text>"}`
+#[derive(Debug, Clone, Serialize)]
+pub struct ExtCheck {
+    /// Owning extension name (table grouping + JSON `group`).
+    pub group: String,
+    /// Extension-declared check id.
+    pub check_id: String,
+    /// Result status.
+    pub status: CheckStatus,
+    /// Human-readable message.
+    pub message: String,
+}
+
+impl ExtCheck {
+    /// Was this check a hard failure? Aggregation uses this to
+    /// decide whether to surface a non-zero CLI exit.
+    pub fn is_fail(&self) -> bool {
+        matches!(self.status, CheckStatus::Fail)
+    }
+}
+
+/// Trait for collecting extension-contributed doctor checks.
+///
+/// Impls are expected to:
+/// - only query extensions advertising `ext.doctor.v1`
+///   (`supervisor::ext_dispatch::should_dispatch`);
+/// - map any per-extension RPC error / panic into a
+///   `CheckStatus::Skipped` row carrying the failure reason —
+///   this module's runner wraps each call in `catch_unwind` as a
+///   final safety net.
+///
+/// Called exactly once per `run_all_with_provider` invocation.
+pub trait ExtensionCheckProvider {
+    /// Collect all ext checks across all loaded extensions, in
+    /// any order (the aggregator groups + stable-sorts by
+    /// `group`). Returning an empty Vec is the normal zero-ext
+    /// path and produces no output rows.
+    fn collect_checks(&self) -> Vec<ExtCheck>;
+}
+
+/// Run a provider with panic isolation. A panic anywhere in
+/// `collect_checks` is converted into a single `Skipped` row
+/// tagged with the panic payload; the rest of `ark doctor`
+/// proceeds normally (kit R2 acceptance criterion: one ext's
+/// panic must not crash the command).
+fn run_provider_safely<P: ExtensionCheckProvider + ?Sized>(
+    provider: &P,
+) -> Vec<ExtCheck> {
+    match catch_unwind(AssertUnwindSafe(|| provider.collect_checks())) {
+        Ok(rows) => rows,
+        Err(payload) => {
+            let msg = if let Some(s) = payload.downcast_ref::<&'static str>() {
+                (*s).to_string()
+            } else if let Some(s) = payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "panic (unknown payload)".to_string()
+            };
+            vec![ExtCheck {
+                group: "(provider)".into(),
+                check_id: "collect_checks".into(),
+                status: CheckStatus::Skipped,
+                message: format!("panic during collect_checks: {msg}"),
+            }]
+        }
+    }
+}
+
+/// Aggregate exit semantics: true iff any check row is a hard
+/// fail (warnings + skipped do not fail the command).
+fn ext_any_fail(rows: &[ExtCheck]) -> bool {
+    rows.iter().any(ExtCheck::is_fail)
 }
 
 // --- PATH / version probing ---------------------------------------
@@ -953,8 +1072,9 @@ fn run_fixes(rs: &[CheckResult], auto_yes: bool) -> io::Result<usize> {
 
 // --- entry points -------------------------------------------------
 
-/// Run every check and return the aggregated result set.
-/// Exposed for tests.
+/// Run every core check and return the aggregated result set.
+/// Exposed for tests. Does NOT run the extension-check provider;
+/// that is a separate pipeline — see [`run_all_with_provider`].
 pub(crate) fn run_all(ctx: &Ctx) -> Vec<CheckResult> {
     let layout = StateLayout::new(
         ctx.state_dir.clone(),
@@ -981,8 +1101,55 @@ pub(crate) fn run_all(ctx: &Ctx) -> Vec<CheckResult> {
     rs
 }
 
+/// T-032: run core checks + extension-provider checks. When
+/// `provider` is `None` the result is identical to [`run_all`]
+/// (pre-Phase-2 compat). Extension rows are gathered with panic
+/// isolation and returned as a sibling vec — callers decide how
+/// to render the two tiers (table / JSON / exit code).
+pub(crate) fn run_all_with_provider(
+    ctx: &Ctx,
+    provider: Option<&dyn ExtensionCheckProvider>,
+) -> (Vec<CheckResult>, Vec<ExtCheck>) {
+    let core = run_all(ctx);
+    let ext = match provider {
+        Some(p) => run_provider_safely(p),
+        None => Vec::new(),
+    };
+    (core, ext)
+}
+
 fn emit_json<W: Write>(out: &mut W, rs: &[CheckResult]) -> Result<(), CliError> {
     let s = serde_json::to_string_pretty(rs).map_err(|e| CliError::Generic {
+        reason: format!("encode json: {e}"),
+    })?;
+    writeln!(out, "{s}").map_err(|e| CliError::Generic {
+        reason: format!("write: {e}"),
+    })?;
+    Ok(())
+}
+
+/// T-032: emit the combined core + extension JSON payload.
+///
+/// Shape:
+/// ```jsonc
+/// {
+///   "core":       [ { "name": "...", "status": "...", "message": "..." }, ... ],
+///   "extensions": [ { "group": "<ext>", "check_id": "...", "status": "...", "message": "..." }, ... ]
+/// }
+/// ```
+///
+/// When `ext` is empty the object still carries an `extensions: []`
+/// field, so callers always see a stable two-key shape.
+fn emit_json_combined<W: Write>(
+    out: &mut W,
+    core: &[CheckResult],
+    ext: &[ExtCheck],
+) -> Result<(), CliError> {
+    let payload = serde_json::json!({
+        "core": core,
+        "extensions": ext,
+    });
+    let s = serde_json::to_string_pretty(&payload).map_err(|e| CliError::Generic {
         reason: format!("encode json: {e}"),
     })?;
     writeln!(out, "{s}").map_err(|e| CliError::Generic {
@@ -1020,7 +1187,10 @@ fn failed_summary(rs: &[CheckResult]) -> String {
     format!("{} checks failed: {}", failed.len(), failed.join(", "))
 }
 
-/// Dispatch `ark doctor` (T-091).
+/// Dispatch `ark doctor` (T-091). Uses no extension provider —
+/// for v0.1-pre-T-030 this matches the pre-Phase-2 behavior
+/// exactly. When T-030 wires a real dispatcher, callers can
+/// route through [`run_with_provider`].
 ///
 /// - Default: render table, exit 0 on all-Ok-or-Warn, else
 ///   [`CliError::PreflightFail`] (exit code 2, F-519).
@@ -1033,7 +1203,26 @@ fn failed_summary(rs: &[CheckResult]) -> String {
 ///   stdout JSON array stays machine-parseable and no state is
 ///   mutated.
 pub fn run(args: DoctorArgs, ctx: &Ctx) -> Result<(), CliError> {
-    let mut rs = run_all(ctx);
+    run_with_provider(args, ctx, None)
+}
+
+/// T-032: `ark doctor` dispatch with an optional extension-check
+/// provider. See [`run`] for the no-provider compat entry point.
+///
+/// Exit policy:
+/// - Any core `Fail` OR any ext `fail` → `CliError::PreflightFail`.
+/// - Otherwise `Ok(())`.
+///
+/// Core rows render exactly as pre-T-032. Extension rows follow
+/// the core rows in the table and ride on a separate `extensions`
+/// JSON key so pre-existing consumers of core-array JSON keep
+/// working (the legacy JSON remains accessible via [`run`]).
+pub fn run_with_provider(
+    args: DoctorArgs,
+    ctx: &Ctx,
+    provider: Option<&dyn ExtensionCheckProvider>,
+) -> Result<(), CliError> {
+    let (mut rs, ext_rs) = run_all_with_provider(ctx, provider);
 
     if args.json {
         // F-513: JSON mode is read-only. If the caller also passed
@@ -1047,13 +1236,28 @@ pub fn run(args: DoctorArgs, ctx: &Ctx) -> Result<(), CliError> {
         }
         let stdout = io::stdout();
         let mut h = stdout.lock();
-        emit_json(&mut h, &rs)?;
+        if provider.is_some() {
+            // T-032: combined shape for provider-driven invocations.
+            // Preserves the legacy flat-array shape when no provider
+            // is wired (the common v0.1 case).
+            emit_json_combined(&mut h, &rs, &ext_rs)?;
+        } else {
+            emit_json(&mut h, &rs)?;
+        }
     } else {
         let stdout = io::stdout();
         let mut h = stdout.lock();
         render_table(&mut h, &rs, ctx.no_color).map_err(|e| CliError::Generic {
             reason: format!("write: {e}"),
         })?;
+        // T-032: render extension rows after core rows, grouped
+        // by ext name. A small visual divider makes the sections
+        // readable without needing color.
+        if !ext_rs.is_empty() {
+            render_ext_table(&mut h, &ext_rs, ctx.no_color).map_err(|e| CliError::Generic {
+                reason: format!("write: {e}"),
+            })?;
+        }
 
         if args.fix {
             let applied = run_fixes(&rs, args.yes).map_err(|e| CliError::Generic {
@@ -1071,17 +1275,72 @@ pub fn run(args: DoctorArgs, ctx: &Ctx) -> Result<(), CliError> {
         }
     }
 
-    match aggregate_status(&rs) {
+    let core_fail = matches!(aggregate_status(&rs), Status::Fail);
+    let ext_fail = ext_any_fail(&ext_rs);
+
+    if core_fail || ext_fail {
         // F-519: doctor failures are preflight/dependency failures —
         // map to exit code 2, not the generic exit 1. The reason
         // string enumerates which checks failed so CI logs point
         // straight at the missing dependency.
-        Status::Fail => Err(CliError::PreflightFail {
-            reason: failed_summary(&rs),
-        }),
-        // Warn-only is still a zero exit — spec: "Warn-only
-        // result → Ok (exit 0)".
-        _ => Ok(()),
+        let mut reason = if core_fail {
+            failed_summary(&rs)
+        } else {
+            String::new()
+        };
+        if ext_fail {
+            let failed: Vec<String> = ext_rs
+                .iter()
+                .filter(|r| r.is_fail())
+                .map(|r| format!("{}:{}", r.group, r.check_id))
+                .collect();
+            let ext_summary = format!("{} ext check(s) failed: {}", failed.len(), failed.join(", "));
+            if reason.is_empty() {
+                reason = ext_summary;
+            } else {
+                reason = format!("{reason}; {ext_summary}");
+            }
+        }
+        return Err(CliError::PreflightFail { reason });
+    }
+    Ok(())
+}
+
+/// T-032: render extension-check rows grouped by extension name.
+/// Appears after the core table when any ext rows exist.
+fn render_ext_table<W: Write>(
+    out: &mut W,
+    rs: &[ExtCheck],
+    no_color: bool,
+) -> io::Result<()> {
+    if rs.is_empty() {
+        return Ok(());
+    }
+    writeln!(out, "---")?;
+    writeln!(out, "extension checks:")?;
+    for r in rs {
+        writeln!(
+            out,
+            "{:>4} {:<20} {:<20} {}",
+            ext_glyph(r.status, no_color),
+            r.group,
+            r.check_id,
+            r.message,
+        )?;
+    }
+    Ok(())
+}
+
+fn ext_glyph(st: CheckStatus, no_color: bool) -> &'static str {
+    match (st, no_color) {
+        (CheckStatus::Ok, true) => "OK ",
+        (CheckStatus::Warn, true) => "WARN",
+        (CheckStatus::Fail, true) => "FAIL",
+        (CheckStatus::Skipped, true) => "SKIP",
+        (CheckStatus::Ok, false) => "\u{2713}",
+        (CheckStatus::Warn, false) => "\u{26A0}",
+        (CheckStatus::Fail, false) => "\u{2717}",
+        (CheckStatus::Skipped, false) => "-",
     }
 }
 
@@ -2064,5 +2323,238 @@ mod tests {
         );
         assert_eq!(rows.len(), 1);
         assert!(rows[0].error.is_some(), "broken ext should surface error");
+    }
+
+    // ---- T-032: extension check provider ----
+
+    /// Canned provider that returns a fixed row set. Used to
+    /// exercise the aggregator + exit semantics without any live
+    /// extension dispatcher.
+    struct StubExtProvider {
+        rows: Vec<ExtCheck>,
+    }
+
+    impl ExtensionCheckProvider for StubExtProvider {
+        fn collect_checks(&self) -> Vec<ExtCheck> {
+            self.rows.clone()
+        }
+    }
+
+    /// Provider whose `collect_checks` panics — exercises the
+    /// `catch_unwind` guard in `run_provider_safely`.
+    struct PanicExtProvider;
+    impl ExtensionCheckProvider for PanicExtProvider {
+        fn collect_checks(&self) -> Vec<ExtCheck> {
+            panic!("stub provider deliberate panic");
+        }
+    }
+
+    #[test]
+    fn doctor_fail_yields_nonzero_exit() {
+        // Core checks may vary by host — we test the aggregation
+        // contract directly. An ext fail must map to a
+        // PreflightFail error with exit code 2.
+        use crate::exit::ExitCode;
+        let ext_rs = vec![ExtCheck {
+            group: "ext-fail".into(),
+            check_id: "c1".into(),
+            status: CheckStatus::Fail,
+            message: "broken".into(),
+        }];
+        assert!(ext_any_fail(&ext_rs));
+        // Simulate run_with_provider's error construction path.
+        let failed: Vec<String> = ext_rs
+            .iter()
+            .filter(|r| r.is_fail())
+            .map(|r| format!("{}:{}", r.group, r.check_id))
+            .collect();
+        let reason = format!("{} ext check(s) failed: {}", failed.len(), failed.join(", "));
+        let err = CliError::PreflightFail { reason };
+        assert!(matches!(err, CliError::PreflightFail { .. }));
+        assert_eq!(err.code(), ExitCode::PreflightFail.code());
+        assert_eq!(err.code(), 2);
+    }
+
+    #[test]
+    fn doctor_ok_warn_skip_do_not_fail() {
+        // A row set containing Ok / Warn / Skipped (no Fail) must
+        // NOT trip the non-zero exit path.
+        let ext_rs = vec![
+            ExtCheck {
+                group: "e".into(),
+                check_id: "c1".into(),
+                status: CheckStatus::Ok,
+                message: "ok".into(),
+            },
+            ExtCheck {
+                group: "e".into(),
+                check_id: "c2".into(),
+                status: CheckStatus::Warn,
+                message: "warn".into(),
+            },
+            ExtCheck {
+                group: "e".into(),
+                check_id: "c3".into(),
+                status: CheckStatus::Skipped,
+                message: "skipped".into(),
+            },
+        ];
+        assert!(!ext_any_fail(&ext_rs));
+    }
+
+    #[test]
+    fn doctor_json_row_shape() {
+        // Kit R2: extension rows must serialize as
+        // { group, check_id, status, message }. Status is a
+        // lowercase enum.
+        let row = ExtCheck {
+            group: "demo".into(),
+            check_id: "disk.free".into(),
+            status: CheckStatus::Warn,
+            message: "low disk".into(),
+        };
+        let v = serde_json::to_value(&row).unwrap();
+        let m = v.as_object().unwrap();
+        assert_eq!(m.get("group").unwrap(), "demo");
+        assert_eq!(m.get("check_id").unwrap(), "disk.free");
+        assert_eq!(m.get("status").unwrap(), "warn");
+        assert_eq!(m.get("message").unwrap(), "low disk");
+        assert_eq!(m.len(), 4, "no extra keys: {m:?}");
+
+        // All four status variants round-trip.
+        let statuses = [
+            (CheckStatus::Ok, "ok"),
+            (CheckStatus::Warn, "warn"),
+            (CheckStatus::Fail, "fail"),
+            (CheckStatus::Skipped, "skipped"),
+        ];
+        for (s, expected) in statuses {
+            let r = ExtCheck {
+                group: "g".into(),
+                check_id: "c".into(),
+                status: s,
+                message: "m".into(),
+            };
+            let v = serde_json::to_value(&r).unwrap();
+            assert_eq!(v["status"], expected);
+        }
+    }
+
+    #[test]
+    fn doctor_combined_json_carries_both_tiers() {
+        // The combined shape exposes `core` (CheckResult[]) and
+        // `extensions` (ExtCheck[]) under stable keys.
+        let core = vec![CheckResult::ok("a", "ok msg")];
+        let ext = vec![ExtCheck {
+            group: "g".into(),
+            check_id: "id".into(),
+            status: CheckStatus::Ok,
+            message: "msg".into(),
+        }];
+        let mut buf: Vec<u8> = Vec::new();
+        emit_json_combined(&mut buf, &core, &ext).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert!(v.get("core").is_some());
+        assert!(v.get("extensions").is_some());
+        assert_eq!(v["core"].as_array().unwrap().len(), 1);
+        assert_eq!(v["extensions"].as_array().unwrap().len(), 1);
+        assert_eq!(v["extensions"][0]["group"], "g");
+        assert_eq!(v["extensions"][0]["check_id"], "id");
+    }
+
+    #[test]
+    fn doctor_provider_panic_is_isolated() {
+        // A panic inside the provider must NOT propagate; instead
+        // the aggregator surfaces a Skipped row tagged with the
+        // panic payload.
+        let rows = run_provider_safely(&PanicExtProvider);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, CheckStatus::Skipped);
+        assert!(
+            rows[0].message.contains("deliberate panic"),
+            "panic payload must surface: {:?}",
+            rows[0]
+        );
+    }
+
+    #[test]
+    fn doctor_provider_rows_preserved_without_panic() {
+        let provider = StubExtProvider {
+            rows: vec![
+                ExtCheck {
+                    group: "a".into(),
+                    check_id: "c1".into(),
+                    status: CheckStatus::Ok,
+                    message: "ok".into(),
+                },
+                ExtCheck {
+                    group: "a".into(),
+                    check_id: "c2".into(),
+                    status: CheckStatus::Fail,
+                    message: "bad".into(),
+                },
+                ExtCheck {
+                    group: "b".into(),
+                    check_id: "c1".into(),
+                    status: CheckStatus::Warn,
+                    message: "warn".into(),
+                },
+            ],
+        };
+        let rows = run_provider_safely(&provider);
+        // All three rows survive; the Fail on a/c2 does NOT
+        // mask the sibling check on a/c1 or the b check.
+        assert_eq!(rows.len(), 3);
+        assert!(ext_any_fail(&rows));
+    }
+
+    #[test]
+    fn doctor_no_provider_matches_legacy_run_all() {
+        // run_all_with_provider(None) must produce exactly the
+        // same core rows as run_all (pre-Phase-2 compat).
+        let tmp = tempfile::Builder::new()
+            .prefix("arkd-t032-compat")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let ctx = test_ctx(tmp.path());
+        let (core_a, ext_a) = run_all_with_provider(&ctx, None);
+        let core_b = run_all(&ctx);
+        assert_eq!(core_a.len(), core_b.len());
+        assert!(ext_a.is_empty(), "no-provider path must emit zero ext rows");
+    }
+
+    #[test]
+    fn ext_render_table_emits_header_and_rows() {
+        let rs = vec![
+            ExtCheck {
+                group: "ext-a".into(),
+                check_id: "c1".into(),
+                status: CheckStatus::Ok,
+                message: "all good".into(),
+            },
+            ExtCheck {
+                group: "ext-a".into(),
+                check_id: "c2".into(),
+                status: CheckStatus::Fail,
+                message: "broken".into(),
+            },
+        ];
+        let mut buf: Vec<u8> = Vec::new();
+        render_ext_table(&mut buf, &rs, true).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains("extension checks:"), "header: {s}");
+        assert!(s.contains("ext-a"));
+        assert!(s.contains("c1"));
+        assert!(s.contains("c2"));
+        assert!(s.contains("OK"));
+        assert!(s.contains("FAIL"));
+    }
+
+    #[test]
+    fn ext_glyph_no_color_is_ascii() {
+        assert_eq!(ext_glyph(CheckStatus::Ok, true), "OK ");
+        assert_eq!(ext_glyph(CheckStatus::Warn, true), "WARN");
+        assert_eq!(ext_glyph(CheckStatus::Fail, true), "FAIL");
+        assert_eq!(ext_glyph(CheckStatus::Skipped, true), "SKIP");
     }
 }

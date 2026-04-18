@@ -126,3 +126,14 @@ pub use ext_dispatch::{
 pub mod host_capabilities;
 pub use host_capabilities::{HOST_PHASE_2_CAPABILITIES, host_phase_2_capabilities};
 
+// T-030 / cavekit-soul-phase-2-host-dispatch R8: extension load
+// sequence orchestrator. Implements the 7-step pipeline (manifest-read,
+// handshake, validate_capabilities, register_intents, register_views,
+// register_gates, ready) and emits a structured `tracing` event at
+// each step so step ordering is verifiable via log capture. Failed
+// extensions surface as `Err` but do not halt peers.
+pub mod ext_loader;
+pub use ext_loader::{
+    ExtLoadError, HandshakeFn, LoadedExtension, load_extension, load_extensions,
+};
+

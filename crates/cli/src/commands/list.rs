@@ -1,4 +1,4 @@
-//! `ark list` — T-023 (cavekit-soul Phase 1).
+//! `ark list` — T-023 (cavekit-soul Phase 1) + T-031 (Phase 2 host-dispatch R1).
 //!
 //! Enumerates sessions under `$STATE/sessions/*/` via
 //! [`list_session_ids`], queries each supervisor over its
@@ -9,12 +9,31 @@
 //! command — the row is surfaced as an "orphan" so the user
 //! can steer `ark doctor`.
 //!
-//! ## Columns (post-T-023)
+//! ## Columns
 //!
-//! `id`, `name`, `cwd`, `uptime`, `running?`. Methodology
-//! concepts (orchestrator, engine, phase, layout, tab count,
-//! last event, findings, source) have been stripped — those
-//! belong inside extensions now.
+//! Core columns (T-031 R1):
+//!   Position 0: `id`
+//!   Position 1: `name`
+//!   Position 2: `status`
+//! Additional core-rendered columns for human table mode
+//! (`cwd`, `uptime`) trail the core triple to preserve the
+//! pre-Phase-2 human-readable output exactly.
+//!
+//! Extension-contributed columns are APPENDED after all core
+//! columns, sorted alpha by extension name then by the ext's
+//! own declaration order. Columns are only collected from
+//! extensions that advertise `ext.list_columns.v1` — gating
+//! lives in the dispatcher, callers give us a flattened list.
+//!
+//! For v0.1-pre-T-030, no live extension dispatcher is wired;
+//! callers pass `None` for the [`ExtensionColumnProvider`] and
+//! output matches pre-Phase-2 behavior exactly. A future task
+//! (see T-030 follow-up) wires a real provider that queries
+//! loaded extensions over RPC.
+//!
+//! Methodology concepts (orchestrator, engine, phase, layout,
+//! tab count, last event, findings, source) remain stripped
+//! — those belong inside extensions now.
 //!
 //! Wire contract (from crates/supervisor/src/commands.rs):
 //!
@@ -91,6 +110,193 @@ impl Row {
     fn is_running(&self) -> bool {
         matches!(self, Row::Live(_, _))
     }
+
+    /// Core status string for the `status` column (position 2 in
+    /// the T-031 core column triple).
+    #[allow(dead_code)]
+    fn status_str(&self) -> &'static str {
+        match self {
+            Row::Live(_, _) => "running",
+            Row::Archived(_, _) => "stopped",
+            Row::Orphan(_) => "orphan",
+        }
+    }
+}
+
+// --- T-031: extension-column provider surface ---------------------
+//
+// `ark list` assembles its rendered column set by combining three
+// groups, in order:
+//
+// 1. CORE fixed triple  — `id`, `name`, `status` at positions 0-2.
+// 2. CORE extras        — `cwd`, `uptime` (human-table only, kept
+//                         to preserve pre-Phase-2 output exactly).
+// 3. EXTENSION columns  — appended after all core columns, sorted
+//                         alpha by extension name, then by the
+//                         extension's own declaration order (which
+//                         is the insertion order into the Vec
+//                         returned by `collect_columns()`).
+//
+// Callers pass an optional [`ExtensionColumnProvider`]. When None
+// (the v0.1 default, and every `ark list` invocation until the
+// T-030 load-sequence wires a real provider), only core columns
+// render — human and JSON output match the pre-Phase-2 behavior.
+//
+// Capability gating is decided by the provider's implementation,
+// which must only surface columns from extensions that advertise
+// `ext.list_columns.v1` (see cavekit-soul-phase-2-host-dispatch
+// R1 + supervisor::ext_dispatch::should_dispatch). A stub
+// provider used in tests never touches the real dispatcher.
+
+/// One extension-contributed column.
+pub struct ExtensionColumn {
+    /// Owning extension name (used for stable alpha-sorting).
+    pub ext_name: String,
+    /// Column header label.
+    pub column_name: String,
+    /// Resolver that renders a cell for the given session row.
+    /// Returning `"-"` on missing data is convention.
+    pub resolver: Box<dyn Fn(&SessionColumnCtx<'_>) -> String + Send + Sync>,
+}
+
+impl std::fmt::Debug for ExtensionColumn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExtensionColumn")
+            .field("ext_name", &self.ext_name)
+            .field("column_name", &self.column_name)
+            .field("resolver", &"<fn>")
+            .finish()
+    }
+}
+
+/// Resolver input — a read-only view of the session's core data
+/// that an extension column needs to render a cell.
+pub struct SessionColumnCtx<'a> {
+    /// Session identifier.
+    pub id: &'a SessionId,
+    /// Latest supervisor-side status (None for Orphan rows).
+    pub status: Option<&'a SessionStatus>,
+    /// Whether the supervisor answered its control socket.
+    pub running: bool,
+}
+
+/// Trait for collecting extension-contributed columns. Impls live
+/// elsewhere (real impl: supervisor dispatcher client; test impl:
+/// stub in the tests module). This module only consumes the trait.
+pub trait ExtensionColumnProvider {
+    /// Return the full, flattened list of extension columns. Order
+    /// within the returned vec is preserved as the declaration
+    /// order for columns belonging to the same extension; the
+    /// consumer stable-sorts by `ext_name` after.
+    ///
+    /// Only extensions advertising `ext.list_columns.v1` should
+    /// appear in the returned list — enforcement is the impl's
+    /// responsibility.
+    fn collect_columns(&self) -> Vec<ExtensionColumn>;
+}
+
+/// A resolved column ready to render — either a core column or an
+/// extension contribution. Used by the column-assembly layer and
+/// the assembly test.
+pub struct ResolvedColumn {
+    /// Group the column belongs to: `"core"` or the extension name.
+    pub group: String,
+    /// Column header.
+    pub name: String,
+    /// Resolver fn, boxed uniformly so core + ext columns compose.
+    pub resolver: Box<dyn Fn(&SessionColumnCtx<'_>) -> String + Send + Sync>,
+}
+
+impl std::fmt::Debug for ResolvedColumn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedColumn")
+            .field("group", &self.group)
+            .field("name", &self.name)
+            .field("resolver", &"<fn>")
+            .finish()
+    }
+}
+
+/// Assemble the full column list for the given provider. Core
+/// columns are emitted first; extension columns follow, sorted
+/// stable-alpha by extension name with declaration order
+/// preserved within each extension.
+///
+/// `include_core_extras` controls whether `cwd` and `uptime` are
+/// appended after the core triple (human-table mode wants them,
+/// the pure-column-model assembly test does not).
+pub fn assemble_columns(
+    provider: Option<&dyn ExtensionColumnProvider>,
+    include_core_extras: bool,
+) -> Vec<ResolvedColumn> {
+    let mut cols: Vec<ResolvedColumn> = Vec::new();
+
+    // Position 0: id (short form, human-scannable).
+    cols.push(ResolvedColumn {
+        group: "core".into(),
+        name: "id".into(),
+        resolver: Box::new(|cx: &SessionColumnCtx<'_>| short_id(cx.id)),
+    });
+    // Position 1: name.
+    cols.push(ResolvedColumn {
+        group: "core".into(),
+        name: "name".into(),
+        resolver: Box::new(|cx: &SessionColumnCtx<'_>| cx.id.name.clone()),
+    });
+    // Position 2: status — one of "running"/"stopped"/"orphan".
+    cols.push(ResolvedColumn {
+        group: "core".into(),
+        name: "status".into(),
+        resolver: Box::new(|cx: &SessionColumnCtx<'_>| {
+            if cx.running {
+                "running".into()
+            } else if cx.status.is_some() {
+                "stopped".into()
+            } else {
+                "orphan".into()
+            }
+        }),
+    });
+
+    if include_core_extras {
+        // Retained for pre-Phase-2 human-table compat (tests still
+        // assert CWD / UPTIME / RUNNING? headers). Not part of the
+        // kit's core-triple contract, but emitted before any ext
+        // contribution.
+        cols.push(ResolvedColumn {
+            group: "core".into(),
+            name: "cwd".into(),
+            // Resolver is a placeholder — human table reads cwd
+            // via spec.json in render_table_with_cwds. This field
+            // exists so --json can include it uniformly.
+            resolver: Box::new(|_cx: &SessionColumnCtx<'_>| "-".into()),
+        });
+        cols.push(ResolvedColumn {
+            group: "core".into(),
+            name: "uptime".into(),
+            resolver: Box::new(|cx: &SessionColumnCtx<'_>| match cx.status {
+                Some(s) => format_uptime_since(s.started_at),
+                None => "-".into(),
+            }),
+        });
+    }
+
+    // Extension columns: collect, stable-sort by ext_name, append.
+    // `sort_by` is stable in Rust → declaration order within each
+    // extension is preserved (kit R1 acceptance criterion).
+    if let Some(p) = provider {
+        let mut ext_cols = p.collect_columns();
+        ext_cols.sort_by(|a, b| a.ext_name.cmp(&b.ext_name));
+        for c in ext_cols {
+            cols.push(ResolvedColumn {
+                group: c.ext_name,
+                name: c.column_name,
+                resolver: c.resolver,
+            });
+        }
+    }
+
+    cols
 }
 
 /// Read a persisted `status.json` for an archived session.
@@ -768,5 +974,166 @@ mod tests {
     fn format_uptime_compact_under_minute() {
         let now = chrono::Utc::now();
         assert_eq!(format_uptime_since(now), "0s");
+    }
+
+    // ---------- T-031 extension column provider ----------
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// Stub provider that returns a fixed set of columns. `calls`
+    /// counts `collect_columns` invocations so tests can verify
+    /// capability-gated skipping.
+    struct StubProvider {
+        cols: Vec<(String, String, String)>, // (ext, col, literal cell value)
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl ExtensionColumnProvider for StubProvider {
+        fn collect_columns(&self) -> Vec<ExtensionColumn> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.cols
+                .iter()
+                .map(|(ext, col, literal)| {
+                    let lit = literal.clone();
+                    ExtensionColumn {
+                        ext_name: ext.clone(),
+                        column_name: col.clone(),
+                        resolver: Box::new(move |_cx| lit.clone()),
+                    }
+                })
+                .collect()
+        }
+    }
+
+    #[test]
+    fn list_columns_order_core_then_ext_alpha() {
+        // ext-b declared first, ext-a second. Final order must
+        // be ext-a.c1, ext-a.c2, ext-b.c1, ext-b.c2 (alpha by
+        // ext, declaration-order within ext).
+        let provider = StubProvider {
+            cols: vec![
+                ("ext-b".into(), "c1".into(), "b1".into()),
+                ("ext-b".into(), "c2".into(), "b2".into()),
+                ("ext-a".into(), "c1".into(), "a1".into()),
+                ("ext-a".into(), "c2".into(), "a2".into()),
+            ],
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let cols = assemble_columns(Some(&provider), false);
+        // Core triple first.
+        assert_eq!(cols[0].group, "core");
+        assert_eq!(cols[0].name, "id");
+        assert_eq!(cols[1].group, "core");
+        assert_eq!(cols[1].name, "name");
+        assert_eq!(cols[2].group, "core");
+        assert_eq!(cols[2].name, "status");
+        // Then ext columns alpha-sorted then declaration order.
+        assert_eq!(cols[3].group, "ext-a");
+        assert_eq!(cols[3].name, "c1");
+        assert_eq!(cols[4].group, "ext-a");
+        assert_eq!(cols[4].name, "c2");
+        assert_eq!(cols[5].group, "ext-b");
+        assert_eq!(cols[5].name, "c1");
+        assert_eq!(cols[6].group, "ext-b");
+        assert_eq!(cols[6].name, "c2");
+        assert_eq!(cols.len(), 7);
+    }
+
+    #[test]
+    fn no_provider_renders_core_triple_only() {
+        let cols = assemble_columns(None, false);
+        assert_eq!(cols.len(), 3);
+        assert_eq!(cols[0].name, "id");
+        assert_eq!(cols[1].name, "name");
+        assert_eq!(cols[2].name, "status");
+        assert!(cols.iter().all(|c| c.group == "core"));
+    }
+
+    #[test]
+    fn core_extras_appended_after_triple_and_before_ext() {
+        let provider = StubProvider {
+            cols: vec![("ext-z".into(), "cz".into(), "zv".into())],
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let cols = assemble_columns(Some(&provider), true);
+        // [id, name, status, cwd, uptime, ext-z.cz]
+        assert_eq!(cols.len(), 6);
+        assert_eq!(cols[0].name, "id");
+        assert_eq!(cols[1].name, "name");
+        assert_eq!(cols[2].name, "status");
+        assert_eq!(cols[3].name, "cwd");
+        assert_eq!(cols[3].group, "core");
+        assert_eq!(cols[4].name, "uptime");
+        assert_eq!(cols[4].group, "core");
+        assert_eq!(cols[5].group, "ext-z");
+        assert_eq!(cols[5].name, "cz");
+    }
+
+    #[test]
+    fn core_status_column_resolves_running_stopped_orphan() {
+        let id = SessionId::new("s");
+        let status = mk_status(&id);
+
+        let cols = assemble_columns(None, false);
+        let status_col = &cols[2];
+
+        let live_cx = SessionColumnCtx {
+            id: &id,
+            status: Some(&status),
+            running: true,
+        };
+        assert_eq!((status_col.resolver)(&live_cx), "running");
+
+        let archived_cx = SessionColumnCtx {
+            id: &id,
+            status: Some(&status),
+            running: false,
+        };
+        assert_eq!((status_col.resolver)(&archived_cx), "stopped");
+
+        let orphan_cx = SessionColumnCtx {
+            id: &id,
+            status: None,
+            running: false,
+        };
+        assert_eq!((status_col.resolver)(&orphan_cx), "orphan");
+    }
+
+    #[test]
+    fn ext_column_resolver_invoked_per_row() {
+        // Smoke: a resolver that formats on the row data should
+        // produce the expected cell for a Live row.
+        let id = SessionId::new("s1");
+        let status = mk_status(&id);
+        let cx = SessionColumnCtx {
+            id: &id,
+            status: Some(&status),
+            running: true,
+        };
+        let col = ExtensionColumn {
+            ext_name: "ext-x".into(),
+            column_name: "badge".into(),
+            resolver: Box::new(|cx: &SessionColumnCtx<'_>| {
+                format!(
+                    "{}-{}",
+                    cx.id.name,
+                    if cx.running { "up" } else { "down" }
+                )
+            }),
+        };
+        assert_eq!((col.resolver)(&cx), "s1-up");
+    }
+
+    #[test]
+    fn row_status_str_matches_variant() {
+        let id = SessionId::new("s");
+        assert_eq!(Row::Live(id.clone(), mk_status(&id)).status_str(), "running");
+        assert_eq!(
+            Row::Archived(id.clone(), mk_status(&id)).status_str(),
+            "stopped"
+        );
+        assert_eq!(Row::Orphan(id).status_str(), "orphan");
     }
 }
