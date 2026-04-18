@@ -34,6 +34,13 @@ fn main() {
     // honors the NO_COLOR spec (empty string does NOT disable color),
     // matching the `Ctx::from_env()` path used by subcommands.
     let no_color_for_help = detect_no_color();
+
+    // Set ZELLIJ_SOCKET_DIR=/tmp/ark-<uid> when unset so zellij's socket
+    // path stays under the 103-byte sun_path cap on darwin (where $TMPDIR
+    // is a ~49-byte /var/folders/... path). Done before any thread is
+    // spawned. See `ark_mux_zellij::socket_dir` for rationale.
+    let _ = ark_mux_zellij::ensure_short_socket_dir();
+
     let cmd = Cli::command_with_no_color_aware(no_color_for_help);
     let matches = cmd.get_matches();
     let cli = match Cli::from_arg_matches(&matches) {

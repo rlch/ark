@@ -366,6 +366,7 @@ dependencies = [
  "ark-types",
  "async-trait",
  "minijinja",
+ "nix 0.29.0",
  "portable-pty",
  "serde",
  "tempfile",

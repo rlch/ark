@@ -22,6 +22,7 @@ pub mod layout_template;
 pub mod layout_writer;
 pub mod mux;
 pub mod pty;
+pub mod socket_dir;
 
 pub use executor::{CommandExecutor, CommandOutput, RealExecutor, StubExecutor};
 pub use layout_resolver::{
@@ -34,3 +35,4 @@ pub use layout_writer::{
 };
 pub use mux::{MIN_ZELLIJ_VERSION, PIPE_TARGET_PICKER, PIPE_TARGET_STATUS, TabHandle, ZellijMux};
 pub use pty::{PtySpawnError, PtyZellijHandle, pty_child_startup_failure, spawn_zellij_with_pty};
+pub use socket_dir::ensure_short_socket_dir;
