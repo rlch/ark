@@ -101,3 +101,9 @@ Overall: 45/134 (34%). Next: Tier 2 (engine-claude-code + event-bus consumers, 1
 - Wave 6a: T-024 (117af17) + T-025 (380700c) parallel. Wave 6b: T-026 + T-027 (d691db7) bundled. Build P, Tests P (1723).
 - Codex tier-gate: 3 findings. F-012/F-014 fixed inline (bfde279 — generics via split_for_impl, attribute-rename doc). F-013 accepted — theoretical breakage, no production users.
 - Next: Tier 6 — T-028..T-036 (supervisor-side: capability dispatcher + load sequence + list/doctor + config + scene validator + reload gate + suppression map — 9 tasks, host-dispatch kit).
+
+### Iteration Tier-6 — 2026-04-18 — phase-2
+- Waves 7a-e, 9 tasks. Serial after 2 git-race collisions (race pattern saved: feedback_parallel_git_collision.md).
+- Commits: c5dbf78 (T-028), a949d40 (T-029+T-033 bundled), 5d742b7 (T-030+T-031+T-032 bundled), afa46d3 (T-034), 890dd17 (T-035), 59c1293 (T-036). Build P, Tests P (1799).
+- Codex tier-gate: F-015 [P1] fixed (4a594b7) — dispatcher opt-out on method_not_found. F-016 [P2] deferred to post-stub-harness.
+- Next: Tier 7 — T-037..T-042 (stub harness + matrices + trybuild + integration tests).

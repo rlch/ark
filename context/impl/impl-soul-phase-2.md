@@ -47,9 +47,30 @@ Ledger is prepend-only. Newest entries at top. Append completion rows below as t
 | T-026 | 5 | ext-surface R7 | DONE | `d691db7` | #[derive(CommandView)] + #[derive(ZellijView)] marker derives (PATH A — minimal, no cross-derive magic) |
 | T-027 | 5 | ext-surface R7 | DONE | `d691db7` | #[ark_extension(capabilities="...")] auto-advertise via inherent ARK_CAPABILITIES const |
 | F-012/F-014 fix | 5 | — | DONE | `bfde279` | generics preserved via split_for_impl() (Extension/View/CommandView/ZellijView); attribute rename doc |
-| T-028..T-044 | 6-8 | various | PENDING | — | see build site |
+| T-028 | 6 | host-dispatch R6 | DONE | `c5dbf78` | capability→method table + per-ext capability registry + should_dispatch + warn-once |
+| T-029 | 6 | host-dispatch R7 | DONE | `a949d40`* | HOST_PHASE_2_CAPABILITIES slate (8 flags, sorted); *commit also absorbed T-033 via git-race |
+| T-030 | 6 | host-dispatch R8 | DONE | `5d742b7`* | 7-step load sequence in ext_loader; structured tracing events; step-order test. *commit also absorbed T-031/T-032 via git-race |
+| T-031 | 6 | host-dispatch R1 | DONE | `5d742b7` | ExtensionColumnProvider trait; core id/name/status at 0-2; ext cols alpha-sorted |
+| T-032 | 6 | host-dispatch R2 | DONE | `5d742b7` | ExtensionCheckProvider; per-check ok/warn/fail/skipped; fail → non-zero exit |
+| T-033 | 6 | host-dispatch R3 | DONE | `a949d40` | figment `extension.<ext>.<section>` loader; required/optional validation |
+| T-034 | 6 | host-dispatch R4 | DONE | `afa46d3` | ViewTypeTable + validate_view_reference + manifest_set_hash (blake3) |
+| T-035 | 6 | host-dispatch R5 | DONE | `890dd17` | reload gate dispatcher; AND Proceed/Defer; fail-open; ReloadDeferredPayload |
+| T-036 | 6 | host-dispatch R9 | DONE | `59c1293` | ClosedByUserMap (BTreeMap); consult() → Spawn/Skip/EvictAndSpawn |
+| F-015 fix | 6 | — | DONE | `4a594b7` | opt-out on method_not_found — future should_dispatch returns false |
+| T-037..T-044 | 7-8 | various | PENDING | — | see build site |
 
 ## Wave Log
+
+### Waves 7a-e — 2026-04-18 — Tier 6 (host-dispatch, 9 tasks)
+- Wave 7a (parallel): T-028 (c5dbf78), T-029+T-033 (both landed in a949d40 via git-index race), T-033 (absorbed). Supervisor capability dispatcher + host slate + figment loader.
+- Wave 7b (parallel): T-030 + T-031/T-032 bundled (all in 5d742b7 via second git-index race). Extension load sequence + CLI list/doctor refactor.
+- **Race pattern saved to memory** (feedback_parallel_git_collision.md): parallel agents on main tree collide at git-add time even when crates are disjoint. Switched to SERIAL dispatch for Waves 7c-e.
+- Wave 7c (serial): T-034 (afa46d3) scene view-type table + blake3 manifest hash. 16 tests.
+- Wave 7d (serial): T-035 (890dd17) reload-gate dispatcher. 7 tests.
+- Wave 7e (serial): T-036 (59c1293) closed_by_user suppression storage. 10 tests.
+- Codex tier-gate: 2 findings. F-015 [P1] fixed inline (4a594b7) — dispatcher now opts out on method_not_found. F-016 [P2] deferred — doctor per-extension panic isolation needs real dispatcher wiring (post-Tier-7).
+- 1799 tests pass workspace-wide (+76 since Tier 5).
+- Next: Tier 7 — T-037..T-042 (stub harness + capability matrix + trybuild goldens + integration tests).
 
 ### Wave 5 — 2026-04-18 — Tier 4
 - Packet A (T-018..T-022 bundled, ext-proto lib.rs + transports): ad001b7 landed 4 of 5 (T-018/T-019/T-021/T-022). T-020 BLOCKED by agent on ark-ext-proto→ark-types dep cycle fear. Parent verified no cycle (ark-types has zero ext-proto deps), added the dep in Cargo.toml, re-dispatched T-020.
