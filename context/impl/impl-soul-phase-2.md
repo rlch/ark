@@ -34,9 +34,25 @@ Ledger is prepend-only. Newest entries at top. Append completion rows below as t
 | T-016 | 3 | ark-view R10 | DONE | `753f91f` | SessionHandles + pane_by_name/stack_by_name/tab_by_name; zero-RPC pure reads |
 | T-017 | 3 | ark-view R11 + R1 deps | DONE | `5d157e3` | cross-crate re-exports (10 names) from ark-ext-proto; integration test pins compile-time resolution |
 | F-008/F-009 fix | 3 | — | DONE | `1094a0a` | HandleGone NDJSON roundtrip (encoder stuffs structured data, decoder parses it); SessionHandles::pane_by_name_typed enforces view-type today; untyped variant doc-updated |
-| T-018..T-044 | 4-8 | various | PENDING | — | see build site |
+| T-018 | 4 | ark-view R6 | DONE | `ad001b7` | 6 pane/stack RPC req+resp struct pairs (OpaqueJson for payload/attrs per existing pattern) |
+| T-019 | 4 | ark-view R6 | DONE | `ad001b7` | 6 default `method_not_found` trait methods on ArkExtension |
+| T-020 | 4 | ext-surface R1 | DONE | `7a24239` | on_session_start + on_session_end hooks; OnSessionEndRequest carries ExitReason (OpaqueJson pattern since SessionSpec lacks Facet) |
+| T-021 | 4 | ext-surface R2 | DONE | `ad001b7` | 4 feature-group hooks: scene_compile_hook/control_verbs/doctor_checks/list_columns |
+| T-022 | 4 | ext-surface R5 | DONE | `ad001b7` | intent_dispatch retention pin (doc-comment + regression test) |
+| T-023 | 4 | ext-surface R4 | DONE | `d6a67bf` | ViewDecl.kind = Option<StringNode> ("pane"\|"stack"); downstream construction sites patched |
+| T-003 doctest fix | 4 | — | DONE | `8815508` | ark-ext-metadata doctest construction missed config_sections/reload_gates |
+| F-010/F-011 fix | 4 | — | PARTIAL | `<pending>` | F-010 kind=stack gap now warn-logged in scene/ext/binding.rs (full consumption at T-034); F-011 gen-extension-spec serde-transparent limitation deferred to tooling task |
+| T-024..T-044 | 5-8 | various | PENDING | — | see build site |
 
 ## Wave Log
+
+### Wave 5 — 2026-04-18 — Tier 4
+- Packet A (T-018..T-022 bundled, ext-proto lib.rs + transports): ad001b7 landed 4 of 5 (T-018/T-019/T-021/T-022). T-020 BLOCKED by agent on ark-ext-proto→ark-types dep cycle fear. Parent verified no cycle (ark-types has zero ext-proto deps), added the dep in Cargo.toml, re-dispatched T-020.
+- Packet B (T-023 metadata-types): d6a67bf. ViewDecl.kind = Option<StringNode>; downstream construction sites patched in ark-ext-metadata, scene/ext/binding + registry.
+- Follow-up: T-020 unblocked at 7a24239 (OpaqueJson pattern since neither SessionSpec nor ExitReason derive Facet). Doctest in ark-ext-metadata at `:256` fixed at 8815508 (T-003 follow-up — construction site the T-003 agent missed).
+- Codex tier-gate: 2 findings. F-010 [P1] ViewDecl.kind stored but unconsumed in scene binding — partially mitigated with warn-log (full consumption in T-034); F-011 [P2] gen-extension-spec emits HandleId as struct-with-field-0 rather than transparent-string — tooling limitation deferred. Gate: advance with accepted deferral of F-010 consumption (T-034) + F-011 (tooling).
+- 1721 tests pass workspace-wide (+7 since Tier 3).
+- Next: Tier 5 — T-024..T-027 (capability-flag taxonomy + derive View/CommandView/ZellijView + auto-advertise).
 
 ### Waves 4a+4b — 2026-04-18 — Tier 3
 - 4a (parallel 3): T-014 (bcd38e2) + T-015 (09676d1) + T-016 (753f91f). Disjoint crates/files. All landed.

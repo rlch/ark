@@ -91,3 +91,8 @@ Overall: 45/134 (34%). Next: Tier 2 (engine-claude-code + event-bus consumers, 1
 - Wave 4a: T-014 (bcd38e2) + T-015 (09676d1) + T-016 (753f91f) parallel. Wave 4b: T-017 (5d157e3). Build P, Tests P (1714).
 - Codex tier-gate: 2 findings. F-008 [P1] NDJSON HandleGone decoder regression + F-009 [P2] SessionHandles view-type enforcement. Both fixed (1094a0a). Gate PROCEED.
 - Next: Tier 4 — T-018..T-023 (6 RPC pairs + lifecycle hooks + feature-group hooks + ViewDecl extension).
+
+### Iteration Tier-4 — 2026-04-18 — phase-2
+- Wave 5: T-018+T-019+T-021+T-022 (ad001b7) + T-023 (d6a67bf); T-020 unblocked (7a24239); doctest fix (8815508). Build P, Tests P (1721).
+- Codex tier-gate: 2 findings. F-010 [P1] kind unconsumed — warn-log added + T-034 deferral. F-011 [P2] spec gen tooling — deferred. Gate: accept deferrals, advance.
+- Next: Tier 5 — T-024..T-027 (capability taxonomy + #[derive(View/CommandView/ZellijView)] + auto-advertise on Extension derive).
