@@ -1,0 +1,51 @@
+[package]
+name = "ark-test-fixtures-claude-code"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# T-017 / T-018 (claude-code-ext R13): Claude-Code-specific fixture
+# helpers.
+#
+# This crate is a NEW, Claude-Code-only sibling of the generic
+# `ark-test-fixtures` crate. The generic fixture crate already ships a
+# `mock-claude` binary, but that one is engine-surface-oriented — it
+# consumes a JSON script of arbitrary hook event envelopes and fans
+# them out via `--output` JSONL or `--settings` hook-command dispatch.
+#
+# This crate's `mock-claude` is different — it is the R13 cc-hook unit-
+# test fixture: deterministic scripted event timelines wired to three
+# flags (`--emit-only`, `--subagent-burst N`, `--transcript-write`) that
+# build-site tasks T-017 + T-018 call out explicitly. Lives beside the
+# generic fixture crate so both accumulate under `crates/test-fixtures/`
+# without one bloating the other's dep budget.
+#
+# Binary naming: `mock-claude-cc` (not `mock-claude`).
+#
+# The generic fixture crate's binary is already called `mock-claude` and
+# cargo rejects two bins with the same name in one workspace (future-
+# hard-error; currently only a warning). Using `-cc` as the
+# disambiguator keeps the task-plan intent (fixture binary for cc-hook
+# tests) readable while avoiding the collision. Tests resolve the
+# correct binary via `env!("CARGO_BIN_EXE_mock-claude-cc")` which cargo
+# scopes per-package.
+#
+# Dep budget:
+#   * `clap` — CLI argument parsing.
+#   * `chrono` — RFC 3339 `emitted_at` timestamps on NDJSON lines.
+#   * `serde_json` — JSON serialisation for NDJSON envelopes + transcript lines.
+
+[dependencies]
+clap = { workspace = true }
+chrono = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[[bin]]
+name = "mock-claude-cc"
+path = "src/main.rs"

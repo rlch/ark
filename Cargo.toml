@@ -21,6 +21,13 @@ members = [
     # Crate directory retained on disk as historical reference only.
     "crates/supervisor",
     "crates/test-fixtures",
+    # T-017 / T-018 (claude-code-ext R13): Claude-Code-specific fixture
+    # helpers. Sibling of the generic test-fixtures crate. Houses the
+    # `mock-claude` binary variant that emits cc-hook NDJSON timelines
+    # + synthesises transcript JSONL lines. See
+    # build-site-claude-code-ext.md T-017/T-018 and the crate's
+    # top-level module doc for the emission contract.
+    "crates/test-fixtures/claude-code",
     "crates/types",
     # T-9.5.1: extension-protocol trait + request/response types (R16).
     "crates/ark-ext-proto",

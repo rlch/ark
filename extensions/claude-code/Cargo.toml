@@ -57,6 +57,14 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# T-016 envelope test: the test harness evaluates `event.payload.*`
+# expressions against a minimal `rhai::Engine` to prove the translator's
+# payload shape is readable from scene reactions. A real scene-runtime
+# dispatch is too heavy for a unit test (would pull in ark-scene's KDL
+# compile pipeline); raw Rhai is sufficient because the scene engine
+# uses the same `Engine::parse_json` → `Dynamic` map conversion under
+# the hood for event payloads.
+rhai = { workspace = true }
 
 # T-003 (claude-code-ext R1): `cc-hook` binary target. Stubbed now;
 # T-006 populates the main with payload-forwarding logic.

@@ -60,6 +60,7 @@ use ark_ext_proto::{
     ArkExtension, ExtResult, OnSessionEndRequest, OnSessionEndResponse, OnSessionStartRequest,
     OnSessionStartResponse,
 };
+use ark_types::{CoreEvent, EventSink};
 use async_trait::async_trait;
 use tracing::{debug, warn};
 
@@ -112,23 +113,58 @@ pub const CC_HOOK_BYTES: &[u8] = &[];
 /// registers scene-compile hooks, wires per-session hook sockets, and
 /// exposes the `claude-code` + `claude-code-subagent` views.
 ///
-/// v0.1 scaffolding: a zero-sized unit struct. Per-session state
-/// (transcript watchers, socket tasks, subagent stack snapshots) lands
-/// in later tiers — T-019+ swap this for a struct carrying the live
-/// handles, behind the same `impl ArkExtension` surface.
+/// v0.1 scaffolding carries a single optional field: [`Self::event_sink`]
+/// — a cloned [`EventSink`] handed in at construction time by whoever
+/// wires the extension into ark core. T-014 uses it to forward every
+/// decoded `claude-code.*` ExtEvent onto the core bus as a
+/// `CoreEvent::Ext` ride-along. When absent (most tests), the accept
+/// loop logs decoded frames at `debug!` and otherwise behaves as a sink-
+/// less observer — the socket reader itself never fails for lack of a
+/// publisher.
 ///
-/// All trait methods currently inherit their defaults from the upstream
-/// trait definition in `ark-ext-proto` — see the module doc for the
-/// tier-by-tier population plan.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct ClaudeCodeExtension;
+/// Design note — construction-time injection: the kit bans ext-crate
+/// edits to supervisor / core for this tier. Rather than wait on an
+/// `ArkExtension`-trait-level event publisher handle, the extension
+/// takes a pre-built [`EventSink`] the caller owns. Downstream wiring
+/// (which lives in a later soul-phase task, not claude-code-ext) can
+/// keep the injection shape or swap to a trait-method surface without
+/// breaking the ExtEvent payload contract.
+#[derive(Debug, Default, Clone)]
+pub struct ClaudeCodeExtension {
+    /// Optional broadcast sink the socket accept loop forwards decoded
+    /// [`ark_types::ExtEvent`]s to, wrapped in
+    /// [`CoreEvent::Ext`]. Cloneable — tokio broadcast senders are
+    /// cheap to clone and safe to share across the spawned accept-loop
+    /// task.
+    event_sink: Option<EventSink>,
+}
 
 impl ClaudeCodeExtension {
-    /// Construct a new [`ClaudeCodeExtension`]. Zero-cost — the struct
-    /// holds no state in v0.1 scaffolding. T-019+ replace this with a
-    /// constructor that seeds per-session bookkeeping.
+    /// Construct a [`ClaudeCodeExtension`] with no event sink. Decoded
+    /// hook frames are still consumed by the socket reader but are not
+    /// published onto the core bus — useful for unit tests, CLI-only
+    /// dry-runs, and any context where the supervisor isn't involved.
     pub fn new() -> Self {
-        Self
+        Self { event_sink: None }
+    }
+
+    /// Construct a [`ClaudeCodeExtension`] wired to an [`EventSink`] so
+    /// every decoded `claude-code.*` ExtEvent reaches the core bus.
+    ///
+    /// The caller owns the sink's lifetime; the extension clones the
+    /// handle into whatever spawned tasks need it. Dropping every
+    /// receiver drops `send` Ok-returns to `Err`, which the loop just
+    /// logs + skips — a gone-away bus is not a session-fatal condition.
+    pub fn with_event_sink(sink: EventSink) -> Self {
+        Self {
+            event_sink: Some(sink),
+        }
+    }
+
+    /// Borrow the configured event sink, if any. Exposed primarily for
+    /// tests that want to confirm the injection took effect.
+    pub fn event_sink(&self) -> Option<&EventSink> {
+        self.event_sink.as_ref()
     }
 }
 
@@ -184,19 +220,29 @@ impl ArkExtension for ClaudeCodeExtension {
             "claude-code: cc-hook socket bound"
         );
 
-        // T-014 will replace this log-only sink with a bus-forwarder
-        // that publishes `ExtEvent`s via the host-dispatch surface. For
-        // now, the listener just records frames at debug level to
-        // prove the socket round-trips end-to-end — unit tests in
-        // socket.rs exercise the decode + dispatch logic directly.
+        // T-014: if a construction-time `EventSink` was provided,
+        // publish every decoded HookFired frame onto the core bus via
+        // `CoreEvent::Ext(ExtEvent)`. Bus send errors only happen when
+        // every receiver has been dropped (session teardown); we log +
+        // continue rather than crash the accept loop.
+        let sink = self.event_sink.clone();
         tokio::spawn(async move {
             sock.accept_loop(move |ev| match ev {
                 socket::SocketEvent::HookFired { event, ext_event } => {
                     debug!(
                         event = %event,
                         kind = %ext_event.kind,
-                        "claude-code: cc-hook frame decoded (sink T-014 pending)"
+                        has_sink = sink.is_some(),
+                        "claude-code: cc-hook frame decoded"
                     );
+                    if let Some(bus) = sink.as_ref() {
+                        if let Err(e) = bus.send(CoreEvent::Ext(ext_event)) {
+                            warn!(
+                                error = %e,
+                                "claude-code: event bus send failed; receivers gone"
+                            );
+                        }
+                    }
                 }
                 socket::SocketEvent::BridgeVersionMismatch { observed, expected } => {
                     warn!(

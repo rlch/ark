@@ -312,6 +312,7 @@ dependencies = [
  "chrono",
  "clap 4.6.0",
  "notify 7.0.0",
+ "rhai",
  "serde",
  "serde_json",
  "tempfile",
@@ -583,6 +584,16 @@ version = "0.1.0"
 dependencies = [
  "clap 4.6.0",
  "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "ark-test-fixtures-claude-code"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clap 4.6.0",
  "serde_json",
  "tempfile",
 ]
