@@ -18,3 +18,7 @@ facet = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+# T-012 (soul phase 2, cavekit R8 + decisions §R-6): blake3 powers the
+# canonical-JSON ParamsHash used by suppression. Dep budget expanded by 1
+# (from {facet, serde, serde_json, thiserror}) as explicitly sanctioned by R8.
+blake3 = { workspace = true }

@@ -544,6 +544,7 @@ dependencies = [
 name = "ark-view"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "facet",
  "serde",
  "serde_json",

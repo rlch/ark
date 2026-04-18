@@ -10,7 +10,11 @@
 
 pub mod handle;
 pub mod invalidation;
+pub mod suppression;
+pub mod typed;
 pub mod view;
 pub use handle::{HandleId, HandleKind};
 pub use invalidation::InvalidationCause;
+pub use suppression::ParamsHash;
+pub use typed::{Pane, Stack, TabHandle};
 pub use view::{CommandView, View, ZellijView};
