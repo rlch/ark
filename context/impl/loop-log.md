@@ -4,6 +4,21 @@ last_edited: "2026-04-18"
 ---
 # Loop Log
 
+### Wave T-009..T-013 — 2026-04-18 — Tier 2 (claude-code-ext hook IPC)
+
+- T-009..T-013 DONE. Serial on main tree per memory. Scope: `extensions/claude-code/` + ledgers only. NO supervisor / scene / cli / ark-view touching.
+- T-009: already DONE by Tier-1 T-006 side-effect (cc-hook already POSTed NDJSON + exit 0). No code change; ledger note.
+- T-010: sentinel-file handshake layered on top of T-006's `--first-post` flag. cc-hook probes `<socket-parent>/cc-hook.handshake`: absent → emit `bridge_version` + touch after successful POST; present → omit. `--first-post` kept as manual override. new helpers `handshake_sentinel_path()` + `touch_sentinel()`. 4 new unit tests (next-to-socket, dot-fallback, idempotent, parent-dir-create). non-fatal on sentinel write fail (worst case: repeated bv advertisement).
+- T-011: new `src/socket.rs`. `CcHookSocket::bind(layout, sid)` → `$STATE/sessions/<sid>/cc-hook.sock`, unlinks stale file + `ensure_dir_0700`, returns typed `CcHookSocketError::BindFailed`. `accept_loop(sink)` per-connection `BufReader::read_line` loop → `NdjsonLine` serde → `HookEvent` parse → `payload_to_ext_event` → `SocketEvent::HookFired` to sink. Malformed NDJSON + unknown kinds → `tracing::warn!` + skip (never crash). `ClaudeCodeExtension::on_session_start` overridden: decodes `OpaqueJson` spec → resolves `StateLayout::from_env` → binds → spawns tokio task. EVERY failure branch returns `Ok(default)` (fail-open — claude-code is pure observability, session-launch MUST NOT block on its failures). Sink is log-only for now; T-014 (Tier 3) wires the real ExtEvent bus forwarder once the trait surfaces a publisher handle. `on_session_end` left at trait default.
+- T-012: ext_state API = ON-DISK SENTINEL (prompt fallback blessed). Scope forbade supervisor touch + adding `ark-core` dep would pull half the workspace into the ext. Wrote `$STATE/sessions/<sid>/claude-code.bridge_version_mismatch.json` with `{observed, expected, first_seen_at}` via tmp-file+rename atomic pattern. `SocketEvent::BridgeVersionMismatch` to sink + one-shot guard silences subsequent mismatches per kit R4 "one-shot doctor warning per session". ark doctor (T-042) reads sentinel with plain `serde_json::from_slice` — NO reverse dep on claude-code crate.
+- T-013: coverage audit per kit R13 cc-hook unit. ADDITIONS:
+  - per-kind NDJSON roundtrip covering all 10 HookEvent × 2 bridge_version states in `hook_payload.rs` module tests.
+  - cross-process `cc-hook` binary fail-open integration suite `tests/cc_hook_fail_open.rs` with 5 tests (missing socket, missing parent dir, empty stdin, garbage stdin, bogus `--event` clap-fail). Resolves binary via `env!("CARGO_BIN_EXE_cc-hook")` so `cargo test` auto-rebuilds.
+- macOS SUN_LEN gotcha: tests use `tempfile::Builder::tempdir_in("/tmp")` + `SessionId::new("s")` (26-char ulid + `/var/folders/…` path blows 104-byte cap otherwise).
+- deps: `thiserror = { workspace = true }` added to crate (already in workspace table).
+- validation: `cargo build --workspace` ✓ 0 errors; `cargo test -p ark-ext-claude-code` ✓ 42 pass (was 23); `cargo test --workspace --tests` ✓ 2099 pass (was 2080); `cargo fmt --all --check` ✓; `cargo clippy -p ark-ext-claude-code --all-targets` ✓ 0 warnings for claude-code.
+- next: Tier 3 (T-014..T-018) — event forwarding proper + mock-claude fixture. T-014 swaps socket.rs log-only sink for real bus forwarder (needs event-publisher handle from ext-proto). T-015 verifies verbatim payload carry-through exhaustively. T-017/T-018 build the `crates/test-fixtures/claude-code/` mock-claude binary.
+
 ### Wave T-004..T-008a — 2026-04-18 — Tier 1 (claude-code-ext salvage)
 
 - T-004..T-008a DONE (T-008a PARTIAL: stub `CC_HOOK_BYTES = &[]`, real embed deferred). Serial on main tree per memory.

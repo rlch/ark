@@ -232,6 +232,32 @@ mod tests {
     }
 
     #[test]
+    fn ndjson_envelope_roundtrips_for_every_hook_kind() {
+        // T-013 + kit R13 cc-hook-unit: every HookEvent variant must
+        // serde-roundtrip through NDJSON so cc-hook never drops an
+        // event on the wire regardless of which of the 10 hook kinds
+        // Claude Code fires. Covers the `kind` string mapping +
+        // payload verbatim carry + bridge_version opt-in shape.
+        for ev in HookEvent::ALL {
+            for bv in [None, Some("0.0.0-test".to_string())] {
+                let p = base_payload(ev.as_str());
+                let line = NdjsonLine {
+                    kind: ev.as_str().to_string(),
+                    session_id: format!("sess-{}", ev.as_str()),
+                    payload: p,
+                    emitted_at: "2026-04-18T00:00:00Z".into(),
+                    bridge_version: bv.clone(),
+                };
+                let s = serde_json::to_string(&line).expect("ser");
+                let parsed: NdjsonLine = serde_json::from_str(&s).expect("de");
+                assert_eq!(parsed, line, "roundtrip failed for {}", ev.as_str());
+                assert_eq!(parsed.kind, ev.as_str());
+                assert_eq!(parsed.bridge_version, bv);
+            }
+        }
+    }
+
+    #[test]
     fn ndjson_envelope_omits_bridge_version_when_none() {
         let p = base_payload("Stop");
         let line = NdjsonLine {

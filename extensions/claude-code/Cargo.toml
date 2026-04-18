@@ -50,6 +50,10 @@ clap = { workspace = true }
 chrono = { workspace = true }
 anyhow = { workspace = true }
 tracing-subscriber = { workspace = true }
+# T-011 socket reader: typed error enum for `CcHookSocket::bind` uses
+# `#[derive(thiserror::Error)]` so callers (on_session_start) can
+# pattern-match on bind-vs-runtime failure classes.
+thiserror = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

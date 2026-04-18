@@ -56,15 +56,24 @@
 
 #![deny(missing_docs)]
 
-use ark_ext_proto::ArkExtension;
+use ark_ext_proto::{
+    ArkExtension, ExtResult, OnSessionEndRequest, OnSessionEndResponse, OnSessionStartRequest,
+    OnSessionStartResponse,
+};
 use async_trait::async_trait;
+use tracing::{debug, warn};
 
 pub mod hook_event;
 pub mod hook_payload;
+pub mod socket;
 pub mod transcript;
 
 pub use hook_event::{HookEvent, UnknownHookEvent};
 pub use hook_payload::{EXT_NAME, HookPayload, NdjsonLine, flat_event_name, payload_to_ext_event};
+pub use socket::{
+    BRIDGE_VERSION_MISMATCH_SENTINEL, BridgeVersionMismatch, CRATE_VERSION, CcHookSocket,
+    CcHookSocketError, SocketEvent, record_mismatch_sentinel,
+};
 pub use transcript::{TailCursor, TranscriptEvent, TranscriptWatcher, encode_cwd, start_watcher};
 
 /// T-008a stub: embedded `cc-hook` binary bytes for `doctor --fix` to
@@ -125,12 +134,91 @@ impl ClaudeCodeExtension {
 
 /// `ArkExtension` implementation for the Claude Code extension.
 ///
-/// T-003 scaffolding: every method stays at its trait default. The
-/// upstream trait returns `method_not_found` for the methods that an
-/// extension MUST override (e.g. `initialize`) and `Ok(Default)` for
-/// the notification-style methods. This crate's overrides land
-/// incrementally in T-020..T-045+ per `build-site-claude-code-ext.md`.
+/// T-011 lands a minimal `on_session_start` override that binds the
+/// per-session cc-hook socket and spawns an accept loop. The loop's
+/// sink is currently log-only — ExtEvent forwarding to the core bus
+/// lands in T-014 (Tier 3) once the `ArkExtension` trait surfaces an
+/// event publisher handle. Other methods stay at their trait defaults
+/// until their respective tiers (see `build-site-claude-code-ext.md`).
 #[async_trait]
 impl ArkExtension for ClaudeCodeExtension {
-    // Intentionally empty — see module doc.
+    async fn on_session_start(
+        &self,
+        req: OnSessionStartRequest,
+    ) -> ExtResult<OnSessionStartResponse> {
+        // Decode the SessionSpec from OpaqueJson. A malformed spec is
+        // non-fatal here — log + return Ok so the supervisor isn't
+        // blocked on an extension-side parse error (matches R2's
+        // fail-open philosophy).
+        let spec: ark_types::SessionSpec = match serde_json::from_str(&req.spec) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "claude-code: on_session_start: spec decode failed; skipping listener bind");
+                return Ok(OnSessionStartResponse::default());
+            }
+        };
+
+        // Resolve state layout from env. If XDG resolution fails we
+        // can't bind — log and move on; the ext is pure observability,
+        // its failure must not block session launch.
+        let layout = match ark_types::StateLayout::from_env() {
+            Ok(l) => l,
+            Err(e) => {
+                warn!(error = %e, "claude-code: on_session_start: StateLayout::from_env failed; no socket");
+                return Ok(OnSessionStartResponse::default());
+            }
+        };
+
+        let sid = spec.id.clone();
+        let sock = match socket::CcHookSocket::bind(&layout, &sid).await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(session = %sid.as_path_leaf(), error = %e, "claude-code: on_session_start: socket bind failed");
+                return Ok(OnSessionStartResponse::default());
+            }
+        };
+
+        debug!(
+            session = %sid.as_path_leaf(),
+            path = %sock.path().display(),
+            "claude-code: cc-hook socket bound"
+        );
+
+        // T-014 will replace this log-only sink with a bus-forwarder
+        // that publishes `ExtEvent`s via the host-dispatch surface. For
+        // now, the listener just records frames at debug level to
+        // prove the socket round-trips end-to-end — unit tests in
+        // socket.rs exercise the decode + dispatch logic directly.
+        tokio::spawn(async move {
+            sock.accept_loop(move |ev| match ev {
+                socket::SocketEvent::HookFired { event, ext_event } => {
+                    debug!(
+                        event = %event,
+                        kind = %ext_event.kind,
+                        "claude-code: cc-hook frame decoded (sink T-014 pending)"
+                    );
+                }
+                socket::SocketEvent::BridgeVersionMismatch { observed, expected } => {
+                    warn!(
+                        observed = %observed,
+                        expected = %expected,
+                        "claude-code: bridge version mismatch; doctor warning persisted"
+                    );
+                }
+            })
+            .await;
+        });
+
+        Ok(OnSessionStartResponse::default())
+    }
+
+    async fn on_session_end(&self, _req: OnSessionEndRequest) -> ExtResult<OnSessionEndResponse> {
+        // Per R2 + kit note: the supervisor owns session-dir cleanup;
+        // our spawned accept-loop task is aborted automatically when
+        // the tokio runtime tears down. A future tier (T-041 +
+        // shutdown-path cleanup) may add explicit task cancellation
+        // tracking; for now the default-ish response is sufficient and
+        // correct.
+        Ok(OnSessionEndResponse::default())
+    }
 }

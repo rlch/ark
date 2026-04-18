@@ -105,16 +105,17 @@ struct Cli {
     #[arg(long = "event")]
     event: HookEvent,
 
-    /// First-POST-per-session marker. When set, the emitted NDJSON
-    /// line carries `bridge_version` (R4). The ark-side socket reader
-    /// decides whether it is actually the first POST it has seen for
-    /// `session` — cc-hook is stateless so it cannot know. In
-    /// practice, the settings.json installer (T-019) sets this flag
-    /// on the `SessionStart` entry only; every other hook template
-    /// omits it.
+    /// First-POST-per-session override. When set, the emitted NDJSON
+    /// line ALWAYS carries `bridge_version` (R4) — useful for manual
+    /// testing / settings.json templates that want to force handshake.
     ///
-    /// Defaults off — operator who runs `cc-hook` by hand without the
-    /// flag gets a lean payload.
+    /// When unset (the default), cc-hook auto-detects first-POST by
+    /// probing a per-session sentinel file at
+    /// `<socket-parent>/cc-hook.handshake`. Absence → first POST; we
+    /// emit `bridge_version` and touch the sentinel. Presence →
+    /// subsequent POST; omit `bridge_version`. Per T-010.
+    ///
+    /// Sentinel write failures are non-fatal (fail-open exit 0 per R2).
     #[arg(long = "first-post", default_value_t = false)]
     first_post: bool,
 }
@@ -169,12 +170,22 @@ fn main() -> ExitCode {
         None => placeholder_payload(&cli),
     };
 
+    // R4 handshake (T-010): decide whether to advertise bridge_version
+    // on this POST. Order of precedence:
+    //   1. `--first-post` flag → always advertise (manual override).
+    //   2. Sentinel file absent → first POST, advertise + touch sentinel.
+    //   3. Sentinel file present → subsequent POST, omit.
+    // Sentinel probe + touch failures are non-fatal; we proceed with the
+    // current best-guess rather than stalling claude.
+    let sentinel_path = handshake_sentinel_path(&cli.socket);
+    let is_first_post = cli.first_post || !sentinel_path.exists();
+
     let line = NdjsonLine {
         kind: cli.event.as_str().to_string(),
         session_id: cli.session.clone(),
         payload,
         emitted_at: chrono::Utc::now().to_rfc3339(),
-        bridge_version: cli.first_post.then(|| BRIDGE_VERSION.to_string()),
+        bridge_version: is_first_post.then(|| BRIDGE_VERSION.to_string()),
     };
 
     let wire = match serde_json::to_string(&line) {
@@ -199,6 +210,22 @@ fn main() -> ExitCode {
             "cc-hook: socket POST failed; fail-open exit 0 ({EXT_NAME})"
         );
         return ExitCode::from(0);
+    }
+
+    // Post succeeded. Touch the handshake sentinel so the next cc-hook
+    // invocation in this session omits `bridge_version`. Failure to
+    // write the sentinel is non-fatal — worst case we advertise the
+    // version on every POST, which is wasteful but correct.
+    if is_first_post {
+        if let Err(e) = touch_sentinel(&sentinel_path) {
+            warn!(
+                session = %cli.session,
+                event = %cli.event,
+                sentinel = %sentinel_path.display(),
+                error = %e,
+                "cc-hook: sentinel touch failed; next POST may repeat bridge_version"
+            );
+        }
     }
 
     ExitCode::from(0)
@@ -255,6 +282,44 @@ fn placeholder_payload(cli: &Cli) -> HookPayload {
         tool_input: None,
         extra: Default::default(),
     }
+}
+
+/// Resolve the R4 handshake sentinel path for a given socket path.
+///
+/// Lives alongside the socket in the per-session state directory:
+/// `$STATE/sessions/<sid>/cc-hook.handshake`. Deriving the path from the
+/// socket (rather than accepting a separate CLI arg) keeps cc-hook's
+/// invocation contract minimal and matches how ark allocates the
+/// session dir on spawn.
+///
+/// If the socket path has no parent (e.g. operator passed a bare
+/// filename) we fall back to the current directory so we still have a
+/// well-defined probe target.
+fn handshake_sentinel_path(socket: &std::path::Path) -> PathBuf {
+    let parent = socket
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    parent.join("cc-hook.handshake")
+}
+
+/// Create the handshake sentinel file if it does not already exist.
+///
+/// Uses `OpenOptions::create(true)` rather than `create_new` — if
+/// another cc-hook process wins the race, the existing file is fine.
+/// We also ensure the parent directory exists (cc-hook may fire before
+/// ark-side setup on a fresh session).
+fn touch_sentinel(sentinel: &std::path::Path) -> std::io::Result<()> {
+    if let Some(parent) = sentinel.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(sentinel)?;
+    Ok(())
 }
 
 /// Connect to `socket`, write `wire\n`, close. Returns `Ok(())` on a
@@ -350,6 +415,50 @@ mod tests {
         let sock = tmp.path().join("nope.sock");
         let err = post_ndjson(&sock, "{}").expect_err("must error");
         assert!(err.to_string().contains("connect"));
+    }
+
+    #[test]
+    fn handshake_sentinel_lives_next_to_socket() {
+        // T-010: the sentinel basename must be stable (`cc-hook.handshake`)
+        // and land in the same dir as the socket so the ark-side
+        // session_dir is the single source of truth.
+        let sock = PathBuf::from("/var/run/ark/sessions/abc/cc-hook.sock");
+        let sentinel = handshake_sentinel_path(&sock);
+        assert_eq!(
+            sentinel,
+            PathBuf::from("/var/run/ark/sessions/abc/cc-hook.handshake")
+        );
+    }
+
+    #[test]
+    fn handshake_sentinel_falls_back_to_dot_on_bare_filename() {
+        // Operator runs cc-hook manually with `--socket foo.sock`; we
+        // still need a well-defined sentinel. Current dir is a safe
+        // default — test binaries have one, so does Claude Code.
+        let sock = PathBuf::from("foo.sock");
+        let sentinel = handshake_sentinel_path(&sock);
+        assert_eq!(sentinel, PathBuf::from("./cc-hook.handshake"));
+    }
+
+    #[test]
+    fn touch_sentinel_creates_file_and_is_idempotent() {
+        let tmp = TempDir::new().unwrap();
+        let sentinel = tmp.path().join("cc-hook.handshake");
+        touch_sentinel(&sentinel).expect("touch1");
+        assert!(sentinel.exists());
+        // Second call is a no-op (doesn't truncate an existing file).
+        std::fs::write(&sentinel, b"payload").unwrap();
+        touch_sentinel(&sentinel).expect("touch2");
+        let contents = std::fs::read(&sentinel).unwrap();
+        assert_eq!(contents, b"payload", "existing contents preserved");
+    }
+
+    #[test]
+    fn touch_sentinel_creates_parent_dirs() {
+        let tmp = TempDir::new().unwrap();
+        let sentinel = tmp.path().join("a/b/c/cc-hook.handshake");
+        touch_sentinel(&sentinel).expect("touch deep");
+        assert!(sentinel.exists());
     }
 
     #[test]
