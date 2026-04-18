@@ -1,0 +1,16 @@
+error[E0599]: the method `write_stdin` exists for struct `ark_view::Pane<ZVOnly>`, but its trait bounds were not satisfied
+  --> tests/ui/zellij_view_cannot_call_write_stdin.rs:13:7
+   |
+ 6 | struct ZVOnly;
+   | ------------- doesn't satisfy `ZVOnly: CommandView`
+...
+13 |     p.write_stdin(b"hello");
+   |       ^^^^^^^^^^^ method cannot be called on `ark_view::Pane<ZVOnly>` due to unsatisfied trait bounds
+   |
+   = note: the following trait bounds were not satisfied:
+           `ZVOnly: CommandView`
+note: the trait `CommandView` must be implemented
+  --> src/view.rs
+   |
+   | pub trait CommandView: View {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^

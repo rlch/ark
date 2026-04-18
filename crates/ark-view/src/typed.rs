@@ -8,8 +8,46 @@
 //! Per cavekit-soul-phase-2-ark-view.md R4 + R5 and scene R17.
 
 use crate::handle::HandleId;
-use crate::view::View;
+use crate::view::{CommandView, View, ZellijView};
 use std::marker::PhantomData;
+
+/// Common surface shared by [`Pane<V>`] and [`Stack<V>`]. Extensions
+/// hold typed wrappers for static guarantees; `&dyn PaneLike` lets
+/// internal helper code iterate mixed containers polymorphically
+/// without reflection.
+///
+/// v0.1 pins only the `handle()` accessor — the `emit<E: Event>`
+/// surface mentioned in kit R4 is deferred until the typed `Event`
+/// trait lands with the RPC wiring in T-018+. Additions to this trait
+/// are MINOR-compatible because extensions consume `&dyn PaneLike`
+/// through inherent methods, not through explicit impls.
+pub trait PaneLike {
+    /// Opaque handle id — same bytes that appear on the wire.
+    fn handle(&self) -> &HandleId;
+}
+
+impl<V: View> PaneLike for Pane<V> {
+    fn handle(&self) -> &HandleId {
+        self.handle()
+    }
+}
+
+impl<V: View> PaneLike for Stack<V> {
+    fn handle(&self) -> &HandleId {
+        self.handle()
+    }
+}
+
+/// **Internal.** Doc-hidden constructor used EXCLUSIVELY by the
+/// `tests/ui/` trybuild compile-fail fixtures to assemble a `Pane<V>`
+/// from outside the crate — `Pane::from_handle` is `pub(crate)` and
+/// the compile-fail fixtures live in an integration test crate that
+/// cannot name it. Not part of the public surface; MUST NOT be called
+/// from extension code. Unstable across any version.
+#[doc(hidden)]
+pub fn __trybuild_pane_ctor<V: View>(h: HandleId) -> Pane<V> {
+    Pane::from_handle(h)
+}
 
 /// Typed wrapper around a pane handle.
 ///
@@ -145,6 +183,118 @@ impl TabHandle {
     }
 }
 
+// ---- Marker-gated affordances on `Pane<V>` (T-010) ---------------------
+//
+// Kit R4 requires that `env`, `write_stdin`, `pid` are ONLY in scope
+// when `V: CommandView`, and that `pipe` is ONLY in scope when
+// `V: ZellijView`. Inherent-impl marker-gating is how Rust encodes
+// this at the type system: a `Pane<Z>` where `Z: ZellijView` but not
+// `CommandView` cannot name `env(...)` — the method is literally not
+// a candidate during method resolution.
+//
+// Bodies are stubs — the actual RPC invocation is wired in T-018+
+// (ext→host method bodies, see cavekit-soul-phase-2-ark-view.md R6
+// pane/* + stack/* methods). Stubs are acceptable here because R4's
+// acceptance criteria are about TYPE-LEVEL visibility, which the
+// signatures lock.
+
+impl<V: CommandView> Pane<V> {
+    /// Set an environment variable for the subprocess renderer.
+    ///
+    /// Maps to the `pane/env` RPC method at T-018+. v0.1 body is a
+    /// stub — callers get the correct type-level visibility now so
+    /// scene/ext code can compile against the surface before the
+    /// dispatcher lands.
+    pub fn env(&self, _key: &str, _value: &str) {
+        // RPC wiring lands in T-018+ (ext→host method bodies).
+    }
+
+    /// Write bytes to the subprocess's stdin stream.
+    ///
+    /// Maps to `pane/write_stdin` at T-018+. Stub body per T-010.
+    pub fn write_stdin(&self, _bytes: &[u8]) {
+        // RPC wiring lands in T-018+.
+    }
+
+    /// Process id of the subprocess renderer, if alive.
+    ///
+    /// Maps to `pane/pid` at T-018+. Stub returns `None` until the
+    /// dispatcher can ask the supervisor.
+    pub fn pid(&self) -> Option<u32> {
+        // RPC wiring lands in T-018+; stub returns None.
+        None
+    }
+}
+
+impl<V: ZellijView> Pane<V> {
+    /// Pipe a message to the zellij plugin renderer.
+    ///
+    /// Maps to `pane/pipe` at T-018+. Stub body per T-010.
+    pub fn pipe(&self, _message: &[u8]) {
+        // RPC wiring lands in T-018+.
+    }
+}
+
+// ---- `Stack<V>` methods (T-011) ----------------------------------------
+
+/// Attributes passed to [`Stack::spawn_pane`].
+///
+/// v0.1 is intentionally empty — later tiers (scene wiring, ext
+/// authoring) may extend this with `env` overrides, initial view-body
+/// payload, etc. Kept as a dedicated struct so additions are
+/// MINOR-compatible (per phase-2 decision #4c): appending fields with
+/// `Default` values is source-compatible for call sites that build
+/// via `PaneAttrs::default()` / struct-literal-with-`..default()`.
+#[derive(Clone, Debug, Default)]
+pub struct PaneAttrs {
+    // Intentionally empty for v0.1 — see doc-comment.
+}
+
+impl<V: View> Stack<V> {
+    /// Spawn a new pane into this stack.
+    ///
+    /// Maps to `stack/spawn_pane` at T-018+. T-011 pins the
+    /// Rust-side signature; the returned `Pane<V>` carries a synthetic
+    /// placeholder handle until the RPC dispatcher is wired — callers
+    /// that exercise the returned handle against the host will get
+    /// a `HandleGone`-shaped error (R7). This is INTENTIONAL for v0.1
+    /// so scene/ext code can compile and unit-test against the surface.
+    pub fn spawn_pane(&self, _attrs: PaneAttrs) -> Pane<V> {
+        // Placeholder: returns a Pane wrapping a synthetic handle.
+        // Replaced with real RPC invocation in T-018+.
+        Pane::from_handle(HandleId::new("__unwired_stack_spawn__"))
+    }
+
+    /// Close a specific child pane without tearing down the stack
+    /// itself. Subsequent ops against the closed child produce
+    /// `HandleGone` (R7) on the dispatcher side.
+    ///
+    /// Per R9, stack-children are NEVER entered into the user-close
+    /// suppression set — a re-invocation of `spawn_pane` after a
+    /// `close_child` is always honoured.
+    ///
+    /// Maps to `stack/close_child` at T-018+. Stub body per T-011.
+    pub fn close_child(&self, _child: &Pane<V>) {
+        // RPC wiring lands in T-018+.
+    }
+
+    /// Enumerate current child panes.
+    ///
+    /// Stub returns empty until the name-indexed lookup surface (R10)
+    /// and the RPC dispatcher land. Callers depending on this should
+    /// flag a follow-up against T-018+.
+    pub fn children(&self) -> Vec<Pane<V>> {
+        Vec::new()
+    }
+
+    /// Close every child pane, leaving the stack itself intact.
+    ///
+    /// Maps to `stack/clear` at T-018+. Stub body per T-011.
+    pub fn clear(&self) {
+        // RPC wiring lands in T-018+.
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,5 +407,73 @@ mod tests {
     fn tab_handle_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<TabHandle>();
+    }
+
+    // ---- PaneLike (T-009) --------------------------------------------------
+
+    #[test]
+    fn pane_like_polymorphic_over_pane_and_stack() {
+        let p: Pane<VX> = Pane::from_handle(HandleId::new("a"));
+        let s: Stack<VX> = Stack::from_handle(HandleId::new("b"));
+        let vec: Vec<&dyn PaneLike> = vec![&p, &s];
+        let ids: Vec<&str> = vec.iter().map(|x| x.handle().as_str()).collect();
+        assert_eq!(ids, vec!["a", "b"]);
+    }
+
+    // ---- Marker-gated affordances on Pane<V> (T-010) -----------------------
+
+    #[test]
+    fn pane_commandview_affordances_exist_on_command_view() {
+        struct CV;
+        impl crate::view::View for CV {}
+        impl crate::view::CommandView for CV {}
+        let p: Pane<CV> = Pane::from_handle(HandleId::new("x"));
+        p.env("KEY", "VALUE");
+        p.write_stdin(b"hello");
+        let _ = p.pid();
+    }
+
+    #[test]
+    fn pane_zellijview_affordances_exist_on_zellij_view() {
+        struct ZV;
+        impl crate::view::View for ZV {}
+        impl crate::view::ZellijView for ZV {}
+        let p: Pane<ZV> = Pane::from_handle(HandleId::new("x"));
+        p.pipe(b"msg");
+    }
+
+    // ---- Stack<V> methods (T-011) ------------------------------------------
+
+    #[test]
+    fn stack_spawn_pane_returns_pane_of_same_view_type() {
+        let s: Stack<VX> = Stack::from_handle(HandleId::new("s"));
+        let _p: Pane<VX> = s.spawn_pane(PaneAttrs::default());
+    }
+
+    #[test]
+    fn stack_close_child_accepts_pane_of_same_view_type() {
+        let s: Stack<VX> = Stack::from_handle(HandleId::new("s"));
+        let child: Pane<VX> = Pane::from_handle(HandleId::new("c"));
+        s.close_child(&child);
+    }
+
+    #[test]
+    fn stack_children_returns_vec_pane_v() {
+        let s: Stack<VX> = Stack::from_handle(HandleId::new("s"));
+        let v: Vec<Pane<VX>> = s.children();
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn stack_clear_compiles() {
+        let s: Stack<VX> = Stack::from_handle(HandleId::new("s"));
+        s.clear();
+    }
+
+    #[test]
+    fn pane_attrs_is_default_clone_debug() {
+        let a = PaneAttrs::default();
+        let _b = a.clone();
+        let _dbg = format!("{:?}", PaneAttrs::default());
     }
 }

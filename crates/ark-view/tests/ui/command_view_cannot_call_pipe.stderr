@@ -1,0 +1,16 @@
+error[E0599]: the method `pipe` exists for struct `ark_view::Pane<CVOnly>`, but its trait bounds were not satisfied
+  --> tests/ui/command_view_cannot_call_pipe.rs:13:7
+   |
+ 6 | struct CVOnly;
+   | ------------- doesn't satisfy `CVOnly: ZellijView`
+...
+13 |     p.pipe(b"msg");
+   |       ^^^^ method cannot be called on `ark_view::Pane<CVOnly>` due to unsatisfied trait bounds
+   |
+   = note: the following trait bounds were not satisfied:
+           `CVOnly: ZellijView`
+note: the trait `ZellijView` must be implemented
+  --> src/view.rs
+   |
+   | pub trait ZellijView: View {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^

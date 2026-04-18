@@ -22,3 +22,11 @@ thiserror = { workspace = true }
 # canonical-JSON ParamsHash used by suppression. Dep budget expanded by 1
 # (from {facet, serde, serde_json, thiserror}) as explicitly sanctioned by R8.
 blake3 = { workspace = true }
+
+# T-009..T-011 (soul phase 2, cavekit R4): `trybuild` runs the negative
+# compile-fail fixtures under `tests/ui/` that lock marker-trait gating
+# — e.g. `Pane<ZellijView>` MUST NOT see `env`/`write_stdin`/`pid`, and
+# `Pane<CommandView>` MUST NOT see `pipe`. Dev-only: the trybuild crate
+# and its fixture source files never ship in the built `ark-view` dylib.
+[dev-dependencies]
+trybuild = "1"

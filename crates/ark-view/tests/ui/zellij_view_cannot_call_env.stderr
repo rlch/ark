@@ -1,0 +1,16 @@
+error[E0599]: the method `env` exists for struct `ark_view::Pane<ZVOnly>`, but its trait bounds were not satisfied
+  --> tests/ui/zellij_view_cannot_call_env.rs:17:7
+   |
+ 6 | struct ZVOnly;
+   | ------------- doesn't satisfy `ZVOnly: CommandView`
+...
+17 |     p.env("K", "V");
+   |       ^^^ method cannot be called on `ark_view::Pane<ZVOnly>` due to unsatisfied trait bounds
+   |
+   = note: the following trait bounds were not satisfied:
+           `ZVOnly: CommandView`
+note: the trait `CommandView` must be implemented
+  --> src/view.rs
+   |
+   | pub trait CommandView: View {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -1,0 +1,16 @@
+error[E0599]: the method `pid` exists for struct `ark_view::Pane<ZVOnly>`, but its trait bounds were not satisfied
+  --> tests/ui/zellij_view_cannot_call_pid.rs:13:15
+   |
+ 6 | struct ZVOnly;
+   | ------------- doesn't satisfy `ZVOnly: CommandView`
+...
+13 |     let _ = p.pid();
+   |               ^^^ method cannot be called on `ark_view::Pane<ZVOnly>` due to unsatisfied trait bounds
+   |
+   = note: the following trait bounds were not satisfied:
+           `ZVOnly: CommandView`
+note: the trait `CommandView` must be implemented
+  --> src/view.rs
+   |
+   | pub trait CommandView: View {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^
