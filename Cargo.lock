@@ -502,6 +502,7 @@ dependencies = [
  "ark-orchestrators-claude-code",
  "ark-scene",
  "ark-types",
+ "ark-view",
  "async-trait",
  "chrono",
  "fd-lock",
