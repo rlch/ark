@@ -29,9 +29,21 @@ Ledger is prepend-only. Newest entries at top. Append completion rows below as t
 | T-012 | 2 | ark-view R8 ParamsHash | DONE | `5b33711` | blake3 of canonical-JSON; ParamsHash newtype `[u8;32]`; hash_params<T: Serialize>() |
 | T-013 | 2 | ark-view R8+R9 | DONE | `cc5c02f` | SceneHandleName + SuppressionPolicy contract type; 6 invariants documented; debug_assert on stack-child |
 | F-007 fix | 2 | — | DONE | pending | distinct synthetic handles from Stack::spawn_pane stub (atomic counter) |
-| T-014..T-044 | 3-8 | various | PENDING | — | see build site |
+| T-014 | 3 | ark-view R7 | DONE | `bcd38e2` | HandleGone { handle, cause } on ExtensionError + wire code `-32006 ext-proto/handle-gone` + NDJSON arm |
+| T-015 | 3 | ark-view R7 wire | DONE | `09676d1` | ark.handle.invalidated golden test (6 tests pinning `{handle, cause}` shape) |
+| T-016 | 3 | ark-view R10 | DONE | `753f91f` | SessionHandles + pane_by_name/stack_by_name/tab_by_name; zero-RPC pure reads |
+| T-017 | 3 | ark-view R11 + R1 deps | DONE | `5d157e3` | cross-crate re-exports (10 names) from ark-ext-proto; integration test pins compile-time resolution |
+| F-008/F-009 fix | 3 | — | DONE | `1094a0a` | HandleGone NDJSON roundtrip (encoder stuffs structured data, decoder parses it); SessionHandles::pane_by_name_typed enforces view-type today; untyped variant doc-updated |
+| T-018..T-044 | 4-8 | various | PENDING | — | see build site |
 
 ## Wave Log
+
+### Waves 4a+4b — 2026-04-18 — Tier 3
+- 4a (parallel 3): T-014 (bcd38e2) + T-015 (09676d1) + T-016 (753f91f). Disjoint crates/files. All landed.
+- 4b (solo): T-017 (5d157e3). Cross-crate re-exports from ark-ext-proto, integration test compiles.
+- Codex tier-gate: 2 findings. F-008 [P1] HandleGone NDJSON decoder regression — fixed inline (1094a0a) with structured data encoding + roundtrip test. F-009 [P2] SessionHandles ignored view-type — added pane_by_name_typed() variant + honest doc on untyped path. Gate PROCEED.
+- 1714 tests pass workspace-wide (+14 since Tier 2).
+- Next: Tier 4 — T-018..T-023 (six ext→host RPC request/response pairs + lifecycle + feature-group hooks + ViewDecl extension).
 
 ### Waves 3a+3b — 2026-04-18 — Tier 2
 - 3a (parallel 2): T-008 (0ffc222) + T-012 (5b33711). Both landed; PhantomData<fn()->V> to preserve Send+Sync; blake3 canonical JSON hash with hex serde.

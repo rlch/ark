@@ -86,3 +86,8 @@ Overall: 45/134 (34%). Next: Tier 2 (engine-claude-code + event-bus consumers, 1
 - Wave 3a: T-008 (0ffc222) + T-012 (5b33711) parallel. Wave 3b: T-009/T-010/T-011 bundle (a904a98 + trybuild) + T-013 (cc5c02f) parallel. Build P, Tests P (1700).
 - Codex tier-gate: 1×P2 (F-007 spawn_pane aliasing). Fixed inline. Gate PROCEED.
 - Next: Tier 3 — T-014..T-017 (HandleGone ExtensionError, handle.invalidated event wire, SessionHandles, cross-crate exports).
+
+### Iteration Tier-3 — 2026-04-18 — phase-2
+- Wave 4a: T-014 (bcd38e2) + T-015 (09676d1) + T-016 (753f91f) parallel. Wave 4b: T-017 (5d157e3). Build P, Tests P (1714).
+- Codex tier-gate: 2 findings. F-008 [P1] NDJSON HandleGone decoder regression + F-009 [P2] SessionHandles view-type enforcement. Both fixed (1094a0a). Gate PROCEED.
+- Next: Tier 4 — T-018..T-023 (6 RPC pairs + lifecycle hooks + feature-group hooks + ViewDecl extension).
