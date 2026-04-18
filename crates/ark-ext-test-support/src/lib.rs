@@ -398,14 +398,13 @@ mod tests {
     #[tokio::test]
     async fn stub_capability_advertisement_round_trip() {
         let caps = ["view.pane.v1", "ext.lifecycle.v1"];
-        let stub = StubExtension::builder().advertise_capabilities(caps).build();
+        let stub = StubExtension::builder()
+            .advertise_capabilities(caps)
+            .build();
         let advertised = stub.advertised_capabilities();
         assert_eq!(
             advertised,
-            vec![
-                "ext.lifecycle.v1".to_string(),
-                "view.pane.v1".to_string(),
-            ]
+            vec!["ext.lifecycle.v1".to_string(), "view.pane.v1".to_string(),]
         );
     }
 
@@ -465,10 +464,7 @@ mod tests {
             .await;
         let _ = stub.pane_close(PaneCloseRequest { handle: h }).await;
         let log = stub.call_log();
-        assert_eq!(
-            log,
-            vec!["pane/emit".to_string(), "pane/close".to_string()]
-        );
+        assert_eq!(log, vec!["pane/emit".to_string(), "pane/close".to_string()]);
     }
 
     #[tokio::test]

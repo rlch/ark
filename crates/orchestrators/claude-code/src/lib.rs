@@ -211,9 +211,7 @@ mod tests {
         orch.run(&spec, world).await.expect("stub returns Ok");
     }
 
-    fn sample_spec(
-        ext: BTreeMap<String, serde_json::Value>,
-    ) -> SessionSpec {
+    fn sample_spec(ext: BTreeMap<String, serde_json::Value>) -> SessionSpec {
         SessionSpec {
             id: SessionId::new("claude"),
             name: "claude".to_string(),

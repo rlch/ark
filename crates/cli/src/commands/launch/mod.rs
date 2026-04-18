@@ -52,11 +52,7 @@ fn is_scene_path(value: &str) -> bool {
 /// 3. `.ark/scene.kdl` in cwd
 /// 4. `$XDG_CONFIG_HOME/ark/scenes/default.kdl`
 /// 5. Built-in default (materialized to a per-run temp file)
-fn resolve_scene_file(
-    config_dir: &Path,
-    cwd: &Path,
-    scene_flag: Option<&str>,
-) -> Option<PathBuf> {
+fn resolve_scene_file(config_dir: &Path, cwd: &Path, scene_flag: Option<&str>) -> Option<PathBuf> {
     if let Some(val) = scene_flag {
         if is_scene_path(val) {
             return Some(PathBuf::from(val));

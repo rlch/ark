@@ -39,7 +39,9 @@ pub enum SceneError {
     #[diagnostic(
         code = "scene/parse",
         severity(Error),
-        help("KDL 2.0 syntax error — see the caret below. Run `ark scene fmt` on a known-good reference to compare shapes.")
+        help(
+            "KDL 2.0 syntax error — see the caret below. Run `ark scene fmt` on a known-good reference to compare shapes."
+        )
     )]
     Parse {
         /// Parser's raw message (KDL-level detail).
@@ -58,7 +60,9 @@ pub enum SceneError {
     #[diagnostic(
         code = "scene/misplaced-node",
         severity(Error),
-        help("R2 scope table: `use`, `include`, `on`, `bind`, `mode`, `clear-*`, `disable-extension` live only at scene root; `tab` only inside `layout`; `row`/`col`/`pane` only inside `tab` (or nested).")
+        help(
+            "R2 scope table: `use`, `include`, `on`, `bind`, `mode`, `clear-*`, `disable-extension` live only at scene root; `tab` only inside `layout`; `row`/`col`/`pane` only inside `tab` (or nested)."
+        )
     )]
     MisplacedNode {
         /// Name of the offending node (e.g. `"on"`).
@@ -116,7 +120,9 @@ pub enum SceneError {
     #[diagnostic(
         code = "scene/handle-clash",
         severity(Error),
-        help("Handles are flat-namespaced across tabs and panes. Rename one of the occurrences so the reconciler can tell them apart.")
+        help(
+            "Handles are flat-namespaced across tabs and panes. Rename one of the occurrences so the reconciler can tell them apart."
+        )
     )]
     HandleClash {
         /// The duplicated handle (including the leading `@`).
@@ -138,7 +144,9 @@ pub enum SceneError {
     #[diagnostic(
         code = "scene/handle-type-mismatch",
         severity(Error),
-        help("Op vocabulary R7: some ops are tab-only (`rename`, `new_tab`), others pane-only (`resize`, `move`, `pin`, `unpin`). The compiler infers handle type from the declaration site.")
+        help(
+            "Op vocabulary R7: some ops are tab-only (`rename`, `new_tab`), others pane-only (`resize`, `move`, `pin`, `unpin`). The compiler infers handle type from the declaration site."
+        )
     )]
     HandleTypeMismatch {
         /// Op name (e.g. `"rename"`).
@@ -166,7 +174,9 @@ pub enum SceneError {
     #[diagnostic(
         code = "scene/handle-missing",
         severity(Error),
-        help("Every `tab` and `pane` needs an `@handle`. Handles are the reconciler's identity keys — without them ark cannot map desired-state panes back to running zellij panes.")
+        help(
+            "Every `tab` and `pane` needs an `@handle`. Handles are the reconciler's identity keys — without them ark cannot map desired-state panes back to running zellij panes."
+        )
     )]
     HandleMissing {
         /// Node kind that lacks a handle (`"tab"` or `"pane"`).
@@ -206,7 +216,9 @@ pub enum SceneError {
     #[diagnostic(
         code = "scene/op-failed",
         severity(Error),
-        help("The op ran but returned an error. Check the op's own logs for the underlying cause; subsequent ops in this reaction are skipped.")
+        help(
+            "The op ran but returned an error. Check the op's own logs for the underlying cause; subsequent ops in this reaction are skipped."
+        )
     )]
     OpFailed {
         /// Op name that failed (e.g. `"spawn"`).
@@ -240,7 +252,9 @@ pub enum SceneError {
     #[diagnostic(
         code = "scene/ambiguous-file-shape",
         severity(Error),
-        help("Pick one. Either move the top-level `layout` into the `scene {{ }}` body, or delete the `scene` wrapper so the file parses in legacy layout-only mode. Run `ark scene fmt` to auto-convert.")
+        help(
+            "Pick one. Either move the top-level `layout` into the `scene {{ }}` body, or delete the `scene` wrapper so the file parses in legacy layout-only mode. Run `ark scene fmt` to auto-convert."
+        )
     )]
     AmbiguousFileShape {
         /// File containing both shapes.
@@ -260,7 +274,9 @@ pub enum SceneError {
     #[diagnostic(
         code = "scene/empty-or-unknown",
         severity(Error),
-        help("Wrap the contents in `scene \"<name>\" {{ … }}`; see `cavekit-scene.md` R1 for the full grammar.")
+        help(
+            "Wrap the contents in `scene \"<name>\" {{ … }}`; see `cavekit-scene.md` R1 for the full grammar."
+        )
     )]
     EmptyOrUnknown {
         /// File that failed the shape probe.
@@ -279,7 +295,9 @@ pub enum SceneError {
     #[diagnostic(
         code = "scene/engine-conflict",
         severity(Error),
-        help("Pick one. Delete the inline engine declaration or remove the `use \"{use_name}\"` entry.")
+        help(
+            "Pick one. Delete the inline engine declaration or remove the `use \"{use_name}\"` entry."
+        )
     )]
     EngineConflict {
         /// Name of the clashing `use` target.
@@ -302,7 +320,9 @@ pub enum SceneError {
     #[diagnostic(
         code = "scene/rhai-parse",
         severity(Error),
-        help("Rhai runs in expression-only mode: no `fn`, no loops, no assignment. Predicates with string literals require KDL raw strings (`when=#\"agent.phase == \"review\"\"#`) because Rhai also uses double quotes. `ark scene fmt` auto-promotes plain → raw when a predicate body contains `\"`.")
+        help(
+            "Rhai runs in expression-only mode: no `fn`, no loops, no assignment. Predicates with string literals require KDL raw strings (`when=#\"agent.phase == \"review\"\"#`) because Rhai also uses double quotes. `ark scene fmt` auto-promotes plain → raw when a predicate body contains `\"`."
+        )
     )]
     RhaiParse {
         /// Rhai parser output (includes line/col within the expression).
@@ -322,7 +342,9 @@ pub enum SceneError {
     #[diagnostic(
         code = "scene/rhai-scope-mismatch",
         severity(Error),
-        help("Layout predicates see only the spawn scope (`cwd`, `id`, `name`, `env`). Reaction / bind predicates see only the event scope (`event`, `payload`, `agent`, `session`, plus selector-captured locals). Move the expression, or use a different binding.")
+        help(
+            "Layout predicates see only the spawn scope (`cwd`, `id`, `name`, `env`). Reaction / bind predicates see only the event scope (`event`, `payload`, `agent`, `session`, plus selector-captured locals). Move the expression, or use a different binding."
+        )
     )]
     RhaiScopeMismatch {
         /// Human-readable mismatch (e.g. "`event` unavailable in spawn scope").
@@ -342,7 +364,9 @@ pub enum SceneError {
     #[diagnostic(
         code = "scene/rhai-eval",
         severity(Error),
-        help("Check that every identifier used in the expression is bound by the surrounding context. Reactions see `event.*`, `payload.*`, `agent.*`, `session.*`, plus selector-captured locals.")
+        help(
+            "Check that every identifier used in the expression is bound by the surrounding context. Reactions see `event.*`, `payload.*`, `agent.*`, `session.*`, plus selector-captured locals."
+        )
     )]
     RhaiEval {
         /// Rhai runtime error string.
@@ -356,7 +380,9 @@ pub enum SceneError {
     #[diagnostic(
         code = "scene/rhai-oom",
         severity(Error),
-        help("Scene expressions are capped at 10,000 operations. Flatten nested conditionals or factor the predicate into multiple reactions.")
+        help(
+            "Scene expressions are capped at 10,000 operations. Flatten nested conditionals or factor the predicate into multiple reactions."
+        )
     )]
     RhaiOom {
         /// The operation cap that was hit.
@@ -388,7 +414,9 @@ pub enum SceneError {
     #[diagnostic(
         code = "ext/cycle",
         severity(Error),
-        help("Break the cycle by removing one of the `use` declarations along the chain. Transitive `use` is one-way — extensions contribute intents/events once; there's no need to re-use an ancestor.")
+        help(
+            "Break the cycle by removing one of the `use` declarations along the chain. Transitive `use` is one-way — extensions contribute intents/events once; there's no need to re-use an ancestor."
+        )
     )]
     ExtCycle {
         /// Ordered name trail — first element = cycle start, last = the
@@ -402,7 +430,9 @@ pub enum SceneError {
     #[diagnostic(
         code = "ext/crashed",
         severity(Error),
-        help("The extension subprocess exited unexpectedly. Check the extension's logs for the underlying cause; subsequent intents dispatched to this extension will fail until it is restarted.")
+        help(
+            "The extension subprocess exited unexpectedly. Check the extension's logs for the underlying cause; subsequent intents dispatched to this extension will fail until it is restarted."
+        )
     )]
     ExtCrashed {
         /// Extension name that crashed.
@@ -417,7 +447,9 @@ pub enum SceneError {
     #[diagnostic(
         code = "ext/reserved-namespace",
         severity(Error),
-        help("`ark.core.*` is reserved for host-owned ops. Rename the extension (or the offending declaration) so the resulting namespace is anything other than `ark.core`.")
+        help(
+            "`ark.core.*` is reserved for host-owned ops. Rename the extension (or the offending declaration) so the resulting namespace is anything other than `ark.core`."
+        )
     )]
     ExtReservedNamespace {
         /// Extension name whose declarations were walked.
@@ -432,7 +464,9 @@ pub enum SceneError {
     #[diagnostic(
         code = "ext/bad-config",
         severity(Error),
-        help("The extension's `ConfigSchema` declared a specific shape for this field. Run `ark ext info <ext>` to inspect the schema.")
+        help(
+            "The extension's `ConfigSchema` declared a specific shape for this field. Run `ark ext info <ext>` to inspect the schema."
+        )
     )]
     ExtBadConfig {
         /// Extension name whose config failed validation.
@@ -453,7 +487,9 @@ pub enum SceneError {
     #[diagnostic(
         code = "ext-proto/unsupported-version",
         severity(Error),
-        help("Either install a build of the extension that targets the host protocol version, or upgrade/downgrade ark to a version that speaks the extension's required protocol.")
+        help(
+            "Either install a build of the extension that targets the host protocol version, or upgrade/downgrade ark to a version that speaks the extension's required protocol."
+        )
     )]
     ExtProtoUnsupportedVersion {
         /// Extension name.
@@ -470,7 +506,9 @@ pub enum SceneError {
     #[diagnostic(
         code = "ext-proto/capability-denied",
         severity(Error),
-        help("The host refused this capability for the extension. Check the extension's manifest against the host's capability policy, or grant the capability at install time.")
+        help(
+            "The host refused this capability for the extension. Check the extension's manifest against the host's capability policy, or grant the capability at install time."
+        )
     )]
     ExtProtoCapabilityDenied {
         /// Extension name that tried to use the capability.
@@ -510,7 +548,9 @@ pub enum SceneError {
     #[diagnostic(
         code = "op/handle-type-mismatch",
         severity(Error),
-        help("Check R7's op vocabulary for the required handle type on this argument. Pane-only ops (`resize`, `pin`, `unpin`, `move`) reject tab handles; tab-only ops (`rename`, `new_tab`) reject pane handles.")
+        help(
+            "Check R7's op vocabulary for the required handle type on this argument. Pane-only ops (`resize`, `pin`, `unpin`, `move`) reject tab handles; tab-only ops (`rename`, `new_tab`) reject pane handles."
+        )
     )]
     OpHandleTypeMismatch {
         /// Op name.
@@ -538,7 +578,9 @@ pub enum SceneError {
     #[diagnostic(
         code = "scene/cascade-depth-exceeded",
         severity(Error),
-        help("The default cascade depth is 4 — raise via `scene \"<name>\" max-cascade-depth=<N>`, or redesign the reaction graph so `emit` chains terminate before the limit.")
+        help(
+            "The default cascade depth is 4 — raise via `scene \"<name>\" max-cascade-depth=<N>`, or redesign the reaction graph so `emit` chains terminate before the limit."
+        )
     )]
     CascadeDepthExceeded {
         /// The depth of the chain that tripped the guard.
@@ -553,7 +595,9 @@ pub enum SceneError {
     #[diagnostic(
         code = "scene/invalid-chord",
         severity(Error),
-        help("Chord grammar: `(Mod )*KEY` where Mod ∈ {{Ctrl, Alt, Shift, Super}} and KEY is alphanumeric or a known zellij special (`Tab`, `Enter`, `Esc`, `Space`, `F1`-`F12`, etc.).")
+        help(
+            "Chord grammar: `(Mod )*KEY` where Mod ∈ {{Ctrl, Alt, Shift, Super}} and KEY is alphanumeric or a known zellij special (`Tab`, `Enter`, `Esc`, `Space`, `F1`-`F12`, etc.)."
+        )
     )]
     InvalidChord {
         /// The chord string as authored.
@@ -573,7 +617,9 @@ pub enum SceneError {
     #[diagnostic(
         code = "scene/include-not-found",
         severity(Error),
-        help("Include paths are resolved relative to the scene file. Check the path exists and is readable.")
+        help(
+            "Include paths are resolved relative to the scene file. Check the path exists and is readable."
+        )
     )]
     IncludeNotFound {
         /// The raw include target as authored.
@@ -602,7 +648,9 @@ pub enum SceneError {
     #[diagnostic(
         code = "scene/include-parse",
         severity(Error),
-        help("Fragments contain scene body nodes (layout, on, bind, etc.) without the `scene \"name\" {{ }}` wrapper.")
+        help(
+            "Fragments contain scene body nodes (layout, on, bind, etc.) without the `scene \"name\" {{ }}` wrapper."
+        )
     )]
     IncludeFragmentParse {
         /// The include target path.
@@ -617,7 +665,9 @@ pub enum SceneError {
     #[diagnostic(
         code = "scene/include-escape",
         severity(Error),
-        help("Include targets must resolve within the scene root directory ({root}). Remove `..` segments or symlinks that escape the scene tree.")
+        help(
+            "Include targets must resolve within the scene root directory ({root}). Remove `..` segments or symlinks that escape the scene tree."
+        )
     )]
     IncludeEscape {
         /// The raw include target as authored.
@@ -631,7 +681,9 @@ pub enum SceneError {
     #[diagnostic(
         code = "scene/include-handle-clash",
         severity(Error),
-        help("Include splices fragments verbatim with no merge. Rename one of the conflicting handles.")
+        help(
+            "Include splices fragments verbatim with no merge. Rename one of the conflicting handles."
+        )
     )]
     IncludeHandleClash {
         /// The duplicated handle name.
@@ -665,7 +717,9 @@ pub enum SceneError {
     #[diagnostic(
         code = "scene/ext-fragment-not-found",
         severity(Error),
-        help("Check the extension's manifest for declared fragment names. The extension may need updating, or the fragment name may be misspelled.")
+        help(
+            "Check the extension's manifest for declared fragment names. The extension may need updating, or the fragment name may be misspelled."
+        )
     )]
     ExtFragmentNotFound {
         /// Extension name.
@@ -682,7 +736,9 @@ pub enum SceneError {
     #[diagnostic(
         code = "scene/ext-include-invalid",
         severity(Error),
-        help("Extension includes must follow the format `ext:<name>/<fragment>`. Both name and fragment are required.")
+        help(
+            "Extension includes must follow the format `ext:<name>/<fragment>`. Both name and fragment are required."
+        )
     )]
     ExtIncludeInvalid {
         /// The raw include target as authored.
@@ -982,10 +1038,7 @@ mod tests {
 
     #[test]
     fn cascade_depth_exceeded_code() {
-        let err = SceneError::CascadeDepthExceeded {
-            depth: 5,
-            limit: 4,
-        };
+        let err = SceneError::CascadeDepthExceeded { depth: 5, limit: 4 };
         assert_code(&err, "scene/cascade-depth-exceeded");
     }
 

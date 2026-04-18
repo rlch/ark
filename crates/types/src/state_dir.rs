@@ -227,7 +227,10 @@ mod tests {
         assert_eq!(session, tmp.path().join("sessions").join(id.as_path_leaf()));
         assert_eq!(layout.session_spec_path(&id), session.join("spec.json"));
         assert_eq!(layout.session_status_path(&id), session.join("status.json"));
-        assert_eq!(layout.session_events_path(&id), session.join("events.jsonl"));
+        assert_eq!(
+            layout.session_events_path(&id),
+            session.join("events.jsonl")
+        );
         assert_eq!(layout.session_pid_path(&id), session.join("pid"));
         assert_eq!(
             layout.session_supervisor_log_path(&id),

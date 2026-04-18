@@ -132,7 +132,10 @@ impl From<&CoreEvent> for FlatEvent {
                 name: "ark.core.session_started".to_string(),
                 payload: serde_json::json!({ "spec": spec }),
             },
-            CoreEvent::SessionEnded { terminated_at, exit } => {
+            CoreEvent::SessionEnded {
+                terminated_at,
+                exit,
+            } => {
                 // Flatten `exit` to a scalar string so scene selectors like
                 // `on SessionEnded exit="cancelled"` match. `Error(msg)`
                 // payload rides along on a separate `exit_message` key.
@@ -301,7 +304,10 @@ mod tests {
             exit: ExitReason::Normal,
         };
         let flat = FlatEvent::from(&normal);
-        assert_eq!(flat.payload.get("exit").and_then(|v| v.as_str()), Some("normal"));
+        assert_eq!(
+            flat.payload.get("exit").and_then(|v| v.as_str()),
+            Some("normal")
+        );
         assert!(flat.payload.get("exit_message").unwrap().is_null());
 
         let cancelled = CoreEvent::SessionEnded {
@@ -309,14 +315,20 @@ mod tests {
             exit: ExitReason::Cancelled,
         };
         let flat = FlatEvent::from(&cancelled);
-        assert_eq!(flat.payload.get("exit").and_then(|v| v.as_str()), Some("cancelled"));
+        assert_eq!(
+            flat.payload.get("exit").and_then(|v| v.as_str()),
+            Some("cancelled")
+        );
 
         let err = CoreEvent::SessionEnded {
             terminated_at: ts,
             exit: ExitReason::Error("crashed".to_string()),
         };
         let flat = FlatEvent::from(&err);
-        assert_eq!(flat.payload.get("exit").and_then(|v| v.as_str()), Some("error"));
+        assert_eq!(
+            flat.payload.get("exit").and_then(|v| v.as_str()),
+            Some("error")
+        );
         assert_eq!(
             flat.payload.get("exit_message").and_then(|v| v.as_str()),
             Some("crashed")

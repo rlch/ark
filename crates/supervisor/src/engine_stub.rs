@@ -86,10 +86,7 @@ impl Engine for AcpEngineStub {
         // all observability flows through the event bus, so this is
         // a no-op. We still return a trait-typed handle so the
         // supervisor can call `teardown` symmetrically.
-        Ok(EngineHandle::new(
-            "acp-engine-stub",
-            AcpEngineHandleMarker,
-        ))
+        Ok(EngineHandle::new("acp-engine-stub", AcpEngineHandleMarker))
     }
 
     async fn teardown(&self, _handle: EngineHandle) -> Result<()> {
@@ -104,11 +101,7 @@ impl Engine for AcpEngineStub {
         None
     }
 
-    async fn auto_approve_permissions(
-        &self,
-        _cwd: &Path,
-        _policy: ApprovalPolicy,
-    ) -> Result<()> {
+    async fn auto_approve_permissions(&self, _cwd: &Path, _policy: ApprovalPolicy) -> Result<()> {
         // Under ACP, permission policy is entirely the
         // `PermissionDispatcher`'s job (T-ACP.5). The old
         // `.claude/policy` file no longer exists — decisions flow

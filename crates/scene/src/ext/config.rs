@@ -32,17 +32,15 @@ pub fn validate_config(
     ext_name: &str,
 ) -> Result<(), SceneError> {
     // Parse the raw config block as a KDL document.
-    let doc: kdl::KdlDocument = config_block.parse().map_err(|e: kdl::KdlError| {
-        SceneError::ExtBadConfig {
-            ext: ext_name.to_string(),
-            message: format!("config block is not valid KDL: {e}"),
-            src: NamedSource::new(
-                format!("{ext_name} config"),
-                config_block.to_string(),
-            ),
-            span: SourceSpan::from((0, config_block.len())),
-        }
-    })?;
+    let doc: kdl::KdlDocument =
+        config_block
+            .parse()
+            .map_err(|e: kdl::KdlError| SceneError::ExtBadConfig {
+                ext: ext_name.to_string(),
+                message: format!("config block is not valid KDL: {e}"),
+                src: NamedSource::new(format!("{ext_name} config"), config_block.to_string()),
+                span: SourceSpan::from((0, config_block.len())),
+            })?;
 
     // 1. Unknown keys: every node in the config block must be a known field.
     for node in doc.nodes() {
@@ -57,10 +55,7 @@ pub fn validate_config(
                     "unknown config key `{key}`; known keys: [{}]",
                     known.join(", ")
                 ),
-                src: NamedSource::new(
-                    format!("{ext_name} config"),
-                    config_block.to_string(),
-                ),
+                src: NamedSource::new(format!("{ext_name} config"), config_block.to_string()),
                 span: SourceSpan::from((offset, len)),
             });
         }
@@ -72,10 +67,7 @@ pub fn validate_config(
             return Err(SceneError::ExtBadConfig {
                 ext: ext_name.to_string(),
                 message: format!("missing required config key `{}`", field.name),
-                src: NamedSource::new(
-                    format!("{ext_name} config"),
-                    config_block.to_string(),
-                ),
+                src: NamedSource::new(format!("{ext_name} config"), config_block.to_string()),
                 span: SourceSpan::from((0, config_block.len())),
             });
         }
@@ -101,10 +93,7 @@ pub fn validate_config(
                 return Err(SceneError::ExtBadConfig {
                     ext: ext_name.to_string(),
                     message: format!("config key `{key}` requires a value"),
-                    src: NamedSource::new(
-                        format!("{ext_name} config"),
-                        config_block.to_string(),
-                    ),
+                    src: NamedSource::new(format!("{ext_name} config"), config_block.to_string()),
                     span: SourceSpan::from((offset, len)),
                 });
             }
@@ -130,13 +119,8 @@ pub fn validate_config(
             let len = entry.span().len();
             return Err(SceneError::ExtBadConfig {
                 ext: ext_name.to_string(),
-                message: format!(
-                    "config key `{key}` expects type `{expected_type}`, got {actual}"
-                ),
-                src: NamedSource::new(
-                    format!("{ext_name} config"),
-                    config_block.to_string(),
-                ),
+                message: format!("config key `{key}` expects type `{expected_type}`, got {actual}"),
+                src: NamedSource::new(format!("{ext_name} config"), config_block.to_string()),
                 span: SourceSpan::from((offset, len)),
             });
         }
@@ -243,7 +227,10 @@ bogus "value""#;
         let err = validate_config(block, &s, "demo").unwrap_err();
         match &err {
             SceneError::ExtBadConfig { message, .. } => {
-                assert!(message.contains("unknown config key `surprise`"), "{message}");
+                assert!(
+                    message.contains("unknown config key `surprise`"),
+                    "{message}"
+                );
             }
             other => panic!("expected ExtBadConfig, got: {other:?}"),
         }
@@ -253,15 +240,15 @@ bogus "value""#;
 
     #[test]
     fn missing_required_field_errors() {
-        let s = schema(&[
-            ("host", "string", true, None),
-            ("port", "int", true, None),
-        ]);
+        let s = schema(&[("host", "string", true, None), ("port", "int", true, None)]);
         let block = r#"host "localhost""#;
         let err = validate_config(block, &s, "demo").unwrap_err();
         match &err {
             SceneError::ExtBadConfig { message, .. } => {
-                assert!(message.contains("missing required config key `port`"), "{message}");
+                assert!(
+                    message.contains("missing required config key `port`"),
+                    "{message}"
+                );
             }
             other => panic!("expected ExtBadConfig, got: {other:?}"),
         }

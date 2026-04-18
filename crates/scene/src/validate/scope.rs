@@ -54,17 +54,17 @@ use crate::parse::SceneIR;
 /// [`SceneError::MisplacedNode`] per violation when it is not.
 pub fn validate_scope(ir: &SceneIR) -> Vec<SceneError> {
     let mut errors = Vec::new();
-    validate_scene_body(&ir.scene, &ir.src, &ir.path.display().to_string(), &mut errors);
+    validate_scene_body(
+        &ir.scene,
+        &ir.src,
+        &ir.path.display().to_string(),
+        &mut errors,
+    );
     errors
 }
 
 /// Walk scene-root body nodes.
-fn validate_scene_body(
-    scene: &SceneNode,
-    src: &str,
-    path: &str,
-    errors: &mut Vec<SceneError>,
-) {
+fn validate_scene_body(scene: &SceneNode, src: &str, path: &str, errors: &mut Vec<SceneError>) {
     for node in &scene.body {
         match node {
             // `layout` body should contain only tabs — walk each tab.
@@ -89,24 +89,14 @@ fn validate_scene_body(
 }
 
 /// Walk a `layout { }` body — should be tabs only.
-fn validate_layout(
-    layout: &LayoutNode,
-    src: &str,
-    path: &str,
-    errors: &mut Vec<SceneError>,
-) {
+fn validate_layout(layout: &LayoutNode, src: &str, path: &str, errors: &mut Vec<SceneError>) {
     for tab in &layout.tabs {
         validate_tab(tab, "layout", src, path, errors);
     }
 }
 
 /// Walk a `mode { }` body — same structure as layout.
-fn validate_mode(
-    mode: &ModeNode,
-    src: &str,
-    path: &str,
-    errors: &mut Vec<SceneError>,
-) {
+fn validate_mode(mode: &ModeNode, src: &str, path: &str, errors: &mut Vec<SceneError>) {
     for tab in &mode.tabs {
         validate_tab(tab, "mode", src, path, errors);
     }
@@ -115,13 +105,7 @@ fn validate_mode(
 /// Walk a `tab @handle { body }`.
 ///
 /// Tab body should contain `row`/`col`/`pane` only (the `LayoutChild` enum).
-fn validate_tab(
-    tab: &TabNode,
-    _parent: &str,
-    src: &str,
-    path: &str,
-    errors: &mut Vec<SceneError>,
-) {
+fn validate_tab(tab: &TabNode, _parent: &str, src: &str, path: &str, errors: &mut Vec<SceneError>) {
     for child in &tab.body {
         validate_layout_child(child, "tab", src, path, errors);
     }
@@ -146,26 +130,14 @@ fn validate_layout_child(
 }
 
 /// Walk `row { body }` — children should be `row`/`col`/`pane`.
-fn validate_row(
-    row: &RowNode,
-    _parent: &str,
-    src: &str,
-    path: &str,
-    errors: &mut Vec<SceneError>,
-) {
+fn validate_row(row: &RowNode, _parent: &str, src: &str, path: &str, errors: &mut Vec<SceneError>) {
     for child in &row.body {
         validate_layout_child(child, "row", src, path, errors);
     }
 }
 
 /// Walk `col { body }` — children should be `row`/`col`/`pane`.
-fn validate_col(
-    col: &ColNode,
-    _parent: &str,
-    src: &str,
-    path: &str,
-    errors: &mut Vec<SceneError>,
-) {
+fn validate_col(col: &ColNode, _parent: &str, src: &str, path: &str, errors: &mut Vec<SceneError>) {
     for child in &col.body {
         validate_layout_child(child, "col", src, path, errors);
     }

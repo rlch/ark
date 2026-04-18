@@ -499,7 +499,10 @@ fn handle_emit(ctx: &SupervisorCommandCtx, args: EmitArgs) -> Response<JsonValue
 /// resolved permission via the `tracing` debug stream so operators can
 /// confirm wiring end-to-end without the registry yet existing.
 fn handle_permit(ctx: &SupervisorCommandCtx, args: PermitArgs) -> Response<JsonValue> {
-    if !matches!(args.outcome.as_str(), "allow" | "reject_once" | "reject_always") {
+    if !matches!(
+        args.outcome.as_str(),
+        "allow" | "reject_once" | "reject_always"
+    ) {
         return Response::err(format!(
             "Permit outcome must be one of allow/reject_once/reject_always, got `{}`",
             args.outcome
@@ -1452,10 +1455,15 @@ mod tests {
 
         let entries = node.entries();
         let by_key = |k: &str| {
-            entries.iter().find(|e| e.name().map(|n| n.value()) == Some(k))
+            entries
+                .iter()
+                .find(|e| e.name().map(|n| n.value()) == Some(k))
         };
         assert!(matches!(by_key("name").unwrap().value(), KdlValue::String(s) if s == "build"));
-        assert!(matches!(by_key("focus").unwrap().value(), KdlValue::Bool(true)));
+        assert!(matches!(
+            by_key("focus").unwrap().value(),
+            KdlValue::Bool(true)
+        ));
         assert!(matches!(
             by_key("size").unwrap().value(),
             KdlValue::Integer(60)

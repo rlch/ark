@@ -373,9 +373,7 @@ mod tests {
 
     // ---- helpers ---------------------------------------------------------
 
-    fn sample_spec(
-        ext: BTreeMap<String, serde_json::Value>,
-    ) -> SessionSpec {
+    fn sample_spec(ext: BTreeMap<String, serde_json::Value>) -> SessionSpec {
         SessionSpec {
             id: SessionId::new("cavekit"),
             name: "cavekit".to_string(),

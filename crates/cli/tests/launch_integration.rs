@@ -325,14 +325,8 @@ fn scene_flag_missing_file_is_not_found() {
     let mux = MockMultiplexer::new();
     let spawner = InlineSupervisor::new();
 
-    let err = launch::run_with(
-        &mux,
-        &spawner,
-        Some("/nonexistent/nowhere.kdl"),
-        None,
-        &ctx,
-    )
-    .expect_err("missing scene must error");
+    let err = launch::run_with(&mux, &spawner, Some("/nonexistent/nowhere.kdl"), None, &ctx)
+        .expect_err("missing scene must error");
     assert!(matches!(err, CliError::NotFound { .. }));
 
     // Supervisor must not be spawned on scene-resolution failure —
@@ -427,14 +421,7 @@ fn explicit_scene_produces_layout_artifact_path() {
     let mux = MockMultiplexer::new();
     let spawner = InlineSupervisor::new();
 
-    launch::run_with(
-        &mux,
-        &spawner,
-        Some(scene.to_str().unwrap()),
-        None,
-        &ctx,
-    )
-    .expect("launch ok");
+    launch::run_with(&mux, &spawner, Some(scene.to_str().unwrap()), None, &ctx).expect("launch ok");
 
     // mux.run_session receives the compiled layout artifact path,
     // not the scene source path. The artifact must exist on disk —
@@ -499,14 +486,8 @@ fn preflight_runs_before_any_filesystem_mutation() {
     });
     let spawner = InlineSupervisor::new();
 
-    let _ = launch::run_with(
-        &mux,
-        &spawner,
-        Some(scene.to_str().unwrap()),
-        None,
-        &ctx,
-    )
-    .expect_err("preflight should fail");
+    let _ = launch::run_with(&mux, &spawner, Some(scene.to_str().unwrap()), None, &ctx)
+        .expect_err("preflight should fail");
 
     // No layout artifact should have been written. The compile
     // pipeline writes to `$STATE/layouts/<scene_id>.kdl` (or

@@ -5,7 +5,7 @@ use crate::ast::layout::{LayoutChild, TabNode};
 use crate::ast::{LayoutNode, ModeNode, SceneBodyNode};
 use crate::error::SceneError;
 use crate::ext::ExtensionRegistry;
-use crate::parse::{parse_scene, SceneIR};
+use crate::parse::{SceneIR, parse_scene};
 
 /// Resolve all `include "<path>"` nodes by reading, parsing, and splicing
 /// fragment body nodes at each include point. Detects handle conflicts
@@ -16,18 +16,20 @@ use crate::parse::{parse_scene, SceneIR};
 /// extension registry (T-075).
 pub fn compose_scene(mut ir: SceneIR) -> Result<SceneIR, SceneError> {
     let canon_path = ir.path.canonicalize().unwrap_or_else(|_| ir.path.clone());
-    let root_dir = canon_path
-        .parent()
-        .unwrap_or(Path::new("."))
-        .to_path_buf();
+    let root_dir = canon_path.parent().unwrap_or(Path::new(".")).to_path_buf();
     let mut stack = vec![canon_path];
 
     let scene_source = ir.path.display().to_string();
     let mut handles: HashMap<String, String> = HashMap::new();
     collect_handles_from_body(&ir.scene.body, &scene_source, &mut handles)?;
 
-    let composed_body =
-        resolve_includes(&ir.scene.body, &ir.path, &root_dir, &mut stack, &mut handles)?;
+    let composed_body = resolve_includes(
+        &ir.scene.body,
+        &ir.path,
+        &root_dir,
+        &mut stack,
+        &mut handles,
+    )?;
     ir.scene.body = composed_body;
     Ok(ir)
 }
@@ -46,12 +48,13 @@ fn resolve_includes(
         match node {
             SceneBodyNode::Include(inc) if !inc.target.starts_with("ext:") => {
                 let resolved = parent_dir.join(&inc.target);
-                let canonical = resolved.canonicalize().map_err(|e| {
-                    SceneError::IncludeNotFound {
-                        target: inc.target.clone(),
-                        reason: e.to_string(),
-                    }
-                })?;
+                let canonical =
+                    resolved
+                        .canonicalize()
+                        .map_err(|e| SceneError::IncludeNotFound {
+                            target: inc.target.clone(),
+                            reason: e.to_string(),
+                        })?;
 
                 // F-0022: path sandboxing — include must stay within root dir
                 if !canonical.starts_with(root_dir) {
@@ -82,8 +85,13 @@ fn resolve_includes(
                 check_handle_conflicts(&fragment_ir.scene.body, &fragment_source, handles)?;
 
                 stack.push(canonical.clone());
-                let nested =
-                    resolve_includes(&fragment_ir.scene.body, &canonical, root_dir, stack, handles)?;
+                let nested = resolve_includes(
+                    &fragment_ir.scene.body,
+                    &canonical,
+                    root_dir,
+                    stack,
+                    handles,
+                )?;
                 stack.pop();
                 result.extend(nested);
             }
@@ -225,10 +233,12 @@ pub fn parse_ext_include(target: &str) -> Result<ExtIncludeRef, SceneError> {
         });
     }
 
-    let slash_pos = rest.find('/').ok_or_else(|| SceneError::ExtIncludeInvalid {
-        target: target.to_string(),
-        reason: "missing `/<fragment>` after extension name".to_string(),
-    })?;
+    let slash_pos = rest
+        .find('/')
+        .ok_or_else(|| SceneError::ExtIncludeInvalid {
+            target: target.to_string(),
+            reason: "missing `/<fragment>` after extension name".to_string(),
+        })?;
 
     let name = &rest[..slash_pos];
     let fragment = &rest[slash_pos + 1..];
@@ -379,11 +389,7 @@ layout {
             "layout.kdl",
             r#"layout { tab "@main" { pane "@p1" } }"#,
         );
-        write_file(
-            dir,
-            "binds.kdl",
-            r#"bind "Alt d" { close "@p1" }"#,
-        );
+        write_file(dir, "binds.kdl", r#"bind "Alt d" { close "@p1" }"#);
 
         let scene_path = write_file(
             dir,
@@ -453,11 +459,7 @@ layout {
         write_file(dir, "a.kdl", r#"include "b.kdl""#);
         write_file(dir, "b.kdl", r#"include "a.kdl""#);
 
-        let scene_path = write_file(
-            dir,
-            "main.kdl",
-            r#"scene "loop" { include "a.kdl" }"#,
-        );
+        let scene_path = write_file(dir, "main.kdl", r#"scene "loop" { include "a.kdl" }"#);
 
         let ir = parse_scene(fs::read_to_string(&scene_path).unwrap(), &scene_path).unwrap();
         let err = compose_scene(ir).unwrap_err();
@@ -512,11 +514,7 @@ layout {
 
         write_file(dir, "bad.kdl", "this is {{{{ not valid kdl");
 
-        let scene_path = write_file(
-            dir,
-            "main.kdl",
-            r#"scene "dev" { include "bad.kdl" }"#,
-        );
+        let scene_path = write_file(dir, "main.kdl", r#"scene "dev" { include "bad.kdl" }"#);
 
         let ir = parse_scene(fs::read_to_string(&scene_path).unwrap(), &scene_path).unwrap();
         let err = compose_scene(ir).unwrap_err();
@@ -532,11 +530,7 @@ layout {
 
         // Use unique handles so handle-clash doesn't fire — we're testing
         // that the cycle detector no longer rejects diamonds.
-        write_file(
-            dir,
-            "shared.kdl",
-            r#"bind "Alt s" { close "@p1" }"#,
-        );
+        write_file(dir, "shared.kdl", r#"bind "Alt s" { close "@p1" }"#);
 
         let scene_path = write_file(
             dir,
@@ -584,16 +578,8 @@ layout {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
 
-        write_file(
-            dir,
-            "a.kdl",
-            r#"layout { tab "@editor" { pane "@code" } }"#,
-        );
-        write_file(
-            dir,
-            "b.kdl",
-            r#"layout { tab "@editor" { pane "@term" } }"#,
-        );
+        write_file(dir, "a.kdl", r#"layout { tab "@editor" { pane "@code" } }"#);
+        write_file(dir, "b.kdl", r#"layout { tab "@editor" { pane "@term" } }"#);
 
         let scene_path = write_file(
             dir,
@@ -619,11 +605,7 @@ layout {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
 
-        write_file(
-            dir,
-            "frag.kdl",
-            r#"layout { tab "@main" { pane "@p2" } }"#,
-        );
+        write_file(dir, "frag.kdl", r#"layout { tab "@main" { pane "@p2" } }"#);
 
         let scene_path = write_file(
             dir,
@@ -644,16 +626,8 @@ layout {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
 
-        write_file(
-            dir,
-            "a.kdl",
-            r#"layout { tab "@t1" { pane "@shared" } }"#,
-        );
-        write_file(
-            dir,
-            "b.kdl",
-            r#"layout { tab "@t2" { pane "@shared" } }"#,
-        );
+        write_file(dir, "a.kdl", r#"layout { tab "@t1" { pane "@shared" } }"#);
+        write_file(dir, "b.kdl", r#"layout { tab "@t2" { pane "@shared" } }"#);
 
         let scene_path = write_file(
             dir,
@@ -679,16 +653,8 @@ layout {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
 
-        write_file(
-            dir,
-            "a.kdl",
-            r#"layout { tab "@t1" { pane "@p1" } }"#,
-        );
-        write_file(
-            dir,
-            "b.kdl",
-            r#"layout { tab "@t2" { pane "@p2" } }"#,
-        );
+        write_file(dir, "a.kdl", r#"layout { tab "@t1" { pane "@p1" } }"#);
+        write_file(dir, "b.kdl", r#"layout { tab "@t2" { pane "@p2" } }"#);
 
         let scene_path = write_file(
             dir,
@@ -780,10 +746,8 @@ layout {
 
     #[test]
     fn resolve_ext_includes_skips_fragment_with_warn_when_active() {
-        use ark_ext_metadata_types::{
-            CapabilitySet, ConfigSchema, ExtensionMetadata, StringNode,
-        };
         use crate::ast::IncludeNode;
+        use ark_ext_metadata_types::{CapabilitySet, ConfigSchema, ExtensionMetadata, StringNode};
 
         let mut registry = ExtensionRegistry::new();
         let meta = ExtensionMetadata {

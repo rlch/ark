@@ -157,12 +157,8 @@ pub trait MuxHandle: Send + Sync + std::fmt::Debug {
 
     /// Create a new tab with the given handle, optional display name,
     /// and optional working directory.
-    fn new_tab(
-        &self,
-        handle: &Handle,
-        name: Option<&str>,
-        cwd: Option<&str>,
-    ) -> Result<(), String>;
+    fn new_tab(&self, handle: &Handle, name: Option<&str>, cwd: Option<&str>)
+    -> Result<(), String>;
 
     /// Send `payload` from one pane to another. Both source and target
     /// must exist.
@@ -532,7 +528,10 @@ pub(crate) mod tests {
             *self.fail_with.lock().expect("poisoned") = Some(msg.into());
         }
         pub(crate) fn mark_existing(&self, raw: &str) {
-            self.existing.lock().expect("poisoned").push(raw.to_string());
+            self.existing
+                .lock()
+                .expect("poisoned")
+                .push(raw.to_string());
         }
     }
 
@@ -565,7 +564,11 @@ pub(crate) mod tests {
             self.check(format!("unpin_pane({})", h.raw()))
         }
         fn handle_exists(&self, h: &Handle) -> bool {
-            self.existing.lock().expect("poisoned").iter().any(|r| r == h.raw())
+            self.existing
+                .lock()
+                .expect("poisoned")
+                .iter()
+                .any(|r| r == h.raw())
         }
         fn spawn_pane(
             &self,
@@ -579,12 +582,7 @@ pub(crate) mod tests {
                 view_body
             ))
         }
-        fn new_tab(
-            &self,
-            h: &Handle,
-            name: Option<&str>,
-            cwd: Option<&str>,
-        ) -> Result<(), String> {
+        fn new_tab(&self, h: &Handle, name: Option<&str>, cwd: Option<&str>) -> Result<(), String> {
             self.check(format!(
                 "new_tab({},name={:?},cwd={:?})",
                 h.raw(),
@@ -609,10 +607,11 @@ pub(crate) mod tests {
     }
     impl EventBus for MockBus {
         fn emit_user_event(&self, name: &str, source: &str, payload: serde_json::Value) {
-            self.events
-                .lock()
-                .expect("poisoned")
-                .push((name.to_string(), source.to_string(), payload));
+            self.events.lock().expect("poisoned").push((
+                name.to_string(),
+                source.to_string(),
+                payload,
+            ));
         }
     }
 
@@ -717,8 +716,7 @@ pub(crate) mod tests {
 
     #[test]
     fn idempotent_map_absent_becomes_ok() {
-        let r = idempotent_map("test.focus", Err("handle not found".into()))
-            .expect("absent -> ok");
+        let r = idempotent_map("test.focus", Err("handle not found".into())).expect("absent -> ok");
         assert_eq!(r, IntentValue::None);
     }
 

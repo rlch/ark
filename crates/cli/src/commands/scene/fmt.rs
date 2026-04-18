@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use clap::Args;
 
 use ark_scene::default_scene::DEFAULT_SCENE_KDL;
-use ark_scene::resolve_path::{resolve_scene_path, SceneSource};
+use ark_scene::resolve_path::{SceneSource, resolve_scene_path};
 
 use crate::ctx::Ctx;
 use crate::error::CliError;
@@ -50,8 +50,8 @@ fn node_priority(name: &str) -> u8 {
         "on" => 4,
         "keybind" | "bind" => 5,
         "engine" => 6,
-        "clear-reactions" | "clear-keybind" | "clear-keybinds"
-        | "clear-bind" | "disable-extension" | "disable-plugin" | "disable-plugins" => 7,
+        "clear-reactions" | "clear-keybind" | "clear-keybinds" | "clear-bind"
+        | "disable-extension" | "disable-plugin" | "disable-plugins" => 7,
         _ => 8, // unknown nodes go last
     }
 }

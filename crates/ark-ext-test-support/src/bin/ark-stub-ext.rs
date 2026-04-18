@@ -53,8 +53,7 @@ use ark_ext_proto::{
     OnSessionStartRequest, OnSessionStartResponse, PaneCloseRequest, PaneCloseResponse,
     PaneEmitRequest, PaneEmitResponse, PaneReplaceViewRequest, PaneReplaceViewResponse,
     SceneCompileHookRequest, SceneCompileHookResponse, StackClearRequest, StackClearResponse,
-    StackCloseChildRequest, StackCloseChildResponse, StackSpawnPaneRequest,
-    StackSpawnPaneResponse,
+    StackCloseChildRequest, StackCloseChildResponse, StackSpawnPaneRequest, StackSpawnPaneResponse,
 };
 use ark_ext_test_support::{StubBuilder, StubExtension};
 

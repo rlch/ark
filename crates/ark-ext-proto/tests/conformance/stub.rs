@@ -9,10 +9,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use ark_ext_proto::{
     ArkExtension, CancelRequest, CancelResponse, ExtResult, HostFsReadRequest, HostFsReadResponse,
     InitializeRequest, InitializeResponse, IntentDispatchRequest, IntentDispatchResponse, LogLevel,
-    LogWriteRequest, LogWriteResponse, PingRequest, PingResponse, ProgressRequest, ProgressResponse,
-    ShutdownRequest, ShutdownResponse, TaskCancelRequest, TaskCancelResponse, TaskCreateRequest,
-    TaskCreateResponse, TaskGetRequest, TaskGetResponse, TaskId, UiKeybindRegisterRequest,
-    UiKeybindRegisterResponse, UiStatusPushRequest, UiStatusPushResponse,
+    LogWriteRequest, LogWriteResponse, PingRequest, PingResponse, ProgressRequest,
+    ProgressResponse, ShutdownRequest, ShutdownResponse, TaskCancelRequest, TaskCancelResponse,
+    TaskCreateRequest, TaskCreateResponse, TaskGetRequest, TaskGetResponse, TaskId,
+    UiKeybindRegisterRequest, UiKeybindRegisterResponse, UiStatusPushRequest, UiStatusPushResponse,
 };
 use async_trait::async_trait;
 
@@ -81,10 +81,7 @@ impl ArkExtension for ConformanceStub {
         Ok(ProgressResponse::default())
     }
 
-    async fn task_create(
-        &self,
-        req: TaskCreateRequest,
-    ) -> ExtResult<TaskCreateResponse> {
+    async fn task_create(&self, req: TaskCreateRequest) -> ExtResult<TaskCreateResponse> {
         Ok(TaskCreateResponse {
             task: TaskId {
                 value: format!("task:{}", req.label),
@@ -99,10 +96,7 @@ impl ArkExtension for ConformanceStub {
         })
     }
 
-    async fn task_cancel(
-        &self,
-        _req: TaskCancelRequest,
-    ) -> ExtResult<TaskCancelResponse> {
+    async fn task_cancel(&self, _req: TaskCancelRequest) -> ExtResult<TaskCancelResponse> {
         Ok(TaskCancelResponse::default())
     }
 
@@ -122,10 +116,7 @@ impl ArkExtension for ConformanceStub {
         Ok(UiKeybindRegisterResponse::default())
     }
 
-    async fn ui_status_push(
-        &self,
-        _req: UiStatusPushRequest,
-    ) -> ExtResult<UiStatusPushResponse> {
+    async fn ui_status_push(&self, _req: UiStatusPushRequest) -> ExtResult<UiStatusPushResponse> {
         Ok(UiStatusPushResponse::default())
     }
 
@@ -133,10 +124,7 @@ impl ArkExtension for ConformanceStub {
         Ok(LogWriteResponse::default())
     }
 
-    async fn host_fs_read(
-        &self,
-        req: HostFsReadRequest,
-    ) -> ExtResult<HostFsReadResponse> {
+    async fn host_fs_read(&self, req: HostFsReadRequest) -> ExtResult<HostFsReadResponse> {
         Ok(HostFsReadResponse {
             contents: format!("read:{}", req.path),
         })
@@ -158,10 +146,7 @@ impl ArkExtension for BlackholeStub {
         })
     }
 
-    async fn task_create(
-        &self,
-        _req: TaskCreateRequest,
-    ) -> ExtResult<TaskCreateResponse> {
+    async fn task_create(&self, _req: TaskCreateRequest) -> ExtResult<TaskCreateResponse> {
         // Park forever — only the timeout path can free this.
         std::future::pending().await
     }

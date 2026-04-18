@@ -92,11 +92,7 @@ pub fn register_core_ops(registry: &mut IntentRegistry) {
 
     // Control (T-051)
     registry.register("ark.core.exec", Arc::new(control::ExecOp));
-    registry.register(
-        "ark.core.reload_scene",
-        Arc::new(control::ReloadSceneOp),
-    );
-
+    registry.register("ark.core.reload_scene", Arc::new(control::ReloadSceneOp));
 }
 
 #[cfg(test)]

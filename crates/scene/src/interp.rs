@@ -229,8 +229,12 @@ mod tests {
 
     #[test]
     fn multi_hole_mixed() {
-        let segs = parse_interp(&engine(), "before {id} middle {name} after", RhaiScope::Spawn)
-            .unwrap();
+        let segs = parse_interp(
+            &engine(),
+            "before {id} middle {name} after",
+            RhaiScope::Spawn,
+        )
+        .unwrap();
         // Expect: Literal, Hole, Literal, Hole, Literal
         assert_eq!(segs.len(), 5);
         assert!(matches!(segs[0], InterpSegment::Literal(ref s) if s == "before "));
@@ -272,15 +276,15 @@ mod tests {
 
     #[test]
     fn empty_hole_errors() {
-        let err = parse_interp(&engine(), "a {} b", RhaiScope::Spawn)
-            .expect_err("empty hole must error");
+        let err =
+            parse_interp(&engine(), "a {} b", RhaiScope::Spawn).expect_err("empty hole must error");
         assert!(matches!(err, SceneError::RhaiParse { .. }));
     }
 
     #[test]
     fn unbalanced_close_brace_errors() {
-        let err = parse_interp(&engine(), "a } b", RhaiScope::Spawn)
-            .expect_err("stray `}` must error");
+        let err =
+            parse_interp(&engine(), "a } b", RhaiScope::Spawn).expect_err("stray `}` must error");
         assert!(matches!(err, SceneError::RhaiParse { .. }));
     }
 

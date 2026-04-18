@@ -44,9 +44,7 @@ pub use lock::{LockError, LockGuard, acquire_lock};
 // T-6.2 grew the surface with `Intent` / `Emit` / `Permit` for the
 // scene-bridge dispatchers (`ark-hook intent | emit | permit`).
 pub mod commands;
-pub use commands::{
-    IntentBridge, SignalSender, SupervisorCommandCtx, SupervisorCommandHandler,
-};
+pub use commands::{IntentBridge, SignalSender, SupervisorCommandCtx, SupervisorCommandHandler};
 
 // T-067: signal handlers + socket-cleanup guard (cavekit-supervisor R7).
 pub mod signals;
@@ -65,9 +63,7 @@ pub use factory::{SupervisorError, build_engine, build_multiplexer, build_orches
 // retired `ark-engines-claude-code` crate.
 pub mod engine_stub;
 pub use engine_stub::{AcpEngineStub, preflight as engine_preflight};
-pub use orchestration::{
-    SupervisorMode, finalize_state, run_supervisor, run_supervisor_with,
-};
+pub use orchestration::{SupervisorMode, finalize_state, run_supervisor, run_supervisor_with};
 
 // W-1: supervisor_main bootstrap helper (cavekit-supervisor R1 + R3 step 12).
 // Top-level async entry point wrapping run_supervisor with readiness-signal
@@ -96,9 +92,7 @@ pub use ready_signal::{ACK_BYTE, ReadyWriter};
 // declared plugin, fans out mount failures as `ark.plugin.failed`
 // UserEvents, and drives the always-on mount sequence at session boot.
 pub mod plugin_lifecycle;
-pub use plugin_lifecycle::{
-    MountOutcome, MountState, PluginLifecycleManager, PLUGIN_FAILED_EVENT,
-};
+pub use plugin_lifecycle::{MountOutcome, MountState, PLUGIN_FAILED_EVENT, PluginLifecycleManager};
 
 // T-8.1: scene compile at supervisor boot. Reads `AgentSpec.scene_path`
 // (falling back to the embedded built-in default), parses + validates
@@ -147,7 +141,4 @@ pub use user_close_suppression::{ClosedByUserMap, SpawnDecision, consult};
 // each step so step ordering is verifiable via log capture. Failed
 // extensions surface as `Err` but do not halt peers.
 pub mod ext_loader;
-pub use ext_loader::{
-    ExtLoadError, HandshakeFn, LoadedExtension, load_extension, load_extensions,
-};
-
+pub use ext_loader::{ExtLoadError, HandshakeFn, LoadedExtension, load_extension, load_extensions};

@@ -13,12 +13,10 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use crate::ast::OnNode;
 use crate::ast::ops::{ExecOp, OpNode};
 use crate::ast::selector::{EventSelector, FieldPattern, MatchType};
-use crate::ast::OnNode;
-use crate::reactions::{
-    Entry, EventKind, OriginKind, ReactionOrigin, ReactionRegistry,
-};
+use crate::reactions::{Entry, EventKind, OriginKind, ReactionOrigin, ReactionRegistry};
 
 /// A legacy TOML-style hook entry: event name + shell command.
 ///
@@ -88,10 +86,7 @@ fn hook_to_on_node(hook: &HookEntry) -> OnNode {
 /// appropriate [`EventKind`]. Hooks whose event kind is unrecognised are
 /// silently skipped (the supervisor's config validator should catch
 /// those earlier).
-pub fn extend_registry_with_hooks(
-    registry: &mut ReactionRegistry,
-    hooks: &[HookEntry],
-) {
+pub fn extend_registry_with_hooks(registry: &mut ReactionRegistry, hooks: &[HookEntry]) {
     for hook in hooks {
         let on = hook_to_on_node(hook);
         let Some(selector) = on.selector.clone() else {

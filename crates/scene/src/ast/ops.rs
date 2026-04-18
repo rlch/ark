@@ -5,9 +5,9 @@
 //! it appears in the scene file; validation (direction enum, anchor enum, etc.)
 //! is deferred to the compile pass (T-052 / T-053).
 
+use ::kdl::KdlDocument;
 use facet::Facet;
 use facet_kdl as kdl;
-use ::kdl::KdlDocument;
 
 // Handle fields are stored as String so facet-kdl can deserialize them
 // directly from KDL arguments. Post-parse validation via Handle::new

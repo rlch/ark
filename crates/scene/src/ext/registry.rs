@@ -97,11 +97,7 @@ impl ExtensionRegistry {
     ///
     /// Returns [`SceneError::ExtReservedNamespace`] if `name` is or
     /// starts with `ark.core`.
-    pub fn activate(
-        &mut self,
-        name: &str,
-        metadata: &ExtensionMetadata,
-    ) -> Result<(), SceneError> {
+    pub fn activate(&mut self, name: &str, metadata: &ExtensionMetadata) -> Result<(), SceneError> {
         // Idempotent: already activated.
         if self.activated.contains_key(name) {
             return Ok(());
@@ -126,8 +122,7 @@ impl ExtensionRegistry {
         for intent in &metadata.intents {
             let fqn = qualify(&intent.name, name);
             record.intent_names.push(fqn.clone());
-            self.intents
-                .insert(fqn, (name.to_string(), intent.clone()));
+            self.intents.insert(fqn, (name.to_string(), intent.clone()));
         }
 
         // Register events.
@@ -197,8 +192,7 @@ impl ExtensionRegistry {
 mod tests {
     use super::*;
     use ark_ext_metadata_types::{
-        CapabilitySet, ConfigSchema, EventDecl, ExtensionMetadata, IntentDecl, StringNode,
-        ViewDecl,
+        CapabilitySet, ConfigSchema, EventDecl, ExtensionMetadata, IntentDecl, StringNode, ViewDecl,
     };
 
     /// Helper: build minimal extension metadata with given intents,
@@ -338,8 +332,7 @@ mod tests {
         let mut reg = ExtensionRegistry::new();
         reg.activate("alpha", &meta("alpha", &[], &[], &[]))
             .unwrap();
-        reg.activate("beta", &meta("beta", &[], &[], &[]))
-            .unwrap();
+        reg.activate("beta", &meta("beta", &[], &[], &[])).unwrap();
         reg.activate("gamma", &meta("gamma", &[], &[], &[]))
             .unwrap();
 

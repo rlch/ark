@@ -189,9 +189,7 @@ impl<'a> CompileCtx<'a> {
             .count();
         if holes > MAX_INTERP_HOLES {
             return Err(SceneError::RhaiParse {
-                message: format!(
-                    "too many `{{Rhai}}` holes: {holes} (limit {MAX_INTERP_HOLES})"
-                ),
+                message: format!("too many `{{Rhai}}` holes: {holes} (limit {MAX_INTERP_HOLES})"),
                 src: NamedSource::new(self.src_path.clone(), self.src_text.clone()),
                 span: SourceSpan::new(0.into(), raw.len().max(1)),
             });
@@ -219,11 +217,7 @@ impl<'a> CompileCtx<'a> {
         Ok(())
     }
 
-    fn walk_layout_child(
-        &mut self,
-        child: &LayoutChild,
-        path: &str,
-    ) -> Result<(), SceneError> {
+    fn walk_layout_child(&mut self, child: &LayoutChild, path: &str) -> Result<(), SceneError> {
         match child {
             LayoutChild::Row(row) => self.walk_row(row, path),
             LayoutChild::Col(col) => self.walk_col(col, path),
@@ -257,10 +251,8 @@ impl<'a> CompileCtx<'a> {
                 for (j, entry) in node.entries().iter().enumerate() {
                     if let ::kdl::KdlValue::String(s) = entry.value() {
                         if s.contains('{') {
-                            let entry_path = format!(
-                                "{path}.view.{}.entries[{j}]",
-                                node.name().value(),
-                            );
+                            let entry_path =
+                                format!("{path}.view.{}.entries[{j}]", node.name().value(),);
                             self.compile_interp_str(s, RhaiScope::Spawn, &entry_path)?;
                         }
                     }
@@ -325,11 +317,7 @@ impl<'a> CompileCtx<'a> {
             }
             OpNode::Pipe(o) => {
                 self.compile_when(&o.when, RhaiScope::Event, &format!("{path}.when"))?;
-                self.compile_interp_str(
-                    &o.payload,
-                    RhaiScope::Event,
-                    &format!("{path}.payload"),
-                )?;
+                self.compile_interp_str(&o.payload, RhaiScope::Event, &format!("{path}.payload"))?;
             }
             OpNode::Emit(o) => {
                 self.compile_when(&o.when, RhaiScope::Event, &format!("{path}.when"))?;
@@ -340,11 +328,7 @@ impl<'a> CompileCtx<'a> {
             }
             OpNode::Exec(o) => {
                 self.compile_when(&o.when, RhaiScope::Event, &format!("{path}.when"))?;
-                self.compile_interp_str(
-                    &o.script,
-                    RhaiScope::Event,
-                    &format!("{path}.script"),
-                )?;
+                self.compile_interp_str(&o.script, RhaiScope::Event, &format!("{path}.script"))?;
             }
             OpNode::ReloadScene(o) => {
                 self.compile_when(&o.when, RhaiScope::Event, &format!("{path}.when"))?;

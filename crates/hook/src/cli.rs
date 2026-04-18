@@ -281,14 +281,9 @@ mod tests {
     fn rejects_unknown_event() {
         let id = fresh_id();
         let id_str = id.as_str();
-        let err = Cli::try_parse_from([
-            "ark-hook",
-            "--id",
-            &id_str,
-            "--event",
-            "TotallyMadeUpEvent",
-        ])
-        .expect_err("unknown event should be rejected at parse time");
+        let err =
+            Cli::try_parse_from(["ark-hook", "--id", &id_str, "--event", "TotallyMadeUpEvent"])
+                .expect_err("unknown event should be rejected at parse time");
         let msg = err.to_string();
         assert!(msg.contains("TotallyMadeUpEvent") || msg.to_lowercase().contains("invalid"));
     }

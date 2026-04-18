@@ -19,7 +19,9 @@
 /// `unknown variant`. Any new cause requires a peer-protocol bump
 /// (see `CURRENT_PROTOCOL_VERSION` in `ark-ext-proto`) and the
 /// corresponding capability flag.
-#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize, facet::Facet)]
+#[derive(
+    Copy, Clone, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize, facet::Facet,
+)]
 #[serde(rename_all = "snake_case")]
 #[repr(u8)]
 #[non_exhaustive]

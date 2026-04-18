@@ -6,13 +6,13 @@
 
 use std::collections::BTreeMap;
 
+use ark_scene::SceneId;
 use ark_scene::ast::layout::{LayoutChild, PaneNode, TabNode, ViewRef};
 use ark_scene::ast::{LayoutNode, SceneBodyNode};
-use ark_scene::compile::layout::{compile_layout_kdl_with_ctx, SpawnContext};
+use ark_scene::compile::layout::{SpawnContext, compile_layout_kdl_with_ctx};
 use ark_scene::compile::{compile_layout_kdl, write_layout_artifact};
 use ark_scene::parse::parse_scene;
 use ark_scene::view::ViewRegistry;
-use ark_scene::SceneId;
 
 use kdl::{KdlDocument, KdlValue};
 
@@ -155,9 +155,7 @@ fn overlay_math_returns_expected_coords() {
     // threading is parallel-safe but requires parser changes outside
     // Tier 4's scope). Exercise the math path directly through the
     // public helpers.
-    use ark_scene::compile::layout::{
-        anchor_overlay, parse_overlay_size, parse_pos, TerminalSize,
-    };
+    use ark_scene::compile::layout::{TerminalSize, anchor_overlay, parse_overlay_size, parse_pos};
     let pos = parse_pos("top-right").unwrap();
     let size = parse_overlay_size("20x10").unwrap();
     let (x, y, w, h) = anchor_overlay(pos, size, TerminalSize { cols: 80, rows: 24 });
@@ -249,8 +247,7 @@ fn full_parse_and_compile_from_source() {
     let ir = parse_scene(src, "dev.kdl").expect("parse");
     for node in &ir.scene.body {
         if let SceneBodyNode::Layout(l) = node {
-            let doc =
-                compile_layout_kdl(l, &ViewRegistry::with_primitives()).expect("compile");
+            let doc = compile_layout_kdl(l, &ViewRegistry::with_primitives()).expect("compile");
             let text = doc.to_string();
             KdlDocument::parse(&text).expect("output must re-parse");
             assert!(text.contains("tab"));

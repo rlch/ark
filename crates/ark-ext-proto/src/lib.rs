@@ -79,8 +79,8 @@ pub use transport::{
 // Suppression / lookup types stay behind the `ark_view` crate directly —
 // they're host-side consumed by the supervisor, not extension authors.
 pub use ark_view::{
-    CommandView, HandleId, HandleKind, InvalidationCause, Pane, PaneLike, Stack, TabHandle,
-    View, ZellijView,
+    CommandView, HandleId, HandleKind, InvalidationCause, Pane, PaneLike, Stack, TabHandle, View,
+    ZellijView,
 };
 
 /// Opaque JSON text carried as a UTF-8 string.
@@ -406,9 +406,8 @@ impl Capabilities {
     /// leaves `ui.pane` un-granted). Garbage shapes return
     /// [`ExtensionError::InvalidParams`].
     pub fn from_wire(json: &str) -> Result<Self, ExtensionError> {
-        let value: serde_json::Value = serde_json::from_str(json).map_err(|e| {
-            ExtensionError::InvalidParams(format!("capability JSON parse: {e}"))
-        })?;
+        let value: serde_json::Value = serde_json::from_str(json)
+            .map_err(|e| ExtensionError::InvalidParams(format!("capability JSON parse: {e}")))?;
         let mut granted = std::collections::BTreeSet::new();
         match value {
             serde_json::Value::Null => {}
@@ -517,16 +516,7 @@ pub type ExtResult<T> = Result<T, ExtensionError>;
 
 /// Log severity for [`ArkExtension::log_write`] calls, aligned with LSP
 /// `window/logMessage` message types and the `tracing` crate's `Level`.
-#[derive(
-    Facet,
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    serde::Serialize,
-    serde::Deserialize,
-)]
+#[derive(Facet, Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[repr(u8)]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {
@@ -549,16 +539,7 @@ pub enum LogLevel {
 /// Callers treat this as an opaque string (R16 async semantics are MCP-style:
 /// long-running ops return a task handle; poll `task/get` or subscribe to
 /// `$/progress`).
-#[derive(
-    Facet,
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
+#[derive(Facet, Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct TaskId {
     /// Extension-minted identifier. Must be unique within the extension
     /// session. Ark treats this as opaque.
@@ -1525,10 +1506,7 @@ pub trait ArkExtension: Send + Sync {
     /// terminal [`ark_types::event::ExitReason`]. Default:
     /// [`ExtensionError::method_not_found`]; extensions that need
     /// teardown hooks override this.
-    async fn on_session_end(
-        &self,
-        _req: OnSessionEndRequest,
-    ) -> ExtResult<OnSessionEndResponse> {
+    async fn on_session_end(&self, _req: OnSessionEndRequest) -> ExtResult<OnSessionEndResponse> {
         Err(ExtensionError::method_not_found("on_session_end"))
     }
 
@@ -1543,26 +1521,17 @@ pub trait ArkExtension: Send + Sync {
     }
 
     /// `control_verbs`. Default: [`ExtensionError::method_not_found`].
-    async fn control_verbs(
-        &self,
-        _req: ControlVerbsRequest,
-    ) -> ExtResult<ControlVerbsResponse> {
+    async fn control_verbs(&self, _req: ControlVerbsRequest) -> ExtResult<ControlVerbsResponse> {
         Err(ExtensionError::method_not_found("control_verbs"))
     }
 
     /// `doctor_checks`. Default: [`ExtensionError::method_not_found`].
-    async fn doctor_checks(
-        &self,
-        _req: DoctorChecksRequest,
-    ) -> ExtResult<DoctorChecksResponse> {
+    async fn doctor_checks(&self, _req: DoctorChecksRequest) -> ExtResult<DoctorChecksResponse> {
         Err(ExtensionError::method_not_found("doctor_checks"))
     }
 
     /// `list_columns`. Default: [`ExtensionError::method_not_found`].
-    async fn list_columns(
-        &self,
-        _req: ListColumnsRequest,
-    ) -> ExtResult<ListColumnsResponse> {
+    async fn list_columns(&self, _req: ListColumnsRequest) -> ExtResult<ListColumnsResponse> {
         Err(ExtensionError::method_not_found("list_columns"))
     }
 
@@ -1586,10 +1555,7 @@ pub trait ArkExtension: Send + Sync {
     }
 
     /// `ui/status/push` notification. Default: `Ok(Default::default())`.
-    async fn ui_status_push(
-        &self,
-        _req: UiStatusPushRequest,
-    ) -> ExtResult<UiStatusPushResponse> {
+    async fn ui_status_push(&self, _req: UiStatusPushRequest) -> ExtResult<UiStatusPushResponse> {
         Ok(UiStatusPushResponse::default())
     }
 
@@ -1661,10 +1627,7 @@ pub trait ArkExtension: Send + Sync {
 
     /// `scene/getRoot`. Default: [`ExtensionError::method_not_found`] —
     /// scene-unaware extensions have no reason to override.
-    async fn scene_get_root(
-        &self,
-        _req: SceneGetRootRequest,
-    ) -> ExtResult<SceneGetRootResponse> {
+    async fn scene_get_root(&self, _req: SceneGetRootRequest) -> ExtResult<SceneGetRootResponse> {
         Err(ExtensionError::method_not_found("scene/getRoot"))
     }
 
@@ -1691,10 +1654,7 @@ pub trait ArkExtension: Send + Sync {
     }
 
     /// `host/net/fetch`. Default: [`ExtensionError::method_not_found`].
-    async fn host_net_fetch(
-        &self,
-        _req: HostNetFetchRequest,
-    ) -> ExtResult<HostNetFetchResponse> {
+    async fn host_net_fetch(&self, _req: HostNetFetchRequest) -> ExtResult<HostNetFetchResponse> {
         Err(ExtensionError::method_not_found("host/net/fetch"))
     }
 
@@ -1744,7 +1704,9 @@ mod tests {
         let ext = StubExt;
         ext.ping(PingRequest::default()).await.unwrap();
         ext.shutdown(ShutdownRequest::default()).await.unwrap();
-        ext.initialized(InitializedRequest::default()).await.unwrap();
+        ext.initialized(InitializedRequest::default())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1843,8 +1805,7 @@ mod tests {
                 spec: "null".into(),
                 exit: encoded.clone(),
             };
-            let back: ExitReason =
-                serde_json::from_str(&req.exit).expect("deserialise exit");
+            let back: ExitReason = serde_json::from_str(&req.exit).expect("deserialise exit");
             assert_eq!(back, variant);
         }
     }
@@ -1984,9 +1945,7 @@ mod tests {
         for (expected_method, err) in expectations {
             match err {
                 ExtensionError::MethodNotFound(m) => assert_eq!(m, expected_method),
-                other => panic!(
-                    "expected MethodNotFound({expected_method}), got {other:?}"
-                ),
+                other => panic!("expected MethodNotFound({expected_method}), got {other:?}"),
             }
         }
     }

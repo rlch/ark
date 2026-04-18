@@ -86,7 +86,11 @@ pub fn parse_scene(
     // and discards the rest). Catch this explicitly so the user sees a
     // clear diagnostic rather than a silent data loss.
     if let Some(ref raw) = kdl_doc {
-        let scene_count = raw.nodes().iter().filter(|n| n.name().value() == "scene").count();
+        let scene_count = raw
+            .nodes()
+            .iter()
+            .filter(|n| n.name().value() == "scene")
+            .count();
         if scene_count > 1 {
             return Err(SceneError::Parse {
                 message: format!(
@@ -116,7 +120,11 @@ fn normalize_bool_properties(src: &str) -> String {
         return src.to_string();
     };
     let changed = normalize_doc_bools(&mut doc);
-    if changed { doc.to_string() } else { src.to_string() }
+    if changed {
+        doc.to_string()
+    } else {
+        src.to_string()
+    }
 }
 
 /// Recursively walk a `KdlDocument`, coercing boolean entries to strings.
@@ -156,9 +164,8 @@ fn kdl_err_to_scene_error(
     path: &std::path::Path,
 ) -> SceneError {
     let message = err.to_string();
-    let span = first_label_span(&err).unwrap_or_else(|| {
-        SourceSpan::new(0.into(), src.len().min(1))
-    });
+    let span =
+        first_label_span(&err).unwrap_or_else(|| SourceSpan::new(0.into(), src.len().min(1)));
 
     SceneError::Parse {
         message,
@@ -181,8 +188,7 @@ mod tests {
 
     #[test]
     fn parses_minimal_scene() {
-        let ir = parse_scene(r#"scene "x" { }"#, "test.kdl")
-            .expect("minimal scene should parse");
+        let ir = parse_scene(r#"scene "x" { }"#, "test.kdl").expect("minimal scene should parse");
         assert_eq!(ir.scene.name, "x");
         assert!(ir.scene.body.is_empty());
         assert_eq!(ir.path.to_str().unwrap(), "test.kdl");
@@ -287,12 +293,21 @@ scene "dev" {
     }
 }
 "#;
-        let ir = parse_scene(src, "focus_bool.kdl")
-            .expect("focus=#true (KDL v2 boolean) should parse");
+        let ir =
+            parse_scene(src, "focus_bool.kdl").expect("focus=#true (KDL v2 boolean) should parse");
         // Extract the tab and verify `focus` is populated.
-        let layout = ir.scene.body.iter().find_map(|n| {
-            if let crate::ast::SceneBodyNode::Layout(l) = n { Some(l) } else { None }
-        }).expect("layout present");
+        let layout = ir
+            .scene
+            .body
+            .iter()
+            .find_map(|n| {
+                if let crate::ast::SceneBodyNode::Layout(l) = n {
+                    Some(l)
+                } else {
+                    None
+                }
+            })
+            .expect("layout present");
         let tab = &layout.tabs[0];
         assert_eq!(
             tab.focus.as_deref(),
@@ -313,11 +328,19 @@ scene "dev" {
     }
 }
 "#;
-        let ir = parse_scene(src, "focus_false.kdl")
-            .expect("focus=#false should parse");
-        let layout = ir.scene.body.iter().find_map(|n| {
-            if let crate::ast::SceneBodyNode::Layout(l) = n { Some(l) } else { None }
-        }).expect("layout present");
+        let ir = parse_scene(src, "focus_false.kdl").expect("focus=#false should parse");
+        let layout = ir
+            .scene
+            .body
+            .iter()
+            .find_map(|n| {
+                if let crate::ast::SceneBodyNode::Layout(l) = n {
+                    Some(l)
+                } else {
+                    None
+                }
+            })
+            .expect("layout present");
         let tab = &layout.tabs[0];
         assert_eq!(
             tab.focus.as_deref(),
@@ -357,7 +380,10 @@ scene "second" { }
         let src = r#"scene "dev" { layout { tab "@main" focus=#true { } } }"#;
         // First verify kdl can parse the full document.
         let parse_result = kdl::KdlDocument::parse(src);
-        assert!(parse_result.is_ok(), "kdl should parse full scene with #true: {parse_result:?}");
+        assert!(
+            parse_result.is_ok(),
+            "kdl should parse full scene with #true: {parse_result:?}"
+        );
         let normalized = normalize_bool_properties(src);
         assert!(
             !normalized.contains("#true"),

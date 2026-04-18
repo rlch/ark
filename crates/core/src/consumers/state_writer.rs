@@ -118,10 +118,7 @@ pub async fn state_writer(
 }
 
 /// Atomically publish `spec.json` for `spec.id` via temp-file + rename.
-fn write_session_spec(
-    layout: &StateLayout,
-    spec: &ark_types::SessionSpec,
-) -> std::io::Result<()> {
+fn write_session_spec(layout: &StateLayout, spec: &ark_types::SessionSpec) -> std::io::Result<()> {
     use std::fs::{self, OpenOptions};
     use std::io::Write;
 
@@ -173,10 +170,7 @@ fn write_session_spec(
 /// observations leave the existing status intact — `spec.json` is
 /// immutable so a second seed would be a no-op; idempotency is
 /// preserved by short-circuiting when the file already exists.
-fn seed_session_status(
-    layout: &StateLayout,
-    spec: &ark_types::SessionSpec,
-) -> std::io::Result<()> {
+fn seed_session_status(layout: &StateLayout, spec: &ark_types::SessionSpec) -> std::io::Result<()> {
     if read_status(layout, &spec.id)?.is_some() {
         return Ok(());
     }
@@ -279,7 +273,9 @@ mod tests {
         assert_eq!(got_spec.name, "auth");
 
         // status.json seeded with terminated_at = None and empty ext_state.
-        let status = read_status(&layout, &id).expect("read status").expect("status.json");
+        let status = read_status(&layout, &id)
+            .expect("read status")
+            .expect("status.json");
         assert_eq!(status.id, id);
         assert!(status.terminated_at.is_none());
         assert!(status.ext_state.is_empty());
@@ -372,7 +368,10 @@ mod tests {
         for _ in 0..200 {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             if events_path.is_file()
-                && std::fs::metadata(&events_path).map(|m| m.len()).unwrap_or(0) > 0
+                && std::fs::metadata(&events_path)
+                    .map(|m| m.len())
+                    .unwrap_or(0)
+                    > 0
             {
                 break;
             }
@@ -390,9 +389,7 @@ mod tests {
             records.len()
         );
         assert!(
-            records
-                .iter()
-                .any(|r| matches!(r.event, CoreEvent::Ext(_))),
+            records.iter().any(|r| matches!(r.event, CoreEvent::Ext(_))),
             "at least one Ext event must be present in events.jsonl"
         );
     }

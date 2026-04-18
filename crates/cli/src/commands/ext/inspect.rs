@@ -59,12 +59,9 @@ pub fn run(args: InspectArgs, _ctx: &Ctx) -> Result<(), CliError> {
         reason: format!("failed to read `{}`: {e}", args.path.display()),
     })?;
 
-    let metadata =
-        read_wasm_metadata(&wasm_bytes).map_err(|e| {
-            CliError::Generic {
-                reason: format!("ext/inspect: {e}"),
-            }
-        })?;
+    let metadata = read_wasm_metadata(&wasm_bytes).map_err(|e| CliError::Generic {
+        reason: format!("ext/inspect: {e}"),
+    })?;
 
     let kdl = extension_metadata_kdl_string(&metadata).map_err(|e| CliError::Generic {
         reason: format!("ext/inspect: failed to re-emit metadata as KDL: {e}"),
@@ -104,10 +101,7 @@ mod tests {
     /// with the given KDL text. Mirrors the fixture pattern in
     /// `ark_scene::wasm_meta::tests`.
     fn make_wasm_with_metadata(kdl: &str) -> Vec<u8> {
-        let wat_src = format!(
-            r#"(module (@custom "ark.metadata" "{}"))"#,
-            wat_escape(kdl)
-        );
+        let wat_src = format!(r#"(module (@custom "ark.metadata" "{}"))"#, wat_escape(kdl));
         wat::parse_str(&wat_src).expect("wat compiles")
     }
 

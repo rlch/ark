@@ -77,11 +77,7 @@ impl Ref {
     /// The ref's payload (everything after the `<category>:` prefix).
     fn value(&self) -> &str {
         match self {
-            Ref::Intent(v)
-            | Ref::Keybind(v)
-            | Ref::Plugin(v)
-            | Ref::Reaction(v)
-            | Ref::Ext(v) => v,
+            Ref::Intent(v) | Ref::Keybind(v) | Ref::Plugin(v) | Ref::Reaction(v) | Ref::Ext(v) => v,
         }
     }
 }
@@ -92,12 +88,12 @@ impl Ref {
 /// `keybind:Alt p` work without shell-quoting tricks. Missing value or
 /// unknown category produces a user-facing error string.
 pub fn parse_ref(raw: &str) -> Result<Ref, String> {
-    let (prefix, rest) = raw
-        .split_once(':')
-        .ok_or_else(|| format!(
+    let (prefix, rest) = raw.split_once(':').ok_or_else(|| {
+        format!(
             "missing ref prefix in `{raw}` (expected `intent:`, `keybind:`, \
              `plugin:`, `reaction:`, or `ext:`)"
-        ))?;
+        )
+    })?;
     if rest.is_empty() {
         return Err(format!("empty ref value after `{prefix}:`"));
     }
@@ -148,22 +144,34 @@ mod tests {
 
     #[test]
     fn parse_intent_ref() {
-        assert_eq!(parse_ref("intent:picker.show").unwrap(), Ref::Intent("picker.show".into()));
+        assert_eq!(
+            parse_ref("intent:picker.show").unwrap(),
+            Ref::Intent("picker.show".into())
+        );
     }
 
     #[test]
     fn parse_keybind_ref_preserves_whitespace() {
-        assert_eq!(parse_ref("keybind:Alt p").unwrap(), Ref::Keybind("Alt p".into()));
+        assert_eq!(
+            parse_ref("keybind:Alt p").unwrap(),
+            Ref::Keybind("Alt p".into())
+        );
     }
 
     #[test]
     fn parse_plugin_ref() {
-        assert_eq!(parse_ref("plugin:picker").unwrap(), Ref::Plugin("picker".into()));
+        assert_eq!(
+            parse_ref("plugin:picker").unwrap(),
+            Ref::Plugin("picker".into())
+        );
     }
 
     #[test]
     fn parse_reaction_ref() {
-        assert_eq!(parse_ref("reaction:Started").unwrap(), Ref::Reaction("Started".into()));
+        assert_eq!(
+            parse_ref("reaction:Started").unwrap(),
+            Ref::Reaction("Started".into())
+        );
     }
 
     #[test]

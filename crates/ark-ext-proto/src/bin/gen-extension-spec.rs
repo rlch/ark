@@ -590,13 +590,7 @@ fn emit_definition(out: &mut String, id: &str, shape: &'static Shape, depth: usi
             writeln!(out, "{}kind \"enum\"", indent_for(depth + 1)).unwrap();
             writeln!(out, "{}variants {{", indent_for(depth + 1)).unwrap();
             for variant in en.variants {
-                writeln!(
-                    out,
-                    "{}variant \"{}\"",
-                    indent_for(depth + 2),
-                    variant.name
-                )
-                .unwrap();
+                writeln!(out, "{}variant \"{}\"", indent_for(depth + 2), variant.name).unwrap();
             }
             writeln!(out, "{}}}", indent_for(depth + 1)).unwrap();
         }

@@ -230,10 +230,7 @@ fn scene_rhai_eval() {
 
 #[test]
 fn scene_rhai_oom() {
-    snap(
-        "scene_rhai-oom",
-        &SceneError::RhaiOom { limit: 10_000 },
-    );
+    snap("scene_rhai-oom", &SceneError::RhaiOom { limit: 10_000 });
 }
 
 #[test]
@@ -254,7 +251,12 @@ fn ext_cycle() {
     snap(
         "ext_cycle",
         &SceneError::ExtCycle {
-            trail: vec!["alpha".into(), "beta".into(), "gamma".into(), "alpha".into()],
+            trail: vec![
+                "alpha".into(),
+                "beta".into(),
+                "gamma".into(),
+                "alpha".into(),
+            ],
         },
     );
 }
@@ -347,4 +349,3 @@ fn op_handle_type_mismatch() {
         },
     );
 }
-

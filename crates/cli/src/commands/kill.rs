@@ -164,7 +164,8 @@ pub fn run(args: KillArgs, ctx: &Ctx) -> Result<(), CliError> {
         ctx.runtime_dir.clone(),
         ctx.config_dir.clone(),
     );
-    let resolved = resolve_session_id(&args.id, &layout).map_err(|e| map_resolve_err(e, &args.id))?;
+    let resolved =
+        resolve_session_id(&args.id, &layout).map_err(|e| map_resolve_err(e, &args.id))?;
 
     let sock = layout.session_socket_path(&resolved);
     let stream = match UnixStream::connect(&sock) {

@@ -70,8 +70,7 @@ pub struct InfoResult {
 /// extension.
 pub fn run(args: InfoArgs, _ctx: &Ctx) -> Result<(), CliError> {
     let xdg_data_home = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from);
-    let system_dirs: Vec<PathBuf> =
-        vec![PathBuf::from("/usr/share/ark/extensions")];
+    let system_dirs: Vec<PathBuf> = vec![PathBuf::from("/usr/share/ark/extensions")];
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     let res = locate_extension(
@@ -136,15 +135,9 @@ fn try_tier(root: &Path, tier: Tier) -> Option<InfoResult> {
 /// `ark_ext_metadata`'s emitter so hand-rendered output stays
 /// byte-identical with the on-disk form.
 pub fn print_info(res: &InfoResult) -> Result<(), CliError> {
-    println!(
-        "# source: {} ({})",
-        res.tier.label(),
-        res.root.display()
-    );
-    let kdl = extension_metadata_kdl_string(&res.metadata).map_err(|e| {
-        CliError::Generic {
-            reason: format!("ext/info: failed to emit metadata as KDL: {e}"),
-        }
+    println!("# source: {} ({})", res.tier.label(), res.root.display());
+    let kdl = extension_metadata_kdl_string(&res.metadata).map_err(|e| CliError::Generic {
+        reason: format!("ext/info: failed to emit metadata as KDL: {e}"),
     })?;
     print!("{kdl}");
     if !kdl.ends_with('\n') {
@@ -202,8 +195,7 @@ extension {{
         let cwd = TempDir::new().unwrap();
         let xdg = TempDir::new().unwrap();
         make_ext(&xdg.path().join("ark/extensions"), "demo", &[]);
-        let res = locate_extension("demo", cwd.path(), Some(xdg.path()), &[])
-            .expect("found");
+        let res = locate_extension("demo", cwd.path(), Some(xdg.path()), &[]).expect("found");
         assert_eq!(res.tier, Tier::User);
     }
 
@@ -219,7 +211,10 @@ extension {{
         make_ext(
             &cwd.path().join(".ark/extensions"),
             "demo",
-            &[(".ark-install", "source: https://example.com/demo\ntag: v0.1.0\n")],
+            &[(
+                ".ark-install",
+                "source: https://example.com/demo\ntag: v0.1.0\n",
+            )],
         );
         let res = locate_extension("demo", cwd.path(), None, &[]).expect("found");
         let ann = res.install_annotation.expect("annotation present");
@@ -239,8 +234,7 @@ extension {{
     fn print_info_renders_ok() {
         let cwd = TempDir::new().unwrap();
         let root = make_ext(&cwd.path().join(".ark/extensions"), "demo", &[]);
-        let metadata =
-            ark_ext_metadata::parse_extension_metadata_kdl(&sample("demo")).unwrap();
+        let metadata = ark_ext_metadata::parse_extension_metadata_kdl(&sample("demo")).unwrap();
         let res = InfoResult {
             metadata,
             tier: Tier::Project,

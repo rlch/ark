@@ -204,10 +204,8 @@ mod tests {
     /// T-116 + T-117: both flags together.
     #[test]
     fn scene_and_session_flags_together() {
-        let cli = Cli::try_parse_from([
-            "ark", "--scene", "myproject", "--session", "work",
-        ])
-        .expect("parse");
+        let cli = Cli::try_parse_from(["ark", "--scene", "myproject", "--session", "work"])
+            .expect("parse");
         assert_eq!(cli.scene.as_deref(), Some("myproject"));
         assert_eq!(cli.session.as_deref(), Some("work"));
         assert!(cli.command.is_none());
@@ -245,7 +243,10 @@ mod tests {
             assert!(msg.contains(cmd), "help missing `{cmd}`:\n{msg}");
         }
         // T-115: spawn is removed.
-        assert!(!msg.contains("spawn"), "help should not list `spawn`:\n{msg}");
+        assert!(
+            !msg.contains("spawn"),
+            "help should not list `spawn`:\n{msg}"
+        );
     }
 
     #[test]

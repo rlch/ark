@@ -83,7 +83,7 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
-use syn::{parse_macro_input, Ident, LitStr, Token};
+use syn::{Ident, LitStr, Token, parse_macro_input};
 
 use ark_ext_metadata_types::{StringNode, ViewDecl};
 
@@ -153,7 +153,9 @@ impl Parse for ValidateSceneArgs {
                 other => {
                     return Err(syn::Error::new(
                         key.span(),
-                        format!("unknown validate_scene! field `{other}` (expected manifests/scene_path/scene)"),
+                        format!(
+                            "unknown validate_scene! field `{other}` (expected manifests/scene_path/scene)"
+                        ),
                     ));
                 }
             }
@@ -167,7 +169,10 @@ impl Parse for ValidateSceneArgs {
                 syn::Error::new(proc_macro2::Span::call_site(), "missing `manifests:` field")
             })?,
             scene_path: scene_path.ok_or_else(|| {
-                syn::Error::new(proc_macro2::Span::call_site(), "missing `scene_path:` field")
+                syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    "missing `scene_path:` field",
+                )
             })?,
             scene: scene.ok_or_else(|| {
                 syn::Error::new(proc_macro2::Span::call_site(), "missing `scene:` field")
@@ -210,8 +215,7 @@ fn declared_kind(v: &ViewDecl) -> &str {
 /// }
 /// ```
 fn parse_manifest(raw: &str) -> Result<ParsedManifest, String> {
-    let doc = kdl::KdlDocument::parse(raw)
-        .map_err(|e| format!("invalid KDL manifest: {e}"))?;
+    let doc = kdl::KdlDocument::parse(raw).map_err(|e| format!("invalid KDL manifest: {e}"))?;
 
     let ext_node = doc
         .nodes()
@@ -331,9 +335,7 @@ struct ParsedManifest {
 /// Build the internal `<ext>.<view> -> ViewEntry` table from a list of
 /// parsed manifests. Mirrors `ark-scene`'s
 /// `ViewTypeTable::from_manifests` for the fields the macro exercises.
-fn build_table(
-    manifests: &[ParsedManifest],
-) -> std::collections::BTreeMap<String, ViewEntry> {
+fn build_table(manifests: &[ParsedManifest]) -> std::collections::BTreeMap<String, ViewEntry> {
     let mut entries = std::collections::BTreeMap::new();
     for m in manifests {
         for view in &m.views {
@@ -353,9 +355,7 @@ fn build_table(
 /// Build the fully-qualified intent symbol table from the manifest set.
 /// Core ops (`ark.core.*`) are always treated as declared; the table
 /// tracks only extension-contributed intents (T-042 R6).
-fn build_intent_table(
-    manifests: &[ParsedManifest],
-) -> std::collections::BTreeSet<String> {
+fn build_intent_table(manifests: &[ParsedManifest]) -> std::collections::BTreeSet<String> {
     let mut set = std::collections::BTreeSet::new();
     for m in manifests {
         for intent_fqn in &m.intents {
@@ -463,11 +463,11 @@ fn check_pane_or_stack(
         .children()
         .and_then(|c| c.nodes().iter().find(|n| n.name().value() == "view_type"))
     {
-        match child
-            .entries()
-            .iter()
-            .find_map(|e| e.value().as_string().map(|s| (s.to_string(), child.name().span().offset())))
-        {
+        match child.entries().iter().find_map(|e| {
+            e.value()
+                .as_string()
+                .map(|s| (s.to_string(), child.name().span().offset()))
+        }) {
             Some(v) => v,
             None => return Ok(()),
         }
@@ -497,14 +497,7 @@ fn check_pane_or_stack(
     if declared != ctx_kind {
         return Err(format!(
             "{}:{}:{}: view type `{}` declared by extension `{}` with kind=`{}` but used in a `{}` context (kind=`{}`)",
-            args.scene_path,
-            line,
-            col,
-            token,
-            entry.ext_name,
-            declared,
-            ctx_kind,
-            ctx_kind
+            args.scene_path, line, col, token, entry.ext_name, declared, ctx_kind, ctx_kind
         ));
     }
     Ok(())

@@ -57,11 +57,11 @@ use tokio::sync::Mutex;
 
 use crate::ast::layout::{ColNode, LayoutChild, PaneNode, RowNode, TabNode};
 use crate::ast::{LayoutNode, SceneBodyNode, SceneNode};
+use crate::compile::CompiledScene;
 use crate::compile::layout::{compile_layout_kdl, write_layout_artifact, write_layout_artifact_in};
 use crate::compile::modes::{compile_modes, write_mode_artifacts, write_mode_artifacts_in};
-use crate::compile::CompiledScene;
 use crate::error::SceneError;
-use crate::rhai::{eval_bool, Engine, Program};
+use crate::rhai::{Engine, Program, eval_bool};
 use crate::view::ViewRegistry;
 
 /// Default debounce window for coalescing rapid reconciliation requests.
@@ -231,14 +231,14 @@ impl LayoutApplier for ZellijCommandApplier {
             args.push(f);
         }
 
-        let output = self
-            .executor
-            .run("zellij", &args)
-            .await
-            .map_err(|e| SceneError::OpFailed {
-                op: "override-layout".to_string(),
-                message: format!("zellij action override-layout failed: {e}"),
-            })?;
+        let output =
+            self.executor
+                .run("zellij", &args)
+                .await
+                .map_err(|e| SceneError::OpFailed {
+                    op: "override-layout".to_string(),
+                    message: format!("zellij action override-layout failed: {e}"),
+                })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -435,12 +435,10 @@ impl Reconciler {
         let changed_truth = truth_map != self.last_predicate_truth;
         self.last_predicate_truth = truth_map;
 
-        let path = self
-            .write_layout(&doc)
-            .map_err(|e| SceneError::OpFailed {
-                op: "write-layout".to_string(),
-                message: format!("failed to write layout artifact: {e}"),
-            })?;
+        let path = self.write_layout(&doc).map_err(|e| SceneError::OpFailed {
+            op: "write-layout".to_string(),
+            message: format!("failed to write layout artifact: {e}"),
+        })?;
 
         self.applier
             .override_layout(&path, OverrideLayoutFlags::full_reconcile())

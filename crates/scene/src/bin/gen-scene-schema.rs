@@ -28,19 +28,16 @@ use std::fmt::Write as _;
 
 use facet::{Def, Facet, Shape, Type, UserType};
 
-use ark_scene::ast::{
-    BindNode, ClearBindNode, ClearReactionsNode, DisableExtensionNode,
-    IncludeNode, LayoutNode, ModeNode, OnNode, SceneBodyNode, SceneDoc,
-    SceneNode, UseNode,
-};
-use ark_scene::ast::layout::{
-    ColNode, Handle, PaneNode, RowNode, TabNode,
-};
+use ark_scene::ast::layout::{ColNode, Handle, PaneNode, RowNode, TabNode};
 use ark_scene::ast::ops::{
-    CloseOp, EmitOp, ExecOp, FocusOp, MoveOp, NewTabOp, OpNode, PinOp, PipeOp,
-    RenameOp, ReloadSceneOp, ResizeOp, SetStatusOp, SpawnOp, UnpinOp, UseModeOp,
+    CloseOp, EmitOp, ExecOp, FocusOp, MoveOp, NewTabOp, OpNode, PinOp, PipeOp, ReloadSceneOp,
+    RenameOp, ResizeOp, SetStatusOp, SpawnOp, UnpinOp, UseModeOp,
 };
 use ark_scene::ast::selector::EventSelector;
+use ark_scene::ast::{
+    BindNode, ClearBindNode, ClearReactionsNode, DisableExtensionNode, IncludeNode, LayoutNode,
+    ModeNode, OnNode, SceneBodyNode, SceneDoc, SceneNode, UseNode,
+};
 
 /// Type index: every user struct / enum reachable from the scene AST.
 type TypeIndex = BTreeMap<&'static str, &'static Shape>;

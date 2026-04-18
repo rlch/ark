@@ -71,7 +71,8 @@ mod tests {
     #[test]
     fn from_file_roundtrips_via_tempfile() {
         let mut tmp = tempfile::NamedTempFile::new().expect("create tempfile");
-        tmp.write_all(b"scene \"hello\" { }").expect("write tempfile");
+        tmp.write_all(b"scene \"hello\" { }")
+            .expect("write tempfile");
         let path = tmp.path().to_path_buf();
 
         let from_disk = SceneId::from_file(&path).expect("from_file ok");

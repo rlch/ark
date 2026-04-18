@@ -71,9 +71,7 @@ fn main() -> ExitCode {
 /// Map a bridge dispatch result to the `ark-hook` exit contract:
 /// `0` on `{ok: true}`, `1` on every error path. Stderr carries the
 /// rendered error so zellij log capture surfaces it.
-fn bridge_exit_code<E: std::fmt::Display>(
-    result: Result<ark_hook::BridgeOutcome, E>,
-) -> ExitCode {
+fn bridge_exit_code<E: std::fmt::Display>(result: Result<ark_hook::BridgeOutcome, E>) -> ExitCode {
     match result {
         Ok(_) => ExitCode::from(0),
         Err(e) => {

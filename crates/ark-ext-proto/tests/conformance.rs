@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use ark_ext_proto::{
     Capabilities, ExtensionClient, ExtensionError, InProcClient, NdjsonClient, NdjsonServer,
-    PingRequest, ReverseRequestGate, RequestOptions, SessionToken, TaskCreateRequest,
+    PingRequest, RequestOptions, ReverseRequestGate, SessionToken, TaskCreateRequest,
     transport::{Notification, Request, Response, ResponseError},
 };
 use serde_json::Value;
@@ -199,7 +199,11 @@ async fn gate_admits_authorized_host_call_ndjson() {
         .await
         .expect("recv timeout")
         .expect("oneshot dropped");
-    assert!(response.error.is_none(), "unexpected error: {:?}", response.error);
+    assert!(
+        response.error.is_none(),
+        "unexpected error: {:?}",
+        response.error
+    );
     let result = response.result.expect("missing result");
     assert_eq!(result["contents"], "read:/etc/hosts");
     client.shutdown_transport().await;
@@ -340,12 +344,7 @@ async fn missing_method_returns_method_not_found_in_proc() {
 /// in-memory duplex pair. Returns the typed [`NdjsonClient`] (so the
 /// caller can invoke `shutdown_transport`) + the server JoinHandle
 /// (kept alive by the caller).
-fn ndjson_pair_with<E>(
-    ext: E,
-) -> (
-    Arc<NdjsonClient>,
-    tokio::task::JoinHandle<Option<u64>>,
-)
+fn ndjson_pair_with<E>(ext: E) -> (Arc<NdjsonClient>, tokio::task::JoinHandle<Option<u64>>)
 where
     E: ark_ext_proto::ArkExtension + 'static,
 {
@@ -354,7 +353,9 @@ where
     let (server_r, server_w) = tokio::io::split(server_io);
     let client = NdjsonClient::from_halves(client_r, client_w);
     let server = tokio::spawn(async move {
-        NdjsonServer::serve(server_r, server_w, Arc::new(ext)).await.ok()
+        NdjsonServer::serve(server_r, server_w, Arc::new(ext))
+            .await
+            .ok()
     });
     (Arc::new(client), server)
 }
@@ -362,11 +363,7 @@ where
 /// Inject a oneshot waiter into the client's pending map so a
 /// hand-rolled wire frame's response can be captured. Used by gate
 /// tests that need to attach `_sessionToken` to params.
-async fn inject_pending(
-    client: &NdjsonClient,
-    id: u64,
-    tx: oneshot::Sender<Response>,
-) {
+async fn inject_pending(client: &NdjsonClient, id: u64, tx: oneshot::Sender<Response>) {
     client.test_inject_pending(id, tx).await;
 }
 

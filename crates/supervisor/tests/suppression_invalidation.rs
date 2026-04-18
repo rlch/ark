@@ -23,14 +23,11 @@
 //! `FakeExtEventBus` that records every published envelope. The
 //! suppression map lives entirely in-process — no I/O, no timers.
 
-use ark_ext_proto::{
-    ArkExtension, ExtensionError, PaneEmitRequest, PaneEmitResponse,
-};
+use ark_ext_proto::{ArkExtension, ExtensionError, PaneEmitRequest, PaneEmitResponse};
 use ark_ext_test_support::StubExtension;
-use ark_supervisor::user_close_suppression::{consult, ClosedByUserMap, SpawnDecision};
+use ark_supervisor::user_close_suppression::{ClosedByUserMap, SpawnDecision, consult};
 use ark_view::{
-    hash_params, HandleId, InvalidationCause, ParamsHash, SceneHandleName,
-    SuppressionPolicy,
+    HandleId, InvalidationCause, ParamsHash, SceneHandleName, SuppressionPolicy, hash_params,
 };
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -129,7 +126,11 @@ fn user_close_records_suppression_and_emits_invalidated() {
     );
     // (b) Exactly one broadcast, with documented shape.
     let events = bus.events();
-    assert_eq!(events.len(), 1, "one invalidated envelope per close; got {events:?}");
+    assert_eq!(
+        events.len(),
+        1,
+        "one invalidated envelope per close; got {events:?}"
+    );
     let env = &events[0];
     assert_eq!(env["ext"], "ark");
     assert_eq!(env["kind"], "handle.invalidated");
@@ -173,7 +174,11 @@ fn reconcile_same_params_skips_spawn_after_user_close() {
         "same-hash reconcile must skip respawn after user close",
     );
     // Entry persists so subsequent reconciles also skip.
-    assert_eq!(map.lookup(&name), Some(hash), "map entry must persist across skips");
+    assert_eq!(
+        map.lookup(&name),
+        Some(hash),
+        "map entry must persist across skips"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -194,7 +199,10 @@ fn reconcile_new_params_respawns_after_user_close() {
     let new_params = json!({ "file": "README.md", "mode": "write" });
     let old_hash = hash_params(&old_params);
     let new_hash = hash_params(&new_params);
-    assert_ne!(old_hash, new_hash, "sanity: materially-different params must produce different hashes");
+    assert_ne!(
+        old_hash, new_hash,
+        "sanity: materially-different params must produce different hashes"
+    );
 
     // User closes under old params.
     simulate_user_close(&map, &bus, &name, old_hash, &handle, false);
@@ -302,16 +310,8 @@ async fn pane_op_after_invalidation_returns_handle_gone() {
 fn supervisor_restart_clears_suppression() {
     // First session: user closes two panes.
     let session_1 = ClosedByUserMap::new();
-    session_1.record(
-        &SceneHandleName::new("a"),
-        hash_params(&"a-params"),
-        false,
-    );
-    session_1.record(
-        &SceneHandleName::new("b"),
-        hash_params(&"b-params"),
-        false,
-    );
+    session_1.record(&SceneHandleName::new("a"), hash_params(&"a-params"), false);
+    session_1.record(&SceneHandleName::new("b"), hash_params(&"b-params"), false);
     assert_eq!(session_1.len(), 2, "sanity: both entries written");
 
     // Supervisor restart: old map is dropped; new session begins with
@@ -372,7 +372,10 @@ fn stack_child_user_close_does_not_suppress_respawn() {
         map.lookup(&name).is_none(),
         "stack children MUST NOT enter the suppression map",
     );
-    assert!(map.is_empty(), "map must remain empty after stack-child close");
+    assert!(
+        map.is_empty(),
+        "map must remain empty after stack-child close"
+    );
 
     // Invariant #6: invalidated fires regardless.
     let events = bus.events();

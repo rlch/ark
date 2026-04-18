@@ -31,7 +31,7 @@ pub mod primitives;
 
 // Re-export the primitive name constants at the module root for
 // ergonomic callsites (`view::COMMAND`, `view::SHELL`, `view::EDIT`).
-pub use primitives::{register_primitives, COMMAND, EDIT, SHELL};
+pub use primitives::{COMMAND, EDIT, SHELL, register_primitives};
 
 // ---------------------------------------------------------------------------
 // Source tier (R6 — primitive / shipped / user / project)
@@ -140,7 +140,9 @@ impl ViewRegistry {
     /// (e.g. tests that want to probe the primitive resolution path
     /// independently).
     pub fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     /// Construct a registry pre-populated with the three primitive views
@@ -275,7 +277,11 @@ mod tests {
     fn earlier_registered_shadows_later() {
         // R6 resolution: primitives win against same-named extension view.
         let mut reg = ViewRegistry::new();
-        reg.register(sample("command", ViewSource::Primitive, RenderMode::CommandView));
+        reg.register(sample(
+            "command",
+            ViewSource::Primitive,
+            RenderMode::CommandView,
+        ));
         reg.register(sample("command", ViewSource::User, RenderMode::ZellijView));
         let m = reg.resolve("command").unwrap();
         assert_eq!(m.source, ViewSource::Primitive);
@@ -310,7 +316,10 @@ mod tests {
         match resolve_or_suggest(&reg, "xxxxxxxxxxxxx") {
             Ok(_) => panic!("should miss"),
             Err(suggestions) => {
-                assert!(suggestions.is_empty(), "far miss should yield no suggestions");
+                assert!(
+                    suggestions.is_empty(),
+                    "far miss should yield no suggestions"
+                );
             }
         }
     }

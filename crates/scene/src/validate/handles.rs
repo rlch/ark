@@ -106,33 +106,21 @@ pub fn validate_handles(ir: &SceneIR) -> Vec<SceneError> {
 // ---------------------------------------------------------------------------
 
 /// Collect handles from a `layout { }` block.
-fn collect_layout_handles(
-    layout: &LayoutNode,
-    context: &str,
-    entries: &mut Vec<HandleEntry>,
-) {
+fn collect_layout_handles(layout: &LayoutNode, context: &str, entries: &mut Vec<HandleEntry>) {
     for tab in &layout.tabs {
         collect_tab_handles(tab, context, entries);
     }
 }
 
 /// Collect handles from a `mode { }` block.
-fn collect_mode_handles(
-    mode: &ModeNode,
-    context: &str,
-    entries: &mut Vec<HandleEntry>,
-) {
+fn collect_mode_handles(mode: &ModeNode, context: &str, entries: &mut Vec<HandleEntry>) {
     for tab in &mode.tabs {
         collect_tab_handles(tab, context, entries);
     }
 }
 
 /// Collect the tab's own handle, then recurse into its body.
-fn collect_tab_handles(
-    tab: &TabNode,
-    context: &str,
-    entries: &mut Vec<HandleEntry>,
-) {
+fn collect_tab_handles(tab: &TabNode, context: &str, entries: &mut Vec<HandleEntry>) {
     entries.push(HandleEntry {
         raw: tab.handle.clone(),
         node_kind: "tab",

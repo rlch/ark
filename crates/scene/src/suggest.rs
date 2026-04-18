@@ -28,7 +28,11 @@ pub fn suggest(input: &str, candidates: &[&str], threshold: f64, max: usize) -> 
             .then_with(|| a.1.cmp(b.1))
     });
 
-    scored.into_iter().take(max).map(|(_, c)| c.to_owned()).collect()
+    scored
+        .into_iter()
+        .take(max)
+        .map(|(_, c)| c.to_owned())
+        .collect()
 }
 
 /// Formats suggestions as `; did you mean: \`a\`, \`b\`, \`c\`?` for appending

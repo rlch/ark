@@ -287,7 +287,10 @@ mod tests {
 
     #[test]
     fn lookup_returns_entry_when_declared() {
-        let meta = make_meta("my-ext", vec![decl("panel", "PanelComponent", Some("pane"))]);
+        let meta = make_meta(
+            "my-ext",
+            vec![decl("panel", "PanelComponent", Some("pane"))],
+        );
         let table = ViewTypeTable::from_manifests([("my-ext".to_string(), meta)]);
         let entry = table.lookup("my-ext.panel").expect("present");
         assert_eq!(entry.ext_name, "my-ext");
@@ -337,8 +340,8 @@ mod tests {
             line: 12,
             column: 5,
         };
-        let err = validate_view_reference(&table, "nope.missing", "pane", Some(loc.clone()))
-            .unwrap_err();
+        let err =
+            validate_view_reference(&table, "nope.missing", "pane", Some(loc.clone())).unwrap_err();
         match err.kind {
             ViewTypeErrorKind::Unknown => {}
             other => panic!("wrong kind: {other:?}"),
@@ -393,10 +396,8 @@ mod tests {
     fn multi_ext_tokens_namespaced_correctly() {
         let m1 = make_meta("ext-a", vec![decl("view1", "V1", None)]);
         let m2 = make_meta("ext-b", vec![decl("view1", "V1Other", Some("stack"))]);
-        let table = ViewTypeTable::from_manifests([
-            ("ext-a".to_string(), m1),
-            ("ext-b".to_string(), m2),
-        ]);
+        let table =
+            ViewTypeTable::from_manifests([("ext-a".to_string(), m1), ("ext-b".to_string(), m2)]);
         // Same view name, different ext → two distinct tokens.
         assert_eq!(table.len(), 2);
         assert_eq!(table.lookup("ext-a.view1").unwrap().ext_name, "ext-a");

@@ -125,9 +125,7 @@ pub fn resolve_agent_id(explicit: Option<&SessionId>) -> Result<SessionId, Bridg
         return Ok(id.clone());
     }
     let raw = env::var(ARK_AGENT_ID_ENV).map_err(|_| {
-        BridgeError::SessionIdUnresolved(format!(
-            "neither --id nor ${ARK_AGENT_ID_ENV} is set"
-        ))
+        BridgeError::SessionIdUnresolved(format!("neither --id nor ${ARK_AGENT_ID_ENV} is set"))
     })?;
     SessionId::parse(&raw).map_err(|e| {
         BridgeError::SessionIdUnresolved(format!(
@@ -142,8 +140,8 @@ pub fn resolve_agent_id(explicit: Option<&SessionId>) -> Result<SessionId, Bridg
 /// Path resolution failures (no `HOME`, no writable runtime) become
 /// [`BridgeError::RuntimeUnresolved`].
 pub fn resolve_socket_path(id: &SessionId) -> Result<PathBuf, BridgeError> {
-    let layout = StateLayout::from_env()
-        .map_err(|e| BridgeError::RuntimeUnresolved(e.to_string()))?;
+    let layout =
+        StateLayout::from_env().map_err(|e| BridgeError::RuntimeUnresolved(e.to_string()))?;
     Ok(layout.session_socket_path(id))
 }
 
@@ -200,15 +198,9 @@ pub fn dispatch_permit(args: &PermitArgs) -> Result<BridgeOutcome, BridgeError> 
         "\"request_id\":\"{}\"",
         escape_json_string(&args.request_id)
     ));
-    args_json.push_str(&format!(
-        ",\"outcome\":\"{}\"",
-        args.outcome.as_wire()
-    ));
+    args_json.push_str(&format!(",\"outcome\":\"{}\"", args.outcome.as_wire()));
     if let Some(opt) = &args.option_id {
-        args_json.push_str(&format!(
-            ",\"option_id\":\"{}\"",
-            escape_json_string(opt)
-        ));
+        args_json.push_str(&format!(",\"option_id\":\"{}\"", escape_json_string(opt)));
     }
     args_json.push('}');
     send_envelope(&sock, "Permit", &args_json)
@@ -234,9 +226,8 @@ fn send_envelope(sock: &Path, cmd: &str, args_json: &str) -> Result<BridgeOutcom
 /// Connect to `sock`, write `payload\n`, read one newline-terminated
 /// reply, return it without the trailing newline.
 fn send_command(sock: &Path, payload: &str) -> Result<String, BridgeError> {
-    let mut stream = UnixStream::connect(sock).map_err(|e| {
-        BridgeError::Io(format!("connect {}: {e}", sock.display()))
-    })?;
+    let mut stream = UnixStream::connect(sock)
+        .map_err(|e| BridgeError::Io(format!("connect {}: {e}", sock.display())))?;
     let to = Duration::from_millis(SOCKET_TIMEOUT_MS);
     stream
         .set_read_timeout(Some(to))
@@ -276,9 +267,7 @@ fn parse_reply(line: &str) -> Result<(), BridgeError> {
     let ok = value
         .get("ok")
         .and_then(|v| v.as_bool())
-        .ok_or_else(|| {
-            BridgeError::ProtocolError(format!("reply missing `ok` bool: {line:?}"))
-        })?;
+        .ok_or_else(|| BridgeError::ProtocolError(format!("reply missing `ok` bool: {line:?}")))?;
     if ok {
         return Ok(());
     }
@@ -398,8 +387,7 @@ mod tests {
 
     #[test]
     fn parse_reply_nak_carries_error_text() {
-        let err = parse_reply(r#"{"ok":false,"error":"unknown command: Foo"}"#)
-            .expect_err("nak");
+        let err = parse_reply(r#"{"ok":false,"error":"unknown command: Foo"}"#).expect_err("nak");
         match err {
             BridgeError::Nak(msg) => assert!(msg.contains("unknown command")),
             other => panic!("expected Nak, got {other:?}"),
@@ -435,8 +423,7 @@ mod tests {
     #[test]
     fn send_envelope_rejects_invalid_json_args() {
         let sock = short_sock("invalid-json");
-        let err = send_envelope(&sock, "Intent", "{not json")
-            .expect_err("must reject");
+        let err = send_envelope(&sock, "Intent", "{not json").expect_err("must reject");
         match err {
             BridgeError::InvalidJson(_) => {}
             other => panic!("expected InvalidJson, got {other:?}"),

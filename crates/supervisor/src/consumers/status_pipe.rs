@@ -91,10 +91,7 @@ mod tests {
 
     async fn ok_output() -> CommandOutput {
         CommandOutput {
-            status: tokio::process::Command::new("true")
-                .status()
-                .await
-                .unwrap(),
+            status: tokio::process::Command::new("true").status().await.unwrap(),
             stdout: Vec::new(),
             stderr: Vec::new(),
         }

@@ -148,7 +148,10 @@ fn derive_extension_inner(input: &DeriveInput) -> syn::Result<proc_macro2::Token
         syn::Error::new_spanned(&input.ident, "missing required `name` in #[extension(…)]")
     })?;
     let version = version.ok_or_else(|| {
-        syn::Error::new_spanned(&input.ident, "missing required `version` in #[extension(…)]")
+        syn::Error::new_spanned(
+            &input.ident,
+            "missing required `version` in #[extension(…)]",
+        )
     })?;
     let description = description.unwrap_or_default();
     let ark_range = ark_range.unwrap_or_default();
@@ -174,10 +177,8 @@ fn derive_extension_inner(input: &DeriveInput) -> syn::Result<proc_macro2::Token
     // implements the convenience surface; cross-derive inventory
     // scanning is NOT viable because `inventory::iter` is a runtime
     // surface, not a macro-expansion one.
-    let cap_literals: Vec<proc_macro2::TokenStream> = capabilities
-        .iter()
-        .map(|c| quote! { #c })
-        .collect();
+    let cap_literals: Vec<proc_macro2::TokenStream> =
+        capabilities.iter().map(|c| quote! { #c }).collect();
 
     Ok(quote! {
         ::inventory::submit! {
@@ -531,9 +532,7 @@ impl Parse for IntentArgs {
                 other => {
                     return Err(syn::Error::new(
                         ident.span(),
-                        format!(
-                            "unknown ark_intent attribute `{other}`; expected: name"
-                        ),
+                        format!("unknown ark_intent attribute `{other}`; expected: name"),
                     ));
                 }
             }
@@ -645,9 +644,9 @@ fn derive_event_inner(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStre
             match ident.to_string().as_str() {
                 "name" => custom_name = Some(value),
                 other => {
-                    return Err(meta.error(format!(
-                        "unknown event attribute `{other}`; expected: name"
-                    )));
+                    return Err(
+                        meta.error(format!("unknown event attribute `{other}`; expected: name"))
+                    );
                 }
             }
             Ok(())
@@ -693,9 +692,7 @@ fn to_snake_case(s: &str) -> String {
                 // 2. Previous char is uppercase AND next char is lowercase
                 //    (e.g. "HTTPReq" → "HTTP_Req" → "http_req")
                 if prev.is_lowercase()
-                    || (prev.is_uppercase()
-                        && i + 1 < chars.len()
-                        && chars[i + 1].is_lowercase())
+                    || (prev.is_uppercase() && i + 1 < chars.len() && chars[i + 1].is_lowercase())
                 {
                     result.push('_');
                 }

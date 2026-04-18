@@ -15,8 +15,8 @@ use kdl::{KdlNode, KdlValue};
 
 use crate::error::SceneError;
 use crate::intent::{
-    Intent, IntentContext, IntentValue, first_argument, parse_handle,
-    property_str, property_u64, strict_map,
+    Intent, IntentContext, IntentValue, first_argument, parse_handle, property_str, property_u64,
+    strict_map,
 };
 
 // ---------------------------------------------------------------------------
@@ -128,11 +128,10 @@ impl Intent for PipeOp {
             op: PIPE_NAME.to_string(),
             message: "missing required property `to=`".to_string(),
         })?;
-        let payload =
-            property_str(args, "payload").ok_or_else(|| SceneError::OpFailed {
-                op: PIPE_NAME.to_string(),
-                message: "missing required property `payload=`".to_string(),
-            })?;
+        let payload = property_str(args, "payload").ok_or_else(|| SceneError::OpFailed {
+            op: PIPE_NAME.to_string(),
+            message: "missing required property `payload=`".to_string(),
+        })?;
         let from = parse_handle(&from_raw, PIPE_NAME)?;
         let to = parse_handle(&to_raw, PIPE_NAME)?;
         let mux = ctx.mux.as_ref().expect("checked by require_mux");
@@ -259,13 +258,9 @@ mod tests {
         let mux = Arc::new(MockMux::default());
         let bus = Arc::new(MockBus::default());
         let ctx = ctx_with(mux.clone(), bus.clone());
-        let node =
-            node_from(r#"pipe from="@src" to="@dst" payload="hello""#);
+        let node = node_from(r#"pipe from="@src" to="@dst" payload="hello""#);
         PipeOp.dispatch(&node, &ctx).await.expect("ok");
-        assert_eq!(
-            mux.take_calls(),
-            vec!["pipe(@src,@dst,hello)".to_string()]
-        );
+        assert_eq!(mux.take_calls(), vec!["pipe(@src,@dst,hello)".to_string()]);
     }
 
     #[tokio::test]
@@ -274,7 +269,10 @@ mod tests {
         let bus = Arc::new(MockBus::default());
         let ctx = ctx_with(mux.clone(), bus.clone());
         let node = node_from(r#"pipe from="@src" to="@dst""#);
-        let err = PipeOp.dispatch(&node, &ctx).await.expect_err("missing payload");
+        let err = PipeOp
+            .dispatch(&node, &ctx)
+            .await
+            .expect_err("missing payload");
         assert!(matches!(err, SceneError::OpFailed { .. }));
     }
 
@@ -329,8 +327,7 @@ mod tests {
         let mux = Arc::new(MockMux::default());
         let bus = Arc::new(MockBus::default());
         let ctx = ctx_with(mux.clone(), bus.clone());
-        let node =
-            node_from(r#"set_status text="ready" severity="info" ttl_ms=2000"#);
+        let node = node_from(r#"set_status text="ready" severity="info" ttl_ms=2000"#);
         SetStatusOp.dispatch(&node, &ctx).await.expect("ok");
         let events = bus.take_events();
         assert_eq!(events.len(), 1);
@@ -347,7 +344,10 @@ mod tests {
         let bus = Arc::new(MockBus::default());
         let ctx = ctx_with(mux.clone(), bus.clone());
         let node = node_from(r#"set_status severity="info""#);
-        let err = SetStatusOp.dispatch(&node, &ctx).await.expect_err("must error");
+        let err = SetStatusOp
+            .dispatch(&node, &ctx)
+            .await
+            .expect_err("must error");
         assert!(matches!(err, SceneError::OpFailed { .. }));
     }
 }

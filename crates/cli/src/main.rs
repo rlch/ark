@@ -17,8 +17,8 @@
 //! flag on help rendering via a pre-parse; the authoritative ctx
 //! used by subcommands is built after parse succeeds.
 
-use ark_cli::{Cli, Ctx, detect_no_color};
 use ark_cli::commands::launch;
+use ark_cli::{Cli, Ctx, detect_no_color};
 use clap::FromArgMatches;
 use tracing_subscriber::EnvFilter;
 

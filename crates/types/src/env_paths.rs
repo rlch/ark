@@ -84,7 +84,9 @@ impl EnvPaths {
     /// cavekit-soul Phase 1 alongside the `agents/` → `sessions/` rename.
     pub fn session_socket_path(id: &SessionId) -> Result<PathBuf, EnvPathsError> {
         let rt = Self::runtime_dir()?;
-        Ok(rt.join("sessions").join(format!("{}.sock", id.as_path_leaf())))
+        Ok(rt
+            .join("sessions")
+            .join(format!("{}.sock", id.as_path_leaf())))
     }
 
     /// Injectable resolver — the single source of truth. All other entry

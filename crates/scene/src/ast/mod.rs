@@ -263,8 +263,7 @@ mod tests {
     #[test]
     fn parses_minimal_empty_scene() {
         let kdl = r#"scene "x" { }"#;
-        let doc =
-            facet_kdl::from_str::<SceneDoc>(kdl).expect("minimal empty scene should parse");
+        let doc = facet_kdl::from_str::<SceneDoc>(kdl).expect("minimal empty scene should parse");
         assert_eq!(doc.scene.name, "x");
         assert!(doc.scene.max_cascade_depth.is_none());
         assert!(doc.scene.body.is_empty());

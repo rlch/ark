@@ -40,9 +40,7 @@ use ark_ext_metadata_types::{ConfigSectionDecl, ExtensionMetadata};
 pub enum ExtConfigError {
     /// The manifest marks the section as required, but no layer in the
     /// figment chain supplied a value for it.
-    #[error(
-        "extension {ext_name:?} requires config section {section:?} but it was not provided"
-    )]
+    #[error("extension {ext_name:?} requires config section {section:?} but it was not provided")]
     MissingRequired {
         /// Extension name (the directory-name/manifest `name`).
         ext_name: String,
@@ -139,10 +137,9 @@ pub fn validate_ext_sections(
         // Presence only — a figment error on the key (e.g. deserialization
         // failure if the value exists but isn't valid JSON) still means
         // "something is there", so we treat only `MissingField` as absent.
-        let present = match figment.extract_inner::<serde_json::Value>(&section_key(
-            ext_name,
-            section_name,
-        )) {
+        let present = match figment
+            .extract_inner::<serde_json::Value>(&section_key(ext_name, section_name))
+        {
             Ok(_) => true,
             Err(e) if e.missing() => false,
             Err(_) => true,
@@ -326,10 +323,7 @@ mod tests {
                 "ext-b".to_string(),
                 meta_with_sections(
                     "ext-b",
-                    vec![sample_decl(
-                        "core",
-                        r#"{"type":"object","required":true}"#,
-                    )],
+                    vec![sample_decl("core", r#"{"type":"object","required":true}"#)],
                 ),
             ),
         ];
@@ -368,10 +362,7 @@ mod tests {
                 "ext-b".to_string(),
                 meta_with_sections(
                     "ext-b",
-                    vec![sample_decl(
-                        "core",
-                        r#"{"type":"object","required":true}"#,
-                    )],
+                    vec![sample_decl("core", r#"{"type":"object","required":true}"#)],
                 ),
             ),
         ];

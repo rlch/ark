@@ -88,7 +88,9 @@ mod tests {
     #[test]
     fn command_is_command_view() {
         let reg = ViewRegistry::with_primitives();
-        let meta = reg.resolve(COMMAND).expect("command primitive should register");
+        let meta = reg
+            .resolve(COMMAND)
+            .expect("command primitive should register");
         assert_eq!(meta.render_mode, RenderMode::CommandView);
         assert_eq!(meta.source, ViewSource::Primitive);
         assert!(meta.config_schema.is_some(), "command accepts cmd+args");

@@ -169,11 +169,9 @@ mod ext_metadata_tests {
     fn picker_metadata_surface() {
         let m = picker_metadata();
         assert_eq!(m.name.value, "picker");
-        let intents: Vec<&str> =
-            m.intents.iter().map(|i| i.name.as_str()).collect();
+        let intents: Vec<&str> = m.intents.iter().map(|i| i.name.as_str()).collect();
         assert!(intents.contains(&"picker.show"));
-        let events: Vec<&str> =
-            m.events.iter().map(|e| e.name.as_str()).collect();
+        let events: Vec<&str> = m.events.iter().map(|e| e.name.as_str()).collect();
         assert!(events.contains(&"picker.picked"));
     }
 

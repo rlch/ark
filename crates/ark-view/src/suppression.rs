@@ -37,10 +37,14 @@ impl ParamsHash {
     /// Construct from raw 32 bytes — intended for tests and the
     /// supervisor's suppression-map storage path; callers computing
     /// a hash from params should use [`hash_params`].
-    pub const fn from_bytes(bytes: [u8; 32]) -> Self { Self(bytes) }
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
 
     /// Borrow the raw 32 bytes.
-    pub const fn as_bytes(&self) -> &[u8; 32] { &self.0 }
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
 }
 
 impl std::fmt::Display for ParamsHash {
@@ -121,7 +125,9 @@ fn write_canonical(out: &mut String, value: &serde_json::Value) {
         Value::Array(arr) => {
             out.push('[');
             for (i, item) in arr.iter().enumerate() {
-                if i > 0 { out.push(','); }
+                if i > 0 {
+                    out.push(',');
+                }
                 write_canonical(out, item);
             }
             out.push(']');
@@ -131,7 +137,9 @@ fn write_canonical(out: &mut String, value: &serde_json::Value) {
             keys.sort();
             out.push('{');
             for (i, k) in keys.iter().enumerate() {
-                if i > 0 { out.push(','); }
+                if i > 0 {
+                    out.push(',');
+                }
                 out.push_str(&serde_json::to_string(k.as_str()).expect("key ser"));
                 out.push(':');
                 write_canonical(out, &map[*k]);
@@ -154,10 +162,14 @@ pub struct SceneHandleName(String);
 
 impl SceneHandleName {
     /// Construct from any string-convertible value.
-    pub fn new(name: impl Into<String>) -> Self { Self(name.into()) }
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
 
     /// Borrow the underlying name.
-    pub fn as_str(&self) -> &str { &self.0 }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl std::fmt::Display for SceneHandleName {
@@ -252,7 +264,7 @@ impl SuppressionPolicy {
 mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};
-    use serde_json::{json, Map, Value};
+    use serde_json::{Map, Value, json};
 
     #[derive(Serialize)]
     struct Simple {

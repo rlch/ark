@@ -123,7 +123,10 @@ fn opted_out() -> &'static Mutex<HashSet<(String, String)>> {
 
 fn is_opted_out(ext_name: &str, method: &str) -> bool {
     let key = (ext_name.to_string(), method.to_string());
-    opted_out().lock().expect("opted_out poisoned").contains(&key)
+    opted_out()
+        .lock()
+        .expect("opted_out poisoned")
+        .contains(&key)
 }
 
 /// Emit a warn-once log when a dispatch proceeded (capability advertised)
@@ -135,7 +138,10 @@ pub fn warn_advertised_but_unimplemented(ext_name: &str, method: &str) {
     let key = (ext_name.to_string(), method.to_string());
     // Opt-out insert — first caller wins. Subsequent
     // `should_dispatch(ext, method)` returns false without RPC.
-    let inserted = opted_out().lock().expect("opted_out poisoned").insert(key.clone());
+    let inserted = opted_out()
+        .lock()
+        .expect("opted_out poisoned")
+        .insert(key.clone());
     if inserted {
         tracing::warn!(
             target: "ark.supervisor.ext_dispatch",
@@ -166,10 +172,7 @@ mod tests {
             capability_for_method("stack/close_child"),
             Some("view.stack.v1")
         );
-        assert_eq!(
-            capability_for_method("stack/clear"),
-            Some("view.stack.v1")
-        );
+        assert_eq!(capability_for_method("stack/clear"), Some("view.stack.v1"));
         assert_eq!(
             capability_for_method("on_session_start"),
             Some("ext.lifecycle.v1")

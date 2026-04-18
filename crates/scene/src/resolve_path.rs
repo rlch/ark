@@ -95,7 +95,10 @@ mod tests {
             None,
             cwd,
         );
-        assert_eq!(result, SceneSource::Flag(PathBuf::from("/explicit/scene.kdl")));
+        assert_eq!(
+            result,
+            SceneSource::Flag(PathBuf::from("/explicit/scene.kdl"))
+        );
     }
 
     #[test]
@@ -105,13 +108,7 @@ mod tests {
 
         touch(&cwd.join(".ark/scene.kdl"));
 
-        let result = resolve_scene_path(
-            None,
-            Some("/env/scene.kdl"),
-            None,
-            None,
-            cwd,
-        );
+        let result = resolve_scene_path(None, Some("/env/scene.kdl"), None, None, cwd);
         assert_eq!(result, SceneSource::EnvVar(PathBuf::from("/env/scene.kdl")));
     }
 
@@ -136,13 +133,7 @@ mod tests {
 
         touch(&xdg.join("ark/scenes/default.kdl"));
 
-        let result = resolve_scene_path(
-            None,
-            None,
-            None,
-            Some(&xdg),
-            tmp.path(),
-        );
+        let result = resolve_scene_path(None, None, None, Some(&xdg), tmp.path());
         assert_eq!(
             result,
             SceneSource::UserConfig(xdg.join("ark/scenes/default.kdl"))
@@ -163,13 +154,7 @@ mod tests {
 
         touch(&xdg.join("myapp/scenes/default.kdl"));
 
-        let result = resolve_scene_path(
-            None,
-            None,
-            Some("myapp"),
-            Some(&xdg),
-            tmp.path(),
-        );
+        let result = resolve_scene_path(None, None, Some("myapp"), Some(&xdg), tmp.path());
         assert_eq!(
             result,
             SceneSource::UserConfig(xdg.join("myapp/scenes/default.kdl"))

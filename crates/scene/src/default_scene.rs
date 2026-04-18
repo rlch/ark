@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use crate::error::SceneError;
-use crate::parse::{parse_scene, SceneIR};
+use crate::parse::{SceneIR, parse_scene};
 
 /// Raw KDL source of the built-in default scene, embedded at compile time.
 pub const DEFAULT_SCENE_KDL: &str = include_str!("assets/default.kdl");
@@ -28,12 +28,11 @@ pub fn resolve_default_scene(xdg_config: Option<&Path>) -> Result<SceneIR, Scene
     if let Some(config) = xdg_config {
         let user_path = config.join("ark/scenes/default.kdl");
         if user_path.exists() {
-            let content = std::fs::read_to_string(&user_path).map_err(|e| {
-                SceneError::IncludeNotFound {
+            let content =
+                std::fs::read_to_string(&user_path).map_err(|e| SceneError::IncludeNotFound {
                     target: user_path.display().to_string(),
                     reason: e.to_string(),
-                }
-            })?;
+                })?;
             return parse_scene(content, user_path);
         }
     }
@@ -43,8 +42,8 @@ pub fn resolve_default_scene(xdg_config: Option<&Path>) -> Result<SceneIR, Scene
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::layout::LayoutChild;
     use crate::ast::SceneBodyNode;
+    use crate::ast::layout::LayoutChild;
     use tempfile::TempDir;
 
     /// Helper: extract the first `LayoutNode` from a scene's body.
@@ -104,8 +103,7 @@ mod tests {
         )
         .unwrap();
 
-        let ir = resolve_default_scene(Some(tmp.path()))
-            .expect("user override should parse");
+        let ir = resolve_default_scene(Some(tmp.path())).expect("user override should parse");
         assert_eq!(ir.scene.name, "custom");
     }
 
@@ -113,8 +111,7 @@ mod tests {
     fn fallback_when_user_file_missing() {
         let tmp = TempDir::new().unwrap();
         // No ark/scenes/default.kdl created — should fall back to built-in.
-        let ir = resolve_default_scene(Some(tmp.path()))
-            .expect("should fall back to built-in");
+        let ir = resolve_default_scene(Some(tmp.path())).expect("should fall back to built-in");
         assert_eq!(ir.scene.name, "default");
     }
 }

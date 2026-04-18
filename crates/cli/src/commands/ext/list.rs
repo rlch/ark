@@ -137,14 +137,23 @@ pub fn enumerate_extensions(
     system_dirs: &[&Path],
 ) -> Vec<Row> {
     let mut rows: Vec<Row> = Vec::new();
-    let mut seen: std::collections::BTreeSet<String> =
-        std::collections::BTreeSet::new();
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
     // Project
-    scan_dir(&cwd.join(".ark/extensions"), Tier::Project, &mut rows, &mut seen);
+    scan_dir(
+        &cwd.join(".ark/extensions"),
+        Tier::Project,
+        &mut rows,
+        &mut seen,
+    );
     // User
     if let Some(xdg) = xdg_data_home {
-        scan_dir(&xdg.join("ark/extensions"), Tier::User, &mut rows, &mut seen);
+        scan_dir(
+            &xdg.join("ark/extensions"),
+            Tier::User,
+            &mut rows,
+            &mut seen,
+        );
     }
     // System
     for sys in system_dirs {
@@ -211,10 +220,8 @@ fn scan_dir(
 /// a short error message on failure — the caller renders this in the
 /// `source` column so one broken extension does not hide others.
 pub fn load_manifest(path: &Path) -> Result<ExtensionMetadata, String> {
-    let text =
-        fs::read_to_string(path).map_err(|e| format!("read failed: {e}"))?;
-    ark_ext_metadata::parse_extension_metadata_kdl(&text)
-        .map_err(|e| format!("parse failed: {e}"))
+    let text = fs::read_to_string(path).map_err(|e| format!("read failed: {e}"))?;
+    ark_ext_metadata::parse_extension_metadata_kdl(&text).map_err(|e| format!("parse failed: {e}"))
 }
 
 /// Print a table of rows to stdout with fixed-width columns.

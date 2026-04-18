@@ -21,9 +21,7 @@
 use ark_ext_metadata_types::{
     CapabilitySet, ConfigSchema, ExtensionMetadata, IntentDecl, StringNode,
 };
-use ark_ext_proto::{
-    ArkExtension, IntentDispatchRequest, IntentDispatchResponse,
-};
+use ark_ext_proto::{ArkExtension, IntentDispatchRequest, IntentDispatchResponse};
 use ark_ext_test_support::StubExtension;
 use ark_scene::ext::ExtensionRegistry;
 use std::sync::{Arc, Mutex};
@@ -74,9 +72,7 @@ fn manifest_intent_appears_in_registry() {
     // Also spawn a StubExtension with the same manifest so the
     // "supervisor loads stub" half of the kit-level assertion is
     // covered (builder axis #3 — `.with_manifest`).
-    let stub = StubExtension::builder()
-        .with_manifest(meta.clone())
-        .build();
+    let stub = StubExtension::builder().with_manifest(meta.clone()).build();
     assert_eq!(
         stub.manifest().intents.len(),
         1,
@@ -128,15 +124,12 @@ async fn scene_op_dispatches_to_manifest_intent() {
 
     let stub = StubExtension::builder()
         .with_manifest(stub_metadata_with_intent("stub", "hello"))
-        .with_method(
-            "intent/dispatch",
-            move |req: IntentDispatchRequest| {
-                captured_clone.lock().unwrap().push(req);
-                Ok(IntentDispatchResponse {
-                    value: "null".to_string(),
-                })
-            },
-        )
+        .with_method("intent/dispatch", move |req: IntentDispatchRequest| {
+            captured_clone.lock().unwrap().push(req);
+            Ok(IntentDispatchResponse {
+                value: "null".to_string(),
+            })
+        })
         .build();
 
     // Simulate the scene compiling `stub.hello "world"` into a
@@ -251,10 +244,7 @@ fn undeclared_intent_scene_op_rejected_at_compile() {
 
     let fixture = scene_ui.join("undeclared_intent_reference.rs");
     let golden = scene_ui.join("undeclared_intent_reference.stderr");
-    let harness = scene_ui
-        .parent()
-        .unwrap()
-        .join("view_types_trybuild.rs");
+    let harness = scene_ui.parent().unwrap().join("view_types_trybuild.rs");
 
     for p in [&fixture, &golden, &harness] {
         assert!(p.exists(), "expected artifact missing: {}", p.display());

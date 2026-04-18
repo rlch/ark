@@ -357,7 +357,10 @@ mod tests {
         let p = base_payload("PermissionRequest");
         let events = payload_to_events(&p, &id(), HookEvent::PermissionRequest);
         let e = first_ext(&events[0]);
-        assert_eq!(e.payload.get("tool").and_then(|v| v.as_str()), Some("unknown"));
+        assert_eq!(
+            e.payload.get("tool").and_then(|v| v.as_str()),
+            Some("unknown")
+        );
     }
 
     #[test]

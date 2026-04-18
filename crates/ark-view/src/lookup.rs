@@ -230,10 +230,8 @@ mod tests {
     #[test]
     fn tab_by_name_returns_tab_when_kind_matches() {
         let name = SceneHandleName::new("main-tab");
-        let sh = SessionHandles::from_records([(
-            name.clone(),
-            rec(HandleKind::Tab, "tab-0", None),
-        )]);
+        let sh =
+            SessionHandles::from_records([(name.clone(), rec(HandleKind::Tab, "tab-0", None))]);
         let t: TabHandle = sh.tab_by_name(&name).expect("tab should be present");
         assert_eq!(t.handle().as_str(), "tab-0");
     }
@@ -292,10 +290,7 @@ mod tests {
                 SceneHandleName::new("a"),
                 rec(HandleKind::Pane, "p-a", Some("ext.view")),
             ),
-            (
-                SceneHandleName::new("b"),
-                rec(HandleKind::Tab, "t-b", None),
-            ),
+            (SceneHandleName::new("b"), rec(HandleKind::Tab, "t-b", None)),
         ]);
         assert_eq!(populated.len(), 2);
         assert!(!populated.is_empty());

@@ -145,13 +145,11 @@ impl ResponseError {
                     .and_then(|o| o.get("handle"))
                     .and_then(|v| v.as_str())
                     .map(ark_view::HandleId::new);
-                let cause = data
-                    .and_then(|o| o.get("cause"))
-                    .and_then(|v| serde_json::from_value::<ark_view::InvalidationCause>(v.clone()).ok());
+                let cause = data.and_then(|o| o.get("cause")).and_then(|v| {
+                    serde_json::from_value::<ark_view::InvalidationCause>(v.clone()).ok()
+                });
                 match (handle, cause) {
-                    (Some(handle), Some(cause)) => {
-                        ExtensionError::HandleGone { handle, cause }
-                    }
+                    (Some(handle), Some(cause)) => ExtensionError::HandleGone { handle, cause },
                     _ => ExtensionError::Internal(self.message),
                 }
             }
@@ -251,11 +249,7 @@ impl NdjsonClient {
             Arc::new(Mutex::new(HashMap::new()));
         let progress: ProgressBus = Arc::new(Mutex::new(HashMap::new()));
 
-        let read_handle = tokio::spawn(Self::read_loop(
-            reader,
-            pending.clone(),
-            progress.clone(),
-        ));
+        let read_handle = tokio::spawn(Self::read_loop(reader, pending.clone(), progress.clone()));
         let write_handle = tokio::spawn(Self::write_loop(writer, rx));
 
         Self {
@@ -412,10 +406,7 @@ impl NdjsonClient {
                 // Fire a `$/cancel` notification so the extension can
                 // abort server-side work (MCP cancellation semantics).
                 let _ = self
-                    .send_notification(
-                        "$/cancel",
-                        serde_json::json!({ "id": id.to_string() }),
-                    )
+                    .send_notification("$/cancel", serde_json::json!({ "id": id.to_string() }))
                     .await;
                 Err(ExtensionError::Internal(format!(
                     "request {method} timed out after {:?}",
@@ -426,11 +417,7 @@ impl NdjsonClient {
     }
 
     /// Send a one-way notification. No id, no response awaiting.
-    pub async fn send_notification<P: Serialize>(
-        &self,
-        method: &str,
-        params: P,
-    ) -> ExtResult<()> {
+    pub async fn send_notification<P: Serialize>(&self, method: &str, params: P) -> ExtResult<()> {
         let params = serde_json::to_value(&params)
             .map_err(|e| ExtensionError::Internal(format!("serialize params: {e}")))?;
         let n = Notification {
@@ -595,11 +582,7 @@ impl ExtensionClient for NdjsonClient {
 
     // -- Async + cancel ------------------------------------------------------
 
-    async fn cancel(
-        &self,
-        req: CancelRequest,
-        _opts: RequestOptions,
-    ) -> ExtResult<CancelResponse> {
+    async fn cancel(&self, req: CancelRequest, _opts: RequestOptions) -> ExtResult<CancelResponse> {
         self.send_notification("$/cancel", req).await?;
         Ok(CancelResponse::default())
     }
@@ -1072,42 +1055,54 @@ impl NdjsonServer {
 
         let method = req.method.as_str();
         let result: Result<Value, ExtensionError> = match method {
-            "initialize" => dispatch_typed::<E, InitializeRequest, InitializeResponse, _>(
-                ext,
-                req.params,
-                |e, r| async move { e.initialize(r).await },
-            )
-            .await,
-            "shutdown" => dispatch_typed::<E, ShutdownRequest, ShutdownResponse, _>(
-                ext,
-                req.params,
-                |e, r| async move { e.shutdown(r).await },
-            )
-            .await,
-            "ping" => dispatch_typed::<E, PingRequest, PingResponse, _>(
-                ext,
-                req.params,
-                |e, r| async move { e.ping(r).await },
-            )
-            .await,
-            "task/create" => dispatch_typed::<E, TaskCreateRequest, TaskCreateResponse, _>(
-                ext,
-                req.params,
-                |e, r| async move { e.task_create(r).await },
-            )
-            .await,
-            "task/get" => dispatch_typed::<E, TaskGetRequest, TaskGetResponse, _>(
-                ext,
-                req.params,
-                |e, r| async move { e.task_get(r).await },
-            )
-            .await,
-            "task/cancel" => dispatch_typed::<E, TaskCancelRequest, TaskCancelResponse, _>(
-                ext,
-                req.params,
-                |e, r| async move { e.task_cancel(r).await },
-            )
-            .await,
+            "initialize" => {
+                dispatch_typed::<E, InitializeRequest, InitializeResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.initialize(r).await },
+                )
+                .await
+            }
+            "shutdown" => {
+                dispatch_typed::<E, ShutdownRequest, ShutdownResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.shutdown(r).await },
+                )
+                .await
+            }
+            "ping" => {
+                dispatch_typed::<E, PingRequest, PingResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.ping(r).await },
+                )
+                .await
+            }
+            "task/create" => {
+                dispatch_typed::<E, TaskCreateRequest, TaskCreateResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.task_create(r).await },
+                )
+                .await
+            }
+            "task/get" => {
+                dispatch_typed::<E, TaskGetRequest, TaskGetResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.task_get(r).await },
+                )
+                .await
+            }
+            "task/cancel" => {
+                dispatch_typed::<E, TaskCancelRequest, TaskCancelResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.task_cancel(r).await },
+                )
+                .await
+            }
             "event/subscribe" => {
                 dispatch_typed::<E, EventSubscribeRequest, EventSubscribeResponse, _>(
                     ext,
@@ -1124,12 +1119,14 @@ impl NdjsonServer {
                 )
                 .await
             }
-            "event/emit" => dispatch_typed::<E, EventEmitRequest, EventEmitResponse, _>(
-                ext,
-                req.params,
-                |e, r| async move { e.event_emit(r).await },
-            )
-            .await,
+            "event/emit" => {
+                dispatch_typed::<E, EventEmitRequest, EventEmitResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.event_emit(r).await },
+                )
+                .await
+            }
             "intent/unregister" => {
                 dispatch_typed::<E, IntentUnregisterRequest, IntentUnregisterResponse, _>(
                     ext,
@@ -1155,14 +1152,11 @@ impl NdjsonServer {
                 .await
             }
             "ui/keybind/unregister" => {
-                dispatch_typed::<
-                    E,
-                    UiKeybindUnregisterRequest,
-                    UiKeybindUnregisterResponse,
-                    _,
-                >(ext, req.params, |e, r| async move {
-                    e.ui_keybind_unregister(r).await
-                })
+                dispatch_typed::<E, UiKeybindUnregisterRequest, UiKeybindUnregisterResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.ui_keybind_unregister(r).await },
+                )
                 .await
             }
             "ui/pane/request" => {
@@ -1173,18 +1167,22 @@ impl NdjsonServer {
                 )
                 .await
             }
-            "ui/pane/close" => dispatch_typed::<E, UiPaneCloseRequest, UiPaneCloseResponse, _>(
-                ext,
-                req.params,
-                |e, r| async move { e.ui_pane_close(r).await },
-            )
-            .await,
-            "pane/emit" => dispatch_typed::<E, PaneEmitRequest, PaneEmitResponse, _>(
-                ext,
-                req.params,
-                |e, r| async move { e.pane_emit(r).await },
-            )
-            .await,
+            "ui/pane/close" => {
+                dispatch_typed::<E, UiPaneCloseRequest, UiPaneCloseResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.ui_pane_close(r).await },
+                )
+                .await
+            }
+            "pane/emit" => {
+                dispatch_typed::<E, PaneEmitRequest, PaneEmitResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.pane_emit(r).await },
+                )
+                .await
+            }
             "pane/replace_view" => {
                 dispatch_typed::<E, PaneReplaceViewRequest, PaneReplaceViewResponse, _>(
                     ext,
@@ -1193,12 +1191,14 @@ impl NdjsonServer {
                 )
                 .await
             }
-            "pane/close" => dispatch_typed::<E, PaneCloseRequest, PaneCloseResponse, _>(
-                ext,
-                req.params,
-                |e, r| async move { e.pane_close(r).await },
-            )
-            .await,
+            "pane/close" => {
+                dispatch_typed::<E, PaneCloseRequest, PaneCloseResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.pane_close(r).await },
+                )
+                .await
+            }
             "stack/spawn_pane" => {
                 dispatch_typed::<E, StackSpawnPaneRequest, StackSpawnPaneResponse, _>(
                     ext,
@@ -1215,12 +1215,14 @@ impl NdjsonServer {
                 )
                 .await
             }
-            "stack/clear" => dispatch_typed::<E, StackClearRequest, StackClearResponse, _>(
-                ext,
-                req.params,
-                |e, r| async move { e.stack_clear(r).await },
-            )
-            .await,
+            "stack/clear" => {
+                dispatch_typed::<E, StackClearRequest, StackClearResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.stack_clear(r).await },
+                )
+                .await
+            }
             "on_session_start" => {
                 dispatch_typed::<E, OnSessionStartRequest, OnSessionStartResponse, _>(
                     ext,
@@ -1269,18 +1271,22 @@ impl NdjsonServer {
                 )
                 .await
             }
-            "host/fs/read" => dispatch_typed::<E, HostFsReadRequest, HostFsReadResponse, _>(
-                ext,
-                req.params,
-                |e, r| async move { e.host_fs_read(r).await },
-            )
-            .await,
-            "host/fs/write" => dispatch_typed::<E, HostFsWriteRequest, HostFsWriteResponse, _>(
-                ext,
-                req.params,
-                |e, r| async move { e.host_fs_write(r).await },
-            )
-            .await,
+            "host/fs/read" => {
+                dispatch_typed::<E, HostFsReadRequest, HostFsReadResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.host_fs_read(r).await },
+                )
+                .await
+            }
+            "host/fs/write" => {
+                dispatch_typed::<E, HostFsWriteRequest, HostFsWriteResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.host_fs_write(r).await },
+                )
+                .await
+            }
             "host/proc/spawn" => {
                 dispatch_typed::<E, HostProcSpawnRequest, HostProcSpawnResponse, _>(
                     ext,
@@ -1297,54 +1303,58 @@ impl NdjsonServer {
                 )
                 .await
             }
-            "workspace/applyEdit" => dispatch_typed::<
-                E,
-                WorkspaceApplyEditRequest,
-                WorkspaceApplyEditResponse,
-                _,
-            >(ext, req.params, |e, r| async move {
-                e.workspace_apply_edit(r).await
-            })
-            .await,
+            "workspace/applyEdit" => {
+                dispatch_typed::<E, WorkspaceApplyEditRequest, WorkspaceApplyEditResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.workspace_apply_edit(r).await },
+                )
+                .await
+            }
             "workspace/configuration" => dispatch_typed::<
                 E,
                 WorkspaceConfigurationRequest,
                 WorkspaceConfigurationResponse,
                 _,
-            >(
-                ext, req.params, |e, r| async move { e.workspace_configuration(r).await }
-            )
-            .await,
-            "workspace/showDocument" => dispatch_typed::<
-                E,
-                WorkspaceShowDocumentRequest,
-                WorkspaceShowDocumentResponse,
-                _,
-            >(
-                ext, req.params, |e, r| async move { e.workspace_show_document(r).await }
-            )
-            .await,
-            "workspace/showMessageRequest" => dispatch_typed::<
-                E,
-                WorkspaceShowMessageRequestRequest,
-                WorkspaceShowMessageRequestResponse,
-                _,
             >(ext, req.params, |e, r| async move {
-                e.workspace_show_message_request(r).await
+                e.workspace_configuration(r).await
             })
             .await,
-            "scene/getRoot" => dispatch_typed::<E, SceneGetRootRequest, SceneGetRootResponse, _>(
-                ext,
-                req.params,
-                |e, r| async move { e.scene_get_root(r).await },
-            )
-            .await,
-            "log/setLevel" => dispatch_typed::<E, LogSetLevelRequest, LogSetLevelResponse, _>(
-                ext,
-                req.params,
-                |e, r| async move { e.log_set_level(r).await },
-            )
-            .await,
+            "workspace/showDocument" => {
+                dispatch_typed::<E, WorkspaceShowDocumentRequest, WorkspaceShowDocumentResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.workspace_show_document(r).await },
+                )
+                .await
+            }
+            "workspace/showMessageRequest" => {
+                dispatch_typed::<
+                    E,
+                    WorkspaceShowMessageRequestRequest,
+                    WorkspaceShowMessageRequestResponse,
+                    _,
+                >(ext, req.params, |e, r| async move {
+                    e.workspace_show_message_request(r).await
+                })
+                .await
+            }
+            "scene/getRoot" => {
+                dispatch_typed::<E, SceneGetRootRequest, SceneGetRootResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.scene_get_root(r).await },
+                )
+                .await
+            }
+            "log/setLevel" => {
+                dispatch_typed::<E, LogSetLevelRequest, LogSetLevelResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.log_set_level(r).await },
+                )
+                .await
+            }
             other => Err(ExtensionError::method_not_found(other)),
         };
         match result {
@@ -1427,8 +1437,8 @@ where
     Resp: Serialize,
     Fut: std::future::Future<Output = ExtResult<Resp>>,
 {
-    let req: Req = serde_json::from_value(params)
-        .map_err(|e| ExtensionError::InvalidParams(e.to_string()))?;
+    let req: Req =
+        serde_json::from_value(params).map_err(|e| ExtensionError::InvalidParams(e.to_string()))?;
     let resp = call(ext.clone(), req).await?;
     serde_json::to_value(&resp).map_err(|e| ExtensionError::Internal(e.to_string()))
 }
@@ -1486,10 +1496,7 @@ mod tests {
             Ok(PingResponse::default())
         }
 
-        async fn task_create(
-            &self,
-            req: TaskCreateRequest,
-        ) -> ExtResult<TaskCreateResponse> {
+        async fn task_create(&self, req: TaskCreateRequest) -> ExtResult<TaskCreateResponse> {
             Ok(TaskCreateResponse {
                 task: TaskId {
                     value: format!("task:{}", req.label),
@@ -1558,10 +1565,7 @@ mod tests {
     struct BlackholeExt;
     #[async_trait]
     impl ArkExtension for BlackholeExt {
-        async fn task_create(
-            &self,
-            _req: TaskCreateRequest,
-        ) -> ExtResult<TaskCreateResponse> {
+        async fn task_create(&self, _req: TaskCreateRequest) -> ExtResult<TaskCreateResponse> {
             // Park forever — timeout is the only escape.
             std::future::pending().await
         }
@@ -1765,10 +1769,7 @@ mod tests {
     struct HostFsExt;
     #[async_trait]
     impl ArkExtension for HostFsExt {
-        async fn host_fs_read(
-            &self,
-            req: HostFsReadRequest,
-        ) -> ExtResult<HostFsReadResponse> {
+        async fn host_fs_read(&self, req: HostFsReadRequest) -> ExtResult<HostFsReadResponse> {
             Ok(HostFsReadResponse {
                 contents: format!("read:{}", req.path),
             })

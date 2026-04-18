@@ -187,10 +187,7 @@ mod tests {
     use ark_types::channel;
 
     async fn mux_with_n_ok_closes(n: usize) -> (Arc<ZellijMux>, Arc<StubExecutor>) {
-        let ok_status = tokio::process::Command::new("true")
-            .status()
-            .await
-            .unwrap();
+        let ok_status = tokio::process::Command::new("true").status().await.unwrap();
         let responses: Vec<CommandOutput> = (0..n)
             .map(|_| CommandOutput {
                 status: ok_status,

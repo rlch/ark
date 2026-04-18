@@ -21,7 +21,7 @@ pub mod parse;
 
 pub use error::{Result, SceneError};
 pub use id::SceneId;
-pub use parse::{parse_scene, SceneIR};
+pub use parse::{SceneIR, parse_scene};
 
 // T-041 (soul phase 2 tests R5): re-export the compile-time view-type
 // validator so trybuild fixtures carry a short `use ark_scene::validate_scene;`

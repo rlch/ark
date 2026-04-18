@@ -223,7 +223,15 @@ fn validate_op(
 
     // `pipe from=@h to=@h` — both sides must be pane refs.
     if let OpNode::Pipe(p) = op {
-        validate_handle_ref("pipe", &p.from, ExpectedKind::Pane, decls, src, path, errors);
+        validate_handle_ref(
+            "pipe",
+            &p.from,
+            ExpectedKind::Pane,
+            decls,
+            src,
+            path,
+            errors,
+        );
         validate_handle_ref("pipe", &p.to, ExpectedKind::Pane, decls, src, path, errors);
     }
 }
@@ -247,7 +255,11 @@ fn validate_handle_ref(
             let help = if names.is_empty() {
                 format!("no handles declared in this scene")
             } else {
-                let list = names.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ");
+                let list = names
+                    .iter()
+                    .map(|n| format!("`{n}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 format!("available handles: {list}{}", format_suggestions(&hints))
             };
             errors.push(SceneError::OpUnresolvedRef {
@@ -353,7 +365,12 @@ scene "s" {
         let errors = validate(src);
         assert_eq!(errors.len(), 1);
         match &errors[0] {
-            SceneError::OpHandleTypeMismatch { op, expected, actual, .. } => {
+            SceneError::OpHandleTypeMismatch {
+                op,
+                expected,
+                actual,
+                ..
+            } => {
                 assert_eq!(op, "rename");
                 assert_eq!(*expected, "tab");
                 assert_eq!(*actual, "pane");
@@ -375,7 +392,12 @@ scene "s" {
         let errors = validate(src);
         assert_eq!(errors.len(), 1);
         match &errors[0] {
-            SceneError::OpHandleTypeMismatch { op, expected, actual, .. } => {
+            SceneError::OpHandleTypeMismatch {
+                op,
+                expected,
+                actual,
+                ..
+            } => {
                 assert_eq!(op, "resize");
                 assert_eq!(*expected, "pane");
                 assert_eq!(*actual, "tab");
@@ -450,7 +472,10 @@ scene "s" {
 }
 "#;
         let errors = validate(src);
-        assert!(errors.is_empty(), "introduced handles should not fail: {errors:?}");
+        assert!(
+            errors.is_empty(),
+            "introduced handles should not fail: {errors:?}"
+        );
     }
 
     #[test]

@@ -234,9 +234,7 @@ pub async fn load_extension<'a>(
 /// independently; one extension's failure does NOT halt peers (R8).
 /// The returned `Vec<Result<_, _>>` preserves per-ext outcomes in
 /// input order so the caller can diagnose partial failures.
-pub async fn load_extensions<I>(
-    extensions: I,
-) -> Vec<Result<LoadedExtension, ExtLoadError>>
+pub async fn load_extensions<I>(extensions: I) -> Vec<Result<LoadedExtension, ExtLoadError>>
 where
     I: IntoIterator<Item = (ExtensionMetadata, HandshakeFn<'static>)>,
 {
@@ -259,14 +257,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_ext_metadata_types::{
-        CapabilitySet, ConfigSchema, ExtensionMetadata, StringNode,
-    };
+    use ark_ext_metadata_types::{CapabilitySet, ConfigSchema, ExtensionMetadata, StringNode};
     use std::sync::{Arc, Mutex};
     use tracing::field::{Field, Visit};
+    use tracing_subscriber::Layer;
     use tracing_subscriber::layer::{Context, SubscriberExt};
     use tracing_subscriber::registry::Registry;
-    use tracing_subscriber::Layer;
 
     /// Build a minimal metadata value for one extension. The facet-kdl
     /// fields we don't care about in these tests default to empty.
@@ -289,17 +285,14 @@ mod tests {
 
     /// Happy-path handshake — advertises exactly the caps supplied.
     fn ok_handshake(caps: Vec<String>) -> HandshakeFn<'static> {
-        Box::new(move |_host_caps: &[&'static str]| {
-            Box::pin(async move { Ok(caps) })
-        })
+        Box::new(move |_host_caps: &[&'static str]| Box::pin(async move { Ok(caps) }))
     }
 
     /// Failing handshake — returns a boxed error unconditionally.
     fn err_handshake(message: &'static str) -> HandshakeFn<'static> {
         Box::new(move |_host_caps: &[&'static str]| {
             Box::pin(async move {
-                let err: Box<dyn std::error::Error + Send + Sync + 'static> =
-                    Box::from(message);
+                let err: Box<dyn std::error::Error + Send + Sync + 'static> = Box::from(message);
                 Err(err)
             })
         })
@@ -388,11 +381,7 @@ mod tests {
             tracing::subscriber::Interest::always()
         }
 
-        fn enabled(
-            &self,
-            _metadata: &tracing::Metadata<'_>,
-            _ctx: Context<'_, S>,
-        ) -> bool {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>, _ctx: Context<'_, S>) -> bool {
             true
         }
 
@@ -430,7 +419,6 @@ mod tests {
     /// completes and records caps via the dispatch registry.
     #[test]
     fn happy_path_completes_and_records_caps() {
-        
         let name = "test-ext-happy";
         let meta = minimal_metadata(name);
         let result = block_on(load_extension(
@@ -449,7 +437,6 @@ mod tests {
     /// (2) Handshake error -> ExtLoadError::Handshake.
     #[test]
     fn handshake_error_returns_handshake_variant() {
-        
         let meta = minimal_metadata("test-ext-handshake-fail");
         let err = block_on(load_extension(meta, err_handshake("boom")))
             .expect_err("expected handshake failure");
@@ -466,7 +453,6 @@ mod tests {
     /// don't BLOCK peers"; warn is OK).
     #[test]
     fn unknown_advertised_capability_warns_but_completes() {
-        
         let meta = minimal_metadata("test-ext-unknown-cap");
         let result = block_on(load_extension(
             meta,
@@ -480,7 +466,6 @@ mod tests {
     /// Vec of length 2; peers are not blocked by the failure.
     #[test]
     fn load_extensions_continues_past_failures() {
-        
         let batch: Vec<(ExtensionMetadata, HandshakeFn<'static>)> = vec![
             (
                 minimal_metadata("batch-ok"),
@@ -548,8 +533,7 @@ mod tests {
         let start = events.lock().unwrap().len();
 
         let meta = minimal_metadata("step-order-ext");
-        block_on(load_extension(meta, ok_handshake(vec![])))
-            .expect("load should succeed");
+        block_on(load_extension(meta, ok_handshake(vec![]))).expect("load should succeed");
 
         let events = events.lock().unwrap();
         let step_indices: Vec<u64> = events

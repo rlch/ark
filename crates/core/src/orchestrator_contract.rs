@@ -239,9 +239,7 @@ mod tests {
 
     #[test]
     fn contract_rejects_empty_name_slug() {
-        let factory = || -> Box<dyn Orchestrator> {
-            Box::new(MockOrchestrator { name: "" })
-        };
+        let factory = || -> Box<dyn Orchestrator> { Box::new(MockOrchestrator { name: "" }) };
         let result = std::panic::catch_unwind(|| name_is_stable_non_empty_slug(&factory));
         assert!(
             result.is_err(),
@@ -251,9 +249,8 @@ mod tests {
 
     #[test]
     fn contract_rejects_uppercase_name_slug() {
-        let factory = || -> Box<dyn Orchestrator> {
-            Box::new(MockOrchestrator { name: "CAVEKIT" })
-        };
+        let factory =
+            || -> Box<dyn Orchestrator> { Box::new(MockOrchestrator { name: "CAVEKIT" }) };
         let result = std::panic::catch_unwind(|| name_is_stable_non_empty_slug(&factory));
         assert!(
             result.is_err(),

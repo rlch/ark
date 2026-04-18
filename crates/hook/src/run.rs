@@ -562,7 +562,6 @@ fn log_budget(cli: &Cli, started: Instant) {
 #[allow(dead_code)]
 fn _touch_path(_p: &Path) {}
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -571,8 +570,8 @@ mod tests {
     use std::io;
     use std::io::Cursor;
 
-    use ark_types::permission::{PermissionPolicy, write_policy_file};
     use ark_types::SessionId;
+    use ark_types::permission::{PermissionPolicy, write_policy_file};
     use tempfile::TempDir;
 
     use crate::allow::ALLOW_PAYLOAD_JSON;
@@ -664,8 +663,7 @@ mod tests {
         let cli = cli_for(HookEvent::PermissionRequest);
         seed_policy(tmp.path(), &cli, PermissionPolicy::Ask);
         let payload = r#"{"session_id":"s1","cwd":"/tmp","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
-        let (_, stdout) =
-            run_sandboxed(&cli, payload.as_bytes(), Some(tmp.path().to_path_buf()));
+        let (_, stdout) = run_sandboxed(&cli, payload.as_bytes(), Some(tmp.path().to_path_buf()));
         assert!(stdout.is_empty());
     }
 
@@ -675,8 +673,7 @@ mod tests {
         let cli = cli_for(HookEvent::PermissionRequest);
         seed_policy(tmp.path(), &cli, PermissionPolicy::AutoApproveAll);
         let payload = r#"{"session_id":"s1","cwd":"/tmp","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"ls"}}"#;
-        let (_, stdout) =
-            run_sandboxed(&cli, payload.as_bytes(), Some(tmp.path().to_path_buf()));
+        let (_, stdout) = run_sandboxed(&cli, payload.as_bytes(), Some(tmp.path().to_path_buf()));
         assert_eq!(std::str::from_utf8(&stdout).unwrap(), ALLOW_PAYLOAD_JSON);
     }
 
@@ -686,8 +683,7 @@ mod tests {
         let cli = cli_for(HookEvent::PermissionRequest);
         seed_policy(tmp.path(), &cli, PermissionPolicy::AutoApproveRead);
         let payload = r#"{"session_id":"s1","cwd":"/tmp","hook_event_name":"PermissionRequest","tool_name":"Read","tool_input":{"file_path":"/x"}}"#;
-        let (_, stdout) =
-            run_sandboxed(&cli, payload.as_bytes(), Some(tmp.path().to_path_buf()));
+        let (_, stdout) = run_sandboxed(&cli, payload.as_bytes(), Some(tmp.path().to_path_buf()));
         assert_eq!(std::str::from_utf8(&stdout).unwrap(), ALLOW_PAYLOAD_JSON);
     }
 
@@ -697,8 +693,7 @@ mod tests {
         let cli = cli_for(HookEvent::PermissionRequest);
         seed_policy(tmp.path(), &cli, PermissionPolicy::AutoApproveRead);
         let payload = r#"{"session_id":"s1","cwd":"/tmp","hook_event_name":"PermissionRequest","tool_name":"Edit","tool_input":{"file_path":"/x"}}"#;
-        let (_, stdout) =
-            run_sandboxed(&cli, payload.as_bytes(), Some(tmp.path().to_path_buf()));
+        let (_, stdout) = run_sandboxed(&cli, payload.as_bytes(), Some(tmp.path().to_path_buf()));
         assert!(stdout.is_empty());
     }
 
@@ -707,8 +702,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let cli = cli_for(HookEvent::PermissionRequest);
         seed_policy(tmp.path(), &cli, PermissionPolicy::AutoApproveAll);
-        let (outcome, stdout) =
-            run_sandboxed(&cli, b"{not json", Some(tmp.path().to_path_buf()));
+        let (outcome, stdout) = run_sandboxed(&cli, b"{not json", Some(tmp.path().to_path_buf()));
         assert_eq!(outcome, HookOutcome::Allow);
         assert!(stdout.is_empty());
     }

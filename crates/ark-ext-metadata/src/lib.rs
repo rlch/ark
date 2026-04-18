@@ -59,9 +59,7 @@ pub fn extension_metadata_kdl_bytes(meta: &ExtensionMetadata) -> Result<Vec<u8>,
 /// [`extension_metadata_kdl_bytes`] but returns a `String` — handy
 /// for callers that want to embed the output in source or
 /// diagnostics.
-pub fn extension_metadata_kdl_string(
-    meta: &ExtensionMetadata,
-) -> Result<String, KdlEmitError> {
+pub fn extension_metadata_kdl_string(meta: &ExtensionMetadata) -> Result<String, KdlEmitError> {
     let doc = ExtensionManifest::new(meta.clone());
     let raw = facet_kdl::to_string(&doc).map_err(|e| KdlEmitError(format!("{e}")))?;
     let stripped = strip_root_wrapper(&raw).ok_or_else(|| {
@@ -80,9 +78,7 @@ pub fn extension_metadata_kdl_string(
 ///
 /// Expects the document rooted at a single `extension { … }` node,
 /// which is what [`extension_metadata_kdl_bytes`] emits.
-pub fn parse_extension_metadata_kdl(
-    kdl: &str,
-) -> Result<ExtensionMetadata, KdlParseError> {
+pub fn parse_extension_metadata_kdl(kdl: &str) -> Result<ExtensionMetadata, KdlParseError> {
     let doc: ExtensionManifest =
         facet_kdl::from_str(kdl).map_err(|e| KdlParseError(format!("{e}")))?;
     Ok(doc.extension)
@@ -182,7 +178,9 @@ fn strip_null_children(kdl: &str) -> String {
                 .strip_suffix("#null")
                 .map(|prefix| {
                     let p = prefix.trim_end();
-                    !p.is_empty() && p.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                    !p.is_empty()
+                        && p.bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
                 })
                 .unwrap_or(false)
         })
@@ -401,7 +399,9 @@ mod tests {
         //! itself is used via macro-namespace lookup; the `use` below
         //! is required for the lookup but reports spuriously as unused.
 
-        use crate::{CapabilitySet, ConfigSchema, ExtensionMetadata, StringNode, register_extension};
+        use crate::{
+            CapabilitySet, ConfigSchema, ExtensionMetadata, StringNode, register_extension,
+        };
 
         /// Builder consumed by the macro below.
         pub fn build() -> ExtensionMetadata {
@@ -426,6 +426,9 @@ mod tests {
 
     #[test]
     fn register_macro_produces_callable_function() {
-        assert_eq!(register_macro_fixture::ark_ext_metadata().name.value, "inner");
+        assert_eq!(
+            register_macro_fixture::ark_ext_metadata().name.value,
+            "inner"
+        );
     }
 }

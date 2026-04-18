@@ -221,10 +221,7 @@ mod tests {
     /// `zellij action switch-session` (which is executor-driven) rather
     /// than the outside-zellij pty path.
     async fn mux_with_n_ok(n: usize) -> (Arc<ZellijMux>, Arc<StubExecutor>) {
-        let ok_status = tokio::process::Command::new("true")
-            .status()
-            .await
-            .unwrap();
+        let ok_status = tokio::process::Command::new("true").status().await.unwrap();
         let responses: Vec<CommandOutput> = (0..n)
             .map(|_| CommandOutput {
                 status: ok_status,
@@ -616,7 +613,11 @@ mod tests {
         .expect("send done");
 
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(count_create_tab_calls(&stub), 0, "no tabs should be created");
+        assert_eq!(
+            count_create_tab_calls(&stub),
+            0,
+            "no tabs should be created"
+        );
         assert_eq!(count_close_tab_calls(&stub), 0, "no tabs should be closed");
 
         cancel.cancel();

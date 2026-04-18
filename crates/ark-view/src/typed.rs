@@ -99,7 +99,9 @@ impl<V: View> Clone for Pane<V> {
 
 impl<V: View> std::fmt::Debug for Pane<V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Pane").field("handle", &self.handle).finish()
+        f.debug_struct("Pane")
+            .field("handle", &self.handle)
+            .finish()
     }
 }
 
@@ -150,7 +152,9 @@ impl<V: View> Clone for Stack<V> {
 
 impl<V: View> std::fmt::Debug for Stack<V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Stack").field("handle", &self.handle).finish()
+        f.debug_struct("Stack")
+            .field("handle", &self.handle)
+            .finish()
     }
 }
 

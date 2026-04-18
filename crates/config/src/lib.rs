@@ -64,9 +64,9 @@ pub use ext_sections::{
 };
 pub use hooks::{HookContext, HookEntry};
 pub use schema::{
-    Config, DefaultsSection, DiffSection,
-    EngineClaudeCodeSection, EngineLaunchSpec, EngineSection, MuxSection, MuxZellijSection,
-    OrchestratorCavekitSection, OrchestratorClaudeCodeSection, OrchestratorSection,
+    Config, DefaultsSection, DiffSection, EngineClaudeCodeSection, EngineLaunchSpec, EngineSection,
+    MuxSection, MuxZellijSection, OrchestratorCavekitSection, OrchestratorClaudeCodeSection,
+    OrchestratorSection,
 };
 
 /// Default env-var prefix for ark config overrides.

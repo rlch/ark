@@ -28,8 +28,8 @@ use kdl::KdlNode;
 
 use crate::error::SceneError;
 use crate::intent::{
-    HandleKind, Intent, IntentContext, IntentValue, first_argument,
-    idempotent_map, parse_handle, property_str,
+    HandleKind, Intent, IntentContext, IntentValue, first_argument, idempotent_map, parse_handle,
+    property_str,
 };
 
 // ---------------------------------------------------------------------------
@@ -213,11 +213,10 @@ impl Intent for ResizeOp {
     ) -> Result<IntentValue, SceneError> {
         require_mux(ctx, RESIZE_NAME)?;
         let handle = require_handle(args, RESIZE_NAME)?;
-        let direction =
-            property_str(args, "direction").ok_or_else(|| SceneError::OpFailed {
-                op: RESIZE_NAME.to_string(),
-                message: "missing required property `direction=`".to_string(),
-            })?;
+        let direction = property_str(args, "direction").ok_or_else(|| SceneError::OpFailed {
+            op: RESIZE_NAME.to_string(),
+            message: "missing required property `direction=`".to_string(),
+        })?;
         let by = property_str(args, "by").ok_or_else(|| SceneError::OpFailed {
             op: RESIZE_NAME.to_string(),
             message: "missing required property `by=`".to_string(),
@@ -341,8 +340,8 @@ impl Intent for UnpinOp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::intent::{HandleKind, IntentContext};
     use crate::intent::tests::{MockBus, MockMux, node_from, test_scene_id};
+    use crate::intent::{HandleKind, IntentContext};
     use std::sync::Arc;
 
     fn ctx_with_mux(mux: Arc<MockMux>, hint: Option<HandleKind>) -> IntentContext {
@@ -392,7 +391,10 @@ mod tests {
         mux.set_fail("mux disconnected");
         let ctx = ctx_with_mux(mux.clone(), None);
         let node = node_from(r#"focus "@editor""#);
-        let err = FocusOp.dispatch(&node, &ctx).await.expect_err("non-absent must surface");
+        let err = FocusOp
+            .dispatch(&node, &ctx)
+            .await
+            .expect_err("non-absent must surface");
         assert!(matches!(err, SceneError::OpFailed { op, .. } if op == "ark.core.focus"));
     }
 
@@ -422,7 +424,10 @@ mod tests {
         let mux = Arc::new(MockMux::default());
         let ctx = ctx_with_mux(mux.clone(), Some(HandleKind::Tab));
         let node = node_from(r#"rename "@main""#);
-        let err = RenameOp.dispatch(&node, &ctx).await.expect_err("must error");
+        let err = RenameOp
+            .dispatch(&node, &ctx)
+            .await
+            .expect_err("must error");
         assert!(matches!(err, SceneError::OpFailed { .. }));
     }
 
@@ -441,7 +446,10 @@ mod tests {
         let ctx = ctx_with_mux(mux.clone(), None);
         let node = node_from(r#"move "@p" to="top-right""#);
         MoveOp.dispatch(&node, &ctx).await.expect("ok");
-        assert_eq!(mux.take_calls(), vec!["move_pane(@p,top-right)".to_string()]);
+        assert_eq!(
+            mux.take_calls(),
+            vec!["move_pane(@p,top-right)".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -475,7 +483,10 @@ mod tests {
     async fn op_without_mux_errors() {
         let ctx = IntentContext::new(test_scene_id(), "scene");
         let node = node_from(r#"focus "@x""#);
-        let err = FocusOp.dispatch(&node, &ctx).await.expect_err("no mux -> error");
+        let err = FocusOp
+            .dispatch(&node, &ctx)
+            .await
+            .expect_err("no mux -> error");
         assert!(matches!(err, SceneError::OpFailed { op, .. } if op == "ark.core.focus"));
     }
 }

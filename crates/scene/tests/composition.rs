@@ -12,8 +12,8 @@ use std::path::Path;
 
 use ark_scene::compose::compose_scene;
 use ark_scene::error::SceneError;
-use ark_scene::load_order::{enforce_load_order, LoadOrderResult};
-use ark_scene::namespace::{apply_namespacing, NamespaceContext};
+use ark_scene::load_order::{LoadOrderResult, enforce_load_order};
+use ark_scene::namespace::{NamespaceContext, apply_namespacing};
 use ark_scene::parse::parse_scene;
 use tempfile::TempDir;
 
@@ -71,10 +71,7 @@ fn format_result(r: &LoadOrderResult) -> String {
     }
 
     if !r.disabled_extensions.is_empty() {
-        out.push_str(&format!(
-            "disabled: {}\n",
-            r.disabled_extensions.join(", ")
-        ));
+        out.push_str(&format!("disabled: {}\n", r.disabled_extensions.join(", ")));
     }
 
     out
@@ -423,11 +420,7 @@ fn compose_nested_includes() {
     let tmp = TempDir::new().unwrap();
     let dir = tmp.path();
 
-    write_file(
-        dir,
-        "deep.kdl",
-        r#"bind "Alt z" { emit "user.undo" }"#,
-    );
+    write_file(dir, "deep.kdl", r#"bind "Alt z" { emit "user.undo" }"#);
 
     write_file(
         dir,

@@ -107,8 +107,7 @@ pub fn build_event_scope(
     let flat = FlatEvent::from(event);
 
     // `event` — the full flattened object.
-    let event_json =
-        serde_json::to_value(&flat).unwrap_or(serde_json::Value::Null);
+    let event_json = serde_json::to_value(&flat).unwrap_or(serde_json::Value::Null);
     scope.push("event", json_to_dynamic(&event_json));
 
     // `payload` — the flat payload, directly. For core variants this is
@@ -118,14 +117,8 @@ pub fn build_event_scope(
 
     // `session` — flat map of snapshot fields.
     let mut session_map = rhai::Map::new();
-    session_map.insert(
-        "id".into(),
-        Dynamic::from(session.id.as_path_leaf()),
-    );
-    session_map.insert(
-        "name".into(),
-        Dynamic::from(session.name.clone()),
-    );
+    session_map.insert("id".into(), Dynamic::from(session.id.as_path_leaf()));
+    session_map.insert("name".into(), Dynamic::from(session.name.clone()));
     session_map.insert(
         "cwd".into(),
         Dynamic::from(session.cwd.display().to_string()),
@@ -194,9 +187,8 @@ mod tests {
 
     #[test]
     fn spawn_scope_has_expected_keys() {
-        let env: BTreeMap<String, String> = [("HOME".into(), "/home/me".into())]
-            .into_iter()
-            .collect();
+        let env: BTreeMap<String, String> =
+            [("HOME".into(), "/home/me".into())].into_iter().collect();
         let scope = build_spawn_scope("/tmp", "abc", "demo", &env);
         assert!(scope.contains("cwd"));
         assert!(scope.contains("id"));
@@ -265,10 +257,7 @@ mod tests {
         let engine = rhai::Engine::new();
         let mut scope2 = scope;
         let counter: i64 = engine
-            .eval_expression_with_scope(
-                &mut scope2,
-                r#"session["extensions"]["myext"]["counter"]"#,
-            )
+            .eval_expression_with_scope(&mut scope2, r#"session["extensions"]["myext"]["counter"]"#)
             .expect("session.extensions.myext.counter should evaluate");
         assert_eq!(counter, 7);
     }
@@ -324,15 +313,19 @@ mod tests {
     #[test]
     fn json_to_dynamic_null_and_primitives() {
         assert!(json_to_dynamic(&serde_json::Value::Null).is_unit());
-        assert!(json_to_dynamic(&serde_json::Value::Bool(true))
-            .as_bool()
-            .unwrap());
+        assert!(
+            json_to_dynamic(&serde_json::Value::Bool(true))
+                .as_bool()
+                .unwrap()
+        );
         assert_eq!(
             json_to_dynamic(&serde_json::json!(42)).as_int().unwrap(),
             42
         );
         assert_eq!(
-            json_to_dynamic(&serde_json::json!("hi")).into_string().unwrap(),
+            json_to_dynamic(&serde_json::json!("hi"))
+                .into_string()
+                .unwrap(),
             "hi".to_string()
         );
     }

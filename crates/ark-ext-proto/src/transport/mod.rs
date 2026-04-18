@@ -36,18 +36,18 @@ use crate::{
     OnSessionEndResponse, OnSessionStartRequest, OnSessionStartResponse, PaneCloseRequest,
     PaneCloseResponse, PaneEmitRequest, PaneEmitResponse, PaneReplaceViewRequest,
     PaneReplaceViewResponse, PingRequest, PingResponse, ProgressRequest, ProgressResponse,
-    ProtocolVersion,
-    SceneCompileHookRequest, SceneCompileHookResponse, SceneGetRootRequest, SceneGetRootResponse,
-    SessionToken, ShutdownRequest, ShutdownResponse, StackClearRequest, StackClearResponse,
-    StackCloseChildRequest, StackCloseChildResponse, StackSpawnPaneRequest, StackSpawnPaneResponse,
-    TaskCancelRequest, TaskCancelResponse, TaskCreateRequest, TaskCreateResponse, TaskGetRequest,
-    TaskGetResponse, TaskId, UiKeybindRegisterRequest, UiKeybindRegisterResponse,
-    UiKeybindUnregisterRequest, UiKeybindUnregisterResponse, UiPaneCloseRequest,
-    UiPaneCloseResponse, UiPaneRequestRequest, UiPaneRequestResponse, UiStatusPushRequest,
-    UiStatusPushResponse, WorkspaceApplyEditRequest, WorkspaceApplyEditResponse,
-    WorkspaceConfigurationRequest, WorkspaceConfigurationResponse, WorkspaceShowDocumentRequest,
-    WorkspaceShowDocumentResponse, WorkspaceShowMessageRequest, WorkspaceShowMessageRequestRequest,
-    WorkspaceShowMessageRequestResponse, WorkspaceShowMessageResponse,
+    ProtocolVersion, SceneCompileHookRequest, SceneCompileHookResponse, SceneGetRootRequest,
+    SceneGetRootResponse, SessionToken, ShutdownRequest, ShutdownResponse, StackClearRequest,
+    StackClearResponse, StackCloseChildRequest, StackCloseChildResponse, StackSpawnPaneRequest,
+    StackSpawnPaneResponse, TaskCancelRequest, TaskCancelResponse, TaskCreateRequest,
+    TaskCreateResponse, TaskGetRequest, TaskGetResponse, TaskId, UiKeybindRegisterRequest,
+    UiKeybindRegisterResponse, UiKeybindUnregisterRequest, UiKeybindUnregisterResponse,
+    UiPaneCloseRequest, UiPaneCloseResponse, UiPaneRequestRequest, UiPaneRequestResponse,
+    UiStatusPushRequest, UiStatusPushResponse, WorkspaceApplyEditRequest,
+    WorkspaceApplyEditResponse, WorkspaceConfigurationRequest, WorkspaceConfigurationResponse,
+    WorkspaceShowDocumentRequest, WorkspaceShowDocumentResponse, WorkspaceShowMessageRequest,
+    WorkspaceShowMessageRequestRequest, WorkspaceShowMessageRequestResponse,
+    WorkspaceShowMessageResponse,
 };
 
 pub mod in_proc;
@@ -171,11 +171,7 @@ pub trait ExtensionClient: Send + Sync {
     // -- Async + cancel ------------------------------------------------------
 
     /// `$/cancel` notification — request cancellation by id.
-    async fn cancel(
-        &self,
-        req: CancelRequest,
-        opts: RequestOptions,
-    ) -> ExtResult<CancelResponse>;
+    async fn cancel(&self, req: CancelRequest, opts: RequestOptions) -> ExtResult<CancelResponse>;
 
     /// `$/progress` notification.
     async fn progress(
@@ -675,10 +671,7 @@ mod tests {
 
     #[async_trait]
     impl ArkExtension for VersionedExt {
-        async fn initialize(
-            &self,
-            req: InitializeRequest,
-        ) -> ExtResult<InitializeResponse> {
+        async fn initialize(&self, req: InitializeRequest) -> ExtResult<InitializeResponse> {
             // Echo the client's capabilities back unchanged so the
             // round-trip can be observed by the test.
             let _ = req;
@@ -791,12 +784,8 @@ mod tests {
 
     #[test]
     fn capabilities_round_trip_object_of_objects() {
-        let caps = Capabilities::from_iter([
-            "ui.keybind",
-            "ui.pane",
-            "host.fs.read",
-            "intents.dispatch",
-        ]);
+        let caps =
+            Capabilities::from_iter(["ui.keybind", "ui.pane", "host.fs.read", "intents.dispatch"]);
         let wire = caps.to_wire();
         // Should decode as `{ ui: { keybind: true, pane: true },
         // host: { fs: { read: true } }, intents: { dispatch: true } }`.

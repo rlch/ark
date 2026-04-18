@@ -106,11 +106,9 @@ pub struct ArkBus;
 /// * `MissingName` — JSON object lacks a `name` string field.
 /// * `NotObject` — top-level JSON value isn't an object.
 pub fn validate_intent_payload(payload: &str) -> Result<String, IntentPayloadError> {
-    let value: serde_json::Value = serde_json::from_str(payload)
-        .map_err(|e| IntentPayloadError::BadJson(e.to_string()))?;
-    let obj = value
-        .as_object()
-        .ok_or(IntentPayloadError::NotObject)?;
+    let value: serde_json::Value =
+        serde_json::from_str(payload).map_err(|e| IntentPayloadError::BadJson(e.to_string()))?;
+    let obj = value.as_object().ok_or(IntentPayloadError::NotObject)?;
     let _name = obj
         .get("name")
         .and_then(|v| v.as_str())
@@ -209,8 +207,8 @@ pub struct RebindActionSpec {
 /// happens inside the wasm dispatcher where the zellij types are
 /// available. Errors here cover only structural / shape problems.
 pub fn validate_rebind_payload(payload: &str) -> Result<RebindRequest, RebindPayloadError> {
-    let req: RebindRequest = serde_json::from_str(payload)
-        .map_err(|e| RebindPayloadError::BadJson(e.to_string()))?;
+    let req: RebindRequest =
+        serde_json::from_str(payload).map_err(|e| RebindPayloadError::BadJson(e.to_string()))?;
     if req.unbind.is_empty() && req.rebind.is_empty() {
         return Err(RebindPayloadError::Empty);
     }
@@ -291,15 +289,16 @@ pub enum IntentPayloadError {
 impl std::fmt::Display for IntentPayloadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            IntentPayloadError::BadJson(msg) => write!(f, "ark-intent payload is not valid JSON: {msg}"),
+            IntentPayloadError::BadJson(msg) => {
+                write!(f, "ark-intent payload is not valid JSON: {msg}")
+            }
             IntentPayloadError::NotObject => write!(
                 f,
                 "ark-intent payload must be a JSON object with at least a `name` field"
             ),
-            IntentPayloadError::MissingName => write!(
-                f,
-                "ark-intent payload missing required `name` string field"
-            ),
+            IntentPayloadError::MissingName => {
+                write!(f, "ark-intent payload missing required `name` string field")
+            }
         }
     }
 }
@@ -307,8 +306,8 @@ impl std::fmt::Display for IntentPayloadError {
 #[cfg(target_arch = "wasm32")]
 mod wasm_plugin {
     use super::{
-        ArkBus, IntentPayloadError, PIPE_INTENT, PIPE_REBIND, PLUGIN_NAME,
-        RebindPayloadError, build_emit_payload, validate_intent_payload, validate_rebind_payload,
+        ArkBus, IntentPayloadError, PIPE_INTENT, PIPE_REBIND, PLUGIN_NAME, RebindPayloadError,
+        build_emit_payload, validate_intent_payload, validate_rebind_payload,
     };
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -524,11 +523,7 @@ mod wasm_plugin {
                     continue;
                 }
             };
-            let actions: Vec<Action> = b
-                .actions
-                .iter()
-                .map(action_spec_to_action)
-                .collect();
+            let actions: Vec<Action> = b.actions.iter().map(action_spec_to_action).collect();
             to_rebind.push((mode, key, actions));
         }
 
@@ -552,10 +547,7 @@ mod wasm_plugin {
     /// already `"MessagePlugin"`.
     fn action_spec_to_action(spec: &super::RebindActionSpec) -> Action {
         let plugin = spec.plugin.clone();
-        let name = spec
-            .name
-            .clone()
-            .unwrap_or_else(|| plugin.clone());
+        let name = spec.name.clone().unwrap_or_else(|| plugin.clone());
         Action::KeybindPipe {
             name: Some(name),
             payload: spec.payload.clone(),
@@ -634,10 +626,8 @@ mod tests {
 
     #[test]
     fn validate_rebind_payload_accepts_unbind_only() {
-        let req = validate_rebind_payload(
-            r#"{"unbind":[{"mode":"Normal","key":"Alt p"}]}"#,
-        )
-        .expect("ok");
+        let req =
+            validate_rebind_payload(r#"{"unbind":[{"mode":"Normal","key":"Alt p"}]}"#).expect("ok");
         assert_eq!(req.unbind.len(), 1);
         assert_eq!(req.rebind.len(), 0);
         assert!(!req.write_to_disk);
@@ -715,11 +705,9 @@ mod tests {
 
     #[test]
     fn build_emit_payload_envelopes_kind_and_payload() {
-        let payload =
-            serde_json::json!({ "terminal_pane_id": 7, "exit_code": 0 });
+        let payload = serde_json::json!({ "terminal_pane_id": 7, "exit_code": 0 });
         let envelope = build_emit_payload("command_pane_exited", payload);
-        let parsed: serde_json::Value =
-            serde_json::from_str(&envelope).expect("ok");
+        let parsed: serde_json::Value = serde_json::from_str(&envelope).expect("ok");
         assert_eq!(
             parsed["event"],
             serde_json::Value::String("ark.zellij.command_pane_exited".into())
@@ -738,8 +726,7 @@ mod tests {
             "file_system_update",
             serde_json::json!({ "paths": ["/a", "/b"] }),
         );
-        let parsed: serde_json::Value =
-            serde_json::from_str(&envelope).expect("ok");
+        let parsed: serde_json::Value = serde_json::from_str(&envelope).expect("ok");
         assert_eq!(
             parsed["event"],
             serde_json::Value::String("ark.zellij.file_system_update".into())

@@ -12,7 +12,7 @@ use std::time::Duration;
 use ark_scene::compile::compile_scene;
 use ark_scene::parse::parse_scene;
 use ark_scene::reconciler::{
-    Debouncer, LayoutApplier, OverrideLayoutFlags, RecordingApplier, Reconciler,
+    Debouncer, LayoutApplier, OverrideLayoutFlags, Reconciler, RecordingApplier,
 };
 use ark_scene::rhai::Engine;
 use ark_scene::view::ViewRegistry;
@@ -73,8 +73,14 @@ async fn reconcile_with_false_when_omits_pane() {
     let mut scope = rhai::Scope::new();
     let outcome = r.reconcile(&mut scope).await.expect("reconcile ok");
     let text = std::fs::read_to_string(&outcome.layout_path).unwrap();
-    assert!(text.contains("visible"), "visible handle must be rendered: {text}");
-    assert!(!text.contains("hidden"), "hidden handle must be elided: {text}");
+    assert!(
+        text.contains("visible"),
+        "visible handle must be rendered: {text}"
+    );
+    assert!(
+        !text.contains("hidden"),
+        "hidden handle must be elided: {text}"
+    );
 }
 
 #[tokio::test]

@@ -137,13 +137,12 @@ pub fn compile_scene_for_runtime(
     // Build the primary reaction registry from the scene AST.
     // `build_registry` walks every `on { }` node, parses selectors,
     // and compiles each `when=` predicate.
-    let mut registry = ark_scene::reactions::build_registry(&ir, &rhai_engine)
-        .map_err(|err| {
-            anyhow::anyhow!(
-                "scene `{}` reaction compile failed:\n- {err}",
-                source.display()
-            )
-        })?;
+    let mut registry = ark_scene::reactions::build_registry(&ir, &rhai_engine).map_err(|err| {
+        anyhow::anyhow!(
+            "scene `{}` reaction compile failed:\n- {err}",
+            source.display()
+        )
+    })?;
 
     // T-5.7: legacy TOML `[[hooks]]` merge on top of the scene registry.
     // Hook entries fire after scene reactions — matches the historical
@@ -152,7 +151,10 @@ pub fn compile_scene_for_runtime(
         extend_registry_with_hooks(&mut registry, hooks);
     }
 
-    let max_cascade_depth = ir.scene.max_cascade_depth.unwrap_or(DEFAULT_MAX_CASCADE_DEPTH);
+    let max_cascade_depth = ir
+        .scene
+        .max_cascade_depth
+        .unwrap_or(DEFAULT_MAX_CASCADE_DEPTH);
 
     let scene_id = ir.id.clone();
 
@@ -180,8 +182,8 @@ pub fn compile_scene_for_runtime(
 fn load_scene_source(scene_path: Option<&Path>) -> Result<(String, SceneSource)> {
     match scene_path {
         Some(p) if p.is_file() => {
-            let bytes = std::fs::read(p)
-                .with_context(|| format!("read scene `{}`", p.display()))?;
+            let bytes =
+                std::fs::read(p).with_context(|| format!("read scene `{}`", p.display()))?;
             let src = String::from_utf8(bytes)
                 .with_context(|| format!("scene `{}` is not valid utf-8", p.display()))?;
             Ok((src, SceneSource::Path(p.to_path_buf())))
@@ -250,11 +252,14 @@ mod tests {
         )
         .unwrap();
 
-        let compiled = compile_scene_for_runtime(Some(&path), &[])
-            .expect("custom scene compiles");
+        let compiled = compile_scene_for_runtime(Some(&path), &[]).expect("custom scene compiles");
         assert_eq!(compiled.source, SceneSource::Path(path));
         // V3: count `on` nodes in the body.
-        let on_count = compiled.ir.scene.body.iter()
+        let on_count = compiled
+            .ir
+            .scene
+            .body
+            .iter()
             .filter(|n| matches!(n, ark_scene::ast::SceneBodyNode::On(_)))
             .count();
         assert_eq!(on_count, 1);
@@ -268,8 +273,7 @@ mod tests {
     fn missing_scene_file_errors() {
         let tmp = tempdir();
         let missing = tmp.path().join("does-not-exist.kdl");
-        let err =
-            compile_scene_for_runtime(Some(&missing), &[]).expect_err("missing file errors");
+        let err = compile_scene_for_runtime(Some(&missing), &[]).expect_err("missing file errors");
         let msg = err.to_string();
         assert!(msg.contains("does not exist"), "got: {msg}");
     }
@@ -420,10 +424,7 @@ pub mod reload_gates {
 
     /// Run every advertised gate. Errors from a gate are treated as
     /// Proceed (fail-open) and logged — per kit R5.
-    pub async fn run_reload_gates<'a>(
-        gates: &[GateId],
-        query: &GateQueryFn<'a>,
-    ) -> ReloadDecision {
+    pub async fn run_reload_gates<'a>(gates: &[GateId], query: &GateQueryFn<'a>) -> ReloadDecision {
         let mut deferrals = Vec::new();
         for gate_id in gates {
             let result = query(gate_id.clone()).await;

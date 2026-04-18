@@ -458,11 +458,11 @@ mod tests {
             assert_eq!(claude.args, vec!["--acp".to_string()]);
             let codex = cfg.engines.get("codex").expect("codex defined");
             assert_eq!(codex.command, "codex");
-            assert_eq!(codex.args, vec!["--acp".to_string(), "--verbose".to_string()]);
             assert_eq!(
-                codex.env.get("MY_KEY").map(|s| s.as_str()),
-                Some("value")
+                codex.args,
+                vec!["--acp".to_string(), "--verbose".to_string()]
             );
+            assert_eq!(codex.env.get("MY_KEY").map(|s| s.as_str()), Some("value"));
             Ok(())
         });
     }

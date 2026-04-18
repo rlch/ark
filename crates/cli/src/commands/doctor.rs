@@ -237,9 +237,7 @@ pub trait ExtensionCheckProvider {
 /// tagged with the panic payload; the rest of `ark doctor`
 /// proceeds normally (kit R2 acceptance criterion: one ext's
 /// panic must not crash the command).
-fn run_provider_safely<P: ExtensionCheckProvider + ?Sized>(
-    provider: &P,
-) -> Vec<ExtCheck> {
+fn run_provider_safely<P: ExtensionCheckProvider + ?Sized>(provider: &P) -> Vec<ExtCheck> {
     match catch_unwind(AssertUnwindSafe(|| provider.collect_checks())) {
         Ok(rows) => rows,
         Err(payload) => {
@@ -897,10 +895,7 @@ fn check_extensions_resolve() -> CheckResult {
     );
 
     if rows.is_empty() {
-        return CheckResult::ok(
-            "extensions",
-            "no extensions installed (none required)",
-        );
+        return CheckResult::ok("extensions", "no extensions installed (none required)");
     }
 
     let total = rows.len();
@@ -1294,7 +1289,11 @@ pub fn run_with_provider(
                 .filter(|r| r.is_fail())
                 .map(|r| format!("{}:{}", r.group, r.check_id))
                 .collect();
-            let ext_summary = format!("{} ext check(s) failed: {}", failed.len(), failed.join(", "));
+            let ext_summary = format!(
+                "{} ext check(s) failed: {}",
+                failed.len(),
+                failed.join(", ")
+            );
             if reason.is_empty() {
                 reason = ext_summary;
             } else {
@@ -1308,11 +1307,7 @@ pub fn run_with_provider(
 
 /// T-032: render extension-check rows grouped by extension name.
 /// Appears after the core table when any ext rows exist.
-fn render_ext_table<W: Write>(
-    out: &mut W,
-    rs: &[ExtCheck],
-    no_color: bool,
-) -> io::Result<()> {
+fn render_ext_table<W: Write>(out: &mut W, rs: &[ExtCheck], no_color: bool) -> io::Result<()> {
     if rs.is_empty() {
         return Ok(());
     }
@@ -2297,11 +2292,7 @@ mod tests {
         )
         .unwrap();
 
-        let rows = crate::commands::ext::list::enumerate_extensions(
-            tmp.path(),
-            None,
-            &[],
-        );
+        let rows = crate::commands::ext::list::enumerate_extensions(tmp.path(), None, &[]);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "demo");
     }
@@ -2316,11 +2307,7 @@ mod tests {
         fs::create_dir_all(&ext_dir).unwrap();
         fs::write(ext_dir.join("extension.kdl"), "not { valid { kdl {").unwrap();
 
-        let rows = crate::commands::ext::list::enumerate_extensions(
-            tmp.path(),
-            None,
-            &[],
-        );
+        let rows = crate::commands::ext::list::enumerate_extensions(tmp.path(), None, &[]);
         assert_eq!(rows.len(), 1);
         assert!(rows[0].error.is_some(), "broken ext should surface error");
     }
@@ -2368,7 +2355,11 @@ mod tests {
             .filter(|r| r.is_fail())
             .map(|r| format!("{}:{}", r.group, r.check_id))
             .collect();
-        let reason = format!("{} ext check(s) failed: {}", failed.len(), failed.join(", "));
+        let reason = format!(
+            "{} ext check(s) failed: {}",
+            failed.len(),
+            failed.join(", ")
+        );
         let err = CliError::PreflightFail { reason };
         assert!(matches!(err, CliError::PreflightFail { .. }));
         assert_eq!(err.code(), ExitCode::PreflightFail.code());

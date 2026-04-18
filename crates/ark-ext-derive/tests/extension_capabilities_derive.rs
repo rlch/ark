@@ -38,7 +38,7 @@ struct NoCapsExt;
 #[extension(
     name = "single-cap-ext",
     version = "0.1.0",
-    capabilities = "view.pane.v1",
+    capabilities = "view.pane.v1"
 )]
 #[allow(dead_code)]
 struct SingleCapExt;
@@ -49,7 +49,7 @@ struct SingleCapExt;
 #[extension(
     name = "multi-cap-ext",
     version = "0.1.0",
-    capabilities = "view.pane.v1, ext.lifecycle.v1 ,view.stack.v1",
+    capabilities = "view.pane.v1, ext.lifecycle.v1 ,view.stack.v1"
 )]
 #[allow(dead_code)]
 struct MultiCapExt;
@@ -59,7 +59,7 @@ struct MultiCapExt;
 #[extension(
     name = "edge-cap-ext",
     version = "0.1.0",
-    capabilities = "view.pane.v1,,ext.doctor.v1,",
+    capabilities = "view.pane.v1,,ext.doctor.v1,"
 )]
 #[allow(dead_code)]
 struct EdgeCapExt;

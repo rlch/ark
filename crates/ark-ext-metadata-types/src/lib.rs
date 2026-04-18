@@ -182,13 +182,7 @@ pub struct ExtensionMetadata {
 /// disclosure surface tight; post-v0.4 additions slot in MINOR via
 /// R16 rule #8 (flat manifest representation, append-only).
 pub const ALLOWED_CAPABILITIES: &[&str] = &[
-    "exec",
-    "fs-read",
-    "fs-write",
-    "pipe",
-    "network",
-    "hook",
-    "agent",
+    "exec", "fs-read", "fs-write", "pipe", "network", "hook", "agent",
 ];
 
 /// Structured agent capability declaration (T-102).
@@ -763,7 +757,10 @@ mod tests {
         assert_eq!(m.views[0].name, "demo.panel");
         assert_eq!(m.views[0].component.value, "DemoPanel");
         assert_eq!(
-            m.config.fields[0].default.as_ref().map(|n| n.value.as_str()),
+            m.config.fields[0]
+                .default
+                .as_ref()
+                .map(|n| n.value.as_str()),
             Some("hi")
         );
     }
@@ -797,7 +794,9 @@ mod tests {
         // scene-compiler warning surface; dropping one is MAJOR.
         assert_eq!(
             ALLOWED_CAPABILITIES,
-            &["exec", "fs-read", "fs-write", "pipe", "network", "hook", "agent"]
+            &[
+                "exec", "fs-read", "fs-write", "pipe", "network", "hook", "agent"
+            ]
         );
     }
 

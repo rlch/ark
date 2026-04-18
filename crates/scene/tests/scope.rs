@@ -49,7 +49,10 @@ scene "dev" {
 "#;
     let ir = parse_scene(src, "valid.kdl").expect("well-formed scene should parse");
     let errors = validate_scope(&ir);
-    assert!(errors.is_empty(), "expected no scope errors, got: {errors:?}");
+    assert!(
+        errors.is_empty(),
+        "expected no scope errors, got: {errors:?}"
+    );
 }
 
 /// A scene with a mode block containing tabs also passes.
@@ -71,7 +74,10 @@ scene "modes" {
 "#;
     let ir = parse_scene(src, "mode.kdl").expect("mode scene should parse");
     let errors = validate_scope(&ir);
-    assert!(errors.is_empty(), "expected no scope errors, got: {errors:?}");
+    assert!(
+        errors.is_empty(),
+        "expected no scope errors, got: {errors:?}"
+    );
 }
 
 /// Deeply nested row/col/pane is valid — the scope pass should not reject
@@ -93,7 +99,10 @@ scene "nested" {
 "#;
     let ir = parse_scene(src, "nested.kdl").expect("nested layout should parse");
     let errors = validate_scope(&ir);
-    assert!(errors.is_empty(), "expected no scope errors, got: {errors:?}");
+    assert!(
+        errors.is_empty(),
+        "expected no scope errors, got: {errors:?}"
+    );
 }
 
 /// An empty scene (no body) passes scope validation trivially.
@@ -102,7 +111,10 @@ fn empty_scene_passes() {
     let src = r#"scene "empty" { }"#;
     let ir = parse_scene(src, "empty.kdl").expect("empty scene should parse");
     let errors = validate_scope(&ir);
-    assert!(errors.is_empty(), "expected no scope errors, got: {errors:?}");
+    assert!(
+        errors.is_empty(),
+        "expected no scope errors, got: {errors:?}"
+    );
 }
 
 // -------------------------------------------------------------------------
@@ -205,5 +217,8 @@ scene "conditional" {
 "#;
     let ir = parse_scene(src, "when.kdl").expect("when scene should parse");
     let errors = validate_scope(&ir);
-    assert!(errors.is_empty(), "expected no scope errors for when= attrs, got: {errors:?}");
+    assert!(
+        errors.is_empty(),
+        "expected no scope errors for when= attrs, got: {errors:?}"
+    );
 }

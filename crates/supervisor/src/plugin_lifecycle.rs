@@ -81,8 +81,8 @@ pub struct PluginDecl {
     /// Mount target (e.g. `"floating"`, `"status-bar"`).
     pub mount: Option<String>,
 }
-use ark_types::event::{CoreEvent, ExtEvent};
 use ark_types::EventSink;
+use ark_types::event::{CoreEvent, ExtEvent};
 #[cfg(test)]
 use kdl::KdlDocument;
 use kdl::{KdlEntry, KdlNode, KdlValue};
@@ -290,9 +290,12 @@ impl PluginLifecycleManager {
         let reason = reason.into();
         {
             let mut inner = self.inner.lock().await;
-            inner
-                .state
-                .insert(name.to_string(), MountState::Failed { reason: reason.clone() });
+            inner.state.insert(
+                name.to_string(),
+                MountState::Failed {
+                    reason: reason.clone(),
+                },
+            );
         }
         emit_failure_event(event_bus, name, &reason);
         error!(
@@ -367,10 +370,7 @@ impl PluginLifecycleManager {
             }
 
             let node = build_mount_plugin_node(decl);
-            match registry
-                .dispatch("ark.core.mount_plugin", &node, ctx)
-                .await
-            {
+            match registry.dispatch("ark.core.mount_plugin", &node, ctx).await {
                 Ok(_value) => {
                     // The stub op does not hand back a pane id. Synthesise
                     // a placeholder so downstream observers can still
@@ -427,10 +427,7 @@ fn build_mount_plugin_node(decl: &PluginDecl) -> KdlNode {
         KdlValue::String(decl.name.clone()),
     ));
     if let Some(target) = &decl.mount {
-        node.push(KdlEntry::new_prop(
-            "at",
-            KdlValue::String(target.clone()),
-        ));
+        node.push(KdlEntry::new_prop("at", KdlValue::String(target.clone())));
     }
     // `into` is not captured in the lowered PluginDecl — the scene-root
     // `plugin { }` node stores it on `MountNode::into`, but that field
@@ -486,17 +483,14 @@ fn node_from_source(src: &str) -> KdlNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_scene::ops::register_core_ops;
     use ark_scene::id::SceneId;
+    use ark_scene::ops::register_core_ops;
     use ark_types::channel;
     use std::path::PathBuf;
 
     fn test_ctx() -> IntentContext {
         IntentContext::new(
-            SceneId::new(
-                &PathBuf::from("/tmp/scene.kdl"),
-                b"scene \"test\" { }",
-            ),
+            SceneId::new(&PathBuf::from("/tmp/scene.kdl"), b"scene \"test\" { }"),
             "scene",
         )
     }
@@ -606,10 +600,7 @@ mod tests {
             Some(MountState::Failed { .. })
         ));
         assert_eq!(mgr.state("summon-1").await, Some(MountState::Dormant));
-        assert_eq!(
-            mgr.state("event-mount-1").await,
-            Some(MountState::Dormant)
-        );
+        assert_eq!(mgr.state("event-mount-1").await, Some(MountState::Dormant));
     }
 
     #[tokio::test]
@@ -626,9 +617,7 @@ mod tests {
         // short-circuit and return AlreadyMounted.
         mgr.record_mounted("already-up", "pane:42").await;
 
-        let outcomes = mgr
-            .mount_always_on(&[decl], &registry, &ctx, &tx)
-            .await;
+        let outcomes = mgr.mount_always_on(&[decl], &registry, &ctx, &tx).await;
         assert_eq!(outcomes.len(), 1);
         match &outcomes[0] {
             MountOutcome::AlreadyMounted { name, pane_id } => {

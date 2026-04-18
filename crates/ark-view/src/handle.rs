@@ -18,15 +18,7 @@
 /// still fail with `unknown variant`. Any new kind requires a peer
 /// protocol bump (see `CURRENT_PROTOCOL_VERSION`).
 #[derive(
-    Copy,
-    Clone,
-    Debug,
-    Eq,
-    Hash,
-    PartialEq,
-    serde::Serialize,
-    serde::Deserialize,
-    facet::Facet,
+    Copy, Clone, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize, facet::Facet,
 )]
 #[serde(rename_all = "lowercase")]
 #[repr(u8)]
@@ -43,16 +35,7 @@ pub enum HandleKind {
 /// The `V` type parameter on typed wrappers is compile-time-only; the
 /// wire format carries only this id (see R5). Consumers MUST treat the
 /// id as opaque — no splitting, pattern-matching, or prefix-sniffing.
-#[derive(
-    Clone,
-    Debug,
-    Eq,
-    Hash,
-    PartialEq,
-    serde::Serialize,
-    serde::Deserialize,
-    facet::Facet,
-)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize, facet::Facet)]
 #[serde(transparent)]
 pub struct HandleId(String);
 
@@ -165,7 +148,13 @@ mod tests {
 
     #[test]
     fn handle_id_roundtrip_preserves_bytes() {
-        for raw in ["", "simple", "with-dash_and_underscore", "utf8-café-🦀", "  spaces  "] {
+        for raw in [
+            "",
+            "simple",
+            "with-dash_and_underscore",
+            "utf8-café-🦀",
+            "  spaces  ",
+        ] {
             let id = HandleId::new(raw);
             let s = serde_json::to_string(&id).unwrap();
             let back: HandleId = serde_json::from_str(&s).unwrap();

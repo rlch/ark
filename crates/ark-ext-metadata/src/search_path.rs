@@ -206,7 +206,11 @@ pub fn suggest_extensions(
             .then_with(|| a.1.cmp(b.1))
     });
 
-    scored.into_iter().take(max).map(|(_, c)| c.to_owned()).collect()
+    scored
+        .into_iter()
+        .take(max)
+        .map(|(_, c)| c.to_owned())
+        .collect()
 }
 
 #[cfg(test)]
@@ -233,14 +237,8 @@ mod tests {
         make_ext(xdg.path(), "ark/extensions/demo");
         make_ext(sys.path(), "demo");
 
-        let got = resolve_extension_path(
-            "demo",
-            cwd.path(),
-            Some(xdg.path()),
-            &[sys.path()],
-            &[],
-        )
-        .unwrap();
+        let got = resolve_extension_path("demo", cwd.path(), Some(xdg.path()), &[sys.path()], &[])
+            .unwrap();
         match got {
             ExtensionPath::File(p) => {
                 assert!(
@@ -283,8 +281,8 @@ mod tests {
 
         make_ext(sys.path(), "demo");
 
-        let got = resolve_extension_path("demo", cwd.path(), None, &[sys.path()], &["demo"])
-            .unwrap();
+        let got =
+            resolve_extension_path("demo", cwd.path(), None, &[sys.path()], &["demo"]).unwrap();
         match got {
             ExtensionPath::File(p) => assert!(p.starts_with(sys.path())),
             other => panic!("expected system-install File, got {other:?}"),
@@ -294,8 +292,8 @@ mod tests {
     #[test]
     fn builtin_wins_when_no_filesystem_match() {
         let cwd = TempDir::new().unwrap();
-        let got = resolve_extension_path("status", cwd.path(), None, &[], &["status", "picker"])
-            .unwrap();
+        let got =
+            resolve_extension_path("status", cwd.path(), None, &[], &["status", "picker"]).unwrap();
         assert_eq!(got, ExtensionPath::BuiltIn("status"));
     }
 
@@ -316,8 +314,7 @@ mod tests {
         let sys = TempDir::new().unwrap();
         make_ext(sys.path(), "demo");
 
-        let got =
-            resolve_extension_path("demo", cwd.path(), None, &[sys.path()], &[]).unwrap();
+        let got = resolve_extension_path("demo", cwd.path(), None, &[sys.path()], &[]).unwrap();
         match got {
             ExtensionPath::File(p) => assert!(
                 p.starts_with(sys.path()),
@@ -350,14 +347,9 @@ mod tests {
         // Only second system dir has the extension.
         make_ext(sys_b.path(), "demo");
 
-        let got = resolve_extension_path(
-            "demo",
-            cwd.path(),
-            None,
-            &[sys_a.path(), sys_b.path()],
-            &[],
-        )
-        .unwrap();
+        let got =
+            resolve_extension_path("demo", cwd.path(), None, &[sys_a.path(), sys_b.path()], &[])
+                .unwrap();
         match got {
             ExtensionPath::File(p) => assert!(p.starts_with(sys_b.path())),
             other => panic!("expected File, got {other:?}"),
@@ -393,13 +385,7 @@ mod tests {
         let cwd = TempDir::new().unwrap();
         make_ext(cwd.path(), ".ark/extensions/git-status");
 
-        let suggestions = suggest_extensions(
-            "zzzzzzz",
-            cwd.path(),
-            None,
-            &[],
-            &[],
-        );
+        let suggestions = suggest_extensions("zzzzzzz", cwd.path(), None, &[], &[]);
         assert!(suggestions.is_empty());
     }
 
@@ -428,14 +414,12 @@ mod tests {
             make_ext(cwd.path(), &format!(".ark/extensions/demo-{i}"));
         }
 
-        let suggestions = suggest_extensions(
-            "demo-0",
-            cwd.path(),
-            None,
-            &[],
-            &[],
+        let suggestions = suggest_extensions("demo-0", cwd.path(), None, &[], &[]);
+        assert!(
+            suggestions.len() <= 3,
+            "expected at most 3, got {}",
+            suggestions.len()
         );
-        assert!(suggestions.len() <= 3, "expected at most 3, got {}", suggestions.len());
     }
 
     #[test]
@@ -471,14 +455,11 @@ mod tests {
         make_ext(cwd.path(), ".ark/extensions/git-status");
         make_ext(sys.path(), "git-status");
 
-        let suggestions = suggest_extensions(
-            "git-statsu",
-            cwd.path(),
-            None,
-            &[sys.path()],
-            &[],
-        );
+        let suggestions = suggest_extensions("git-statsu", cwd.path(), None, &[sys.path()], &[]);
         let count = suggestions.iter().filter(|s| *s == "git-status").count();
-        assert_eq!(count, 1, "git-status should appear once, got: {suggestions:?}");
+        assert_eq!(
+            count, 1,
+            "git-status should appear once, got: {suggestions:?}"
+        );
     }
 }

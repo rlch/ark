@@ -17,8 +17,8 @@ pub mod view;
 pub use handle::{HandleId, HandleKind};
 pub use invalidation::InvalidationCause;
 pub use lookup::{HandleRecord, SessionHandles};
-pub use suppression::{hash_params, ParamsHash, SceneHandleName, SuppressionPolicy};
-pub use typed::{Pane, PaneAttrs, PaneLike, Stack, TabHandle};
+pub use suppression::{ParamsHash, SceneHandleName, SuppressionPolicy, hash_params};
 #[doc(hidden)]
 pub use typed::__trybuild_pane_ctor;
+pub use typed::{Pane, PaneAttrs, PaneLike, Stack, TabHandle};
 pub use view::{CommandView, View, ZellijView};

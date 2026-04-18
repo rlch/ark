@@ -444,7 +444,11 @@ fn render_detail<W: Write>(
                 writeln!(out, "cwd:      -")?;
             }
             writeln!(out, "uptime:   {}", format_uptime_since(s.started_at))?;
-            writeln!(out, "running?: {}", if row.is_running() { "yes" } else { "no" })?;
+            writeln!(
+                out,
+                "running?: {}",
+                if row.is_running() { "yes" } else { "no" }
+            )?;
             Ok(())
         }
         Row::Orphan(id) => {
@@ -452,7 +456,10 @@ fn render_detail<W: Write>(
             writeln!(out, "name:     {}", id.name)?;
             writeln!(out, "cwd:      -")?;
             writeln!(out, "uptime:   -")?;
-            writeln!(out, "running?: orphan (no live supervisor; try `ark doctor`)")?;
+            writeln!(
+                out,
+                "running?: orphan (no live supervisor; try `ark doctor`)"
+            )?;
             Ok(())
         }
     }
@@ -496,10 +503,7 @@ fn read_spec_cwd(layout: &StateLayout, id: &SessionId) -> Option<std::path::Path
 /// `sessions_root`) is surfaced as `CliError::Generic`, not silently
 /// swallowed into an empty list. Missing `sessions_root` is already
 /// treated as empty inside `list_session_ids` itself.
-fn gather_rows(
-    layout: &StateLayout,
-    only: Option<&SessionId>,
-) -> Result<Vec<Row>, CliError> {
+fn gather_rows(layout: &StateLayout, only: Option<&SessionId>) -> Result<Vec<Row>, CliError> {
     let ids: Vec<SessionId> = match only {
         Some(id) => vec![id.clone()],
         None => list_session_ids(layout).map_err(|err| CliError::Generic {
@@ -531,8 +535,7 @@ fn run_once(args: &ListArgs, ctx: &Ctx) -> Result<(), CliError> {
 
     // ID branch: resolve + single-session query.
     if let Some(query) = args.id.as_deref() {
-        let resolved =
-            resolve_session_id(query, &layout).map_err(|e| map_resolve_err(e, query))?;
+        let resolved = resolve_session_id(query, &layout).map_err(|e| map_resolve_err(e, query))?;
         let rows = gather_rows(&layout, Some(&resolved))?;
         let stdout = std::io::stdout();
         let mut h = stdout.lock();
@@ -622,10 +625,7 @@ fn emit_json<W: Write>(
                 if let Value::Object(ref mut m) = v {
                     m.insert("running".to_string(), Value::Bool(true));
                     if let Some(cwd) = read_spec_cwd(layout, id) {
-                        m.insert(
-                            "cwd".to_string(),
-                            Value::String(cwd.display().to_string()),
-                        );
+                        m.insert("cwd".to_string(), Value::String(cwd.display().to_string()));
                     }
                 }
                 v
@@ -635,10 +635,7 @@ fn emit_json<W: Write>(
                 if let Value::Object(ref mut m) = v {
                     m.insert("running".to_string(), Value::Bool(false));
                     if let Some(cwd) = read_spec_cwd(layout, id) {
-                        m.insert(
-                            "cwd".to_string(),
-                            Value::String(cwd.display().to_string()),
-                        );
+                        m.insert("cwd".to_string(), Value::String(cwd.display().to_string()));
                     }
                 }
                 v
@@ -978,8 +975,8 @@ mod tests {
 
     // ---------- T-031 extension column provider ----------
 
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Stub provider that returns a fixed set of columns. `calls`
     /// counts `collect_columns` invocations so tests can verify
@@ -1116,11 +1113,7 @@ mod tests {
             ext_name: "ext-x".into(),
             column_name: "badge".into(),
             resolver: Box::new(|cx: &SessionColumnCtx<'_>| {
-                format!(
-                    "{}-{}",
-                    cx.id.name,
-                    if cx.running { "up" } else { "down" }
-                )
+                format!("{}-{}", cx.id.name, if cx.running { "up" } else { "down" })
             }),
         };
         assert_eq!((col.resolver)(&cx), "s1-up");
@@ -1129,7 +1122,10 @@ mod tests {
     #[test]
     fn row_status_str_matches_variant() {
         let id = SessionId::new("s");
-        assert_eq!(Row::Live(id.clone(), mk_status(&id)).status_str(), "running");
+        assert_eq!(
+            Row::Live(id.clone(), mk_status(&id)).status_str(),
+            "running"
+        );
         assert_eq!(
             Row::Archived(id.clone(), mk_status(&id)).status_str(),
             "stopped"

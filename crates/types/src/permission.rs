@@ -138,28 +138,43 @@ mod tests {
 
     #[test]
     fn decide_ask_always_defers() {
-        assert_eq!(decide(PermissionPolicy::Ask, "Edit"), PolicyDecision::Deferred);
-        assert_eq!(decide(PermissionPolicy::Ask, "Read"), PolicyDecision::Deferred);
+        assert_eq!(
+            decide(PermissionPolicy::Ask, "Edit"),
+            PolicyDecision::Deferred
+        );
+        assert_eq!(
+            decide(PermissionPolicy::Ask, "Read"),
+            PolicyDecision::Deferred
+        );
     }
 
     #[test]
     fn decide_auto_approve_read_allows_read_tools() {
         for t in READ_ONLY_TOOLS {
-            assert_eq!(decide(PermissionPolicy::AutoApproveRead, t), PolicyDecision::Allowed);
+            assert_eq!(
+                decide(PermissionPolicy::AutoApproveRead, t),
+                PolicyDecision::Allowed
+            );
         }
     }
 
     #[test]
     fn decide_auto_approve_read_defers_writes() {
         for t in ["Edit", "Bash", "Write"] {
-            assert_eq!(decide(PermissionPolicy::AutoApproveRead, t), PolicyDecision::Deferred);
+            assert_eq!(
+                decide(PermissionPolicy::AutoApproveRead, t),
+                PolicyDecision::Deferred
+            );
         }
     }
 
     #[test]
     fn decide_auto_approve_all_always_allows() {
         for t in ["Edit", "Read", "Bash"] {
-            assert_eq!(decide(PermissionPolicy::AutoApproveAll, t), PolicyDecision::Allowed);
+            assert_eq!(
+                decide(PermissionPolicy::AutoApproveAll, t),
+                PolicyDecision::Allowed
+            );
         }
     }
 

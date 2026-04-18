@@ -21,9 +21,7 @@ use kdl::KdlNode;
 use tokio::process::Command;
 
 use crate::error::SceneError;
-use crate::intent::{
-    Intent, IntentContext, IntentValue, property_str, property_u64,
-};
+use crate::intent::{Intent, IntentContext, IntentValue, property_str, property_u64};
 
 /// Default shell used when `shell=` is absent. `sh` is ubiquitous on
 /// ark's target platforms (Linux + macOS) and portable enough to run
@@ -61,8 +59,7 @@ impl Intent for ExecOp {
             message: "missing required property `script=`".to_string(),
         })?;
         let shell = property_str(args, "shell").unwrap_or_else(|| DEFAULT_SHELL.to_string());
-        let timeout_ms =
-            property_u64(args, "timeout_ms").unwrap_or(DEFAULT_EXEC_TIMEOUT_MS);
+        let timeout_ms = property_u64(args, "timeout_ms").unwrap_or(DEFAULT_EXEC_TIMEOUT_MS);
         let timeout = Duration::from_millis(timeout_ms);
 
         let mut cmd = Command::new(&shell);
@@ -196,7 +193,10 @@ mod tests {
     async fn exec_times_out() {
         // Sleep for 2s with a 50ms timeout — must surface as op/failed.
         let node = node_from(r#"exec script="sleep 2" timeout_ms=50"#);
-        let err = ExecOp.dispatch(&node, &ctx()).await.expect_err("must timeout");
+        let err = ExecOp
+            .dispatch(&node, &ctx())
+            .await
+            .expect_err("must timeout");
         if let SceneError::OpFailed { message, .. } = err {
             assert!(
                 message.contains("timed out"),
@@ -210,7 +210,10 @@ mod tests {
     #[tokio::test]
     async fn exec_missing_script_errors() {
         let node = node_from(r#"exec"#);
-        let err = ExecOp.dispatch(&node, &ctx()).await.expect_err("must error");
+        let err = ExecOp
+            .dispatch(&node, &ctx())
+            .await
+            .expect_err("must error");
         assert!(matches!(err, SceneError::OpFailed { .. }));
     }
 

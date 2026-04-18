@@ -95,7 +95,11 @@ pub fn write_mode_artifacts_in(
 
     let mut out = BTreeMap::new();
     for (name, doc) in modes {
-        let filename = format!("{}-mode-{}.kdl", id_slug(scene_id), sanitise_mode_name(name));
+        let filename = format!(
+            "{}-mode-{}.kdl",
+            id_slug(scene_id),
+            sanitise_mode_name(name)
+        );
         let path = dir.join(filename);
         let text = doc.to_string();
         if let Err(e) = KdlDocument::parse(&text) {
@@ -214,6 +218,11 @@ mod tests {
         assert!(p.exists());
         let text = std::fs::read_to_string(p).unwrap();
         KdlDocument::parse(&text).expect("mode file must re-parse");
-        assert!(p.file_name().unwrap().to_string_lossy().contains("mode-review"));
+        assert!(
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains("mode-review")
+        );
     }
 }

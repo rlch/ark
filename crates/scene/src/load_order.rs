@@ -146,11 +146,7 @@ fn apply_clear_reactions(reactions: &mut Vec<OnNode>, cr: &ClearReactionsNode) {
     let kind_token = selector_text.split_whitespace().next().unwrap_or("");
 
     reactions.retain(|on| {
-        let on_kind = on
-            .selector
-            .as_ref()
-            .map(|s| s.kind.as_str())
-            .unwrap_or("");
+        let on_kind = on.selector.as_ref().map(|s| s.kind.as_str()).unwrap_or("");
         // If the clear selector specifies only the kind with no field
         // patterns, it removes ALL reactions of that kind.
         // If it specifies field patterns, we compare them too.
@@ -159,10 +155,7 @@ fn apply_clear_reactions(reactions: &mut Vec<OnNode>, cr: &ClearReactionsNode) {
         }
         // Parse field patterns from the clear selector (everything after
         // the kind token).
-        let field_part = selector_text
-            .strip_prefix(kind_token)
-            .unwrap_or("")
-            .trim();
+        let field_part = selector_text.strip_prefix(kind_token).unwrap_or("").trim();
         if field_part.is_empty() {
             // No field constraints — remove all reactions of this kind.
             return false;
@@ -237,9 +230,9 @@ fn apply_clear_bind(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::DisableExtensionNode;
     use crate::ast::ops::OpNode;
     use crate::ast::selector::{EventSelector, FieldPattern, MatchType};
-    use crate::ast::DisableExtensionNode;
     use std::collections::BTreeMap;
 
     // --- helpers ---
@@ -310,10 +303,7 @@ mod tests {
             result.reactions[1].selector.as_ref().unwrap().kind,
             "FileEdited"
         );
-        assert_eq!(
-            result.reactions[2].selector.as_ref().unwrap().kind,
-            "Error"
-        );
+        assert_eq!(result.reactions[2].selector.as_ref().unwrap().kind, "Error");
     }
 
     // --- binds are last-wins per chord ---
@@ -370,10 +360,7 @@ mod tests {
         ];
         let result = enforce_load_order(&body);
         assert_eq!(result.reactions.len(), 1);
-        assert_eq!(
-            result.reactions[0].selector.as_ref().unwrap().kind,
-            "Error"
-        );
+        assert_eq!(result.reactions[0].selector.as_ref().unwrap().kind, "Error");
     }
 
     #[test]
@@ -566,10 +553,7 @@ mod tests {
         assert_eq!(result.layouts.len(), 1);
         // FileEdited was cleared, only Error remains.
         assert_eq!(result.reactions.len(), 1);
-        assert_eq!(
-            result.reactions[0].selector.as_ref().unwrap().kind,
-            "Error"
-        );
+        assert_eq!(result.reactions[0].selector.as_ref().unwrap().kind, "Error");
         // Alt d last-wins + Ctrl c.
         assert_eq!(result.binds.len(), 2);
         assert_eq!(result.disabled_extensions, vec!["git-status"]);

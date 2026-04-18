@@ -256,10 +256,7 @@ mod tests {
             CoreEvent::Ext(e) => {
                 assert_eq!(e.ext, "claude-code");
                 assert_eq!(e.kind, "tool.use");
-                assert_eq!(
-                    e.payload.get("tool").and_then(|v| v.as_str()),
-                    Some("Read")
-                );
+                assert_eq!(e.payload.get("tool").and_then(|v| v.as_str()), Some("Read"));
             }
             other => panic!("unexpected event: {other:?}"),
         }

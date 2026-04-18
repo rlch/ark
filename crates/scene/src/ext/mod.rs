@@ -21,7 +21,7 @@ pub mod registry;
 // T-095: transitive `use` resolution with cycle detection and topo-sort.
 pub mod resolve;
 
-pub use binding::{resolve_binding, ExtensionBinding, ProtocolMode, RenderMode};
+pub use binding::{ExtensionBinding, ProtocolMode, RenderMode, resolve_binding};
 pub use config::validate_config;
 pub use emission::validate_emission_namespace;
 pub use registry::ExtensionRegistry;

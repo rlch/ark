@@ -137,10 +137,7 @@ fn real_zellij_accepts_compiled_default_layout() {
     cmd.env_remove("ZELLIJ_PANE_ID");
     cmd.env_remove("ZELLIJ_SESSION_NAME");
 
-    let mut child = pty
-        .slave
-        .spawn_command(cmd)
-        .expect("spawn ark in pty");
+    let mut child = pty.slave.spawn_command(cmd).expect("spawn ark in pty");
     // Drop the slave handle so the pty pair's master alone holds it.
     drop(pty.slave);
 

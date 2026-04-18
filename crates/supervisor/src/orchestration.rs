@@ -164,10 +164,9 @@ pub async fn run_supervisor_with(
         .context("bind control socket")?;
     debug!(path = %socket_handle.path().display(), "R3 step 3: control socket bound");
 
-    let _signal_task =
-        install_signal_handlers(socket_handle.path().to_path_buf(), cancel.clone())
-            .await
-            .context("install signal handlers")?;
+    let _signal_task = install_signal_handlers(socket_handle.path().to_path_buf(), cancel.clone())
+        .await
+        .context("install signal handlers")?;
     debug!("F-087: SIGTERM/SIGINT handlers installed");
 
     // ---- Step 6: factory ----
@@ -411,11 +410,7 @@ async fn drain_consumers(set: &mut JoinSet<Result<()>>, timeout: std::time::Dura
 }
 
 /// Write the final `status.json` with `terminated_at` set.
-pub fn finalize_state(
-    layout: &StateLayout,
-    id: &SessionId,
-    _supervisor_pid: u32,
-) -> Result<()> {
+pub fn finalize_state(layout: &StateLayout, id: &SessionId, _supervisor_pid: u32) -> Result<()> {
     let mut status = match ark_core::read_status(layout, id)? {
         Some(s) => s,
         None => SessionStatus {
@@ -495,16 +490,12 @@ mod tests {
         let layout = layout_at(tmp.path());
         let spec = sample_spec();
 
-        let ok_status = tokio::process::Command::new("true")
-            .status()
-            .await
-            .unwrap();
-        let (mux, _stub) =
-            ZellijMux::for_test(vec![ark_mux_zellij::executor::CommandOutput {
-                status: ok_status,
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-            }]);
+        let ok_status = tokio::process::Command::new("true").status().await.unwrap();
+        let (mux, _stub) = ZellijMux::for_test(vec![ark_mux_zellij::executor::CommandOutput {
+            status: ok_status,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        }]);
 
         // Pre-fire the cancel token so the bare-session path returns
         // immediately after parking on `world.cancel.cancelled().await`.
@@ -534,7 +525,10 @@ mod tests {
         let status = ark_core::read_status(&layout, &spec.id)
             .expect("read status")
             .expect("status exists");
-        assert!(status.terminated_at.is_some(), "finalize_state must set terminated_at");
+        assert!(
+            status.terminated_at.is_some(),
+            "finalize_state must set terminated_at"
+        );
 
         // Socket file was unlinked on shutdown.
         let sock = layout.session_socket_path(&spec.id);

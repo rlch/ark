@@ -131,10 +131,7 @@ fn extract_host(url: &str) -> String {
         .unwrap_or(url);
     let host_and_rest = rest.split('/').next().unwrap_or(rest);
     // Strip optional `user:pass@` + optional `:port`.
-    let after_userinfo = host_and_rest
-        .rsplit('@')
-        .next()
-        .unwrap_or(host_and_rest);
+    let after_userinfo = host_and_rest.rsplit('@').next().unwrap_or(host_and_rest);
     after_userinfo
         .split(':')
         .next()
@@ -217,9 +214,7 @@ fn parse_trust_keys(text: &str) -> HashSet<String> {
     let doc = match kdl::KdlDocument::parse(text) {
         Ok(d) => d,
         Err(_) => {
-            tracing::warn!(
-                "extension-trust.kdl parse error — treating as empty trust set"
-            );
+            tracing::warn!("extension-trust.kdl parse error — treating as empty trust set");
             return HashSet::new();
         }
     };
@@ -253,8 +248,7 @@ pub fn save_trust(publisher: &Publisher) -> Result<(), String> {
 /// Test-friendly variant of [`save_trust`].
 pub fn save_trust_at(path: &Path, publisher: &Publisher) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("creating {}: {e}", parent.display()))?;
+        fs::create_dir_all(parent).map_err(|e| format!("creating {}: {e}", parent.display()))?;
     }
     let existing = fs::read_to_string(path).unwrap_or_default();
     let already = parse_trust_keys(&existing).contains(&publisher.as_key());
@@ -273,10 +267,7 @@ pub fn save_trust_at(path: &Path, publisher: &Publisher) -> Result<(), String> {
 /// Append a single audit-log entry. Creates the log file (and its
 /// parent directory) on first use. Always succeeds best-effort —
 /// callers should log but not fail an install on audit-write errors.
-pub fn append_audit(
-    publisher: &Publisher,
-    source_specifier: &str,
-) -> Result<(), String> {
+pub fn append_audit(publisher: &Publisher, source_specifier: &str) -> Result<(), String> {
     let path = audit_log_path()?;
     append_audit_at(&path, publisher, source_specifier)
 }
@@ -288,8 +279,7 @@ pub fn append_audit_at(
     source_specifier: &str,
 ) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("creating {}: {e}", parent.display()))?;
+        fs::create_dir_all(parent).map_err(|e| format!("creating {}: {e}", parent.display()))?;
     }
     let line = format!(
         "{} accept-all publisher={} source={}\n",
@@ -372,9 +362,7 @@ pub fn load_trusted_caps() -> std::collections::HashSet<(String, String)> {
 }
 
 /// Test-friendly variant of [`load_trusted_caps`].
-pub fn load_trusted_caps_at(
-    path: &Path,
-) -> std::collections::HashSet<(String, String)> {
+pub fn load_trusted_caps_at(path: &Path) -> std::collections::HashSet<(String, String)> {
     let text = match fs::read_to_string(path) {
         Ok(s) => s,
         Err(_) => return std::collections::HashSet::new(),
@@ -473,14 +461,9 @@ pub fn save_caps(ext_key: &str, caps: &[&str]) -> Result<(), String> {
 }
 
 /// Test-friendly variant of [`save_caps`].
-pub fn save_caps_at(
-    path: &Path,
-    ext_key: &str,
-    caps: &[&str],
-) -> Result<(), String> {
+pub fn save_caps_at(path: &Path, ext_key: &str, caps: &[&str]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("creating {}: {e}", parent.display()))?;
+        fs::create_dir_all(parent).map_err(|e| format!("creating {}: {e}", parent.display()))?;
     }
     let existing = fs::read_to_string(path).unwrap_or_default();
     let already = parse_trusted_caps(&existing);
@@ -495,9 +478,7 @@ pub fn save_caps_at(
         if !text.is_empty() && !text.ends_with('\n') {
             text.push('\n');
         }
-        text.push_str(&format!(
-            "capability \"{cap}\" extension=\"{ext_key}\"\n"
-        ));
+        text.push_str(&format!("capability \"{cap}\" extension=\"{ext_key}\"\n"));
         appended += 1;
     }
     if appended == 0 {
@@ -516,17 +497,12 @@ pub fn append_caps_audit(ext_key: &str, caps: &[&str]) -> Result<(), String> {
 }
 
 /// Test-friendly variant of [`append_caps_audit`].
-pub fn append_caps_audit_at(
-    path: &Path,
-    ext_key: &str,
-    caps: &[&str],
-) -> Result<(), String> {
+pub fn append_caps_audit_at(path: &Path, ext_key: &str, caps: &[&str]) -> Result<(), String> {
     if caps.is_empty() {
         return Ok(());
     }
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("creating {}: {e}", parent.display()))?;
+        fs::create_dir_all(parent).map_err(|e| format!("creating {}: {e}", parent.display()))?;
     }
     let line = format!(
         "{} accept-all-caps extension={} caps={}\n",
@@ -620,7 +596,10 @@ mod tests {
 
     #[test]
     fn extract_host_handles_port_and_userinfo() {
-        assert_eq!(extract_host("https://u:p@example.com:8443/x"), "example.com");
+        assert_eq!(
+            extract_host("https://u:p@example.com:8443/x"),
+            "example.com"
+        );
         assert_eq!(extract_host("http://example.com"), "example.com");
         assert_eq!(extract_host("https://example.com/foo/bar"), "example.com");
     }

@@ -2,8 +2,8 @@
 //! extension authors import from one crate.
 
 use ark_ext_proto::{
-    CommandView, HandleId, HandleKind, InvalidationCause, Pane, PaneLike, Stack, TabHandle,
-    View, ZellijView,
+    CommandView, HandleId, HandleKind, InvalidationCause, Pane, PaneLike, Stack, TabHandle, View,
+    ZellijView,
 };
 
 struct MyCmdView;

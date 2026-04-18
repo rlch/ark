@@ -58,10 +58,7 @@ mod tests {
     fn capacity_zero_clamps_to_one() {
         let (tx, mut rx) = channel(0);
         tx.send(sample_event()).expect("send");
-        assert!(matches!(
-            rx.try_recv(),
-            Ok(CoreEvent::SessionEnded { .. })
-        ));
+        assert!(matches!(rx.try_recv(), Ok(CoreEvent::SessionEnded { .. })));
     }
 
     #[test]

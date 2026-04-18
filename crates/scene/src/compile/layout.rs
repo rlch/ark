@@ -135,7 +135,12 @@ impl<'a> SpawnContext<'a> {
     pub fn empty() -> SpawnContext<'static> {
         static EMPTY_ENV: OnceLock<BTreeMap<String, String>> = OnceLock::new();
         let env = EMPTY_ENV.get_or_init(BTreeMap::new);
-        SpawnContext { cwd: "", id: "", name: "", env }
+        SpawnContext {
+            cwd: "",
+            id: "",
+            name: "",
+            env,
+        }
     }
 }
 
@@ -247,7 +252,11 @@ pub fn compile_layout_kdl_full(
         });
     }
 
-    let compile_ctx = LayoutCompileCtx { registry, term, spawn: ctx };
+    let compile_ctx = LayoutCompileCtx {
+        registry,
+        term,
+        spawn: ctx,
+    };
     let mut doc = KdlDocument::new();
 
     let mut layout_node = KdlNode::new("layout");
@@ -282,13 +291,11 @@ impl<'a> LayoutCompileCtx<'a> {
     // -----------------------------------------------------------------
 
     fn emit_tab(&self, tab: &TabNode, out: &mut KdlDocument) -> Result<(), SceneError> {
-        let handle = Handle::new(&tab.handle).map_err(|e| {
-            SceneError::MisplacedNode {
-                node: format!("@{}", tab.handle),
-                parent: format!("handle: {e}"),
-                src: NamedSource::new("<layout>", String::new()),
-                span: SourceSpan::new(0.into(), 1),
-            }
+        let handle = Handle::new(&tab.handle).map_err(|e| SceneError::MisplacedNode {
+            node: format!("@{}", tab.handle),
+            parent: format!("handle: {e}"),
+            src: NamedSource::new("<layout>", String::new()),
+            span: SourceSpan::new(0.into(), 1),
         })?;
 
         let mut tab_node = KdlNode::new("tab");
@@ -317,13 +324,11 @@ impl<'a> LayoutCompileCtx<'a> {
         for child in &tab.body {
             if let LayoutChild::Pane(pane) = child {
                 if pane_is_overlay(pane) {
-                    let h = Handle::new(&pane.handle).map_err(|e| {
-                        SceneError::MisplacedNode {
-                            node: format!("@{}", pane.handle),
-                            parent: format!("handle: {e}"),
-                            src: NamedSource::new("<layout>", String::new()),
-                            span: SourceSpan::new(0.into(), 1),
-                        }
+                    let h = Handle::new(&pane.handle).map_err(|e| SceneError::MisplacedNode {
+                        node: format!("@{}", pane.handle),
+                        parent: format!("handle: {e}"),
+                        src: NamedSource::new("<layout>", String::new()),
+                        span: SourceSpan::new(0.into(), 1),
                     })?;
                     overlays.push((h, pane));
                     continue;
@@ -380,13 +385,7 @@ impl<'a> LayoutCompileCtx<'a> {
         out: &mut KdlDocument,
     ) -> Result<(), SceneError> {
         match child {
-            LayoutChild::Row(row) => self.emit_split(
-                "horizontal",
-                row,
-                own_span,
-                total_span,
-                out,
-            ),
+            LayoutChild::Row(row) => self.emit_split("horizontal", row, own_span, total_span, out),
             LayoutChild::Col(col) => self.emit_split_col(col, own_span, total_span, out),
             LayoutChild::Pane(pane) => self.emit_pane(pane, own_span, total_span, out),
         }
@@ -454,13 +453,11 @@ impl<'a> LayoutCompileCtx<'a> {
         total_span: u32,
         out: &mut KdlDocument,
     ) -> Result<(), SceneError> {
-        let handle = Handle::new(&pane.handle).map_err(|e| {
-            SceneError::MisplacedNode {
-                node: format!("@{}", pane.handle),
-                parent: format!("handle: {e}"),
-                src: NamedSource::new("<layout>", String::new()),
-                span: SourceSpan::new(0.into(), 1),
-            }
+        let handle = Handle::new(&pane.handle).map_err(|e| SceneError::MisplacedNode {
+            node: format!("@{}", pane.handle),
+            parent: format!("handle: {e}"),
+            src: NamedSource::new("<layout>", String::new()),
+            span: SourceSpan::new(0.into(), 1),
         })?;
         let mut node = KdlNode::new("pane");
         node.push(str_prop("name", handle.name()));
@@ -547,9 +544,7 @@ impl<'a> LayoutCompileCtx<'a> {
                         let hint = format_suggestions(&suggestions);
                         return Err(SceneError::UnknownView {
                             view: other.to_string(),
-                            help: format!(
-                                "Available views: {avail}{hint}"
-                            ),
+                            help: format!("Available views: {avail}{hint}"),
                             src: NamedSource::new("<layout>", String::new()),
                             span: SourceSpan::new(0.into(), 1),
                         });
@@ -568,10 +563,10 @@ impl<'a> LayoutCompileCtx<'a> {
 fn emit_shell(handle: &Handle, node: &mut KdlNode) {
     let mut body = KdlDocument::new();
     push_command_child(&mut body, "env");
-    push_args_child(&mut body, vec![
-        format!("ARK_HANDLE={}", handle.raw()),
-        "$SHELL".to_string(),
-    ]);
+    push_args_child(
+        &mut body,
+        vec![format!("ARK_HANDLE={}", handle.raw()), "$SHELL".to_string()],
+    );
     node.set_children(body);
 }
 
@@ -804,7 +799,11 @@ fn parse_dim(raw: &str) -> Result<(bool, u32), SceneError> {
 /// Compute absolute `(x, y, width, height)` for an overlay given its
 /// parsed pos + size and the current terminal size. Public so the
 /// reconciler can re-anchor overlays on resize events.
-pub fn anchor_overlay(pos: OverlayPos, size: OverlaySize, term: TerminalSize) -> (u32, u32, u32, u32) {
+pub fn anchor_overlay(
+    pos: OverlayPos,
+    size: OverlaySize,
+    term: TerminalSize,
+) -> (u32, u32, u32, u32) {
     let (w, h) = match size {
         OverlaySize::Cells(w, h) => (w, h),
         OverlaySize::Percent(wp, hp) => (term.cols * wp / 100, term.rows * hp / 100),
@@ -813,10 +812,7 @@ pub fn anchor_overlay(pos: OverlayPos, size: OverlaySize, term: TerminalSize) ->
         OverlayPos::TopLeft => (0, 0),
         OverlayPos::TopRight => (term.cols.saturating_sub(w), 0),
         OverlayPos::BottomLeft => (0, term.rows.saturating_sub(h)),
-        OverlayPos::BottomRight => (
-            term.cols.saturating_sub(w),
-            term.rows.saturating_sub(h),
-        ),
+        OverlayPos::BottomRight => (term.cols.saturating_sub(w), term.rows.saturating_sub(h)),
         OverlayPos::Center => (
             (term.cols.saturating_sub(w)) / 2,
             (term.rows.saturating_sub(h)) / 2,
@@ -1062,7 +1058,10 @@ mod tests {
 
     #[test]
     fn parse_pos_accepts_presets() {
-        assert!(matches!(parse_pos("top-right").unwrap(), OverlayPos::TopRight));
+        assert!(matches!(
+            parse_pos("top-right").unwrap(),
+            OverlayPos::TopRight
+        ));
         assert!(matches!(parse_pos("center").unwrap(), OverlayPos::Center));
     }
 
@@ -1494,8 +1493,14 @@ mod tests {
         let doc = compile_layout_kdl(&layout, &registry()).unwrap();
         let text = doc.to_string();
         KdlDocument::parse(&text).expect("overlay layout must re-parse");
-        assert!(text.contains("floating_panes"), "must contain floating_panes block: {text}");
-        assert!(text.contains("pinned=true"), "sticky=true maps to pinned (v1): {text}");
+        assert!(
+            text.contains("floating_panes"),
+            "must contain floating_panes block: {text}"
+        );
+        assert!(
+            text.contains("pinned=true"),
+            "sticky=true maps to pinned (v1): {text}"
+        );
     }
 
     // F-0010: command/args use KDL child nodes, not properties
@@ -1551,8 +1556,7 @@ mod tests {
                 })],
             }],
         };
-        let err = compile_layout_kdl(&layout, &registry())
-            .expect_err("unknown view must error");
+        let err = compile_layout_kdl(&layout, &registry()).expect_err("unknown view must error");
         assert!(matches!(err, SceneError::UnknownView { .. }));
     }
 
@@ -1560,8 +1564,7 @@ mod tests {
     #[test]
     fn empty_layout_rejected() {
         let layout = LayoutNode { tabs: vec![] };
-        let err = compile_layout_kdl(&layout, &registry())
-            .expect_err("empty layout must error");
+        let err = compile_layout_kdl(&layout, &registry()).expect_err("empty layout must error");
         assert!(matches!(err, SceneError::MisplacedNode { .. }));
     }
 }

@@ -14,8 +14,7 @@ use kdl::KdlNode;
 
 use crate::error::SceneError;
 use crate::intent::{
-    Intent, IntentContext, IntentValue, first_argument, parse_handle,
-    property_str, strict_map,
+    Intent, IntentContext, IntentValue, first_argument, parse_handle, property_str, strict_map,
 };
 
 // ---------------------------------------------------------------------------
@@ -231,7 +230,8 @@ mod tests {
     async fn spawn_overlay_sets_overlay_flag() {
         let mux = Arc::new(MockMux::default());
         let ctx = ctx_with(mux.clone());
-        let node = node_from(r#"spawn "@palette" "overlay" pos="top-right" size="60%x40%" { command }"#);
+        let node =
+            node_from(r#"spawn "@palette" "overlay" pos="top-right" size="60%x40%" { command }"#);
         SpawnOp.dispatch(&node, &ctx).await.expect("ok");
         let calls = mux.take_calls();
         assert_eq!(calls.len(), 1);
@@ -254,7 +254,10 @@ mod tests {
         mux.set_fail("out of memory");
         let ctx = ctx_with(mux.clone());
         let node = node_from(r#"spawn "@editor" { shell }"#);
-        let err = SpawnOp.dispatch(&node, &ctx).await.expect_err("must surface");
+        let err = SpawnOp
+            .dispatch(&node, &ctx)
+            .await
+            .expect_err("must surface");
         assert!(matches!(err, SceneError::OpFailed { op, .. } if op == "ark.core.spawn"));
     }
 

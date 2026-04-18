@@ -160,7 +160,12 @@ mod tests {
     fn ext_accepts_arbitrary_fields() {
         let s = sel(
             "Ext",
-            &[("name", "n"), ("payload", "{}"), ("anything", "x"), ("tool", "Bash")],
+            &[
+                ("name", "n"),
+                ("payload", "{}"),
+                ("anything", "x"),
+                ("tool", "Bash"),
+            ],
         );
         validate_event_fields(&s).expect("Ext should accept arbitrary fields");
     }

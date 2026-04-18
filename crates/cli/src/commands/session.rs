@@ -278,7 +278,10 @@ mod tests {
     #[test]
     fn build_switch_session_command_without_layout() {
         let cmd = build_switch_session_command(&invocation("work", None));
-        assert_eq!(argv(&cmd), vec!["zellij", "action", "switch-session", "work"]);
+        assert_eq!(
+            argv(&cmd),
+            vec!["zellij", "action", "switch-session", "work"]
+        );
     }
 
     #[test]

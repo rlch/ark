@@ -22,8 +22,7 @@ use miette::{GraphicalReportHandler, GraphicalTheme};
 /// graphical report handler with the `unicode_nocolor` theme (stable
 /// across terminals and CI).
 fn render_errors(errors: &[SceneError]) -> String {
-    let handler =
-        GraphicalReportHandler::new().with_theme(GraphicalTheme::unicode_nocolor());
+    let handler = GraphicalReportHandler::new().with_theme(GraphicalTheme::unicode_nocolor());
     let mut out = String::new();
     for e in errors {
         let _ = handler.render_report(&mut out, e);
@@ -54,7 +53,10 @@ fn parse_and_validate(src: &str, name: &str) -> Vec<SceneError> {
 fn fixture_parse_no_scene_node() {
     let src = include_str!("fixtures/parse_no_scene_node.kdl");
     let errs = parse_and_validate(src, "parse_no_scene_node.kdl");
-    assert!(!errs.is_empty(), "expected parse error for missing scene node");
+    assert!(
+        !errs.is_empty(),
+        "expected parse error for missing scene node"
+    );
     insta::assert_snapshot!("parse_no_scene_node", render_errors(&errs));
 }
 
@@ -119,10 +121,12 @@ fn fixture_handle_clash() {
 #[test]
 fn fixture_handle_missing_prefix() {
     let src = include_str!("fixtures/handle_missing_prefix.kdl");
-    let ir =
-        parse_scene(src, "handle_missing_prefix.kdl").expect("fixture should parse");
+    let ir = parse_scene(src, "handle_missing_prefix.kdl").expect("fixture should parse");
     let errs = validate_handles(&ir);
-    assert!(!errs.is_empty(), "expected handle-missing error (no @ prefix)");
+    assert!(
+        !errs.is_empty(),
+        "expected handle-missing error (no @ prefix)"
+    );
     insta::assert_snapshot!("handle_missing_prefix", render_errors(&errs));
 }
 
@@ -131,15 +135,17 @@ fn fixture_handle_empty() {
     let src = include_str!("fixtures/handle_empty.kdl");
     let ir = parse_scene(src, "handle_empty.kdl").expect("fixture should parse");
     let errs = validate_handles(&ir);
-    assert!(!errs.is_empty(), "expected handle-missing error (empty string)");
+    assert!(
+        !errs.is_empty(),
+        "expected handle-missing error (empty string)"
+    );
     insta::assert_snapshot!("handle_empty", render_errors(&errs));
 }
 
 #[test]
 fn fixture_handle_in_mode_clash() {
     let src = include_str!("fixtures/handle_in_mode_clash.kdl");
-    let ir =
-        parse_scene(src, "handle_in_mode_clash.kdl").expect("fixture should parse");
+    let ir = parse_scene(src, "handle_in_mode_clash.kdl").expect("fixture should parse");
     let errs = validate_handles(&ir);
     assert!(
         !errs.is_empty(),
@@ -151,8 +157,7 @@ fn fixture_handle_in_mode_clash() {
 #[test]
 fn fixture_handle_invalid_char() {
     let src = include_str!("fixtures/handle_invalid_char.kdl");
-    let ir =
-        parse_scene(src, "handle_invalid_char.kdl").expect("fixture should parse");
+    let ir = parse_scene(src, "handle_invalid_char.kdl").expect("fixture should parse");
     let errs = validate_handles(&ir);
     assert!(
         !errs.is_empty(),
@@ -164,8 +169,7 @@ fn fixture_handle_invalid_char() {
 #[test]
 fn fixture_handle_starts_digit() {
     let src = include_str!("fixtures/handle_starts_digit.kdl");
-    let ir =
-        parse_scene(src, "handle_starts_digit.kdl").expect("fixture should parse");
+    let ir = parse_scene(src, "handle_starts_digit.kdl").expect("fixture should parse");
     let errs = validate_handles(&ir);
     assert!(
         !errs.is_empty(),
@@ -177,8 +181,7 @@ fn fixture_handle_starts_digit() {
 #[test]
 fn fixture_handle_multiple_errors() {
     let src = include_str!("fixtures/handle_multiple_errors.kdl");
-    let ir = parse_scene(src, "handle_multiple_errors.kdl")
-        .expect("fixture should parse");
+    let ir = parse_scene(src, "handle_multiple_errors.kdl").expect("fixture should parse");
     let errs = validate_handles(&ir);
     assert!(
         !errs.is_empty(),

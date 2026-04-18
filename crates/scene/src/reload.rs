@@ -35,7 +35,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::ast::ops::OpNode;
 use crate::ast::{BindNode, OnNode};
-use crate::compile::{compile_scene, CompiledScene};
+use crate::compile::{CompiledScene, compile_scene};
 use crate::compose::compose_scene;
 use crate::error::SceneError;
 use crate::parse::parse_scene;
@@ -157,10 +157,7 @@ pub fn reload_scene(
         Err(e) => {
             return Some(Err(SceneError::Parse {
                 message: format!("failed to read {}: {e}", scene_path.display()),
-                src: miette::NamedSource::new(
-                    scene_path.display().to_string(),
-                    String::new(),
-                ),
+                src: miette::NamedSource::new(scene_path.display().to_string(), String::new()),
                 span: (0, 0).into(),
             }));
         }
@@ -250,10 +247,7 @@ fn extract_bind_nodes(scene: &CompiledScene) -> Vec<&BindNode> {
 /// structural diffs ([`diff_reactions`] / [`diff_keybinds`]).
 ///
 /// Returns `(reactions_added, reactions_removed, keybinds_changed)`.
-fn compute_delta(
-    prev: &CompiledScene,
-    next: &CompiledScene,
-) -> (usize, usize, usize) {
+fn compute_delta(prev: &CompiledScene, next: &CompiledScene) -> (usize, usize, usize) {
     let prev_reactions: Vec<&OnNode> = extract_on_nodes(prev);
     let next_reactions: Vec<&OnNode> = extract_on_nodes(next);
     let prev_binds: Vec<&BindNode> = extract_bind_nodes(prev);
@@ -347,22 +341,80 @@ pub struct ReactionDiff {
 fn hash_op_node(op: &OpNode, h: &mut impl Hasher) {
     std::mem::discriminant(op).hash(h);
     match op {
-        OpNode::Focus(o) => { o.handle.hash(h); o.when.hash(h); }
-        OpNode::Close(o) => { o.handle.hash(h); o.when.hash(h); }
-        OpNode::Rename(o) => { o.handle.hash(h); o.to.hash(h); o.when.hash(h); }
-        OpNode::Resize(o) => { o.handle.hash(h); o.direction.hash(h); o.by.hash(h); o.when.hash(h); }
-        OpNode::Move(o) => { o.handle.hash(h); o.to.hash(h); o.when.hash(h); }
-        OpNode::Pin(o) => { o.handle.hash(h); o.when.hash(h); }
-        OpNode::Unpin(o) => { o.handle.hash(h); o.when.hash(h); }
-        OpNode::Spawn(o) => { o.handle.hash(h); o.when.hash(h); }
-        OpNode::NewTab(o) => { o.handle.hash(h); o.name.hash(h); o.cwd.hash(h); o.when.hash(h); }
-        OpNode::UseMode(o) => { o.mode.hash(h); o.when.hash(h); }
-        OpNode::Pipe(o) => { o.from.hash(h); o.to.hash(h); o.payload.hash(h); o.when.hash(h); }
-        OpNode::Emit(o) => { o.event_name.hash(h); o.when.hash(h); }
-        OpNode::SetStatus(o) => { o.text.hash(h); o.severity.hash(h); o.ttl_ms.hash(h); o.when.hash(h); }
-        OpNode::Exec(o) => { o.script.hash(h); o.shell.hash(h); o.timeout_ms.hash(h); o.when.hash(h); }
-        OpNode::ReloadScene(o) => { o.when.hash(h); }
-        OpNode::Unknown { verb, .. } => { verb.hash(h); }
+        OpNode::Focus(o) => {
+            o.handle.hash(h);
+            o.when.hash(h);
+        }
+        OpNode::Close(o) => {
+            o.handle.hash(h);
+            o.when.hash(h);
+        }
+        OpNode::Rename(o) => {
+            o.handle.hash(h);
+            o.to.hash(h);
+            o.when.hash(h);
+        }
+        OpNode::Resize(o) => {
+            o.handle.hash(h);
+            o.direction.hash(h);
+            o.by.hash(h);
+            o.when.hash(h);
+        }
+        OpNode::Move(o) => {
+            o.handle.hash(h);
+            o.to.hash(h);
+            o.when.hash(h);
+        }
+        OpNode::Pin(o) => {
+            o.handle.hash(h);
+            o.when.hash(h);
+        }
+        OpNode::Unpin(o) => {
+            o.handle.hash(h);
+            o.when.hash(h);
+        }
+        OpNode::Spawn(o) => {
+            o.handle.hash(h);
+            o.when.hash(h);
+        }
+        OpNode::NewTab(o) => {
+            o.handle.hash(h);
+            o.name.hash(h);
+            o.cwd.hash(h);
+            o.when.hash(h);
+        }
+        OpNode::UseMode(o) => {
+            o.mode.hash(h);
+            o.when.hash(h);
+        }
+        OpNode::Pipe(o) => {
+            o.from.hash(h);
+            o.to.hash(h);
+            o.payload.hash(h);
+            o.when.hash(h);
+        }
+        OpNode::Emit(o) => {
+            o.event_name.hash(h);
+            o.when.hash(h);
+        }
+        OpNode::SetStatus(o) => {
+            o.text.hash(h);
+            o.severity.hash(h);
+            o.ttl_ms.hash(h);
+            o.when.hash(h);
+        }
+        OpNode::Exec(o) => {
+            o.script.hash(h);
+            o.shell.hash(h);
+            o.timeout_ms.hash(h);
+            o.when.hash(h);
+        }
+        OpNode::ReloadScene(o) => {
+            o.when.hash(h);
+        }
+        OpNode::Unknown { verb, .. } => {
+            verb.hash(h);
+        }
     }
 }
 
@@ -619,10 +671,7 @@ pub fn reload_telemetry_payload(result: &ReloadResult) -> HashMap<String, String
             ReloadStatus::Failed(s) => format!("failed: {s}"),
         },
     );
-    payload.insert(
-        "duration_ms".to_string(),
-        result.duration_ms.to_string(),
-    );
+    payload.insert("duration_ms".to_string(), result.duration_ms.to_string());
     payload.insert(
         "reactions_added".to_string(),
         result.reactions_added.to_string(),
@@ -658,7 +707,10 @@ mod tests {
         let guard = ReloadGuard::new();
         let _lock1 = guard.try_acquire().expect("first acquire");
         let lock2 = guard.try_acquire();
-        assert!(lock2.is_none(), "second acquire should fail while first is held");
+        assert!(
+            lock2.is_none(),
+            "second acquire should fail while first is held"
+        );
     }
 
     #[test]
@@ -671,7 +723,10 @@ mod tests {
         // Lock dropped — guard should be idle.
         assert!(!guard.is_active());
         let lock2 = guard.try_acquire();
-        assert!(lock2.is_some(), "should acquire after previous lock dropped");
+        assert!(
+            lock2.is_some(),
+            "should acquire after previous lock dropped"
+        );
     }
 
     #[test]

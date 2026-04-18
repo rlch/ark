@@ -42,8 +42,7 @@ fn round_trip(meta: &ExtensionMetadata) -> ExtensionMetadata {
     let inner = strip_outer_wrapper(&raw).expect("strip root wrapper");
     let stripped = strip_null_children(&inner);
 
-    let doc: ExtensionManifest =
-        facet_kdl::from_str(&stripped).expect("re-parse emitted manifest");
+    let doc: ExtensionManifest = facet_kdl::from_str(&stripped).expect("re-parse emitted manifest");
     doc.extension
 }
 
@@ -200,12 +199,7 @@ fn emit_contains_new_field_values() {
     let manifest = ExtensionManifest::new(meta);
     let text = facet_kdl::to_string(&manifest).expect("serialize manifest");
 
-    for needle in [
-        "section-alpha",
-        "schema-alpha",
-        "gate-beta",
-        "desc-beta",
-    ] {
+    for needle in ["section-alpha", "schema-alpha", "gate-beta", "desc-beta"] {
         assert!(
             text.contains(needle),
             "missing {needle} in emitted KDL:\n{text}"

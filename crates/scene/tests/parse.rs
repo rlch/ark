@@ -12,8 +12,7 @@ use ark_scene::parse_scene;
 
 #[test]
 fn parses_minimal_scene() {
-    let ir = parse_scene(r#"scene "x" { }"#, "test.kdl")
-        .expect("minimal scene should parse");
+    let ir = parse_scene(r#"scene "x" { }"#, "test.kdl").expect("minimal scene should parse");
     assert_eq!(ir.scene.name, "x");
     assert!(ir.scene.body.is_empty());
     assert!(ir.scene.max_cascade_depth.is_none());

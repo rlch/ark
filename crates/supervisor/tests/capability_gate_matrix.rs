@@ -34,8 +34,7 @@ use ark_ext_proto::{
 };
 use ark_ext_test_support::StubExtension;
 use ark_supervisor::ext_dispatch::{
-    capability_for_method, record_capabilities, should_dispatch,
-    warn_advertised_but_unimplemented,
+    capability_for_method, record_capabilities, should_dispatch, warn_advertised_but_unimplemented,
 };
 use ark_view::HandleId;
 use tracing::field::{Field, Visit};

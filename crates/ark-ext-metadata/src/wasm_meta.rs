@@ -7,7 +7,7 @@
 //! section, and parses the KDL text into an [`ExtensionMetadata`] via the
 //! existing [`parse_extension_metadata_kdl`] helper.
 
-use crate::{parse_extension_metadata_kdl, ExtensionMetadata};
+use crate::{ExtensionMetadata, parse_extension_metadata_kdl};
 
 /// Name of the wasm custom section that carries extension metadata.
 const SECTION_NAME: &str = "ark.metadata";
@@ -143,7 +143,7 @@ mod tests {
     #[test]
     fn reads_metadata_from_custom_section() {
         // Use the crate's own serializer to produce valid KDL.
-        use crate::{extension_metadata_kdl_string, CapabilitySet, ConfigSchema, StringNode};
+        use crate::{CapabilitySet, ConfigSchema, StringNode, extension_metadata_kdl_string};
 
         let meta = ExtensionMetadata {
             name: StringNode::new("demo"),
@@ -192,7 +192,7 @@ mod tests {
     fn round_trip_through_wasm_preserves_fields() {
         // Use the crate's own serializer to produce the KDL, then embed
         // it in wasm and read it back.
-        use crate::{extension_metadata_kdl_string, CapabilitySet, ConfigSchema, StringNode};
+        use crate::{CapabilitySet, ConfigSchema, StringNode, extension_metadata_kdl_string};
 
         let original = ExtensionMetadata {
             name: StringNode::new("roundtrip"),

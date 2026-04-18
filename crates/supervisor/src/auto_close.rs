@@ -144,9 +144,9 @@ mod tests {
 
         let handle = {
             let cancel = cancel.clone();
-            tokio::spawn(async move {
-                apply_auto_close_policy(&mut rx, &mux, &id, &name, cancel).await
-            })
+            tokio::spawn(
+                async move { apply_auto_close_policy(&mut rx, &mux, &id, &name, cancel).await },
+            )
         };
 
         // No SessionEnded — just cancel.

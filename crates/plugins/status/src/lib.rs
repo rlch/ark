@@ -85,12 +85,10 @@ pub fn status_metadata() -> ark_ext_metadata::ExtensionMetadata {
         zellij_range: StringNode::new(">=0.44, <0.45"),
         requires: vec![],
         intents: vec![],
-        events: vec![
-            EventDecl {
-                name: "status.updated".into(),
-                payload_schema: StringNode::new("{}"),
-            },
-        ],
+        events: vec![EventDecl {
+            name: "status.updated".into(),
+            payload_schema: StringNode::new("{}"),
+        }],
         views: vec![],
         config: ConfigSchema::default(),
         capabilities: CapabilitySet::from_strs(&["ui.status-bar"]),
@@ -112,8 +110,7 @@ mod ext_metadata_tests {
         let m = status_metadata();
         assert_eq!(m.name.value, "status");
         assert!(m.intents.is_empty());
-        let events: Vec<&str> =
-            m.events.iter().map(|e| e.name.as_str()).collect();
+        let events: Vec<&str> = m.events.iter().map(|e| e.name.as_str()).collect();
         assert!(events.contains(&"status.updated"));
     }
 

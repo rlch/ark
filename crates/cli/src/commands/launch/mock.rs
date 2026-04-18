@@ -101,10 +101,13 @@ impl Multiplexer for MockMultiplexer {
     }
 
     fn run_session(&self, session: &str, layout: Option<&Path>) -> Result<(), CliError> {
-        self.calls.lock().unwrap().push(MultiplexerCall::RunSession {
-            session: session.to_string(),
-            layout: layout.map(PathBuf::from),
-        });
+        self.calls
+            .lock()
+            .unwrap()
+            .push(MultiplexerCall::RunSession {
+                session: session.to_string(),
+                layout: layout.map(PathBuf::from),
+            });
         self.run_session_result
             .lock()
             .unwrap()
@@ -283,9 +286,7 @@ mod tests {
             PathBuf::from("/tmp/r"),
             PathBuf::from("/tmp/c"),
         );
-        let err = spawner
-            .spawn_and_wait_for_ready(spec, &layout)
-            .unwrap_err();
+        let err = spawner.spawn_and_wait_for_ready(spec, &layout).unwrap_err();
         assert!(matches!(err, CliError::Internal { .. }));
     }
 }

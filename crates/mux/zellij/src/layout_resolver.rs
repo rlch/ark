@@ -43,8 +43,7 @@ pub const SHIPPED_LAYOUTS: &[(&str, &str)] = &[
 /// `{{ agent_args }}`) ride along unchanged — the scene compiler
 /// preserves them and the spawn-time renderer
 /// (`ark_mux_zellij::layout_template::render`) resolves them.
-pub const SHIPPED_SCENES: &[(&str, &str)] =
-    &[("builder", include_str!("../scenes/builder.kdl"))];
+pub const SHIPPED_SCENES: &[(&str, &str)] = &[("builder", include_str!("../scenes/builder.kdl"))];
 
 /// Result of resolving a layout identifier.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -585,11 +584,7 @@ mod tests {
             .1;
         // Strip whitespace to absorb the indentation shift introduced
         // by wrapping in `scene { … }`.
-        let strip = |s: &str| {
-            s.chars()
-                .filter(|c| !c.is_whitespace())
-                .collect::<String>()
-        };
+        let strip = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
         let stripped_legacy = strip(legacy);
         let stripped_scene = strip(scene);
         assert!(

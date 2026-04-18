@@ -22,7 +22,10 @@ scene "dev" {
 "#;
     let ir = parse_scene(src, "valid.kdl").expect("well-formed scene should parse");
     let errors = validate_handles(&ir);
-    assert!(errors.is_empty(), "expected no handle errors, got: {errors:?}");
+    assert!(
+        errors.is_empty(),
+        "expected no handle errors, got: {errors:?}"
+    );
 }
 
 /// Two panes sharing `@shell` produce a HandleClash error.
@@ -40,10 +43,18 @@ scene "dup" {
 "#;
     let ir = parse_scene(src, "dup.kdl").expect("scene should parse");
     let errors = validate_handles(&ir);
-    assert!(!errors.is_empty(), "expected at least one error for duplicate handles");
+    assert!(
+        !errors.is_empty(),
+        "expected at least one error for duplicate handles"
+    );
 
-    let has_clash = errors.iter().any(|e| matches!(e, ark_scene::SceneError::HandleClash { handle, .. } if handle == "@shell"));
-    assert!(has_clash, "expected HandleClash for @shell, got: {errors:?}");
+    let has_clash = errors.iter().any(
+        |e| matches!(e, ark_scene::SceneError::HandleClash { handle, .. } if handle == "@shell"),
+    );
+    assert!(
+        has_clash,
+        "expected HandleClash for @shell, got: {errors:?}"
+    );
 }
 
 /// A tab with handle `"main"` (no `@` prefix) is rejected.
@@ -60,10 +71,18 @@ scene "bad" {
 "#;
     let ir = parse_scene(src, "bad.kdl").expect("scene should parse");
     let errors = validate_handles(&ir);
-    assert!(!errors.is_empty(), "expected error for handle without @ prefix");
+    assert!(
+        !errors.is_empty(),
+        "expected error for handle without @ prefix"
+    );
 
-    let has_missing = errors.iter().any(|e| matches!(e, ark_scene::SceneError::HandleMissing { node: "tab", .. }));
-    assert!(has_missing, "expected HandleMissing for tab, got: {errors:?}");
+    let has_missing = errors
+        .iter()
+        .any(|e| matches!(e, ark_scene::SceneError::HandleMissing { node: "tab", .. }));
+    assert!(
+        has_missing,
+        "expected HandleMissing for tab, got: {errors:?}"
+    );
 }
 
 /// A handle `@editor` declared in both layout and mode blocks clashes.
@@ -85,10 +104,18 @@ scene "conflict" {
 "#;
     let ir = parse_scene(src, "conflict.kdl").expect("scene should parse");
     let errors = validate_handles(&ir);
-    assert!(!errors.is_empty(), "expected HandleClash across layout + mode");
+    assert!(
+        !errors.is_empty(),
+        "expected HandleClash across layout + mode"
+    );
 
-    let has_clash = errors.iter().any(|e| matches!(e, ark_scene::SceneError::HandleClash { handle, .. } if handle == "@editor"));
-    assert!(has_clash, "expected HandleClash for @editor, got: {errors:?}");
+    let has_clash = errors.iter().any(
+        |e| matches!(e, ark_scene::SceneError::HandleClash { handle, .. } if handle == "@editor"),
+    );
+    assert!(
+        has_clash,
+        "expected HandleClash for @editor, got: {errors:?}"
+    );
 }
 
 /// A pane with an empty handle string is rejected.
@@ -107,6 +134,11 @@ scene "empty" {
     let errors = validate_handles(&ir);
     assert!(!errors.is_empty(), "expected error for empty handle");
 
-    let has_missing = errors.iter().any(|e| matches!(e, ark_scene::SceneError::HandleMissing { node: "pane", .. }));
-    assert!(has_missing, "expected HandleMissing for pane, got: {errors:?}");
+    let has_missing = errors
+        .iter()
+        .any(|e| matches!(e, ark_scene::SceneError::HandleMissing { node: "pane", .. }));
+    assert!(
+        has_missing,
+        "expected HandleMissing for pane, got: {errors:?}"
+    );
 }

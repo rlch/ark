@@ -17,9 +17,9 @@
 //! overlay attr parsing) happens in T-036 / T-037. View resolution against
 //! the `ViewRegistry` happens in T-026+.
 
+use ::kdl::KdlDocument;
 use facet::Facet;
 use facet_kdl as kdl;
-use ::kdl::KdlDocument;
 
 // ---------------------------------------------------------------------------
 // Handles (R3 — `@handle` required on every tab + pane)

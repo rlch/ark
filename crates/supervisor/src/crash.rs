@@ -71,10 +71,7 @@ pub fn detect_crashed(layout: &StateLayout, session_id: &SessionId) -> io::Resul
 /// `terminated_at = Utc::now()` and preserve every other field.
 ///
 /// Returns `Ok(true)` if an adjustment landed, else `Ok(false)`.
-pub fn adjust_status_if_crashed(
-    layout: &StateLayout,
-    session_id: &SessionId,
-) -> io::Result<bool> {
+pub fn adjust_status_if_crashed(layout: &StateLayout, session_id: &SessionId) -> io::Result<bool> {
     let Some(mut status) = read_status(layout, session_id).map_err(io::Error::other)? else {
         return Ok(false);
     };

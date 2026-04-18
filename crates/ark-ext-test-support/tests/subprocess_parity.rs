@@ -35,7 +35,11 @@ use tokio::process::Command;
 /// resolving `target/<profile>/ark-stub-ext` relative to the
 /// integration-test executable if the env var is missing.
 const BIN_ENV: &str = "CARGO_BIN_EXE_ark-stub-ext";
-const BIN_NAME: &str = if cfg!(windows) { "ark-stub-ext.exe" } else { "ark-stub-ext" };
+const BIN_NAME: &str = if cfg!(windows) {
+    "ark-stub-ext.exe"
+} else {
+    "ark-stub-ext"
+};
 
 /// Resolve the path to the built `ark-stub-ext` binary.
 ///

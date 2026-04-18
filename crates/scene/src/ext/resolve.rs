@@ -116,13 +116,19 @@ fn visit(
                 // Cycle detected — build trail ending with the repeated name.
                 let mut cycle_trail = trail.clone();
                 cycle_trail.push(dep_name.to_string());
-                return Err(SceneError::ExtCycle {
-                    trail: cycle_trail,
-                });
+                return Err(SceneError::ExtCycle { trail: cycle_trail });
             }
             Colour::White => {
                 trail.push(dep_name.to_string());
-                visit(dep_name, lookup, colour, order, meta_cache, trail, depth + 1)?;
+                visit(
+                    dep_name,
+                    lookup,
+                    colour,
+                    order,
+                    meta_cache,
+                    trail,
+                    depth + 1,
+                )?;
                 trail.pop();
             }
             Colour::Black => {
@@ -145,9 +151,7 @@ fn visit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_ext_metadata_types::{
-        CapabilitySet, ConfigSchema, ExtensionMetadata, StringNode,
-    };
+    use ark_ext_metadata_types::{CapabilitySet, ConfigSchema, ExtensionMetadata, StringNode};
     use std::collections::HashMap;
 
     /// Build a minimal `ExtensionMetadata` with the given requires list.

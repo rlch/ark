@@ -29,9 +29,9 @@ use ark_ext_proto::{
 use ark_ext_test_support::StubExtension;
 use std::sync::{Arc, Mutex};
 use tracing::field::{Field, Visit};
+use tracing_subscriber::Layer;
 use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::registry::Registry;
-use tracing_subscriber::Layer;
 
 // ---------------------------------------------------------------------------
 // Tracing capture layer
@@ -119,11 +119,7 @@ where
         tracing::subscriber::Interest::always()
     }
 
-    fn enabled(
-        &self,
-        _metadata: &tracing::Metadata<'_>,
-        _ctx: Context<'_, S>,
-    ) -> bool {
+    fn enabled(&self, _metadata: &tracing::Metadata<'_>, _ctx: Context<'_, S>) -> bool {
         true
     }
 
@@ -169,10 +165,7 @@ where
 fn stub_at(ext_version: ProtocolVersion) -> StubExtension {
     StubExtension::builder()
         .with_protocol_version(ext_version)
-        .advertise_capabilities([
-            "view.pane.v1",
-            "ext.lifecycle.v1",
-        ])
+        .advertise_capabilities(["view.pane.v1", "ext.lifecycle.v1"])
         .build()
 }
 
@@ -200,8 +193,9 @@ async fn run_handshake(
 #[tokio::test(flavor = "current_thread")]
 async fn handshake_version_match_1_1_and_1_1_ok_no_warn() {
     let stub = stub_at(ProtocolVersion::new(1, 1));
-    let (result, warns) =
-        with_capture(|| futures::executor::block_on(run_handshake(&stub, ProtocolVersion::new(1, 1))));
+    let (result, warns) = with_capture(|| {
+        futures::executor::block_on(run_handshake(&stub, ProtocolVersion::new(1, 1)))
+    });
 
     let resp = result.expect("same MAJOR.MINOR must handshake OK");
     assert_eq!(resp.protocol_version, "1.1");
@@ -222,8 +216,9 @@ async fn handshake_version_match_1_1_and_1_1_ok_no_warn() {
 #[tokio::test(flavor = "current_thread")]
 async fn handshake_version_mismatch_client_newer_minor_ok_no_warn() {
     let stub = stub_at(ProtocolVersion::new(1, 0));
-    let (result, warns) =
-        with_capture(|| futures::executor::block_on(run_handshake(&stub, ProtocolVersion::new(1, 1))));
+    let (result, warns) = with_capture(|| {
+        futures::executor::block_on(run_handshake(&stub, ProtocolVersion::new(1, 1)))
+    });
 
     let resp = result.expect("same MAJOR, older MINOR on ext side must handshake OK");
     assert_eq!(resp.protocol_version, "1.0");
@@ -240,8 +235,9 @@ async fn handshake_version_mismatch_client_newer_minor_ok_no_warn() {
 #[tokio::test(flavor = "current_thread")]
 async fn handshake_version_mismatch_ext_newer_minor_ok_with_warn() {
     let stub = stub_at(ProtocolVersion::new(1, 1));
-    let (result, warns) =
-        with_capture(|| futures::executor::block_on(run_handshake(&stub, ProtocolVersion::new(1, 0))));
+    let (result, warns) = with_capture(|| {
+        futures::executor::block_on(run_handshake(&stub, ProtocolVersion::new(1, 0)))
+    });
 
     let resp = result.expect("same MAJOR, newer MINOR on ext side must handshake OK (best-effort)");
     assert_eq!(resp.protocol_version, "1.1");
@@ -280,8 +276,14 @@ async fn handshake_version_mismatch_major_client_newer_rejects() {
         ExtensionError::UnsupportedVersion(msg) => {
             // Error message must name both versions so operators can
             // diagnose the bump side (kit R3).
-            assert!(msg.contains("2.0"), "error message must mention client 2.0: {msg}");
-            assert!(msg.contains("1.1"), "error message must mention ext 1.1: {msg}");
+            assert!(
+                msg.contains("2.0"),
+                "error message must mention client 2.0: {msg}"
+            );
+            assert!(
+                msg.contains("1.1"),
+                "error message must mention ext 1.1: {msg}"
+            );
             assert!(
                 msg.contains("MAJOR mismatch"),
                 "error message must flag the MAJOR mismatch: {msg}"
@@ -310,8 +312,14 @@ async fn handshake_version_mismatch_major_ext_newer_rejects() {
         .expect_err("MAJOR mismatch (client=1.1, ext=2.0) must be rejected");
     match err {
         ExtensionError::UnsupportedVersion(msg) => {
-            assert!(msg.contains("1.1"), "error message must mention client 1.1: {msg}");
-            assert!(msg.contains("2.0"), "error message must mention ext 2.0: {msg}");
+            assert!(
+                msg.contains("1.1"),
+                "error message must mention client 1.1: {msg}"
+            );
+            assert!(
+                msg.contains("2.0"),
+                "error message must mention ext 2.0: {msg}"
+            );
             assert!(
                 msg.contains("MAJOR mismatch"),
                 "error message must flag the MAJOR mismatch: {msg}"

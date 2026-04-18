@@ -55,9 +55,7 @@ impl InProcClient {
     where
         T: ArkExtension + 'static,
     {
-        Self {
-            ext: Arc::new(ext),
-        }
+        Self { ext: Arc::new(ext) }
     }
 
     /// Borrow the wrapped extension. Useful in tests that want to
@@ -101,11 +99,7 @@ impl ExtensionClient for InProcClient {
 
     // -- Async + cancel ------------------------------------------------------
 
-    async fn cancel(
-        &self,
-        req: CancelRequest,
-        _opts: RequestOptions,
-    ) -> ExtResult<CancelResponse> {
+    async fn cancel(&self, req: CancelRequest, _opts: RequestOptions) -> ExtResult<CancelResponse> {
         self.ext.cancel(req).await
     }
 
@@ -477,10 +471,7 @@ mod tests {
             Ok(PingResponse::default())
         }
 
-        async fn task_create(
-            &self,
-            req: TaskCreateRequest,
-        ) -> ExtResult<TaskCreateResponse> {
+        async fn task_create(&self, req: TaskCreateRequest) -> ExtResult<TaskCreateResponse> {
             *self.last_label.lock().unwrap() = Some(req.label.clone());
             Ok(TaskCreateResponse {
                 task: TaskId {
@@ -489,10 +480,7 @@ mod tests {
             })
         }
 
-        async fn initialize(
-            &self,
-            _req: InitializeRequest,
-        ) -> ExtResult<InitializeResponse> {
+        async fn initialize(&self, _req: InitializeRequest) -> ExtResult<InitializeResponse> {
             Ok(InitializeResponse {
                 protocol_version: "0.1".into(),
                 extension_capabilities: "null".into(),
@@ -586,8 +574,7 @@ mod tests {
     /// sites.
     #[tokio::test]
     async fn in_proc_client_is_dyn_extension_client() {
-        let client: Arc<dyn ExtensionClient> =
-            Arc::new(InProcClient::from_ext(CountingExt::new()));
+        let client: Arc<dyn ExtensionClient> = Arc::new(InProcClient::from_ext(CountingExt::new()));
         let resp = client
             .initialize(
                 InitializeRequest {

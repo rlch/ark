@@ -127,7 +127,10 @@ pub async fn dispatch_event(event: &CoreEvent, ctx: &ReactionDispatcherCtx) {
     // reactions with a pinned `name=` pattern dispatch without a linear
     // scan of every `on Ext { … }`.
     let mut candidates: Vec<&Entry> = ctx.reactions.by_kind(kind).iter().collect();
-    if let CoreEvent::Ext(ExtEvent { ext, kind: ev_kind, .. }) = event {
+    if let CoreEvent::Ext(ExtEvent {
+        ext, kind: ev_kind, ..
+    }) = event
+    {
         let dotted = format!("{ext}.{ev_kind}");
         for entry in ctx.reactions.by_ext_name(&dotted) {
             if !candidates.iter().any(|c| std::ptr::eq(*c, entry)) {
@@ -146,7 +149,9 @@ pub async fn dispatch_event(event: &CoreEvent, ctx: &ReactionDispatcherCtx) {
     // Event-name string (dotted `<ext>.<kind>` for Ext, empty for
     // core variants) — passed through to the telemetry target.
     let event_name = match event {
-        CoreEvent::Ext(ExtEvent { ext, kind: ev_kind, .. }) => {
+        CoreEvent::Ext(ExtEvent {
+            ext, kind: ev_kind, ..
+        }) => {
             format!("{ext}.{ev_kind}")
         }
         _ => String::new(),
@@ -229,10 +234,7 @@ pub async fn dispatch_event(event: &CoreEvent, ctx: &ReactionDispatcherCtx) {
 /// bus as a [`CoreEvent::Ext`], and [`OpNode::SetStatus`] read-modify-
 /// writes `SessionStatus::ext_state`. Everything else routes through
 /// the [`IntentRegistry`].
-async fn dispatch_op_sequence(
-    ops: &[OpNode],
-    ctx: &ReactionDispatcherCtx,
-) -> Result<(), String> {
+async fn dispatch_op_sequence(ops: &[OpNode], ctx: &ReactionDispatcherCtx) -> Result<(), String> {
     for op in ops {
         match op {
             OpNode::Emit(e) => {
@@ -356,15 +358,9 @@ fn handle_set_status_op(
         Some(serde_json::Value::Object(map)) => map,
         _ => serde_json::Map::new(),
     };
-    bucket.insert(
-        "text".into(),
-        serde_json::Value::String(op.text.clone()),
-    );
+    bucket.insert("text".into(), serde_json::Value::String(op.text.clone()));
     if let Some(sev) = &op.severity {
-        bucket.insert(
-            "severity".into(),
-            serde_json::Value::String(sev.clone()),
-        );
+        bucket.insert("severity".into(), serde_json::Value::String(sev.clone()));
     }
     if let Some(ttl) = op.ttl_ms {
         bucket.insert("ttl_ms".into(), serde_json::json!(ttl));
@@ -467,10 +463,7 @@ fn op_to_dispatch_pair(op: &OpNode) -> (String, kdl::KdlNode) {
                 KdlValue::String(e.script.clone()),
             ));
             if let Some(shell) = &e.shell {
-                node.push(KdlEntry::new_prop(
-                    "shell",
-                    KdlValue::String(shell.clone()),
-                ));
+                node.push(KdlEntry::new_prop("shell", KdlValue::String(shell.clone())));
             }
             if let Some(timeout) = e.timeout_ms {
                 node.push(KdlEntry::new_prop(
@@ -693,9 +686,7 @@ mod tests {
         let id = test_session_id();
         let (ctx, _bus) = make_ctx(registry, layout.clone(), id.clone());
 
-        let trigger = CoreEvent::Error {
-            error: "x".into(),
-        };
+        let trigger = CoreEvent::Error { error: "x".into() };
         dispatch_event(&trigger, &ctx).await;
 
         // Bucket key is the intent_ctx origin ("scene" in our test fixture).
@@ -707,7 +698,10 @@ mod tests {
             .get("scene")
             .expect("scene bucket present in ext_state");
         assert_eq!(bucket.get("text").and_then(|v| v.as_str()), Some("hello"));
-        assert_eq!(bucket.get("severity").and_then(|v| v.as_str()), Some("warn"));
+        assert_eq!(
+            bucket.get("severity").and_then(|v| v.as_str()),
+            Some("warn")
+        );
         assert_eq!(bucket.get("ttl_ms").and_then(|v| v.as_u64()), Some(5000));
     }
 
@@ -780,13 +774,7 @@ mod tests {
         let (ctx, bus) = make_ctx(registry, layout, test_session_id());
         let mut spy = bus.subscribe();
 
-        dispatch_event(
-            &CoreEvent::Error {
-                error: "x".into(),
-            },
-            &ctx,
-        )
-        .await;
+        dispatch_event(&CoreEvent::Error { error: "x".into() }, &ctx).await;
 
         // No matching reaction → no Ext event published.
         assert!(matches!(

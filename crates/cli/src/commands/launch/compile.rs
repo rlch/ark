@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use ark_scene::ast::SceneBodyNode;
-use ark_scene::compile::layout::{compile_layout_kdl_with_ctx, SpawnContext};
+use ark_scene::compile::layout::{SpawnContext, compile_layout_kdl_with_ctx};
 use ark_scene::compile::{compile_scene, write_layout_artifact};
 use ark_scene::compose::compose_scene;
 use ark_scene::parse::parse_scene;

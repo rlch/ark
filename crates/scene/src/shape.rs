@@ -35,12 +35,8 @@ pub fn detect_and_normalize(src: &str, path: &Path) -> Result<String, SceneError
     let nodes = doc.nodes();
 
     // Locate span info for the first `scene` and first `layout` node.
-    let scene_node = nodes
-        .iter()
-        .find(|n| n.name().value() == "scene");
-    let layout_node = nodes
-        .iter()
-        .find(|n| n.name().value() == "layout");
+    let scene_node = nodes.iter().find(|n| n.name().value() == "scene");
+    let layout_node = nodes.iter().find(|n| n.name().value() == "layout");
 
     let has_scene = scene_node.is_some();
     let has_layout = layout_node.is_some();

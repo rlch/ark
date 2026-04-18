@@ -100,7 +100,10 @@ mod tests {
 
         // Same path, different content -> different SceneId -> miss.
         let different = SceneId::new("a.kdl", b"different content");
-        assert!(cache.get(&different).is_none(), "different hash should miss");
+        assert!(
+            cache.get(&different).is_none(),
+            "different hash should miss"
+        );
     }
 
     #[test]
@@ -111,6 +114,9 @@ mod tests {
         cache.insert(ir);
 
         assert!(cache.invalidate(&id), "invalidate should return true");
-        assert!(cache.get(&id).is_none(), "get after invalidate should be None");
+        assert!(
+            cache.get(&id).is_none(),
+            "get after invalidate should be None"
+        );
     }
 }

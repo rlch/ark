@@ -209,9 +209,10 @@ mod tests {
 
     #[test]
     fn user_context_rewrites_unprefixed_emit() {
-        let mut scene = scene_with(vec![SceneBodyNode::On(on_node("SomeEvent", vec![emit(
-            "foo",
-        )]))]);
+        let mut scene = scene_with(vec![SceneBodyNode::On(on_node(
+            "SomeEvent",
+            vec![emit("foo")],
+        ))]);
         apply_namespacing(&mut scene, &NamespaceContext::User).unwrap();
 
         if let SceneBodyNode::On(ref on) = scene.body[0] {
@@ -229,9 +230,10 @@ mod tests {
 
     #[test]
     fn extension_context_rewrites_unprefixed_emit() {
-        let mut scene = scene_with(vec![SceneBodyNode::On(on_node("SomeEvent", vec![emit(
-            "bar",
-        )]))]);
+        let mut scene = scene_with(vec![SceneBodyNode::On(on_node(
+            "SomeEvent",
+            vec![emit("bar")],
+        ))]);
         apply_namespacing(&mut scene, &NamespaceContext::Extension("status".into())).unwrap();
 
         if let SceneBodyNode::On(ref on) = scene.body[0] {
@@ -249,9 +251,10 @@ mod tests {
 
     #[test]
     fn already_prefixed_emit_unchanged() {
-        let mut scene = scene_with(vec![SceneBodyNode::On(on_node("SomeEvent", vec![emit(
-            "ext.ready",
-        )]))]);
+        let mut scene = scene_with(vec![SceneBodyNode::On(on_node(
+            "SomeEvent",
+            vec![emit("ext.ready")],
+        ))]);
         apply_namespacing(&mut scene, &NamespaceContext::User).unwrap();
 
         if let SceneBodyNode::On(ref on) = scene.body[0] {
@@ -269,9 +272,10 @@ mod tests {
 
     #[test]
     fn rejects_ark_core_emit() {
-        let mut scene = scene_with(vec![SceneBodyNode::On(on_node("SomeEvent", vec![emit(
-            "ark.core.init",
-        )]))]);
+        let mut scene = scene_with(vec![SceneBodyNode::On(on_node(
+            "SomeEvent",
+            vec![emit("ark.core.init")],
+        ))]);
         let err = apply_namespacing(&mut scene, &NamespaceContext::User).unwrap_err();
         match err {
             SceneError::ExtReservedNamespace { ext, attempted } => {
@@ -284,9 +288,10 @@ mod tests {
 
     #[test]
     fn rejects_ark_core_emit_in_extension() {
-        let mut scene = scene_with(vec![SceneBodyNode::On(on_node("SomeEvent", vec![emit(
-            "ark.core.ready",
-        )]))]);
+        let mut scene = scene_with(vec![SceneBodyNode::On(on_node(
+            "SomeEvent",
+            vec![emit("ark.core.ready")],
+        ))]);
         let err =
             apply_namespacing(&mut scene, &NamespaceContext::Extension("evil".into())).unwrap_err();
         match err {
@@ -308,11 +313,8 @@ mod tests {
             "other.SomeEvent",
             vec![emit("init")],
         ))]);
-        let err = apply_namespacing(
-            &mut scene,
-            &NamespaceContext::Extension("ark.core".into()),
-        )
-        .unwrap_err();
+        let err = apply_namespacing(&mut scene, &NamespaceContext::Extension("ark.core".into()))
+            .unwrap_err();
         match err {
             SceneError::ExtReservedNamespace { attempted, .. } => {
                 assert_eq!(attempted, "ark.core.init");
@@ -325,11 +327,8 @@ mod tests {
     fn rejects_unprefixed_selector_that_becomes_reserved() {
         // Extension named "ark.core" + unprefixed selector → "ark.core.SomeEvent"
         let mut scene = scene_with(vec![SceneBodyNode::On(on_node("SomeEvent", vec![]))]);
-        let err = apply_namespacing(
-            &mut scene,
-            &NamespaceContext::Extension("ark.core".into()),
-        )
-        .unwrap_err();
+        let err = apply_namespacing(&mut scene, &NamespaceContext::Extension("ark.core".into()))
+            .unwrap_err();
         match err {
             SceneError::ExtReservedNamespace { attempted, .. } => {
                 assert_eq!(attempted, "ark.core.SomeEvent");

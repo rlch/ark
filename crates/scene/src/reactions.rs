@@ -47,7 +47,7 @@ use crate::ast::selector::{EventSelector, FieldPattern, MatchType};
 use crate::ast::{OnNode, SceneBodyNode};
 use crate::error::SceneError;
 use crate::parse::SceneIR;
-use crate::rhai::{compile_in_scope, Engine, Program, RhaiScope};
+use crate::rhai::{Engine, Program, RhaiScope, compile_in_scope};
 
 // ---------------------------------------------------------------------------
 // EventKind — snake_case classification of `CoreEvent`.
@@ -207,22 +207,14 @@ impl ReactionRegistry {
     /// the secondary index when `ext_name` is `Some`. Callers
     /// that pass a non-`Ext` kind together with a name will see
     /// the name ignored (the mirror is only written for Ext).
-    pub fn insert(
-        &mut self,
-        kind: EventKind,
-        ext_name: Option<String>,
-        entry: Entry,
-    ) {
+    pub fn insert(&mut self, kind: EventKind, ext_name: Option<String>, entry: Entry) {
         self.by_kind
             .entry(kind.as_str())
             .or_default()
             .push(entry.clone());
         if let Some(name) = ext_name {
             if kind == EventKind::Ext {
-                self.by_ext_name
-                    .entry(name)
-                    .or_default()
-                    .push(entry);
+                self.by_ext_name.entry(name).or_default().push(entry);
             }
         }
     }
@@ -299,29 +291,22 @@ impl ReactionRegistry {
 /// immediately — build_registry does NOT continue past the first bad
 /// reaction.
 #[allow(clippy::result_large_err)]
-pub fn build_registry(
-    ir: &SceneIR,
-    engine: &Engine,
-) -> Result<ReactionRegistry, SceneError> {
+pub fn build_registry(ir: &SceneIR, engine: &Engine) -> Result<ReactionRegistry, SceneError> {
     let mut registry = ReactionRegistry::new();
     for (idx, node) in ir.scene.body.iter().enumerate() {
         if let SceneBodyNode::On(on) = node {
             let selector = resolve_selector_for_on(ir, idx, on)?;
-            let kind = EventKind::parse(&selector.kind).ok_or_else(|| {
-                SceneError::UnknownEventField {
+            let kind =
+                EventKind::parse(&selector.kind).ok_or_else(|| SceneError::UnknownEventField {
                     event_kind: selector.kind.clone(),
                     field: "<kind>".to_string(),
                     help: format!(
                         "unknown event kind `{}`; run `ark scene check` for the full list",
                         selector.kind
                     ),
-                    src: miette::NamedSource::new(
-                        ir.path.display().to_string(),
-                        ir.src.clone(),
-                    ),
+                    src: miette::NamedSource::new(ir.path.display().to_string(), ir.src.clone()),
                     span: miette::SourceSpan::new(0.into(), ir.src.len().min(1)),
-                }
-            })?;
+                })?;
             let predicate = match &on.when {
                 Some(src) => Some(compile_in_scope(engine, src, RhaiScope::Event)?),
                 None => None,
@@ -405,10 +390,7 @@ fn collect_on_nodes(doc: &kdl::KdlDocument) -> Vec<&kdl::KdlNode> {
 
 /// Build an [`EventSelector`] from a raw `on <kind> field=pat …` KDL node.
 #[allow(clippy::result_large_err)]
-fn selector_from_kdl_node(
-    node: &kdl::KdlNode,
-    ir: &SceneIR,
-) -> Result<EventSelector, SceneError> {
+fn selector_from_kdl_node(node: &kdl::KdlNode, ir: &SceneIR) -> Result<EventSelector, SceneError> {
     let mut kind: Option<String> = None;
     let mut field_patterns: BTreeMap<String, FieldPattern> = BTreeMap::new();
     for entry in node.entries() {
@@ -434,13 +416,11 @@ fn selector_from_kdl_node(
                     .value()
                     .as_string()
                     .map(|s| s.to_string())
-                    .unwrap_or_else(|| {
-                        match entry.value() {
-                            kdl::KdlValue::Integer(i) => i.to_string(),
-                            kdl::KdlValue::Float(f) => f.to_string(),
-                            kdl::KdlValue::Bool(b) => b.to_string(),
-                            _ => String::new(),
-                        }
+                    .unwrap_or_else(|| match entry.value() {
+                        kdl::KdlValue::Integer(i) => i.to_string(),
+                        kdl::KdlValue::Float(f) => f.to_string(),
+                        kdl::KdlValue::Bool(b) => b.to_string(),
+                        _ => String::new(),
                     });
                 let fp = FieldPattern::parse(&field_name, &raw_value).map_err(|e| {
                     SceneError::UnknownEventField {
@@ -459,7 +439,10 @@ fn selector_from_kdl_node(
         }
     }
     let kind = kind.ok_or_else(|| {
-        malformed_on_node(ir, "`on` node is missing the event kind positional argument")
+        malformed_on_node(
+            ir,
+            "`on` node is missing the event kind positional argument",
+        )
     })?;
     Ok(EventSelector {
         kind,
@@ -623,7 +606,10 @@ mod tests {
 
     #[test]
     fn event_kind_parse_accepts_both_cases() {
-        assert_eq!(EventKind::parse("SessionStarted"), Some(EventKind::SessionStarted));
+        assert_eq!(
+            EventKind::parse("SessionStarted"),
+            Some(EventKind::SessionStarted)
+        );
         assert_eq!(
             EventKind::parse("session_started"),
             Some(EventKind::SessionStarted)
@@ -789,7 +775,10 @@ scene "s" {
             error: "boom".into(),
         };
         let caps = match_selector(&sel, &evt).expect("should match");
-        assert_eq!(caps.get("error").unwrap().clone().into_string().unwrap(), "boom");
+        assert_eq!(
+            caps.get("error").unwrap().clone().into_string().unwrap(),
+            "boom"
+        );
     }
 
     #[test]
@@ -878,7 +867,10 @@ scene "s" {
             payload: serde_json::json!({ "tool": "Bash" }),
         });
         let caps = match_selector(&sel, &evt).expect("hybrid access should match");
-        assert_eq!(caps.get("tool").unwrap().clone().into_string().unwrap(), "Bash");
+        assert_eq!(
+            caps.get("tool").unwrap().clone().into_string().unwrap(),
+            "Bash"
+        );
     }
 
     #[test]
@@ -947,14 +939,16 @@ scene "s" {
         };
         let locals = match_selector(&entry.selector, &evt).expect("match");
         // `error` should be captured as a local from the glob match.
-        assert!(locals.contains_key("error"), "error not captured: {locals:?}");
+        assert!(
+            locals.contains_key("error"),
+            "error not captured: {locals:?}"
+        );
         use crate::context::{SessionSnapshot, build_event_scope};
         use crate::rhai::eval_bool_in_scope;
         let session = SessionSnapshot::default();
         let mut scope = build_event_scope(&evt, &session, &locals);
         let program = entry.predicate.as_ref().expect("predicate");
-        let ok = eval_bool_in_scope(&engine, program, RhaiScope::Event, &mut scope)
-            .expect("eval");
+        let ok = eval_bool_in_scope(&engine, program, RhaiScope::Event, &mut scope).expect("eval");
         assert!(ok, "error ending with boom should match the predicate");
     }
 
@@ -969,17 +963,11 @@ scene "s" {
         let engine = Engine::new();
         let reg = build_registry(&ir, &engine).expect("build");
         let entry = &reg.by_kind(EventKind::Error)[0];
-        let evt = CoreEvent::Error {
-            error: "x".into(),
-        };
+        let evt = CoreEvent::Error { error: "x".into() };
         let locals = match_selector(&entry.selector, &evt).expect("match");
         use crate::context::{SessionSnapshot, build_event_scope};
         use crate::rhai::eval_bool_in_scope;
-        let mut scope = build_event_scope(
-            &evt,
-            &SessionSnapshot::default(),
-            &locals,
-        );
+        let mut scope = build_event_scope(&evt, &SessionSnapshot::default(), &locals);
         let ok = eval_bool_in_scope(
             &engine,
             entry.predicate.as_ref().unwrap(),

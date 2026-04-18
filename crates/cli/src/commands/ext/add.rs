@@ -111,10 +111,16 @@ impl Source {
         match self {
             Source::Path(p) => format!("path:{}", p.display()),
             Source::Url(u) => format!("url:{u}"),
-            Source::Github { slug, git_ref: Some(r) } => {
+            Source::Github {
+                slug,
+                git_ref: Some(r),
+            } => {
                 format!("github:{slug}@{r}")
             }
-            Source::Github { slug, git_ref: None } => format!("github:{slug}"),
+            Source::Github {
+                slug,
+                git_ref: None,
+            } => format!("github:{slug}"),
         }
     }
 }
@@ -132,9 +138,7 @@ pub fn parse_source(raw: &str) -> Result<Source, String> {
     }
     if let Some(rest) = raw.strip_prefix("url:") {
         if !(rest.starts_with("https://") || rest.starts_with("http://")) {
-            return Err(format!(
-                "url: source must be an http(s) URL: `{rest}`"
-            ));
+            return Err(format!("url: source must be an http(s) URL: `{rest}`"));
         }
         return Ok(Source::Url(rest.to_string()));
     }
@@ -175,9 +179,7 @@ pub fn run(args: AddArgs, _ctx: &Ctx) -> Result<(), CliError> {
             // T-13.2: non-interactive path. Record the bypass and
             // persist the trust so subsequent installs in the same
             // CI context don't re-log.
-            if let Err(e) =
-                super::trust::append_audit(&publisher, &source.as_specifier())
-            {
+            if let Err(e) = super::trust::append_audit(&publisher, &source.as_specifier()) {
                 eprintln!("ark ext add: audit log write failed: {e}");
             }
             if let Err(e) = super::trust::save_trust(&publisher) {
@@ -223,15 +225,11 @@ pub fn run(args: AddArgs, _ctx: &Ctx) -> Result<(), CliError> {
         decide_capability_disclosure(meta, accept_all)
     };
 
-    let outcome = install_from_source_with_cap_decision(
-        &source,
-        &extensions_root,
-        accept_all,
-        &decide_caps,
-    )
-    .map_err(|reason| CliError::Generic {
-        reason: format!("ext/add: {reason}"),
-    })?;
+    let outcome =
+        install_from_source_with_cap_decision(&source, &extensions_root, accept_all, &decide_caps)
+            .map_err(|reason| CliError::Generic {
+                reason: format!("ext/add: {reason}"),
+            })?;
 
     println!(
         "installed extension `{}` (version {}) to {}",
@@ -267,12 +265,7 @@ pub fn install_from_source(
     extensions_root: &Path,
     accept_all: bool,
 ) -> Result<InstallOutcome, String> {
-    install_from_source_with_cap_decision(
-        source,
-        extensions_root,
-        accept_all,
-        &|_meta| Ok(()),
-    )
+    install_from_source_with_cap_decision(source, extensions_root, accept_all, &|_meta| Ok(()))
 }
 
 /// Full install pipeline with an injectable capability-disclosure
@@ -325,9 +318,7 @@ pub fn install_from_source_with_cap_decision(
     let name = metadata.name.value.clone();
     if name.is_empty() {
         let _ = fs::remove_dir_all(&staging);
-        return Err(
-            "metadata contains empty `name` field — refusing to install".into()
-        );
+        return Err("metadata contains empty `name` field — refusing to install".into());
     }
     validate_name(&name).map_err(|e| {
         let _ = fs::remove_dir_all(&staging);
@@ -407,8 +398,7 @@ pub fn decide_capability_disclosure(
     meta: &ExtensionMetadata,
     accept_all: bool,
 ) -> Result<(), String> {
-    let ext_key =
-        super::trust::ext_version_key(&meta.name.value, &meta.version.value);
+    let ext_key = super::trust::ext_version_key(&meta.name.value, &meta.version.value);
     // Warn on unknown caps (T-13.3 vocabulary); still proceed — the
     // v0.4 spec text explicitly keeps unknown names non-fatal.
     for unknown in meta.unknown_capabilities() {
@@ -513,9 +503,7 @@ fn fetch_into_staging(source: &Source, dest: &Path) -> Result<(), String> {
     match source {
         Source::Path(src) => install_path(src, dest),
         Source::Url(url) => install_url(url, dest),
-        Source::Github { slug, git_ref } => {
-            install_github(slug, git_ref.as_deref(), dest)
-        }
+        Source::Github { slug, git_ref } => install_github(slug, git_ref.as_deref(), dest),
     }
 }
 
@@ -527,8 +515,7 @@ fn install_path(src: &Path, dest: &Path) -> Result<(), String> {
     if !src.is_dir() {
         return Err(format!("source `{}` is not a directory", src.display()));
     }
-    copy_dir_recursive(src, dest)
-        .map_err(|e| format!("copying {}: {e}", src.display()))
+    copy_dir_recursive(src, dest).map_err(|e| format!("copying {}: {e}", src.display()))
 }
 
 /// `url:` source — download a tarball and extract. Accepts `.tar.gz`
@@ -559,8 +546,7 @@ fn extract_tarball(bytes: &[u8], dest: &Path) -> Result<(), String> {
     // point at an uncompressed `.tar` too.
     let looks_gzipped = bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b;
     let mut archive = if looks_gzipped {
-        tar::Archive::new(Box::new(GzDecoder::new(Cursor::new(bytes)))
-            as Box<dyn io::Read>)
+        tar::Archive::new(Box::new(GzDecoder::new(Cursor::new(bytes))) as Box<dyn io::Read>)
     } else {
         tar::Archive::new(Box::new(Cursor::new(bytes)) as Box<dyn io::Read>)
     };
@@ -571,8 +557,7 @@ fn extract_tarball(bytes: &[u8], dest: &Path) -> Result<(), String> {
     // the shape; otherwise keep the flat layout.
     let scratch = dest.with_extension("extract");
     let _ = fs::remove_dir_all(&scratch);
-    fs::create_dir_all(&scratch)
-        .map_err(|e| format!("mkdir {}: {e}", scratch.display()))?;
+    fs::create_dir_all(&scratch).map_err(|e| format!("mkdir {}: {e}", scratch.display()))?;
     archive
         .unpack(&scratch)
         .map_err(|e| format!("extracting tarball: {e}"))?;
@@ -609,19 +594,14 @@ fn promote_single_root(scratch: &Path, dest: &Path) -> Result<(), String> {
             copy_dir_recursive(&from, &to)
                 .map_err(|e| format!("copying {}: {e}", from.display()))?;
         } else {
-            fs::copy(&from, &to)
-                .map_err(|e| format!("copying {}: {e}", from.display()))?;
+            fs::copy(&from, &to).map_err(|e| format!("copying {}: {e}", from.display()))?;
         }
     }
     Ok(())
 }
 
 /// `github:` source — subprocess `git clone --depth 1 [--branch <ref>]`.
-fn install_github(
-    slug: &str,
-    git_ref: Option<&str>,
-    dest: &Path,
-) -> Result<(), String> {
+fn install_github(slug: &str, git_ref: Option<&str>, dest: &Path) -> Result<(), String> {
     let url = format!("https://github.com/{slug}.git");
     let mut cmd = Command::new("git");
     cmd.arg("clone").arg("--depth").arg("1");
@@ -663,8 +643,7 @@ pub fn read_staging_metadata(staging: &Path) -> Result<ExtensionMetadata, String
     // Fallback: wasm custom-section read. Pick the first `*.wasm` in
     // the root — cartridge-only extensions are single-file.
     let wasm = first_wasm_in_dir(staging)?;
-    let bytes = fs::read(&wasm)
-        .map_err(|e| format!("reading {}: {e}", wasm.display()))?;
+    let bytes = fs::read(&wasm).map_err(|e| format!("reading {}: {e}", wasm.display()))?;
     ark_ext_metadata::wasm_meta::read_wasm_metadata(&bytes)
         .map_err(|e| format!("reading wasm metadata from {}: {e}", wasm.display()))
 }
@@ -672,8 +651,7 @@ pub fn read_staging_metadata(staging: &Path) -> Result<ExtensionMetadata, String
 /// Find the first `*.wasm` file in `dir`. Errors with a stable
 /// message when none is present.
 fn first_wasm_in_dir(dir: &Path) -> Result<PathBuf, String> {
-    let entries = fs::read_dir(dir)
-        .map_err(|e| format!("readdir {}: {e}", dir.display()))?;
+    let entries = fs::read_dir(dir).map_err(|e| format!("readdir {}: {e}", dir.display()))?;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) == Some("wasm") {
@@ -715,8 +693,7 @@ fn write_install_dotfile(dir: &Path, source: &Source, name: &str) -> Result<(), 
         now,
         name
     );
-    fs::write(dir.join(".ark-install"), contents)
-        .map_err(|e| format!("writing .ark-install: {e}"))
+    fs::write(dir.join(".ark-install"), contents).map_err(|e| format!("writing .ark-install: {e}"))
 }
 
 /// Copy `src` into `dst` recursively. Skips symlinks by following
@@ -895,8 +872,7 @@ extension {{
         let extensions_root = work.path().join("xdg/ark/extensions");
 
         let source = Source::Path(src_dir.clone());
-        let outcome =
-            install_from_source(&source, &extensions_root, true).expect("install");
+        let outcome = install_from_source(&source, &extensions_root, true).expect("install");
 
         assert_eq!(outcome.metadata.name.value, "my-ext");
         let installed = extensions_root.join("my-ext");
@@ -918,10 +894,7 @@ extension {{
         let err = install_from_source(&source, &extensions_root, true).unwrap_err();
         assert!(err.contains("no `extension.kdl`"), "{err}");
         // Staging must not leak into the extensions root.
-        let leftover: Vec<_> = fs::read_dir(&extensions_root)
-            .unwrap()
-            .flatten()
-            .collect();
+        let leftover: Vec<_> = fs::read_dir(&extensions_root).unwrap().flatten().collect();
         assert!(leftover.is_empty(), "expected clean extensions root");
     }
 
@@ -962,7 +935,10 @@ extension {{
         let extensions_root = work.path().join("xdg/ark/extensions");
         let source = Source::Path(src);
         let err = install_from_source(&source, &extensions_root, true).unwrap_err();
-        assert!(err.contains("invalid character") || err.contains("empty"), "{err}");
+        assert!(
+            err.contains("invalid character") || err.contains("empty"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1005,8 +981,7 @@ extension {{
         let work = TempDir::new().unwrap();
         let dest = work.path().join("out");
         let manifest = sample_manifest("tarball-flat");
-        let bytes =
-            build_tar_gz(&[("extension.kdl", manifest.as_bytes()), ("README.md", b"hi")]);
+        let bytes = build_tar_gz(&[("extension.kdl", manifest.as_bytes()), ("README.md", b"hi")]);
         extract_tarball(&bytes, &dest).unwrap();
         assert!(dest.join("extension.kdl").is_file());
         assert!(dest.join("README.md").is_file());
@@ -1039,10 +1014,7 @@ extension {{
         // `read_staging_metadata`.
         let work = TempDir::new().unwrap();
         let dest = work.path().join("out");
-        let bytes = build_tar_gz(&[(
-            "extension.kdl",
-            sample_manifest("url-sample").as_bytes(),
-        )]);
+        let bytes = build_tar_gz(&[("extension.kdl", sample_manifest("url-sample").as_bytes())]);
         extract_tarball(&bytes, &dest).unwrap();
         let meta = read_staging_metadata(&dest).unwrap();
         assert_eq!(meta.name.value, "url-sample");
@@ -1224,22 +1196,18 @@ extension {{
             let m = meta_with_caps("cap-auto", "0.1.0", &["exec", "pipe"]);
             decide_capability_disclosure(&m, true).expect("accept-all");
 
-            let trust_text =
-                fs::read_to_string(xdg_cfg.join("ark/extension-trust.kdl"))
-                    .expect("trust file written");
+            let trust_text = fs::read_to_string(xdg_cfg.join("ark/extension-trust.kdl"))
+                .expect("trust file written");
             assert!(
-                trust_text
-                    .contains("capability \"exec\" extension=\"cap-auto@0.1.0\""),
+                trust_text.contains("capability \"exec\" extension=\"cap-auto@0.1.0\""),
                 "missing exec cap:\n{trust_text}"
             );
             assert!(
-                trust_text
-                    .contains("capability \"pipe\" extension=\"cap-auto@0.1.0\""),
+                trust_text.contains("capability \"pipe\" extension=\"cap-auto@0.1.0\""),
                 "missing pipe cap:\n{trust_text}"
             );
 
-            let audit =
-                fs::read_to_string(xdg.join("ark/extension-audit.log")).unwrap();
+            let audit = fs::read_to_string(xdg.join("ark/extension-audit.log")).unwrap();
             assert!(audit.contains("accept-all-caps"));
             assert!(audit.contains("extension=cap-auto@0.1.0"));
             assert!(audit.contains("caps=exec,pipe"));
@@ -1282,12 +1250,10 @@ extension {{
             )
             .unwrap();
 
-            let m =
-                meta_with_caps("pre-trusted", "0.1.0", &["exec", "pipe"]);
+            let m = meta_with_caps("pre-trusted", "0.1.0", &["exec", "pipe"]);
             decide_capability_disclosure(&m, true).expect("accept-all");
 
-            let audit =
-                fs::read_to_string(xdg.join("ark/extension-audit.log")).unwrap();
+            let audit = fs::read_to_string(xdg.join("ark/extension-audit.log")).unwrap();
             // `exec` already trusted → must not re-appear on the audit
             // line. The line for `pipe` should still exist.
             assert!(audit.contains("caps=pipe"), "audit: {audit}");
@@ -1328,9 +1294,7 @@ extension {{
         with_isolated_xdg(|_xdg, xdg_cfg| {
             let m = meta_with_caps("mixed", "0.1.0", &["exec", "weird.new"]);
             decide_capability_disclosure(&m, true).expect("accept-all");
-            let trust_text =
-                fs::read_to_string(xdg_cfg.join("ark/extension-trust.kdl"))
-                    .unwrap();
+            let trust_text = fs::read_to_string(xdg_cfg.join("ark/extension-trust.kdl")).unwrap();
             assert!(trust_text.contains("\"exec\""));
             assert!(trust_text.contains("\"weird.new\""));
         });
@@ -1353,11 +1317,7 @@ extension {{
             // Pre-seed v1.1 trust: {pipe} already accepted.
             let trust_path = xdg_cfg.join("ark/extension-trust.kdl");
             fs::create_dir_all(trust_path.parent().unwrap()).unwrap();
-            fs::write(
-                &trust_path,
-                "capability \"pipe\" extension=\"foo@1.1\"\n",
-            )
-            .unwrap();
+            fs::write(&trust_path, "capability \"pipe\" extension=\"foo@1.1\"\n").unwrap();
 
             // Install v1.2 declaring {pipe, exec} with --accept-all.
             // pipe should carry forward silently; exec is genuinely
@@ -1384,8 +1344,7 @@ extension {{
             // Only the genuinely-new cap should land in the audit log
             // (carried-forward caps don't need an accept-all line —
             // they were accepted on the prior install).
-            let audit =
-                fs::read_to_string(xdg.join("ark/extension-audit.log")).unwrap();
+            let audit = fs::read_to_string(xdg.join("ark/extension-audit.log")).unwrap();
             assert!(audit.contains("caps=exec"), "audit: {audit}");
             assert!(
                 !audit.contains("pipe"),
@@ -1410,8 +1369,7 @@ extension {{
             .unwrap();
 
             let m = meta_with_caps("bar", "1.2", &["exec", "pipe"]);
-            decide_capability_disclosure(&m, true)
-                .expect("all carried forward");
+            decide_capability_disclosure(&m, true).expect("all carried forward");
 
             // Caps carried forward under the new version key.
             let trust_text = fs::read_to_string(&trust_path).unwrap();
@@ -1445,8 +1403,7 @@ extension {{
             // `picker-ng`'s `exec` should land in the audit log as a
             // genuinely new accept — the `picker@1.1` entry must not
             // shadow it.
-            let audit =
-                fs::read_to_string(xdg.join("ark/extension-audit.log")).unwrap();
+            let audit = fs::read_to_string(xdg.join("ark/extension-audit.log")).unwrap();
             assert!(
                 audit.contains("extension=picker-ng@1.1"),
                 "picker-ng install should produce its own audit line: {audit}"
@@ -1473,11 +1430,7 @@ extension {{
         with_isolated_xdg(|_xdg, xdg_cfg| {
             let trust_path = xdg_cfg.join("ark/extension-trust.kdl");
             fs::create_dir_all(trust_path.parent().unwrap()).unwrap();
-            fs::write(
-                &trust_path,
-                "capability \"pipe\" extension=\"baz@1.1\"\n",
-            )
-            .unwrap();
+            fs::write(&trust_path, "capability \"pipe\" extension=\"baz@1.1\"\n").unwrap();
 
             // accept_all=false would normally hit stdin; with only
             // carry-forward caps the prompt is skipped entirely.
@@ -1502,23 +1455,18 @@ extension {{
         let extensions_root = work.path().join("xdg/ark/extensions");
 
         let source = Source::Path(src);
-        let err = install_from_source_with_cap_decision(
-            &source,
-            &extensions_root,
-            false,
-            &|_meta| Err("user declined caps".to_string()),
-        )
-        .unwrap_err();
+        let err =
+            install_from_source_with_cap_decision(&source, &extensions_root, false, &|_meta| {
+                Err("user declined caps".to_string())
+            })
+            .unwrap_err();
         assert!(err.contains("user declined caps"), "{err}");
 
         // Neither the final install dir nor any staging residue
         // should remain.
         assert!(!extensions_root.join("deny-me").exists());
         if extensions_root.exists() {
-            let leftover: Vec<_> = fs::read_dir(&extensions_root)
-                .unwrap()
-                .flatten()
-                .collect();
+            let leftover: Vec<_> = fs::read_dir(&extensions_root).unwrap().flatten().collect();
             assert!(
                 leftover.is_empty(),
                 "expected clean extensions root after denial"

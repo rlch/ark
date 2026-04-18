@@ -366,8 +366,7 @@ mod tests {
             Ok(c) => c,
             Err(_) => return, // No bash on this platform — skip.
         };
-        let sup = ExtSupervisor::new("test", child)
-            .with_stdin_close_grace(Duration::from_secs(2));
+        let sup = ExtSupervisor::new("test", child).with_stdin_close_grace(Duration::from_secs(2));
         let status = sup.shutdown().await.expect("shutdown completes");
         assert!(status.success(), "expected clean exit, got {status:?}");
     }

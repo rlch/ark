@@ -111,9 +111,27 @@ impl std::fmt::Display for Chord {
 /// zellij lexer. Function keys `F1`–`F12` are handled programmatically
 /// via [`function_key_shape`].
 const SPECIAL_KEYS: &[&str] = &[
-    "Tab", "Enter", "Esc", "Space", "Backspace", "Delete", "Insert", "Home", "End", "PageUp",
-    "PageDown", "Left", "Right", "Up", "Down", "CapsLock", "ScrollLock", "NumLock", "PrintScreen",
-    "Pause", "Menu",
+    "Tab",
+    "Enter",
+    "Esc",
+    "Space",
+    "Backspace",
+    "Delete",
+    "Insert",
+    "Home",
+    "End",
+    "PageUp",
+    "PageDown",
+    "Left",
+    "Right",
+    "Up",
+    "Down",
+    "CapsLock",
+    "ScrollLock",
+    "NumLock",
+    "PrintScreen",
+    "Pause",
+    "Menu",
 ];
 
 /// Parse a chord source string into a typed [`Chord`] (T-064).
@@ -126,7 +144,10 @@ const SPECIAL_KEYS: &[&str] = &[
 pub fn parse_chord(src: &str) -> Result<Chord, SceneError> {
     let trimmed = src.trim();
     if trimmed.is_empty() {
-        return Err(invalid_chord(src, "chord string is empty or whitespace-only"));
+        return Err(invalid_chord(
+            src,
+            "chord string is empty or whitespace-only",
+        ));
     }
     let tokens: Vec<&str> = trimmed.split_whitespace().collect();
     debug_assert!(!tokens.is_empty(), "trim+split yielded empty");
@@ -335,7 +356,10 @@ mod tests {
     fn key_with_punctuation_rejected() {
         for tok in ["a!", "p@", "x.y", "a-b"] {
             let err = parse_chord(tok).unwrap_err();
-            assert!(matches!(err, SceneError::InvalidChord { .. }), "tok `{tok}`");
+            assert!(
+                matches!(err, SceneError::InvalidChord { .. }),
+                "tok `{tok}`"
+            );
         }
     }
 

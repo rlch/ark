@@ -17,12 +17,12 @@ use std::path::{Path, PathBuf};
 
 use clap::Args;
 
-use ark_scene::compile::{compile_scene, CompiledScene};
+use ark_scene::compile::{CompiledScene, compile_scene};
 use ark_scene::compose::compose_scene;
 use ark_scene::default_scene::DEFAULT_SCENE_KDL;
 use ark_scene::error::SceneError;
 use ark_scene::parse::parse_scene;
-use ark_scene::resolve_path::{resolve_scene_path, SceneSource};
+use ark_scene::resolve_path::{SceneSource, resolve_scene_path};
 use ark_scene::rhai::Engine;
 use ark_scene::shape::detect_and_normalize;
 use ark_scene::validate::{handles, op_refs, pane_views, scope};
@@ -177,9 +177,7 @@ fn resolve_default_source() -> Result<(String, String), CliError> {
             })?;
             Ok((src, p.display().to_string()))
         }
-        SceneSource::BuiltIn => {
-            Ok((DEFAULT_SCENE_KDL.to_string(), "<built-in>".to_string()))
-        }
+        SceneSource::BuiltIn => Ok((DEFAULT_SCENE_KDL.to_string(), "<built-in>".to_string())),
     }
 }
 
@@ -221,7 +219,10 @@ fn render_diagnostics(errors: &[SceneError], no_color: bool) {
                 self.handler.display(self.err, f)
             }
         }
-        let d = DiagFmt { err, handler: &*handler };
+        let d = DiagFmt {
+            err,
+            handler: &*handler,
+        };
         let mut buf = String::new();
         if write!(&mut buf, "{d}").is_ok() {
             eprintln!("{buf}");

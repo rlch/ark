@@ -85,10 +85,7 @@ fn walk_node(node: &KdlNode, src: &str, path: &str, errors: &mut Vec<SceneError>
 /// error span points at the pane's own head so miette's caret lands on
 /// the `pane @handle` site.
 fn validate_pane(pane: &KdlNode, src: &str, path: &str, errors: &mut Vec<SceneError>) {
-    let count = pane
-        .children()
-        .map(|d| d.nodes().len())
-        .unwrap_or(0);
+    let count = pane.children().map(|d| d.nodes().len()).unwrap_or(0);
 
     if count == 1 {
         return;

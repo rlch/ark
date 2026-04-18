@@ -127,16 +127,21 @@ mod tests {
     fn ready_writer_write_ack_writes_ack_byte_and_closes_fd() {
         let (read_fd, write_fd) = nix::unistd::pipe().expect("pipe");
 
-        let writer = unsafe { ReadyWriter::from_raw_fd(std::os::fd::AsRawFd::as_raw_fd(&write_fd)) };
+        let writer =
+            unsafe { ReadyWriter::from_raw_fd(std::os::fd::AsRawFd::as_raw_fd(&write_fd)) };
         std::mem::forget(write_fd);
 
         writer.write_ack().expect("write_ack");
 
         let mut buf = [0u8; 2];
-        let n = nix::unistd::read(std::os::fd::AsRawFd::as_raw_fd(&read_fd), &mut buf)
-            .expect("read");
+        let n =
+            nix::unistd::read(std::os::fd::AsRawFd::as_raw_fd(&read_fd), &mut buf).expect("read");
         assert_eq!(n, 1, "exactly 1 byte should be written");
-        assert_eq!(buf[0], crate::ready_signal::ACK_BYTE, "byte must be ACK_BYTE");
+        assert_eq!(
+            buf[0],
+            crate::ready_signal::ACK_BYTE,
+            "byte must be ACK_BYTE"
+        );
 
         // Second read should return EOF (fd closed after write_ack consumed
         // the writer).

@@ -120,10 +120,7 @@ fn exchange(mut stream: UnixStream, request: &Value) -> Result<Value, CliError> 
 }
 
 /// Render the response envelope on stdout + classify errors.
-fn render_response(
-    resolved: &ark_types::SessionId,
-    response: &Value,
-) -> Result<(), CliError> {
+fn render_response(resolved: &ark_types::SessionId, response: &Value) -> Result<(), CliError> {
     let ok = response.get("ok").and_then(Value::as_bool).unwrap_or(false);
     if !ok {
         let msg = response
@@ -140,10 +137,7 @@ fn render_response(
     // The `ark.core.reload_scene` intent wraps its payload in
     // `{dispatched, result}` via the supervisor's `Intent` handler.
     // Unwrap `result` if present, otherwise fall back to `data`.
-    let result = data
-        .get("result")
-        .cloned()
-        .unwrap_or(data.clone());
+    let result = data.get("result").cloned().unwrap_or(data.clone());
 
     // The reload payload shape (from SceneReloader::reload →
     // ReloadSceneOp) carries `status` and counters.
@@ -199,7 +193,10 @@ fn map_resolve_err(e: ResolveError, query: &str) -> CliError {
         | ResolveError::AmbiguousSubstring { candidates, .. }
         | ResolveError::AmbiguousName { candidates, .. } => CliError::Ambiguous {
             what: query.to_string(),
-            candidates: candidates.into_iter().map(|c| c.as_str().to_string()).collect(),
+            candidates: candidates
+                .into_iter()
+                .map(|c| c.as_str().to_string())
+                .collect(),
         },
         ResolveError::Io(err) => CliError::Generic {
             reason: format!("resolve session: {err}"),

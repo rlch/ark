@@ -120,27 +120,8 @@ impl Engine {
         // assignment, module import). Keeping the engine expression-only
         // is what makes scene files non-Turing-complete.
         for sym in &[
-            "fn",
-            "while",
-            "for",
-            "loop",
-            "return",
-            "break",
-            "continue",
-            "=",
-            "+=",
-            "-=",
-            "*=",
-            "/=",
-            "%=",
-            "**=",
-            "<<=",
-            ">>=",
-            "&=",
-            "|=",
-            "^=",
-            "import",
-            "export",
+            "fn", "while", "for", "loop", "return", "break", "continue", "=", "+=", "-=", "*=",
+            "/=", "%=", "**=", "<<=", ">>=", "&=", "|=", "^=", "import", "export",
         ] {
             inner.disable_symbol(*sym);
         }
@@ -438,8 +419,7 @@ mod tests {
     #[test]
     fn rejects_while_loop() {
         let engine = Engine::new();
-        let err =
-            compile_in_scope(&engine, "while true { 0 }", RhaiScope::Spawn).unwrap_err();
+        let err = compile_in_scope(&engine, "while true { 0 }", RhaiScope::Spawn).unwrap_err();
         assert!(matches!(err, SceneError::RhaiParse { .. }));
     }
 
@@ -528,7 +508,10 @@ mod tests {
             Err(e) => e,
         };
         assert!(
-            matches!(err, SceneError::RhaiOom { .. } | SceneError::RhaiEval { .. }),
+            matches!(
+                err,
+                SceneError::RhaiOom { .. } | SceneError::RhaiEval { .. }
+            ),
             "expected RhaiOom or RhaiEval, got {err:?}"
         );
     }
@@ -546,7 +529,10 @@ mod tests {
                 let mut s = rhai::Scope::new();
                 let err = eval_value(&engine, &program, &mut s).unwrap_err();
                 assert!(
-                    matches!(err, SceneError::RhaiEval { .. } | SceneError::RhaiOom { .. }),
+                    matches!(
+                        err,
+                        SceneError::RhaiEval { .. } | SceneError::RhaiOom { .. }
+                    ),
                     "expected RhaiEval or RhaiOom for oversize string, got {err:?}"
                 );
             }
@@ -657,8 +643,8 @@ mod tests {
             let p = compile_in_scope(&engine, src, RhaiScope::Spawn)
                 .unwrap_or_else(|e| panic!("compile {src}: {e:?}"));
             let mut s = rhai::Scope::new();
-            let got = eval_bool(&engine, &p, &mut s)
-                .unwrap_or_else(|e| panic!("eval {src}: {e:?}"));
+            let got =
+                eval_bool(&engine, &p, &mut s).unwrap_or_else(|e| panic!("eval {src}: {e:?}"));
             assert!(got, "{src} should eval true");
         }
     }
@@ -690,8 +676,8 @@ mod tests {
             let p = compile_in_scope(&engine, src, RhaiScope::Spawn)
                 .unwrap_or_else(|e| panic!("compile {src}: {e:?}"));
             let mut s = rhai::Scope::new();
-            let got = eval_bool(&engine, &p, &mut s)
-                .unwrap_or_else(|e| panic!("eval {src}: {e:?}"));
+            let got =
+                eval_bool(&engine, &p, &mut s).unwrap_or_else(|e| panic!("eval {src}: {e:?}"));
             assert!(got, "{src} should eval true");
         }
     }
