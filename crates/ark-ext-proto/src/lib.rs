@@ -72,6 +72,17 @@ pub use transport::{
     ReverseRequestGate, TaskProgress, method_to_capability,
 };
 
+// Re-export ark-view types so extension authors can `use ark_ext_proto::{...}`
+// without a direct ark-view dep (per cavekit-soul-phase-2-ark-view.md R11).
+// These are the derive-addressable surface for `#[derive(View)]` /
+// `#[derive(Extension)]`: core trait + typed wrappers + kind enums + id types.
+// Suppression / lookup types stay behind the `ark_view` crate directly —
+// they're host-side consumed by the supervisor, not extension authors.
+pub use ark_view::{
+    CommandView, HandleId, HandleKind, InvalidationCause, Pane, PaneLike, Stack, TabHandle,
+    View, ZellijView,
+};
+
 /// Opaque JSON text carried as a UTF-8 string.
 ///
 /// Fields typed `OpaqueJson` hold a serialized JSON document that ark's
