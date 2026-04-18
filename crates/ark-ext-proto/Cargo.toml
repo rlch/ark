@@ -49,6 +49,10 @@ futures = { workspace = true }
 # SIGKILL — we need SIGTERM as the middle escalation step. Posix-only
 # signals are guarded behind `#[cfg(unix)]` in `supervision.rs`.
 nix = { workspace = true }
+# T-001 (soul phase 2 cavekit R1): typed `Handle` surface lives in
+# `ark-view`. Re-exports + protocol use sites land in T-017; this dep
+# edge is added up-front so the workspace DAG is stable.
+ark-view = { path = "../ark-view" }
 
 [[bin]]
 # T-9.5.2 (cavekit-scene R16): canonical extension-protocol.kdl emitter.

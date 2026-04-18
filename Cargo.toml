@@ -26,6 +26,10 @@ members = [
     # T-089: `#[derive(Extension)]` proc macro — generates
     # `inventory::submit!(ExtensionMeta { … })` from struct attributes.
     "crates/ark-ext-derive",
+    # T-001 (soul phase 2 cavekit R1): typed `Handle` surface shared by
+    # `ark-ext-proto` and `ark-scene`. Sits below both in the DAG; dep
+    # budget is `facet` + `serde` + `serde_json` + `thiserror` only.
+    "crates/ark-view",
     # T-ACP.7: `crates/engines/*` is gone — the legacy
     # `ark-engines-claude-code` crate was retired and replaced by
     # `ark-supervisor::engine_stub` + `acp-client` (ACP wire

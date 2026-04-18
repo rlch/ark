@@ -1,0 +1,20 @@
+[package]
+name = "ark-view"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# T-001 (soul phase 2 cavekit R1): `ark-view` owns the typed `Handle` surface
+# that `ark-ext-proto` and `ark-scene` both depend on. Sits BELOW both crates
+# in the workspace DAG — no `ark-ext-proto` / `ark-scene` deps here. Dep
+# budget is intentionally tiny (facet for SHAPE reflection, serde/serde_json
+# for wire round-trips, thiserror for the typed error surface). No async
+# runtime, no KDL, no Rhai: this crate is pure types.
+[dependencies]
+facet = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

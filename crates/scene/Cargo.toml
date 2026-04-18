@@ -66,6 +66,10 @@ tracing = { workspace = true }
 # T-094: extension registry needs the metadata types (IntentDecl, EventDecl,
 # ViewDecl) to store symbols from activated extensions.
 ark-ext-metadata-types = { path = "../ark-ext-metadata-types" }
+# T-001 (soul phase 2 cavekit R1): typed `Handle` surface shared with
+# `ark-ext-proto`. Scene uses `Handle` for view bindings + op dispatch in
+# later tiers; dep edge added up-front so the workspace DAG is stable.
+ark-view = { path = "../ark-view" }
 
 [[bin]]
 # T-140 (cavekit-scene R13 / Tier 15): scene schema emitter. Walks every
