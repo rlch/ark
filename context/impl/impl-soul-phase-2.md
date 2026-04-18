@@ -17,9 +17,19 @@ Ledger is prepend-only. Newest entries at top. Append completion rows below as t
 | T-003 | 0 | ext-surface R4 | DONE | `8547655` | added `config_sections`+`reload_gates` Vec fields + decl structs; downstream construction sites patched |
 | T-045 | 0 | ext-surface R1 | DONE | `1544dab` | `CoreEvent::SessionEnded` gains `exit: ExitReason`; new enum `{Normal, Error(String), Cancelled}` `#[non_exhaustive]`; also patched `kill.rs`/`orchestration.rs` prod sites |
 | F-003 fix | 0 | — | DONE | `3133529` | Codex tier-gate: flatten `exit` to scalar string on FlatEvent; scene selectors can now match `exit="cancelled"` |
-| T-004..T-044 | 1-8 | various | PENDING | — | see build site |
+| T-004 | 1 | ark-view R2 | DONE | `6f31378` | HandleKind {Tab, Pane, Stack} + Facet + snake_case serde |
+| T-005 | 1 | ark-view R5 | DONE | `6f31378` | HandleId opaque newtype (`#[serde(transparent)]`); inner String now private (F-004 fix) |
+| T-006 | 1 | ark-view R3 | DONE | `e913cb5` | View + CommandView + ZellijView marker traits (Send+Sync+'static) |
+| T-007 | 1 | ark-view R7 | DONE | `541db89` | InvalidationCause {UserClosed, SceneReloadDropped, SessionEnded} |
+| F-004/F-005/F-006 fix | 1 | — | DONE | `dc90de0` | HandleId pub-field → private; wire-compat doc clarification on both enums |
+| T-008..T-044 | 2-8 | various | PENDING | — | see build site |
 
 ## Wave Log
+
+### Wave 2 — 2026-04-18 — Tier 1
+- 3 parallel opus agents (T-004+T-005 packet, T-006 solo, T-007 solo). All COMPLETE. Commits: 6f31378, e913cb5, 541db89. Build P, Tests 1666 (+18 ark-view).
+- Codex tier-gate: 3 P2 findings — F-004 (HandleId `pub String` breaks opaque contract, fixed), F-005/F-006 (`#[non_exhaustive]` doc-overclaim on HandleKind/InvalidationCause wire compat — doc fixed). Gate PROCEED (no P0/P1).
+- Next: Tier 2 — T-008..T-013 (Pane<V>, Stack<V>, TabHandle, PaneLike, marker-gated impls, ParamsHash, SuppressionPolicy).
 
 ### Wave 1 — 2026-04-18 — Tier 0
 - 4 parallel opus agents (general-purpose, not ck:task-builder per memory). T-001/T-002/T-045 committed self; T-003 interrupted mid-commit, parent took ownership (per memory feedback_subagents — verify sha before marking DONE).

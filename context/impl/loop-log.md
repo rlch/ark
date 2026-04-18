@@ -76,3 +76,8 @@ Overall: 45/134 (34%). Next: Tier 2 (engine-claude-code + event-bus consumers, 1
 - Wave 1 (Tier 0): 4 parallel general-purpose opus agents. T-001/T-002/T-003/T-045 all COMPLETE. Commits: 20c21e6, b8e07ab, 8547655, 1544dab. Build P, Tests P (1648).
 - Codex tier-gate: 3 findings. F-003 fix 3133529. F-001 deferred→T-046 (facet-kdl limitation, pre-existing). F-002 deferred→T-043 sequenced.
 - Next: Tier 1 — T-004..T-007 (ark-view type primitives: HandleKind, HandleId, View traits, InvalidationCause).
+
+### Iteration Tier-1 — 2026-04-18 — phase-2
+- Wave 2 (Tier 1): 3 parallel general-purpose opus agents. T-004+T-005/T-006/T-007 all COMPLETE. Commits: 6f31378, e913cb5, 541db89. Build P, Tests P (1666).
+- Codex tier-gate: 3×P2 (all P2, gate PROCEED). F-004/F-005/F-006 fixed inline: dc90de0. HandleId internals now private; doc-comments no longer overclaim wire-compat from #[non_exhaustive].
+- Next: Tier 2 — T-008..T-013 (Pane<V>, Stack<V>, TabHandle, PaneLike, marker-gated impls, ParamsHash, SuppressionPolicy).
