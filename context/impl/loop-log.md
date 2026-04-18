@@ -4,6 +4,16 @@ last_edited: "2026-04-18"
 ---
 # Loop Log
 
+### Wave T-001..T-003 — 2026-04-18 — Tier 0 (claude-code-ext scaffolding)
+
+- T-001+T-002+T-003 DONE. coupled scaffolding landed as one commit per build-site guidance.
+- T-001: new top-level `extensions/` dir. `extensions/claude-code` added to workspace members (explicit line, not glob — `crates/*` globs don't reach outside `crates/`).
+- T-002: `Cargo.toml` with crate name `ark-ext-claude-code` (mirror `ark-ext-*` convention). dep budget per kit R1: ark-types, ark-ext-proto, ark-view, ark-scene, notify, tokio, serde, serde_json, tracing + async-trait. `async-trait` not in build-site list but NEEDED — upstream `ArkExtension` is `#[async_trait]`-based so `impl` block w/o dep doesn't compile. skipped ark-ext-metadata-types for now (no manifest work in scaffolding; T-019+ adds on demand).
+- T-003: `src/lib.rs` → `pub struct ClaudeCodeExtension;` unit struct + Default/Clone/Copy + empty `impl ArkExtension` (all 40+ methods inherit trait defaults that return `method_not_found` or `Ok(Default)`). doc-comment on every public symbol. T-020+ overrides methods incrementally.
+- T-003: `bin/cc-hook/main.rs` → empty `fn main()` with T-006 TODO comment. binary target wires through `[[bin]]` stanza; verified `cargo build -p ark-ext-claude-code --bin cc-hook` succeeds.
+- validation: `cargo build --workspace` → 0 errors. pre-existing wasm-build fallback warnings unchanged.
+- next: Tier 1 (T-004..T-008a) — salvage from pre-2026-04-18 deleted crates (hook/orchestrators/claude-code). blocked on T-003 which is now DONE.
+
 ### Wave T-044 — 2026-04-18 — Tier 8 (CI workspace green-gate) — PHASE 2 COMPLETE
 
 **PHASE 2 DONE: 45/45 tasks landed. Tier 8 closed. Build-site exhausted.**

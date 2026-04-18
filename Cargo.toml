@@ -51,6 +51,12 @@ members = [
     "crates/orchestrators/*",
     "crates/mux/*",
     "crates/plugins/*",
+    # T-001 (claude-code-ext R1): single-crate Claude Code extension.
+    # Lives at repo root under `extensions/` (NOT `crates/`) per the
+    # 2026-04-18 pivot — extensions are a distinct layer from core
+    # workspace crates even though they still share the cargo
+    # workspace. See cavekit-claude-code.md + build-site-claude-code-ext.md.
+    "extensions/claude-code",
 ]
 
 [workspace.package]

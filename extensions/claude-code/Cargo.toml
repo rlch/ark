@@ -1,0 +1,49 @@
+[package]
+name = "ark-ext-claude-code"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# T-001..T-003 (claude-code-ext R1 scaffolding): single-crate Claude Code
+# extension. Ships as a workspace member at `extensions/claude-code/`
+# (distinct from core `crates/*`) per the 2026-04-18 pivot.
+#
+# Contents (populated incrementally by T-004..T-045+):
+#   * `src/lib.rs` — `ClaudeCodeExtension` struct + `ArkExtension` impl.
+#   * `bin/cc-hook/main.rs` — subprocess binary invoked from
+#     `~/.claude/settings.json` hooks; POSTs NDJSON events to ark's
+#     per-session socket. See kit R1 / R2.
+#
+# Dep budget (R1):
+#   * `ark-types` — shared `SessionSpec` / `ExitReason` / event types.
+#   * `ark-ext-proto` — `ArkExtension` trait surface.
+#   * `ark-view` — typed `Handle` surface for `view.pane.v1`.
+#   * `ark-scene` — scene-compile-hook entry point for `use "claude-code"`.
+#   * `notify` — fs watcher for transcript-tail (T-007).
+#   * `tokio` — async runtime for hook socket + transcript tail.
+#   * `serde` / `serde_json` — NDJSON hook payload ser/de.
+#   * `tracing` — structured logs.
+#   * `async-trait` — required so `impl ArkExtension` can use
+#     `#[async_trait]` (the upstream trait is `#[async_trait]`-based;
+#     see `crates/ark-ext-proto/src/lib.rs`).
+
+[dependencies]
+ark-types = { path = "../../crates/types" }
+ark-ext-proto = { path = "../../crates/ark-ext-proto" }
+ark-view = { path = "../../crates/ark-view" }
+ark-scene = { path = "../../crates/scene" }
+notify = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+
+# T-003 (claude-code-ext R1): `cc-hook` binary target. Stubbed now;
+# T-006 populates the main with payload-forwarding logic.
+[[bin]]
+name = "cc-hook"
+path = "bin/cc-hook/main.rs"

@@ -300,6 +300,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ark-ext-claude-code"
+version = "0.1.0"
+dependencies = [
+ "ark-ext-proto",
+ "ark-scene",
+ "ark-types",
+ "ark-view",
+ "async-trait",
+ "notify 7.0.0",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ark-ext-derive"
 version = "0.1.0"
 dependencies = [
