@@ -161,6 +161,73 @@ No new proto version constants required. `CURRENT_PROTOCOL_VERSION` at ark-ext-p
 
 ---
 
+## Resolutions — 2026-04-18 follow-up interview
+
+All 10 open items from the initial decomposition resolved. These bind the 4 build sites and the kits they reference.
+
+### R-5 — `SessionOutcome` payload type
+
+Extend `ark-types::event::CoreEvent::SessionEnded` with `exit: ExitReason` alongside existing `terminated_at`. `ExitReason` enum: `Normal | Error(String) | Cancelled`. Phase 2 `on_session_end(&self, spec: &SessionSpec, exit: &ExitReason)`. No new crate or type required — lives in `ark-types::event`.
+
+*Rationale:* `CoreEvent::SessionEnded` already exists (`crates/types/src/event.rs:63`) as the terminal signal. Event bus is the natural carrier. No need for separate `SessionOutcome` type.
+
+### R-6 — Symbol-table cache hash algorithm
+
+`blake3`. Canonical, cryptographic, fast. No new workspace dep (check: if not already pulled in, add to `ark-ext-metadata-types` deps). Manifest-set reproducible hash key used for figment cache + scene-compile cache keys.
+
+### R-7 — Stack-child dynamic handle naming
+
+Ark auto-generates `<stack-handle>-<ulid>` for every `spawn_into` / `stack.spawn_pane()` call. Ulid is the low-26 bytes of the per-call timestamp-random ULID (lowercase). Extensions receive the generated `Pane<V>` handle as the return value of `stack.spawn_pane(attrs)`; they do not name the child themselves.
+
+*Rationale:* Mirrors `SessionId::as_path_leaf()` pattern (`<name>-<ulid>`). Collision-free under async races. Sortable.
+
+### R-8 — Scene union syntax: DEFERRED entirely to v0.2
+
+Scene R6's union syntax (`stack @h { A | B }`, `pane @h { A | B }`) **cut from scene-2026-04-18 landing.** Ship homogeneous stacks (`stack @h { foo }`) + single-view panes (`pane @h { foo }`) only.
+
+Consequences:
+- Parser rejects `|` in view-alias position.
+- View-type validator expects one declared view type per pane/stack.
+- `pane.replace_view::<V2>()` outside the declared type = compile error with no escape hatch.
+- If claude-code needs mode-swap semantics (waiting / active / permission), implement via an `enum ViewMode` inside a single `ClaudeCodeView` impl.
+- User-opened panes (via zellij keybinds, no `ARK_HANDLE`) remain outside the type system entirely — unrelated to scene's view-type constraints. Users add shells freely at runtime; they're invisible to extensions.
+
+*Rationale:* Union syntax was speculative for pi-v0.2 patterns that may not materialize. Claude-code v0.1 uses homogeneous-only. YAGNI for v0.1. If a real consumer emerges, re-introduce at that point.
+
+### R-9 — Stack sizing semantics
+
+`span` / `cells` / `min` / `max` on `stack` govern the stack container's share of its parent row/col. Child panes inside the stack ignore sizing attrs — zellij owns expand/collapse stacking. Child-level sizing attrs at parse = `error[scene/sizing-on-stack-child]` compile error.
+
+*Rationale:* Matches zellij's actual pane-stack model. Avoids a false affordance where ark would silently drop child sizing.
+
+### R-10 — `CompiledScene.view_table` accessor shape
+
+Private. Runtime access via `IntentContext::view_of(&HandleId) -> Option<&ViewDecl>` only. `CompiledScene` does not expose `view_table` publicly. If `ark scene debug` tooling eventually needs broader surface, widen then — don't pre-commit.
+
+*Rationale:* LSP/Zed/tower-lsp precedent: internal symbol stores stay private; runtime access via handle-scoped accessors. Narrow surface is easy to evolve.
+
+### R-11 — `crates/supervisor/src/factory.rs` disposition
+
+Delete `factory.rs` whole. Inline `build_multiplexer` into `orchestration.rs:66` (single caller). `build_engine` + `build_orchestrator` are dead code (no runtime callers, test-only). `SupervisorError` enum follows in Phase 5 cleanup.
+
+### R-12 — `run_preflight: bool` parameter
+
+Delete the param from `run_supervisor_with`. All callers pass `true`. `engine_stub::preflight` is a no-op. Inline the call, then delete `engine_stub.rs` as part of Phase 5 `Engine` trait removal (stub stack becomes unused).
+
+### R-13 — `cc-hook` install location
+
+`ark doctor --fix` places `cc-hook` at `$XDG_BIN_HOME/cc-hook` (default `~/.local/bin/cc-hook`) and writes absolute path into `~/.claude/settings.json` hook config. User does not need PATH tweak because Claude Code's hook config accepts absolute paths verbatim.
+
+Distribution: cc-hook embedded into the `ark` binary via `include_bytes!` at build time; `doctor --fix` writes the embedded bytes to disk with `0755`. Mirrors how ark ships wasm plugins today (`crates/cli/build.rs` compile-time wasm embedding → `~/.config/zellij/plugins/ark-*.wasm` at doctor-fix time).
+
+### R-14 — Claude Code project-dir encoding: NON-ISSUE
+
+Not a problem for ark. Every Claude Code hook payload carries `transcript_path` as an absolute path (e.g. `/Users/.../.claude/projects/.../transcript.jsonl`). cc-hook forwards the path verbatim to ark over the control socket; ark opens the path directly. No need to derive, hash, or encode the project directory name in ark code.
+
+*Evidence:* Hook docs at https://code.claude.com/docs/en/hooks show every event's JSON payload includes `transcript_path` as the first-class field.
+
+---
+
 ## Open items for decomposition agent
 
 1. **Capability taxonomy finalization.** Names above are illustrative; decomposition sub-kits should finalize the exact set + their methods.
