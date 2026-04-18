@@ -1173,6 +1173,7 @@ fn error_response(id: u64, e: &ExtensionError) -> Response {
         ExtensionError::CapabilityDenied(_) => -32003,
         ExtensionError::UnsupportedVersion(_) => -32004,
         ExtensionError::Crashed { .. } => -32005,
+        ExtensionError::HandleGone { .. } => -32006,
         ExtensionError::Internal(_) => -32000,
     };
     Response {

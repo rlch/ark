@@ -147,6 +147,23 @@ pub enum ExtensionError {
         /// 100 lines).
         stderr_tail: String,
     },
+
+    /// Op targeted a handle that is no longer valid. The host MUST return
+    /// this variant (not `method_not_found` nor `Internal`) for any op in
+    /// the R6 pane/* + stack/* surface invoked against an invalidated
+    /// handle. Mirrors the push-style `ark.handle.invalidated { handle,
+    /// cause }` ExtEvent for race-free pull-style detection; extensions
+    /// that miss the event observe the failure lazily. Per cavekit-
+    /// soul-phase-2-ark-view.md R7 + decision #3c.
+    ///
+    /// Wire error code (R12): `ext-proto/handle-gone`.
+    #[error("handle {handle} gone ({cause:?})")]
+    HandleGone {
+        /// The invalidated handle id that the op targeted.
+        handle: ark_view::HandleId,
+        /// Which of the three terminal causes produced the invalidation.
+        cause: ark_view::InvalidationCause,
+    },
 }
 
 impl ExtensionError {
@@ -187,6 +204,7 @@ impl ExtensionError {
             ExtensionError::InvalidParams(_) => "ext-proto/invalid-params",
             ExtensionError::Internal(_) => "ext-proto/internal",
             ExtensionError::Crashed { .. } => "ext/crashed",
+            ExtensionError::HandleGone { .. } => "ext-proto/handle-gone",
         }
     }
 }
@@ -1385,5 +1403,38 @@ mod tests {
     fn extension_error_displays_method_name() {
         let e = ExtensionError::method_not_found("foo/bar");
         assert_eq!(e.to_string(), "method not found: foo/bar");
+    }
+
+    /// R7 + R12: the wire error code for `HandleGone` MUST be stable at
+    /// `ext-proto/handle-gone` — transports key JSON-RPC `data` off
+    /// `ExtensionError::code()` so scene consumers can pattern-match
+    /// against the string without parsing `Display`.
+    #[test]
+    fn handle_gone_error_code_matches_wire_contract() {
+        let e = ExtensionError::HandleGone {
+            handle: ark_view::HandleId::new("abc"),
+            cause: ark_view::InvalidationCause::UserClosed,
+        };
+        assert_eq!(e.code(), "ext-proto/handle-gone");
+    }
+
+    /// Display string MUST surface both the handle id and the cause tag
+    /// — operators reading logs need to see which handle died and why
+    /// without cross-referencing the structured fields.
+    #[test]
+    fn handle_gone_display_mentions_handle_and_cause() {
+        let e = ExtensionError::HandleGone {
+            handle: ark_view::HandleId::new("pane-42"),
+            cause: ark_view::InvalidationCause::SceneReloadDropped,
+        };
+        let rendered = e.to_string();
+        assert!(
+            rendered.contains("pane-42"),
+            "expected handle id in display, got {rendered:?}"
+        );
+        assert!(
+            rendered.contains("SceneReloadDropped"),
+            "expected cause tag in display, got {rendered:?}"
+        );
     }
 }
