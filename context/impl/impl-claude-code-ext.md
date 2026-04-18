@@ -12,9 +12,9 @@ Ledger is append-only. Newest entries at top.
 
 | Task | Tier | Kit R | Status | SHA | Notes |
 |------|------|-------|--------|-----|-------|
-| T-001 | 0 | R1 | DONE | `<PENDING>` | `extensions/` workspace dir + registered in top-level `Cargo.toml` members |
-| T-002 | 0 | R1 | DONE | `<PENDING>` | `extensions/claude-code/Cargo.toml` with R1 dep budget + `[[bin]] cc-hook` target at `bin/cc-hook/main.rs` |
-| T-003 | 0 | R1 | DONE | `<PENDING>` | `src/lib.rs` with `ClaudeCodeExtension` unit struct + empty `impl ArkExtension` (trait defaults inherited); `bin/cc-hook/main.rs` empty-body stub with T-006 TODO |
+| T-001 | 0 | R1 | DONE | `829fa3c` | `extensions/` workspace dir + registered in top-level `Cargo.toml` members |
+| T-002 | 0 | R1 | DONE | `829fa3c` | `extensions/claude-code/Cargo.toml` with R1 dep budget + `[[bin]] cc-hook` target at `bin/cc-hook/main.rs` |
+| T-003 | 0 | R1 | DONE | `829fa3c` | `src/lib.rs` with `ClaudeCodeExtension` unit struct + empty `impl ArkExtension` (trait defaults inherited); `bin/cc-hook/main.rs` empty-body stub with T-006 TODO |
 
 ## Tier 0 notes (2026-04-18)
 
