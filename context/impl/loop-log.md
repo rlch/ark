@@ -4,6 +4,20 @@ last_edited: "2026-04-18"
 ---
 # Loop Log
 
+### Wave T-043 — 2026-04-18 — Tier 8 (proto version bump)
+- T-043 DONE. bump `CURRENT_PROTOCOL_VERSION` 1.0→1.1. one-line const change + fat doc-comment enumerating 1.1 adds (6 RPC methods, 6 feature-group hooks, 8-flag caps, `-32006 handle-gone` wire code). grep-swept `"1\.0"` + `::new\(1,\s*0\)` across `crates/` — 11 hits total, ALL explicit test fixtures or unrelated strings:
+  - `ark-ext-test-support/tests/version_mismatch.rs` (T-039 matrix) — drives versions via `ProtocolVersion::new(1, 0|1)` literals; no const dep; 5/5 cells still green.
+  - `ark-ext-proto/tests/conformance.rs` + `conformance/stub.rs` — `ConformanceStub::with_version("1.0")` literal (ext-side reported version, not host const).
+  - `ark-ext-proto/src/lib.rs:1713` — `StubExt` default-impl test just passes `"1.0"` as a string to exercise `MethodNotFound`; unrelated to const.
+  - `ark-ext-proto/src/transport/mod.rs` (5 hits) — unit tests for `is_compatible` + `handshake_*` explicitly drive `ProtocolVersion::new(1, 0)` vs `(1, 5)/(2, 0)` to pin MAJOR semantics; bump-invariant.
+  - `ark-ext-test-support/src/lib.rs:443` — the `stub_protocol_version_override` self-test explicitly sets 1.0; unrelated.
+  - `scene/src/error.rs:942` + `scene/tests/errors.rs:304` — `SceneError::ExtProtoUnsupportedVersion { actual: "1.0", required: ">= 2.0" }` error-display test; freeform strings.
+  - `cli/src/commands/doctor.rs:1602` — `CheckResult::ok("claude", "1.0")` is the `claude` CLI version string from `claude --version`, NOT proto.
+- ZERO test-fixture manifest updates needed (those are `extension.version = "1.0.0"` semver, not proto).
+- validation: `cargo build --workspace` clean; `cargo test -p ark-ext-proto` 84/0; `cargo test -p ark-ext-test-support` 15/0 (incl. `--test version_mismatch` 5/0); `cargo test -p ark-supervisor` 134/0/3-ign; `cargo test --workspace --lib` 1807/0; `cargo test --workspace` 2062/0/19-ign. baseline preserved (+0 tests since T-042 — no new tests; const-only change).
+- F-002 (P1 finding from Tier 0 Codex review) now cleared — 1.1 bump lands with the full additive surface behind it, as scheduled by build-site sequencing.
+- Next: T-044 (CI gate) — last Phase 2 task.
+
 ### Wave T-042 — 2026-04-18 — Tier 7 (tests R6 + R7)
 - T-042 (soul phase 2 tests R6+R7): integration suite. DONE. 10 tests pass (4 R6 + 6 R7), 0 fail, 0 ignore.
 - New files:

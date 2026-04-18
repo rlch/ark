@@ -294,7 +294,24 @@ impl ProtocolVersion {
 /// Compile-time host-side protocol version this build of `ark-ext-proto`
 /// supports. Used by [`ExtensionClient::handshake`] as the
 /// `client_version` default.
-pub const CURRENT_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(1, 0);
+///
+/// **1.1 additions over 1.0** (Phase 2, additive — MAJOR unchanged):
+/// * 6 new RPC methods — `pane/emit`, `pane/replace_view`, `pane/close`,
+///   `stack/spawn_pane`, `stack/close_child`, `stack/clear`
+///   (cavekit-soul-phase-2 T-018/T-019).
+/// * 6 new feature-group hooks — `on_session_start`, `on_session_end`,
+///   `scene_compile_hook`, `control_verbs`, `doctor_checks`,
+///   `list_columns` (T-020/T-021).
+/// * 8-flag capability taxonomy — see [`PHASE_2_CAPABILITY_FLAGS`]
+///   (T-024); each flag gates a method/hook group (T-028/T-029).
+/// * New wire code `-32006 ext-proto/handle-gone` +
+///   [`ExtensionError::HandleGone`]; `SessionEnded.exit: ExitReason`
+///   (T-014/T-045).
+///
+/// All additions are guarded by capability flags; a 1.0 client talking
+/// to a 1.1 extension is still compatible under [`ProtocolVersion::is_compatible`]
+/// (same MAJOR = OK + soft WARN per R16).
+pub const CURRENT_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(1, 1);
 
 /// v1 capability-flag taxonomy (Phase 2 ext-surface R6).
 ///
