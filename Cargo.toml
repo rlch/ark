@@ -4,7 +4,6 @@ members = [
     "crates/cli",
     "crates/config",
     "crates/core",
-    "crates/hook",
     "crates/pane",
     # T-001: fresh v3 scene crate (Rhai + facet-kdl stack). Replaces the
     # archived v2 crate as the canonical `ark-scene` package. Populated
@@ -55,7 +54,9 @@ members = [
     # `ark-supervisor::engine_stub` + `acp-client` (ACP wire
     # client). Future engines ship as extensions (R17 rung 3), not
     # as workspace-member crates.
-    "crates/orchestrators/*",
+    # Cleanup P4-R2/P4-R3/P4-R6: `crates/orchestrators/*` glob removed —
+    # both ark-orchestrators-cavekit + ark-orchestrators-claude-code
+    # crates are gone; orchestrator workflow lives in extensions now.
     "crates/mux/*",
     "crates/plugins/*",
     # T-001 (claude-code-ext R1): single-crate Claude Code extension.

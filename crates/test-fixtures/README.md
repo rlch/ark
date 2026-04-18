@@ -60,8 +60,12 @@ The spec (`context/kits/cavekit-testing.md` R2) calls out these consumers:
 
 - Engine contract suite (T-114) — hook payloads + transcripts.
 - Orchestrator contract suite (T-115) — cavekit-project fixture directory.
-- Engine unit tests (`ark-engines-claude-code`) — hook payloads.
-- Orchestrator unit tests (`ark-orchestrators-cavekit`) — cavekit-project.
+- Engine unit tests (historical: `ark-engines-claude-code`) — hook payloads.
+- Orchestrator unit tests (historical: ark orchestrator crates) — cavekit-project.
+
+(Historical consumers were deleted in cleanup Packet A — Tier 1 removed
+the `crates/orchestrators/*` glob. Fixture files retained in case a
+future extension reuses the layout.)
 
 Crates pull this crate in as a `dev-dependency` (wiring lands in T-114+).
 

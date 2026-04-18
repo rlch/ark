@@ -12,9 +12,10 @@ last_modified: "2026-04-15T11:05:00Z"
 
 ## Your Role
 
-Fixture ralph-loop document. Watched by `ark-orchestrators-cavekit` ralph-loop
-watcher. Iteration counter, status, and started_at are the load-bearing
-fields; everything else is prose that the parser must ignore.
+Fixture ralph-loop document. Historically watched by the ark orchestrator
+crate's ralph-loop watcher (removed in cleanup Packet A Tier 1).
+Iteration counter, status, and started_at are the load-bearing fields;
+everything else is prose that the parser must ignore.
 
 ## Read These First
 

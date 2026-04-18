@@ -4,6 +4,17 @@ last_edited: "2026-04-19"
 ---
 # Loop Log
 
+### Wave cleanup-A-Tier1 — 2026-04-19 — cavekit-soul cleanup Packet A Tier 1 (T-003 + T-004 + T-005)
+
+- scope: `crates/orchestrators/` + `crates/hook/` deleted outright. workspace Cargo.toml members trimmed; cli + supervisor dep entries dropped; orchestrators/* glob comment-replaced.
+- factory.rs REF-PATCH (NOT deletion — Packet B T-008 owns): both `use ark_orchestrators_*::…` imports removed. `build_orchestrator` now `Err` for every slug + TODO(cleanup-T-008). per-slug positive tests (cavekit / claude-code) + `cavekit_orchestrator_name_is_cavekit` gone; single `build_orchestrator_always_errors` replacement asserts negative contract. doc-comments rewritten without concrete type names so T-007 grep gate is clean.
+- justfile: install + uninstall targets stripped of `ark-hook` lines.
+- test-fixtures/tests/fixtures/cavekit-project/ prose (5 md files) + test-fixtures/README.md annotated "historical — crate removed" so `ark-orchestrators-cavekit` string no longer appears in crates/ tree.
+- ark-bus plugin still has 10+ `ark-hook` string refs in comments + 2 `PathBuf::from("ark-hook")` runtime-spawn callsites. OUT OF SCOPE for Packet A — grep gate is `ark_hook` (underscore / crate-name) not `ark-hook` (kebab / external-binary-name). Documenting: the hidden `ark-hook intent/emit` panes spawned from ark-bus will fail at runtime now that the binary is gone; rerouting that IPC is a v0.2 concern.
+- greps (crates/): ark_hook=0; ark_orchestrators=0; CavekitOrchestrator=0; ClaudeCodeOrchestrator=0.
+- `cargo check --workspace --tests` = 0 errors; 21 crates (was 27 pre-cleanup — 6 crates gone: orchestrators/cavekit, orchestrators/claude-code, hook, and 3 of their dev-test target crates).
+- next: Tier 2 — delete `crates/types/src/permission.rs` + `pub mod`/`pub use` entries + full green gate.
+
 ### Wave cleanup-A-Tier0 — 2026-04-19 — cavekit-soul cleanup Packet A Tier 0 (T-001 + T-002)
 
 - head pre-wave `216c675`. serial main. scope: `crates/cli/Cargo.toml` + `context/impl/cleanup-*.md` only.

@@ -82,21 +82,23 @@ docs-build:
 fmt-check:
     cargo fmt --all -- --check
 
-# Install ark + ark-hook to ~/.cargo/bin from this checkout.
+# Install ark to ~/.cargo/bin from this checkout.
 # Builds wasm plugins first so they get embedded in the binary
 # (status bar + picker won't work without this step).
+#
+# Cleanup P4-R4: the legacy `ark-hook` binary (crates/hook/) was absorbed
+# into the claude-code extension as `extensions/claude-code/bin/cc-hook/`
+# and is no longer installed alongside `ark`.
 install: wasm
     cargo install --path crates/cli --bin ark --force --locked
-    cargo install --path crates/hook --bin ark-hook --force --locked
     @echo ""
-    @echo "ark + ark-hook installed to ~/.cargo/bin"
+    @echo "ark installed to ~/.cargo/bin"
     @echo "Next: run 'ark doctor --fix' to write embedded plugins"
     @echo "      and print the zellij KDL keybind snippet."
 
-# Remove ark + ark-hook from ~/.cargo/bin.
+# Remove ark from ~/.cargo/bin.
 uninstall:
     cargo uninstall ark-cli
-    cargo uninstall ark-hook
 
 # T-1.5: regenerate crates/scene/share/scene.kdl-schema by walking the
 # facet SHAPE of ark-scene's AST. Runs the `gen-scene-schema` binary, then

@@ -5,8 +5,9 @@ last_edited: "2026-04-15"
 
 # Build Site — TEST-001 fixture
 
-8 tasks across 2 tiers. Minimal cavekit-shaped build site exercised by
-`ark-orchestrators-cavekit` contract tests.
+8 tasks across 2 tiers. Minimal cavekit-shaped build site historically
+exercised by the ark orchestrator crate's contract tests (crate removed
+in cleanup Packet A Tier 1).
 
 ```mermaid
 graph TD

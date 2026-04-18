@@ -55,8 +55,6 @@ ark-scene = { path = "../scene" }
 # re-emit them with ark-ext-metadata::extension_metadata_kdl_string.
 ark-ext-metadata = { path = "../ark-ext-metadata" }
 ark-ext-metadata-types = { path = "../ark-ext-metadata-types" }
-ark-orchestrators-cavekit = { path = "../orchestrators/cavekit" }
-ark-orchestrators-claude-code = { path = "../orchestrators/claude-code" }
 ark-mux-zellij = { path = "../mux/zellij" }
 clap = { workspace = true }
 facet = { workspace = true }

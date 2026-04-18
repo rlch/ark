@@ -1,7 +1,8 @@
 # cavekit-project fixture
 
-Minimal cavekit-shaped project tree consumed by `ark-orchestrators-cavekit`
-contract tests (T-114/T-115).
+Minimal cavekit-shaped project tree (historically consumed by the
+ark orchestrator crate's contract tests T-114/T-115; crate removed in
+cleanup Packet A Tier 1, fixture preserved for future extension reuse).
 
 ## Layout
 

@@ -13,20 +13,18 @@
 //! [`ark_types::ENGINES_V1`] / [`ark_types::ORCHESTRATORS_V1`] /
 //! [`ark_types::MUX_V1`]).
 //!
-//! ## Cavekit orchestrator
+//! ## Orchestrator factory
 //!
-//! T-083 wires the real [`ark_orchestrators_cavekit::CavekitOrchestrator`]
-//! here (previously a stub delegating to `ClaudeCodeOrchestrator`). The
-//! full orchestrator spawns the R4–R8 watchers and runs the R9 done-signal
-//! resolver.
+//! Cleanup Packet A T-003/T-004 deleted the concrete orchestrator
+//! crates; `build_orchestrator` now only returns `Err` for every slug.
+//! Packet B T-008 deletes this file outright (no production caller
+//! remains).
 
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use ark_core::{Config, Engine, Orchestrator};
 use ark_mux_zellij::ZellijMux;
-use ark_orchestrators_cavekit::CavekitOrchestrator;
-use ark_orchestrators_claude_code::ClaudeCodeOrchestrator;
 use ark_types::is_v1_mux;
 use thiserror::Error;
 
@@ -110,15 +108,16 @@ pub fn build_engine(slug: &str, _config: &Config) -> Result<Box<dyn Engine>> {
 // ---------------------------------------------------------- orchestrators ----
 
 /// Mint a concrete `Orchestrator` trait object for `slug`.
+///
+/// TODO(cleanup-T-008): this function is dead — Packet B T-008 deletes
+/// `factory.rs` outright. Packet A Tier 1 (T-003 / T-004) deleted the only
+/// concrete orchestrator crates, so every slug now returns `Err`. No
+/// production caller invokes this path (`run_supervisor` hard-codes
+/// `orchestrator = None`).
 pub fn build_orchestrator(slug: &str, _config: &Config) -> Result<Box<dyn Orchestrator>> {
-    // cavekit-soul Phase 1: orchestrator slugs no longer live in core scope.
-    match slug {
-        "cavekit" => Ok(Box::new(CavekitOrchestrator::new())),
-        "claude-code" => Ok(Box::new(ClaudeCodeOrchestrator::new())),
-        other => Err(anyhow!(
-            "unknown orchestrator slug `{other}` — known: cavekit, claude-code"
-        )),
-    }
+    Err(anyhow!(
+        "orchestrator slug `{slug}` unresolvable — concrete orchestrator crates were removed in cleanup Packet A (see TODO(cleanup-T-008))"
+    ))
 }
 
 // --------------------------------------------------------------- mux --------
@@ -174,29 +173,21 @@ mod tests {
         assert!(msg.contains("empty"), "got: {msg}");
     }
 
+    // TODO(cleanup-T-008): the per-slug positive tests were removed
+    // with the concrete orchestrator crates (cleanup P4-R2/P4-R3).
+    // Only the unreachable-slug negative test survives until T-008
+    // deletes `factory.rs` whole.
     #[test]
-    fn build_orchestrator_cavekit_returns_ok() {
+    fn build_orchestrator_always_errors() {
         let c = cfg();
-        let o = build_orchestrator("cavekit", &c).expect("cavekit orchestrator");
-        assert_eq!(o.name(), "cavekit");
-    }
-
-    #[test]
-    fn build_orchestrator_claude_code_returns_ok() {
-        let c = cfg();
-        let o = build_orchestrator("claude-code", &c).expect("claude-code orchestrator");
-        assert_eq!(o.name(), "claude-code");
-    }
-
-    #[test]
-    fn build_orchestrator_unknown_slug_errors() {
-        let c = cfg();
-        let err = match build_orchestrator("ralph", &c) {
-            Ok(_) => panic!("must error"),
-            Err(e) => e,
-        };
-        let msg = format!("{err}");
-        assert!(msg.contains("unknown orchestrator"), "got: {msg}");
+        for slug in ["cavekit", "claude-code", "ralph", ""] {
+            let err = match build_orchestrator(slug, &c) {
+                Ok(_) => panic!("build_orchestrator({slug}) must error"),
+                Err(e) => e,
+            };
+            let msg = format!("{err}");
+            assert!(msg.contains("unresolvable"), "got: {msg}");
+        }
     }
 
     #[test]
@@ -222,9 +213,6 @@ mod tests {
         let _ = is_v1_mux;
     }
 
-    #[test]
-    fn cavekit_orchestrator_name_is_cavekit() {
-        let o = CavekitOrchestrator::new();
-        assert_eq!(o.name(), "cavekit");
-    }
+    // TODO(cleanup-T-008): concrete-orchestrator identity tests were
+    // deleted (cleanup P4-R2) — the concrete types no longer exist.
 }

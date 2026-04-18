@@ -228,8 +228,6 @@ dependencies = [
  "ark-ext-metadata",
  "ark-ext-metadata-types",
  "ark-mux-zellij",
- "ark-orchestrators-cavekit",
- "ark-orchestrators-claude-code",
  "ark-pane",
  "ark-scene",
  "ark-supervisor",
@@ -395,21 +393,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ark-hook"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "ark-types",
- "clap 4.6.0",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "ark-mux-zellij"
 version = "0.1.0"
 dependencies = [
@@ -425,43 +408,6 @@ dependencies = [
  "tokio",
  "tracing",
  "ulid",
-]
-
-[[package]]
-name = "ark-orchestrators-cavekit"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "ark-core",
- "ark-mux-zellij",
- "ark-test-fixtures",
- "ark-types",
- "async-trait",
- "chrono",
- "notify 7.0.0",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "ark-orchestrators-claude-code"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "ark-core",
- "ark-mux-zellij",
- "ark-types",
- "async-trait",
- "chrono",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-util",
- "tracing",
 ]
 
 [[package]]
@@ -558,8 +504,6 @@ dependencies = [
  "ark-ext-proto",
  "ark-ext-test-support",
  "ark-mux-zellij",
- "ark-orchestrators-cavekit",
- "ark-orchestrators-claude-code",
  "ark-scene",
  "ark-types",
  "ark-view",
