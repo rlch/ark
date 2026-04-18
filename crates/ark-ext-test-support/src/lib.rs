@@ -41,12 +41,13 @@
 use ark_ext_metadata_types::ExtensionMetadata;
 use ark_ext_proto::{
     ArkExtension, ControlVerbsRequest, ControlVerbsResponse, DoctorChecksRequest,
-    DoctorChecksResponse, ExtResult, ExtensionError, ListColumnsRequest, ListColumnsResponse,
-    OnSessionEndRequest, OnSessionEndResponse, OnSessionStartRequest, OnSessionStartResponse,
-    PHASE_2_CAPABILITY_FLAGS, PaneCloseRequest, PaneCloseResponse, PaneEmitRequest,
-    PaneEmitResponse, PaneReplaceViewRequest, PaneReplaceViewResponse, ProtocolVersion,
-    SceneCompileHookRequest, SceneCompileHookResponse, StackClearRequest, StackClearResponse,
-    StackCloseChildRequest, StackCloseChildResponse, StackSpawnPaneRequest, StackSpawnPaneResponse,
+    DoctorChecksResponse, ExtResult, ExtensionError, InitializeRequest, InitializeResponse,
+    ListColumnsRequest, ListColumnsResponse, OnSessionEndRequest, OnSessionEndResponse,
+    OnSessionStartRequest, OnSessionStartResponse, PHASE_2_CAPABILITY_FLAGS, PaneCloseRequest,
+    PaneCloseResponse, PaneEmitRequest, PaneEmitResponse, PaneReplaceViewRequest,
+    PaneReplaceViewResponse, ProtocolVersion, SceneCompileHookRequest, SceneCompileHookResponse,
+    StackClearRequest, StackClearResponse, StackCloseChildRequest, StackCloseChildResponse,
+    StackSpawnPaneRequest, StackSpawnPaneResponse,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -270,6 +271,26 @@ fn empty_manifest() -> ExtensionMetadata {
 
 #[async_trait::async_trait]
 impl ArkExtension for StubExtension {
+    /// Handshake override: echo the configured
+    /// [`ProtocolVersion`] + advertised capability bag so
+    /// [`ark_ext_proto::ExtensionClient::handshake`] can exercise the
+    /// version-compat gate (kit R3 — version-mismatch matrix). The
+    /// default trait body returns `method_not_found`, which would
+    /// prevent the gate from ever seeing the ext's version.
+    async fn initialize(&self, _req: InitializeRequest) -> ExtResult<InitializeResponse> {
+        // Build the `extension_capabilities` bag from the advertised
+        // set. `ark_ext_proto::Capabilities::to_wire` emits the R10
+        // object-of-objects shape expected by the handshake round-trip
+        // test in `ark-ext-proto/src/transport/mod.rs`.
+        let caps = ark_ext_proto::Capabilities::from_iter(self.inner.advertised.iter().cloned());
+        Ok(InitializeResponse {
+            protocol_version: self.inner.protocol_version.to_wire(),
+            extension_capabilities: caps.to_wire(),
+            extension_info: r#"{"name":"ark-ext-test-support-stub","version":"0.0.0"}"#.into(),
+            session_token: String::new(),
+        })
+    }
+
     async fn pane_emit(&self, req: PaneEmitRequest) -> ExtResult<PaneEmitResponse> {
         self.dispatch("pane/emit", req)
     }

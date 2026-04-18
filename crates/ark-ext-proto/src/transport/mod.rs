@@ -534,6 +534,23 @@ pub trait ExtensionClient: Send + Sync {
                 ext = ext_version.to_wire(),
             )));
         }
+        // R16 3-tier policy — same MAJOR, newer MINOR on the ext side
+        // runs in best-effort mode. Emit a WARN enumerating the caps
+        // the ext advertises so host operators can diagnose unknown
+        // surfaces. Kit R3 (soul phase 2 cavekit-tests) pins this
+        // behaviour on the `1.0 ↔ 1.1` row of the version-mismatch
+        // matrix — a test-attached subscriber asserts the WARN fires.
+        if ext_version.minor > client_version.minor {
+            tracing::warn!(
+                target: "ark.ext_proto.handshake",
+                client_version = %client_version.to_wire(),
+                ext_version = %ext_version.to_wire(),
+                ext_capabilities = %resp.extension_capabilities,
+                "extension reports newer MINOR version than this client; \
+                 running in best-effort mode — capabilities the ext \
+                 advertises may not be recognised"
+            );
+        }
         // Host always controls the session token — overwrite whatever
         // the extension echoed (extension echoes `""` per spec).
         resp.session_token = SessionToken::mint().as_str().to_string();

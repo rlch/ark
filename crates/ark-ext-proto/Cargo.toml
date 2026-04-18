@@ -61,6 +61,11 @@ ark-view = { path = "../ark-view" }
 # NOT depend on ark-types" note in supervision.rs:16 (stale from v0.1
 # when ark-types was broader).
 ark-types = { path = "../types" }
+# T-039 (soul phase 2 cavekit-tests R3): `ExtensionClient::handshake`
+# emits a `tracing::warn!` when the extension reports a newer MINOR
+# version than the client (same MAJOR, best-effort mode per R16's
+# 3-tier version policy). Zero-cost when no subscriber is installed.
+tracing = { workspace = true }
 
 [[bin]]
 # T-9.5.2 (cavekit-scene R16): canonical extension-protocol.kdl emitter.

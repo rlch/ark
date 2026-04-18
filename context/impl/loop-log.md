@@ -4,6 +4,26 @@ last_edited: "2026-04-18"
 ---
 # Loop Log
 
+### Wave T-039 — 2026-04-18 — Tier 7 (tests R3)
+- T-039 (soul phase 2 tests R3): version-mismatch matrix. DONE. 5 cells all green.
+- New file `crates/ark-ext-test-support/tests/version_mismatch.rs` — drives `ExtensionClient::handshake` against `StubExtension::builder().with_protocol_version(...)` to exercise 5 (client × ext) (MAJOR.MINOR) pairings.
+- Wiring touched (scope-minimal — grep-verified absent first):
+  - `ark-ext-test-support/src/lib.rs`: added `initialize` override on `StubExtension::ArkExtension` impl so the stub's configured `protocol_version` + advertised bag surface in the `InitializeResponse`. Default trait body returned `method_not_found`, would have short-circuited handshake before version gate. `Capabilities::from_iter` + `to_wire` build the R10 object-of-objects shape.
+  - `ark-ext-proto/src/transport/mod.rs`: `ExtensionClient::handshake` now emits one `tracing::warn!` on `target = "ark.ext_proto.handshake"` when `ext.minor > client.minor` (same MAJOR). Fields: `client_version`, `ext_version`, `ext_capabilities`, message. Honours R3 "ark logs a WARN ... the ext advertises that this ark doesn't recognize". Existing MAJOR-mismatch `UnsupportedVersion` error kept untouched.
+  - `ark-ext-proto/Cargo.toml`: add `tracing = workspace` dep (was absent — no tracing usage anywhere in this crate pre-T-039).
+  - `ark-ext-test-support/Cargo.toml`: add `tracing`, `tracing-subscriber`, `futures` as dev-deps for the capture-layer in the new test file.
+- 5 cells (all tokio `current_thread` flavor so the thread-scoped `tracing_subscriber::with_default` sees the event — tokio multi-thread block_on swaps dispatchers):
+  1. `handshake_version_match_1_1_and_1_1_ok_no_warn` — client=1.1, ext=1.1 → Ok, warns empty, session_token minted.
+  2. `handshake_version_mismatch_client_newer_minor_ok_no_warn` — client=1.1, ext=1.0 → Ok, zero warns (host newer, ext older: caps simply not advertised).
+  3. `handshake_version_mismatch_ext_newer_minor_ok_with_warn` — client=1.0, ext=1.1 → Ok, exactly-one WARN with both version strings + advertised capability bag.
+  4. `handshake_version_mismatch_major_client_newer_rejects` — client=2.0, ext=1.1 → `ExtensionError::UnsupportedVersion(msg)` where msg contains "2.0", "1.1", "MAJOR mismatch"; stub call_log stays empty (no subsequent RPC).
+  5. `handshake_version_mismatch_major_ext_newer_rejects` — client=1.1, ext=2.0 → symmetric reject; call_log empty.
+- Used `futures::executor::block_on` inside the `with_default(subscriber, || …)` closure to keep the subscriber on the executing thread (same pattern as `supervisor::ext_loader::tests`). tokio `block_on` would swap the thread-local dispatcher.
+- Capture layer scoped via `with_default` (not global) so prior or future tests in the same process don't leak events; `rebuild_interest_cache` on install to survive any prior global subscriber from other test suites.
+- Validation: `cargo test -p ark-ext-test-support --test version_mismatch` — 5 passed / 0 failed. `cargo test -p ark-ext-test-support` 15 passed (+5 over baseline). `cargo test -p ark-ext-proto` 84 passed (existing handshake_fails_on_major_mismatch still green — no regression). `cargo test -p ark-supervisor` 121 passed. `cargo build --workspace` clean. `cargo test --workspace --lib` 1807 passed (no change — this test file is integration, not lib).
+- Not touched: scene, cli, config, ark-view, supervisor prod code. ext_loader warn path untouched (complementary warn — this new one fires in `ExtensionClient::handshake` before any loader sees the capability bag).
+- Next: Tier 7 continues with T-040 (capability-gate matrix), T-042 (intent + suppression integration), then Tier 8 T-043/T-044.
+
 ### Wave T-038 — 2026-04-18 — Tier 7 (tests R2)
 - T-038 (soul phase 2 tests R2): NDJSON subprocess stub. DONE.
 - New bin `ark-stub-ext` in crate `ark-ext-test-support` — `src/bin/ark-stub-ext.rs`. Bin wrap R1 StubExtension in `ark_ext_proto::transport::ndjson::NdjsonServer::serve`, pump stdin→stub→stdout. `tokio::main(flavor = "current_thread")` keep dep-budget tight. No new workspace dep needed — all pieces already in `ark-ext-proto`.
