@@ -260,9 +260,18 @@ impl<V: View> Stack<V> {
     /// a `HandleGone`-shaped error (R7). This is INTENTIONAL for v0.1
     /// so scene/ext code can compile and unit-test against the surface.
     pub fn spawn_pane(&self, _attrs: PaneAttrs) -> Pane<V> {
-        // Placeholder: returns a Pane wrapping a synthetic handle.
-        // Replaced with real RPC invocation in T-018+.
-        Pane::from_handle(HandleId::new("__unwired_stack_spawn__"))
+        // Placeholder: distinct synthetic handles per call so callers
+        // can still distinguish two spawned children by handle before
+        // RPC wiring lands. `<stack-handle>-<monotonic>` mirrors R-7's
+        // production format (stack-handle-ulid) in spirit. Replaced
+        // with real RPC invocation in T-018+.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        Pane::from_handle(HandleId::new(format!(
+            "__unwired_spawn__-{}-{n}",
+            self.handle.as_str()
+        )))
     }
 
     /// Close a specific child pane without tearing down the stack
