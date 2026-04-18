@@ -4,6 +4,29 @@ last_edited: "2026-04-18"
 ---
 # Loop Log
 
+### Wave T-042 — 2026-04-18 — Tier 7 (tests R6 + R7)
+- T-042 (soul phase 2 tests R6+R7): integration suite. DONE. 10 tests pass (4 R6 + 6 R7), 0 fail, 0 ignore.
+- New files:
+  - `crates/supervisor/tests/manifest_intent_integration.rs` — 4 tests. (1) `manifest_intent_appears_in_registry` activates stub manifest via `ark_scene::ext::ExtensionRegistry::activate`, asserts `registry.intent_names()` contains `"stub.hello"` + `resolve_intent` returns Some; (2) `scene_op_dispatches_to_manifest_intent` registers a capturing handler on StubExtension's `intent/dispatch` method, invokes `stub.intent_dispatch(name="stub.hello", args="\"world\"")`, asserts call-log + captured req.name + req.args; (3) `intent_register_rpc_method_is_gone` reads `crates/ark-ext-proto/src/lib.rs` via `CARGO_MANIFEST_DIR`-relative path, asserts `"intent/register"` string literal absent + `fn intent_register(` absent (allows `intent_unregister`/`intent_dispatch` which are retained); (4) `undeclared_intent_scene_op_rejected_at_compile` asserts the trybuild fixture + golden stderr + harness wiring exist with `.kdl:line:col: unknown intent` pointer in the golden.
+  - `crates/supervisor/tests/suppression_invalidation.rs` — 6 tests. FakeExtEventBus helper publishes `{ext:"ark", kind:"handle.invalidated", payload:{handle, cause}}` matching T-015 golden shape. `simulate_user_close()` helper bundles `ClosedByUserMap::record` + bus publish per SuppressionPolicy invariants #1/#5/#6. (1) user_close records + emits; (2) same params → consult Skip; (3) new params → consult EvictAndSpawn → post-evict Spawn; (4) pane/emit against invalidated handle → ExtensionError::HandleGone (stub handler consults shared invalidated set); (5) drop + fresh ClosedByUserMap = empty (session-scoped invariant #3); (6) stack-child close is_stack_child=true skips map write but still broadcasts invalidated event (invariants #5 + #6).
+  - `crates/scene/tests/ui/undeclared_intent_reference.rs` + `.stderr` — trybuild fixture for R6 #4. Scene has `on "FileEdited" { intent "ext.a.undeclared" "payload" }`; manifest declares only `intent "declared"`. Golden: `tests/ui/fixtures/undeclared_intent_reference.kdl:4:16: unknown intent ext.a.undeclared — no loaded extension manifest declares it (per decision #2 ...)`.
+- scene-macros scope bump (option A per task plan — natural extension, ~30 LOC):
+  - `crates/scene-macros/src/lib.rs`: added case (5) `check_intent` validator. Walks scene for `intent "name" [args...]` nodes; name is fully-qualified; passes if starts with `ark.core.` OR appears in manifest-derived intent table. Manifest parser extended to pick up `intents { intent "name" { ... } }` children (mirrors views grammar). Replaced the `(String, Vec<ViewDecl>)` tuple with a `ParsedManifest` struct carrying views + intents. Doc-comment + mini-grammar table updated.
+  - `crates/scene/tests/view_types_trybuild.rs` harness adds one new `t.compile_fail("tests/ui/undeclared_intent_reference.rs")` line.
+- Small public-API widening (justified):
+  - `ark_scene::ext::ExtensionRegistry::intent_names()` — sorted `Vec<&str>` of fully-qualified declared intents. Minimal mirror of existing `resolve_intent` API; kit R6 bullet 1 explicitly says `registry.names()`.
+  - `ark_ext_test_support::StubExtension::intent_dispatch` override — routes through the same JSON-erased handler table as every other method so tests can register per-intent behaviour via `.with_method("intent/dispatch", ...)`. Missing before; trait default was `method_not_found`, blocking R6 bullet 2.
+- Validation:
+  - `cargo test -p ark-supervisor --test manifest_intent_integration` → 4/4 pass.
+  - `cargo test -p ark-supervisor --test suppression_invalidation` → 6/6 pass.
+  - `cargo test -p ark-scene --test view_types_trybuild` → 2/2 pass (4 R5 goldens + 1 new R6 golden = 5 compile-fail; 2 compile-pass).
+  - `cargo test -p ark-ext-test-support` → 15 pass (+4 from baseline 11; StubExtension's intent_dispatch override is covered via new R6 test).
+  - `cargo test -p ark-scene --tests` → 597 pass.
+  - `cargo test --workspace --lib` → 1807 pass (unchanged from T-040 baseline).
+  - `cargo build --workspace` clean (pre-existing dead-code warnings only).
+- Not touched: scene runtime, cli, config, ark-view beyond its existing API. ext_loader step 4 wiring still TODO (noted in R6 #2 test's doc-comment — the RPC contract is pinned now, the end-to-end shim lands in a post-Tier-7 task).
+- Next: Tier 8 — T-043 (bump `CURRENT_PROTOCOL_VERSION` to 1.1) + T-044 (CI gate).
+
 ### Wave T-040 — 2026-04-18 — Tier 7 (tests R4)
 - T-040 (soul phase 2 tests R4): capability-gate matrix. DONE. 4 cells (3 pass, 1 ignore per decision #4c).
 - New file `crates/supervisor/tests/capability_gate_matrix.rs` (548 LOC). `GatedClient` wrapper: `should_dispatch` gate → `serde_json::to_vec` → trait dispatch; byte-counter `AtomicUsize` tracks serialized output.

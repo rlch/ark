@@ -12,6 +12,10 @@
 //!     `Pane<V>` handle (not a `Stack<V>`).
 //!  4. A manifest-declared `Pane<V>` attribute receiving a plain string
 //!     literal instead of a typed handle reference.
+//!  5. An intent reference (`intent "ext.verb"` node) that is neither
+//!     a core op (`ark.core.*`) nor declared by any loaded manifest
+//!     (T-042 R6 — manifest is sole source of intent truth per
+//!     decision #2).
 //!
 //! Each emitted error carries a `.kdl:<line>:<col>` pointer — the
 //! `.stderr` goldens under `crates/scene/tests/ui/` grep-assert these
@@ -53,6 +57,7 @@
 //! | `stack @handle { view_type "tok" }`     | Stack referencing view-type `tok` (stack) |
 //! | `spawn_into @parent { … }`              | Child spawned under `@parent`             |
 //! | `handle_attr @h "tok" value="lit"`      | Typed-handle attr bound to a value        |
+//! | `intent "ext.verb" [args...]`           | Dispatches the named intent (T-042 R6)    |
 //!
 //! Handles are written as `@name` (the `@` is part of the handle name
 //! in this mini-grammar, simplifying the parser). A handle used in
@@ -204,7 +209,7 @@ fn declared_kind(v: &ViewDecl) -> &str {
 ///     }
 /// }
 /// ```
-fn parse_manifest(raw: &str) -> Result<(String, Vec<ViewDecl>), String> {
+fn parse_manifest(raw: &str) -> Result<ParsedManifest, String> {
     let doc = kdl::KdlDocument::parse(raw)
         .map_err(|e| format!("invalid KDL manifest: {e}"))?;
 
@@ -226,6 +231,38 @@ fn parse_manifest(raw: &str) -> Result<(String, Vec<ViewDecl>), String> {
         .and_then(|n| n.entries().iter().find_map(|e| e.value().as_string()))
         .ok_or_else(|| "manifest `extension` block missing `name \"…\"` child".to_string())?
         .to_string();
+
+    // Parse declared intents — T-042 R6 (decision #2). Each
+    // `intents { intent "verb" { ... } }` child contributes to the
+    // intent symbol table. Unprefixed names are qualified under the
+    // extension name (matching scene `ExtensionRegistry` behaviour).
+    let mut intents: Vec<String> = Vec::new();
+    if let Some(intents_node) = ext_children
+        .nodes()
+        .iter()
+        .find(|n| n.name().value() == "intents")
+    {
+        if let Some(intents_children) = intents_node.children() {
+            for intent in intents_children.nodes() {
+                if intent.name().value() != "intent" {
+                    continue;
+                }
+                let raw_name = intent
+                    .entries()
+                    .iter()
+                    .find_map(|e| e.value().as_string())
+                    .ok_or_else(|| {
+                        "`intent` node missing positional string arg (intent name)".to_string()
+                    })?;
+                let fq = if raw_name.contains('.') {
+                    raw_name.to_string()
+                } else {
+                    format!("{ext_name}.{raw_name}")
+                };
+                intents.push(fq);
+            }
+        }
+    }
 
     let mut views: Vec<ViewDecl> = Vec::new();
     if let Some(views_node) = ext_children
@@ -275,23 +312,36 @@ fn parse_manifest(raw: &str) -> Result<(String, Vec<ViewDecl>), String> {
         }
     }
 
-    Ok((ext_name, views))
+    Ok(ParsedManifest {
+        ext_name,
+        views,
+        intents,
+    })
+}
+
+/// Parsed manifest snapshot produced by [`parse_manifest`].
+struct ParsedManifest {
+    ext_name: String,
+    views: Vec<ViewDecl>,
+    /// Fully-qualified intent names declared by this manifest
+    /// (T-042 R6 intent symbol table).
+    intents: Vec<String>,
 }
 
 /// Build the internal `<ext>.<view> -> ViewEntry` table from a list of
-/// parsed manifest tuples. Mirrors `ark-scene`'s
+/// parsed manifests. Mirrors `ark-scene`'s
 /// `ViewTypeTable::from_manifests` for the fields the macro exercises.
 fn build_table(
-    manifests: &[(String, Vec<ViewDecl>)],
+    manifests: &[ParsedManifest],
 ) -> std::collections::BTreeMap<String, ViewEntry> {
     let mut entries = std::collections::BTreeMap::new();
-    for (ext, views) in manifests {
-        for view in views {
-            let token = format!("{}.{}", ext, view.name);
+    for m in manifests {
+        for view in &m.views {
+            let token = format!("{}.{}", m.ext_name, view.name);
             entries.insert(
                 token,
                 ViewEntry {
-                    ext_name: ext.clone(),
+                    ext_name: m.ext_name.clone(),
                     decl: view.clone(),
                 },
             );
@@ -300,24 +350,40 @@ fn build_table(
     entries
 }
 
+/// Build the fully-qualified intent symbol table from the manifest set.
+/// Core ops (`ark.core.*`) are always treated as declared; the table
+/// tracks only extension-contributed intents (T-042 R6).
+fn build_intent_table(
+    manifests: &[ParsedManifest],
+) -> std::collections::BTreeSet<String> {
+    let mut set = std::collections::BTreeSet::new();
+    for m in manifests {
+        for intent_fqn in &m.intents {
+            set.insert(intent_fqn.clone());
+        }
+    }
+    set
+}
+
 // ───────────────────────────────────────────────────────────────────
 // Validator entry point
 // ───────────────────────────────────────────────────────────────────
 
 fn run(args: ValidateSceneArgs) -> Result<(), String> {
     // Parse manifests. Each inline string is expected to be a KDL blob
-    // of the shape `extension { name "…"; views { view "…" { … } } }`.
-    let mut parsed_manifests: Vec<(String, Vec<ViewDecl>)> = Vec::new();
+    // of the shape `extension { name "…"; intents { intent "…" { … } } views { view "…" { … } } }`.
+    let mut parsed_manifests: Vec<ParsedManifest> = Vec::new();
     for (i, raw) in args.manifests.iter().enumerate() {
-        let (ext_name, views) = parse_manifest(raw).map_err(|e| {
+        let parsed = parse_manifest(raw).map_err(|e| {
             format!(
                 "{}:0:0: manifest #{} failed to parse: {}",
                 args.scene_path, i, e
             )
         })?;
-        parsed_manifests.push((ext_name, views));
+        parsed_manifests.push(parsed);
     }
     let table = build_table(&parsed_manifests);
+    let intent_table = build_intent_table(&parsed_manifests);
 
     // Parse scene KDL via the `kdl` crate so we keep span info.
     let doc = kdl::KdlDocument::parse(&args.scene).map_err(|e| {
@@ -357,6 +423,7 @@ fn run(args: ValidateSceneArgs) -> Result<(), String> {
             "pane" | "stack" => check_pane_or_stack(node, &args, &table)?,
             "spawn_into" => check_spawn_into(node, &args, &handle_kinds)?,
             "handle_attr" => check_handle_attr(node, &args, &table)?,
+            "intent" => check_intent(node, &args, &intent_table)?,
             _ => {}
         }
     }
@@ -505,6 +572,35 @@ fn check_handle_attr(
         ));
     }
     Ok(())
+}
+
+/// Case (5) T-042 R6: `intent "ext.verb" [args...]` — the first
+/// positional string arg is the fully-qualified intent name and MUST
+/// be either a core op (`ark.core.*`) OR declared by one of the
+/// loaded manifests. Per decision #2, the manifest is the SOLE source
+/// of intent registration in v0.1.
+fn check_intent(
+    node: &kdl::KdlNode,
+    args: &ValidateSceneArgs,
+    intent_table: &std::collections::BTreeSet<String>,
+) -> Result<(), String> {
+    let Some(name_entry) = node.entries().iter().find(|e| e.name().is_none()) else {
+        // No positional arg -> nothing to validate.
+        return Ok(());
+    };
+    let Some(name) = name_entry.value().as_string() else {
+        return Ok(());
+    };
+    // `ark.core.*` are always in scope.
+    if name.starts_with("ark.core.") || intent_table.contains(name) {
+        return Ok(());
+    }
+    let offset = name_entry.span().offset();
+    let (line, col) = offset_to_line_col(&args.scene, offset);
+    Err(format!(
+        "{}:{}:{}: unknown intent `{}` — no loaded extension manifest declares it (per decision #2 the manifest is the sole source of intent registration)",
+        args.scene_path, line, col, name
+    ))
 }
 
 /// Convert a byte offset into 1-indexed (line, column).

@@ -1,0 +1,13 @@
+error: tests/ui/fixtures/undeclared_intent_reference.kdl:4:16: unknown intent `ext.a.undeclared` — no loaded extension manifest declares it (per decision #2 the manifest is the sole source of intent registration)
+  --> tests/ui/undeclared_intent_reference.rs:10:1
+   |
+10 | / validate_scene! {
+11 | |     manifests: [
+12 | |         r#"extension {
+13 | |             name "ext.a"
+...  |
+26 | | "#,
+27 | | }
+   | |_^
+   |
+   = note: this error originates in the macro `validate_scene` (in Nightly builds, run with -Z macro-backtrace for more info)

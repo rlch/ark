@@ -72,6 +72,11 @@ fn view_types_compile_fail() {
     t.compile_fail("tests/ui/view_type_mismatch_on_handle_attr.rs");
     t.compile_fail("tests/ui/stack_child_under_non_stack_parent.rs");
     t.compile_fail("tests/ui/handle_typed_attr_takes_non_handle.rs");
+    // T-042 R6: manifest is sole source of intent registration
+    // (decision #2). A scene referencing an intent not declared by
+    // any loaded manifest produces a compile error pointing at the
+    // offending KDL line.
+    t.compile_fail("tests/ui/undeclared_intent_reference.rs");
 }
 
 #[test]

@@ -291,6 +291,18 @@ impl ArkExtension for StubExtension {
         })
     }
 
+    async fn intent_dispatch(
+        &self,
+        req: ark_ext_proto::IntentDispatchRequest,
+    ) -> ExtResult<ark_ext_proto::IntentDispatchResponse> {
+        // T-042 R6: manifest is the sole source of intent registration,
+        // but the RPC method itself stays on the trait (per T-022). The
+        // stub dispatches through the same JSON-erased handler table
+        // every other method uses so tests can register per-intent
+        // handlers via `.with_method("intent/dispatch", ...)`.
+        self.dispatch("intent/dispatch", req)
+    }
+
     async fn pane_emit(&self, req: PaneEmitRequest) -> ExtResult<PaneEmitResponse> {
         self.dispatch("pane/emit", req)
     }

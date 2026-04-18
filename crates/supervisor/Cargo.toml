@@ -62,6 +62,11 @@ ark-mux-zellij = { path = "../mux/zellij", features = ["test-support"] }
 ark-ext-test-support = { path = "../ark-ext-test-support" }
 ark-ext-proto = { path = "../ark-ext-proto" }
 ark-view = { path = "../ark-view" }
+# T-042 (tests R6): scene's `ExtensionRegistry` owns the manifest→intent
+# symbol table we assert on; registry-only, no scene compiler. (Main
+# `ark-scene` path dep stays above; `ark-ext-metadata-types` is already
+# a main dep via line 17 — we re-list it here only for test clarity.)
+ark-ext-metadata-types = { path = "../ark-ext-metadata-types" }
 futures = { workspace = true }
 
 # Tiny helper binary exercised by the lock + daemon tests. It's a dev-

@@ -175,6 +175,17 @@ impl ExtensionRegistry {
         self.active_order.iter().map(|s| s.as_str()).collect()
     }
 
+    /// Return every fully-qualified intent name known to the registry,
+    /// sorted. Used by supervisor-level integration tests (T-042 R6)
+    /// to verify that a manifest-declared intent is picked up at load
+    /// time — the "registry.names() contains 'stub.hello'" contract
+    /// from `cavekit-soul-phase-2-tests.md` R6.
+    pub fn intent_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.intents.keys().map(|s| s.as_str()).collect();
+        names.sort();
+        names
+    }
+
     /// Return the stored [`ExtensionMetadata`] for an activated
     /// extension, or `None` if it has not been activated.
     pub fn metadata(&self, name: &str) -> Option<&ExtensionMetadata> {
