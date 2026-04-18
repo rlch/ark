@@ -893,7 +893,7 @@ mod tests {
     /// T-13.3 SHAPE-read contract and is what we pin here.
     #[test]
     fn capabilities_consumer_surface_matches_v04_spec() {
-        let m = meta_with_caps(&ALLOWED_CAPABILITIES.iter().copied().collect::<Vec<_>>());
+        let m = meta_with_caps(&ALLOWED_CAPABILITIES.to_vec());
         let names: Vec<&str> = m.capability_names().collect();
         assert_eq!(names, Vec::from(ALLOWED_CAPABILITIES));
         assert!(m.capabilities_are_all_known());

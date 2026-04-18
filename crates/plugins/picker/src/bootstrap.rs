@@ -369,7 +369,7 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> Option<i64> {
     }
     let y = if m <= 2 { y - 1 } else { y };
     let era = y.div_euclid(400);
-    let yoe = (y - era * 400) as i64; // [0, 399]
+    let yoe = y - era * 400; // [0, 399]
     let m_adj = if m > 2 { m as i64 - 3 } else { m as i64 + 9 };
     let doy = (153 * m_adj + 2) / 5 + d as i64 - 1; // [0, 365]
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]

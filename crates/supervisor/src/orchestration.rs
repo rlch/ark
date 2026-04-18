@@ -119,7 +119,7 @@ pub async fn run_supervisor_with(
     let state_arc: Arc<StateLayout> = Arc::new(state_layout.clone());
     let config_arc: Arc<Config> = Arc::new(config.clone());
 
-    let cancel = external_cancel.unwrap_or_else(CancellationToken::new);
+    let cancel = external_cancel.unwrap_or_default();
 
     let (events, _boot_rx) = channel(DEFAULT_EVENT_BUS_CAPACITY);
 

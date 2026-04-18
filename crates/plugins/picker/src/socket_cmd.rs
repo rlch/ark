@@ -136,7 +136,7 @@ fn parse_ack_envelope(line: &str) -> Result<(), SocketError> {
         return Ok(());
     }
     if trimmed.contains("\"ok\":false") || trimmed.contains("\"ok\": false") {
-        let msg = crate::bootstrap::find_string_field(trimmed, "error").unwrap_or_else(String::new);
+        let msg = crate::bootstrap::find_string_field(trimmed, "error").unwrap_or_default();
         return Err(SocketError::Nak(msg));
     }
     Err(SocketError::ProtocolError(trimmed.to_string()))

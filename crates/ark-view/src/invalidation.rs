@@ -75,6 +75,10 @@ mod tests {
     #[test]
     fn invalidation_cause_exhaustive_pattern_match() {
         fn describe(c: InvalidationCause) -> &'static str {
+            // `#[non_exhaustive]` wildcard is intentional for future variants
+            // and remains reachable from other crates; in-crate match is
+            // exhaustive, hence the allow.
+            #[allow(unreachable_patterns)]
             match c {
                 InvalidationCause::UserClosed => "user_closed",
                 InvalidationCause::SceneReloadDropped => "scene_reload_dropped",

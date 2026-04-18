@@ -94,6 +94,10 @@ mod tests {
         // distinct string. Later tiers can add variants without breaking
         // the wildcard arm's existence.
         fn describe(k: HandleKind) -> &'static str {
+            // `#[non_exhaustive]` wildcard is intentional for future variants
+            // and remains reachable from other crates; in-crate match is
+            // exhaustive, hence the allow.
+            #[allow(unreachable_patterns)]
             match k {
                 HandleKind::Tab => "tab",
                 HandleKind::Pane => "pane",

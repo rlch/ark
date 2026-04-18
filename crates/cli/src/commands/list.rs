@@ -342,6 +342,10 @@ fn query_status(sock: &std::path::Path) -> Option<SessionStatus> {
 }
 
 /// Render a table into `out`. `no_color` suppresses ANSI.
+///
+/// Retained as a pure-render helper for unit tests; production
+/// path is `render_table_with_cwds` (see below).
+#[allow(dead_code)]
 fn render_table<W: Write>(out: &mut W, rows: &[Row], no_color: bool) -> std::io::Result<()> {
     // Columns (T-023): id, name, cwd, uptime, running?
     let hdr = ("ID", "NAME", "CWD", "UPTIME", "RUNNING?");
@@ -383,6 +387,7 @@ fn render_table<W: Write>(out: &mut W, rows: &[Row], no_color: bool) -> std::io:
 /// rows surfaced via the live socket, the supervisor does not ship
 /// cwd in the status payload, so we fall back to reading `spec.json`
 /// off disk. Errors collapse to `"-"`.
+#[allow(dead_code)]
 fn cwd_for(_row: &Row) -> String {
     // Placeholder — cwd is read via `spec.json` in gather_rows and
     // attached to the row. We avoid touching the filesystem here to

@@ -83,7 +83,7 @@ pub fn render(template_src: &str, vars: &LayoutVars) -> Result<String, LayoutTem
 
 /// Very light KDL syntax validation: balanced braces + quoted-string integrity
 /// + no stray backtick/unclosed comment. Does NOT attempt to replicate zellij's
-/// full parser — catches obvious malformations that would make zellij refuse.
+///   full parser — catches obvious malformations that would make zellij refuse.
 fn validate_kdl(src: &str) -> Result<(), LayoutTemplateError> {
     let mut depth: i64 = 0;
     let mut in_str = false;

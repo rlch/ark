@@ -1076,20 +1076,21 @@ pub(crate) fn run_all(ctx: &Ctx) -> Vec<CheckResult> {
         ctx.runtime_dir.clone(),
         ctx.config_dir.clone(),
     );
-    let mut rs = Vec::new();
-    rs.push(check_zellij());
-    rs.push(check_claude());
-    rs.push(check_delta_binary());
-    rs.push(check_runtime_dir(ctx));
-    rs.push(check_state_dir(ctx));
-    rs.push(check_config_dir(ctx));
-    rs.push(check_config_file(ctx));
-    rs.push(check_editor());
-    rs.push(check_status_plugin_installed(ctx));
-    rs.push(check_picker_plugin_installed(ctx));
-    // T-126: scene + extension health checks.
-    rs.push(check_default_scene());
-    rs.push(check_extensions_resolve());
+    let mut rs = vec![
+        check_zellij(),
+        check_claude(),
+        check_delta_binary(),
+        check_runtime_dir(ctx),
+        check_state_dir(ctx),
+        check_config_dir(ctx),
+        check_config_file(ctx),
+        check_editor(),
+        check_status_plugin_installed(ctx),
+        check_picker_plugin_installed(ctx),
+        // T-126: scene + extension health checks.
+        check_default_scene(),
+        check_extensions_resolve(),
+    ];
     rs.extend(check_orphan_sockets(&layout));
     rs.extend(check_stale_locks(&layout));
     rs.extend(check_dangling_worktrees(&layout));
@@ -1499,10 +1500,10 @@ mod tests {
             ctx.runtime_dir.clone(),
             ctx.config_dir.clone(),
         );
-        let mut rs = check_orphan_sockets(&layout);
+        let rs = check_orphan_sockets(&layout);
         assert_eq!(rs.len(), 1);
         // Apply with auto_yes.
-        run_fixes(&mut rs, true).expect("fix");
+        run_fixes(&rs, true).expect("fix");
         assert!(!sock.exists(), "socket should be gone");
     }
 

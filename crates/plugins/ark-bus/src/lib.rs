@@ -575,7 +575,7 @@ mod tests {
     /// without touching the wasm-only `zellij_tile` host imports.
     #[test]
     fn default_constructs_on_host() {
-        let _bus = ArkBus::default();
+        let _bus = ArkBus;
     }
 
     /// Guard the registered plugin name — supervisors key `zellij pipe

@@ -320,9 +320,8 @@ pub fn install_from_source_with_cap_decision(
         let _ = fs::remove_dir_all(&staging);
         return Err("metadata contains empty `name` field — refusing to install".into());
     }
-    validate_name(&name).map_err(|e| {
+    validate_name(&name).inspect_err(|_| {
         let _ = fs::remove_dir_all(&staging);
-        e
     })?;
 
     let final_dir = extensions_root.join(&name);
@@ -345,9 +344,8 @@ pub fn install_from_source_with_cap_decision(
 
     // Write `.ark-install` into the staging dir before the rename so
     // the file lands atomically with the rest of the extension.
-    write_install_dotfile(&staging, source, &name).map_err(|e| {
+    write_install_dotfile(&staging, source, &name).inspect_err(|_| {
         let _ = fs::remove_dir_all(&staging);
-        e
     })?;
 
     // Rename staging -> final. `fs::rename` is atomic when the src +

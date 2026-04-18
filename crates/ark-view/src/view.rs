@@ -45,6 +45,7 @@ mod tests {
 
     #[test]
     fn command_view_has_no_required_methods_beyond_view() {
+        #[allow(dead_code)] // trait-impl existence is the assertion
         struct X;
         impl View for X {}
         impl CommandView for X {}
@@ -52,6 +53,7 @@ mod tests {
 
     #[test]
     fn zellij_view_has_no_required_methods_beyond_view() {
+        #[allow(dead_code)] // trait-impl existence is the assertion
         struct Y;
         impl View for Y {}
         impl ZellijView for Y {}
@@ -59,7 +61,9 @@ mod tests {
 
     #[test]
     fn downstream_trait_can_refine_view() {
+        #[allow(dead_code)] // trait-impl existence is the assertion
         trait DiffView: View {}
+        #[allow(dead_code)]
         struct Z;
         impl View for Z {}
         impl DiffView for Z {}
@@ -67,6 +71,7 @@ mod tests {
 
     #[test]
     fn view_is_send_sync_static() {
+        #[allow(dead_code)] // bound check via instantiation below
         fn assert_send_sync_static<T: Send + Sync + 'static>() {}
         fn _check<V: View>() {
             assert_send_sync_static::<V>()

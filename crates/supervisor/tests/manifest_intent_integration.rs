@@ -89,7 +89,7 @@ fn manifest_intent_appears_in_registry() {
         .expect("activate must succeed for a well-formed manifest");
     let names = registry.intent_names();
     assert!(
-        names.iter().any(|n| *n == "stub.hello"),
+        names.contains(&"stub.hello"),
         "registry.intent_names() must contain 'stub.hello'; got {names:?}",
     );
     assert!(

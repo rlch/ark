@@ -135,7 +135,7 @@ pub fn list_session_ids(state_layout: &StateLayout) -> io::Result<Vec<SessionId>
             ids.push(id);
         }
     }
-    ids.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+    ids.sort_by_key(|a| a.as_str());
     Ok(ids)
 }
 

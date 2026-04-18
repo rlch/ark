@@ -490,7 +490,7 @@ mod tests {
 
     fn test_ctx() -> IntentContext {
         IntentContext::new(
-            SceneId::new(&PathBuf::from("/tmp/scene.kdl"), b"scene \"test\" { }"),
+            SceneId::new(PathBuf::from("/tmp/scene.kdl"), b"scene \"test\" { }"),
             "scene",
         )
     }

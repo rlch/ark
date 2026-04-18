@@ -101,10 +101,7 @@ impl CommandExecutor for StubExecutor {
         ));
         match self.responses.lock().unwrap().pop_front() {
             Some(output) => Ok(output),
-            None => Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "no queued response",
-            )),
+            None => Err(std::io::Error::other("no queued response")),
         }
     }
 }

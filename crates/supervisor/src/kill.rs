@@ -240,14 +240,10 @@ mod tests {
         );
 
         // No SessionEnded must have been broadcast on the fast path.
-        match rx.try_recv() {
-            Err(_) => {}
-            Ok(ev) => match ev {
-                CoreEvent::SessionEnded { .. } => {
-                    panic!("fast-path must not emit SessionEnded")
-                }
-                _ => {}
-            },
+        if let Ok(ev) = rx.try_recv()
+            && let CoreEvent::SessionEnded { .. } = ev
+        {
+            panic!("fast-path must not emit SessionEnded")
         }
     }
 

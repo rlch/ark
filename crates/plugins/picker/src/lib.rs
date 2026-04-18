@@ -981,7 +981,7 @@ mod tests {
     #[test]
     fn set_focused_session_picks_the_is_current_entry() {
         let mut p = Picker::new();
-        let sessions = vec![
+        let sessions = [
             ("ark-cavekit-auth-01abcdef", false),
             ("ark-cavekit-billing-02abcdef", true),
             ("unrelated-session", false),
@@ -998,7 +998,7 @@ mod tests {
     fn set_focused_session_none_when_no_current() {
         let mut p = Picker::new();
         p.focused_session = Some("stale".into());
-        let sessions = vec![("a", false), ("b", false)];
+        let sessions = [("a", false), ("b", false)];
         let changed = p.set_focused_session(sessions.iter().map(|(n, f)| (*n, *f)));
         assert!(changed, "transition Some → None counts as a change");
         assert!(p.focused_session.is_none());
@@ -1008,7 +1008,7 @@ mod tests {
     fn set_focused_session_no_change_returns_false() {
         let mut p = Picker::new();
         p.focused_session = Some("same".into());
-        let sessions = vec![("same", true)];
+        let sessions = [("same", true)];
         let changed = p.set_focused_session(sessions.iter().map(|(n, f)| (*n, *f)));
         assert!(!changed);
         assert_eq!(p.focused_session.as_deref(), Some("same"));

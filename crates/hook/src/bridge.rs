@@ -297,6 +297,7 @@ fn escape_json_string(s: &str) -> String {
 mod tests {
     use super::*;
     use ark_types::SessionId;
+    #[allow(unused_imports)] // trait methods (read_line/write_all) dispatched via these
     use std::io::{BufRead as _, BufReader, Write as _};
     use std::os::unix::net::UnixListener;
     use std::path::PathBuf;

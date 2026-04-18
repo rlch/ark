@@ -132,7 +132,6 @@ pub fn preflight(_spec: &SessionSpec) -> Result<()> {
 }
 
 #[allow(dead_code)]
-
 fn which(name: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else {
         return false;

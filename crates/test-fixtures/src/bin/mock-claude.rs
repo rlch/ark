@@ -16,8 +16,8 @@
 //!   agent uses.
 //!
 //! Either flag may be used alone or together (commands run first, then the
-//! raw JSONL append). Keeping mock-claude dependency-light (clap + serde_json
-//! + std) is deliberate: it must build in the test-fixtures crate without
+//! raw JSONL append). Keeping mock-claude dependency-light (clap, serde_json,
+//! std) is deliberate: it must build in the test-fixtures crate without
 //! dragging in async runtimes or engine plumbing.
 
 use std::fs::{self, OpenOptions};

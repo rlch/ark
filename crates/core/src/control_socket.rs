@@ -762,9 +762,9 @@ mod tests {
             ));
         }
 
-        assert_eq!(outcomes[0].1, true, "live socket must report alive");
-        assert_eq!(outcomes[1].1, false, "bare file must be unlinked");
-        assert_eq!(outcomes[2].1, false, "missing path → dead");
+        assert!(outcomes[0].1, "live socket must report alive");
+        assert!(!outcomes[1].1, "bare file must be unlinked");
+        assert!(!outcomes[2].1, "missing path → dead");
 
         assert!(live_path.exists(), "live socket must be preserved");
         assert!(!stale_path.exists(), "stale file must be unlinked");

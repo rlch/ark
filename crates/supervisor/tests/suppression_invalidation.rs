@@ -253,7 +253,7 @@ async fn pane_op_after_invalidation_returns_handle_gone() {
         .with_method("pane/emit", move |req: PaneEmitRequest| {
             let handle_str = req.handle.as_str().to_string();
             let inv = invalidated_for_handler.lock().unwrap();
-            if inv.iter().any(|h| *h == handle_str) {
+            if inv.contains(&handle_str) {
                 Err(ExtensionError::HandleGone {
                     handle: req.handle.clone(),
                     cause: InvalidationCause::UserClosed,

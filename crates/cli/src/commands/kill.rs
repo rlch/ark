@@ -296,9 +296,11 @@ mod tests {
         fs::create_dir_all(layout.session_dir(id)).expect("mkdir");
     }
 
+    #[allow(dead_code)]
     fn ulid_a() -> Ulid {
         Ulid::from_string("01JX7Z8K6X9Y2ZT4ABCDEF0123").expect("ulid a")
     }
+    #[allow(dead_code)]
     fn ulid_b() -> Ulid {
         Ulid::from_string("01JX7Z8K6X9Y2ZT4ABCDEF0456").expect("ulid b")
     }

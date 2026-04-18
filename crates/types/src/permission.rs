@@ -106,7 +106,7 @@ pub fn decide(policy: PermissionPolicy, tool: &str) -> PolicyDecision {
     match policy {
         PermissionPolicy::Ask => PolicyDecision::Deferred,
         PermissionPolicy::AutoApproveRead => {
-            if READ_ONLY_TOOLS.iter().any(|t| *t == tool) {
+            if READ_ONLY_TOOLS.contains(&tool) {
                 PolicyDecision::Allowed
             } else {
                 PolicyDecision::Deferred

@@ -413,8 +413,12 @@ pub fn fuzzy_filter_and_sort(cache: &PickerCache, query: &str) -> Vec<(String, i
     let needle = Utf32Str::new(&lowered, &mut needle_buf);
 
     let mut scored: Vec<(String, i32, usize)> = Vec::new();
-    let mut idx: usize = 0;
-    for summary in cache.active.values().chain(cache.resurrectable.values()) {
+    for (idx, summary) in cache
+        .active
+        .values()
+        .chain(cache.resurrectable.values())
+        .enumerate()
+    {
         let hay_str = fuzzy_haystack(summary);
         let mut hay_buf: Vec<char> = Vec::new();
         let hay = Utf32Str::new(&hay_str, &mut hay_buf);
@@ -424,7 +428,6 @@ pub fn fuzzy_filter_and_sort(cache: &PickerCache, query: &str) -> Vec<(String, i
             // aren't blocked by the type.
             scored.push((summary.id.clone(), score as i32, idx));
         }
-        idx += 1;
     }
     // Stable sort: primary descending score, secondary ascending original
     // index (so ties keep BTreeMap iteration order).

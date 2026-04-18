@@ -281,10 +281,7 @@ fn main() {
 ///   nested cargo invocation entirely when the target is missing
 ///   (the common `cargo install ark-cli` bare-machine case).
 fn inline_build_enabled() -> bool {
-    match env::var("ARK_BUILD_WASM") {
-        Ok(v) if v == "0" => false,
-        _ => true,
-    }
+    !matches!(env::var("ARK_BUILD_WASM"), Ok(v) if v == "0")
 }
 
 /// F-709: true when the `wasm32-wasip1` rustup target is installed on
