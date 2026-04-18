@@ -4,6 +4,14 @@ last_edited: "2026-04-19"
 ---
 # Loop Log
 
+### Wave cleanup-B-T008 — 2026-04-18 — Packet B T-008 (factory.rs gone, mux inlined)
+
+- DEL `crates/supervisor/src/factory.rs` whole (219 LOC). `build_engine`/`build_orchestrator`/`SupervisorError` dead → all rode file into grave.
+- INLINE `build_multiplexer("zellij", &config)` at `orchestration.rs:66` → `Arc::new(ZellijMux::new())` + `MUX_V1 = ["zellij"]` comment. no rehome to mux crate (R-11).
+- lib.rs: `pub mod factory;` + `pub use factory::{SupervisorError, build_engine, build_multiplexer, build_orchestrator};` gone. cleanup-T-008 banner comment replaces.
+- grep gate (crates/): `build_engine|build_orchestrator|build_multiplexer` = 0 live hits (3 comment references, all explaining the deletion).
+- `cargo check --workspace --tests` = 0 err. next: T-009 run_supervisor_with sig simplification.
+
 ### Wave cleanup-A-Tier2 — 2026-04-19 — cavekit-soul cleanup Packet A Tier 2 + Phase 4 green gate (T-006 + T-007) — PACKET A COMPLETE
 
 - T-006 DEL permission.rs. `crates/types/src/permission.rs` gone; `pub mod permission` + 4-line `pub use permission::{…}` dropped from lib.rs; Cargo.toml unchanged. only pre-cleanup consumer was `crates/hook/src/run.rs` (deleted in Wave 2); ext side carries its own re-declared copy per kit non-goals.

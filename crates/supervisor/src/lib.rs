@@ -54,10 +54,12 @@ pub use signals::{ControlSocketGuard, SignalTaskHandle, install_signal_handlers}
 pub mod audit_log;
 pub use audit_log::AuditLogger;
 
-// T-069: factory + full R3 boot sequence.
-pub mod factory;
+// T-069: full R3 boot sequence.
+// cleanup-T-008 (Packet B): factory.rs deleted whole. `build_multiplexer`
+// was inlined at its sole call site (orchestration.rs); `build_engine` +
+// `build_orchestrator` + `SupervisorError` were dead code and went with
+// the file.
 pub mod orchestration;
-pub use factory::{SupervisorError, build_engine, build_multiplexer, build_orchestrator};
 
 // T-ACP.7: minimal ACP-engine Engine-trait stub that replaces the
 // retired `ark-engines-claude-code` crate.

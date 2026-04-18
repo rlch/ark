@@ -63,7 +63,11 @@ pub async fn run_supervisor(
     let state_layout = StateLayout::from_env().context("resolve state layout")?;
     let engine: Option<Box<dyn Engine + Send + Sync>> = None;
     let orchestrator: Option<Box<dyn Orchestrator + Send + Sync>> = None;
-    let mux = crate::factory::build_multiplexer("zellij", &config).context("build multiplexer")?;
+    // cleanup-T-008: `build_multiplexer` factory was deleted; v1 is locked
+    // to a single mux (`MUX_V1 = ["zellij"]`), so instantiate directly.
+    // Adding a second concrete mux becomes a local edit here, not a factory
+    // extension.
+    let mux: Arc<ZellijMux> = Arc::new(ZellijMux::new());
     run_supervisor_with(
         spec,
         mode,

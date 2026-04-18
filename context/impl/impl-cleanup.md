@@ -2,7 +2,7 @@
 created: "2026-04-18"
 last_edited: "2026-04-18"
 ---
-# Implementation Tracking: Cavekit Soul Cleanup (Packet A)
+# Implementation Tracking: Cavekit Soul Cleanup (Packets A + B)
 
 Build site: `context/plans/build-site-cleanup.md`
 
@@ -12,7 +12,8 @@ Ledger append-only. Newest entries at top.
 
 | Task | Tier | Phase | Status | SHA | Notes |
 |------|------|-------|--------|-----|-------|
-| T-007 | 2 | 4 | DONE | `<pending-tier2>` | Phase 4 green gate: cargo check --workspace --tests = 0 errors; cargo build -p ark-cli = 0 errors; cargo test --workspace --tests = 2164 passed / 4 ignored / 0 fail (69 suites, 34.46s); cargo fmt --all --check = clean; greps (crates/): ark_hook=0, ark_orchestrators=0, CavekitOrchestrator=0, ClaudeCodeOrchestrator=0, ark_types::permission=0, PermissionPolicy/PolicyDecision/READ_ONLY_TOOLS/POLICY_FILE_NAME=0 |
+| T-008 | 3 | 5 | DONE | `<pending-P5-T008>` | `crates/supervisor/src/factory.rs` deleted whole (219 LOC). `build_multiplexer("zellij", &config)` inlined at sole call site (`orchestration.rs:66`) as `Arc::new(ZellijMux::new())` with inline comment noting `MUX_V1 = ["zellij"]` v1-lock. `build_engine`/`build_orchestrator`/`SupervisorError` were dead code — went with file. `pub mod factory;` + `pub use factory::{…}` dropped from lib.rs with a cleanup-T-008 comment. Grep gate (`crates/`): `build_engine|build_orchestrator|build_multiplexer` = 0 live-code hits (3 comment lines remain explaining the removal). `cargo check --workspace --tests` = 0 errors. |
+| T-007 | 2 | 4 | DONE | `3169b1d` | Phase 4 green gate: cargo check --workspace --tests = 0 errors; cargo build -p ark-cli = 0 errors; cargo test --workspace --tests = 2164 passed / 4 ignored / 0 fail (69 suites, 34.46s); cargo fmt --all --check = clean; greps (crates/): ark_hook=0, ark_orchestrators=0, CavekitOrchestrator=0, ClaudeCodeOrchestrator=0, ark_types::permission=0, PermissionPolicy/PolicyDecision/READ_ONLY_TOOLS/POLICY_FILE_NAME=0 |
 | T-006 | 2 | 4 | DONE | `<pending-tier2>` | `crates/types/src/permission.rs` deleted; `pub mod permission` + the 4-line `pub use permission::{…}` re-export removed from `crates/types/src/lib.rs`; Cargo.toml unchanged (no permission-specific dep gate) |
 | T-005 | 1 | 4 | DONE | `df7206f` | `crates/hook/` deleted; `"crates/hook"` removed from workspace `members`; `justfile` install/uninstall dropped ark-hook lines (runtime spawn in ark-bus plugin left as external-binary callsite — out-of-scope doc) |
 | T-004 | 1 | 4 | DONE | `df7206f` | `crates/orchestrators/claude-code/` deleted; dep removed from cli + supervisor Cargo.toml; `crates/orchestrators/*` workspace-glob dropped |
