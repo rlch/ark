@@ -132,13 +132,24 @@ impl From<&CoreEvent> for FlatEvent {
                 name: "ark.core.session_started".to_string(),
                 payload: serde_json::json!({ "spec": spec }),
             },
-            CoreEvent::SessionEnded { terminated_at, exit } => FlatEvent {
-                name: "ark.core.session_ended".to_string(),
-                payload: serde_json::json!({
-                    "terminated_at": terminated_at,
-                    "exit": exit,
-                }),
-            },
+            CoreEvent::SessionEnded { terminated_at, exit } => {
+                // Flatten `exit` to a scalar string so scene selectors like
+                // `on SessionEnded exit="cancelled"` match. `Error(msg)`
+                // payload rides along on a separate `exit_message` key.
+                let (exit_kind, exit_message) = match exit {
+                    ExitReason::Normal => ("normal", None),
+                    ExitReason::Cancelled => ("cancelled", None),
+                    ExitReason::Error(msg) => ("error", Some(msg.clone())),
+                };
+                FlatEvent {
+                    name: "ark.core.session_ended".to_string(),
+                    payload: serde_json::json!({
+                        "terminated_at": terminated_at,
+                        "exit": exit_kind,
+                        "exit_message": exit_message,
+                    }),
+                }
+            }
             CoreEvent::Ext(ext) => FlatEvent::from(ext),
         }
     }
@@ -281,18 +292,35 @@ mod tests {
     }
 
     #[test]
-    fn flat_event_from_core_session_ended_includes_exit() {
+    fn flat_event_from_core_session_ended_projects_exit_as_scalar() {
+        // Scene selectors stringify payload values — `exit` must be a
+        // scalar string so `on SessionEnded exit="cancelled"` can match.
         let ts = Utc::now();
-        let ev = CoreEvent::SessionEnded {
+        let normal = CoreEvent::SessionEnded {
+            terminated_at: ts,
+            exit: ExitReason::Normal,
+        };
+        let flat = FlatEvent::from(&normal);
+        assert_eq!(flat.payload.get("exit").and_then(|v| v.as_str()), Some("normal"));
+        assert!(flat.payload.get("exit_message").unwrap().is_null());
+
+        let cancelled = CoreEvent::SessionEnded {
+            terminated_at: ts,
+            exit: ExitReason::Cancelled,
+        };
+        let flat = FlatEvent::from(&cancelled);
+        assert_eq!(flat.payload.get("exit").and_then(|v| v.as_str()), Some("cancelled"));
+
+        let err = CoreEvent::SessionEnded {
             terminated_at: ts,
             exit: ExitReason::Error("crashed".to_string()),
         };
-        let flat = FlatEvent::from(&ev);
-        assert_eq!(flat.name, "ark.core.session_ended");
-        assert!(flat.payload.get("terminated_at").is_some());
-        let exit = flat.payload.get("exit").expect("exit key present");
-        assert_eq!(exit.get("kind").and_then(|v| v.as_str()), Some("error"));
-        assert_eq!(exit.get("value").and_then(|v| v.as_str()), Some("crashed"));
+        let flat = FlatEvent::from(&err);
+        assert_eq!(flat.payload.get("exit").and_then(|v| v.as_str()), Some("error"));
+        assert_eq!(
+            flat.payload.get("exit_message").and_then(|v| v.as_str()),
+            Some("crashed")
+        );
     }
 
     #[test]
