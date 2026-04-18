@@ -35,6 +35,19 @@ ark-types = { path = "../../crates/types" }
 ark-ext-proto = { path = "../../crates/ark-ext-proto" }
 ark-view = { path = "../../crates/ark-view" }
 ark-scene = { path = "../../crates/scene" }
+# T-029 / T-034 (claude-code-ext R5 + R6): view structs are authored via
+# `#[derive(View, CommandView)]` from ark-ext-derive. `inventory::submit!`
+# blocks the derive expands into pull in an inventory dep transitively,
+# but the proc-macro crate itself is the only direct edge we need here.
+ark-ext-derive = { path = "../../crates/ark-ext-derive" }
+# T-029 view-registration records submitted by `#[derive(View)]` are typed
+# as `inventory::collect!`-ed `ViewRegistration`s; the struct definition
+# lives in ark-ext-metadata-types. Already pulled in transitively via
+# ark-scene but named explicitly so the dep is discoverable.
+ark-ext-metadata-types = { path = "../../crates/ark-ext-metadata-types" }
+# T-029 derive uses `::inventory::submit!`; make the crate name resolvable
+# at macro-expansion time in this ext's own source.
+inventory = { workspace = true }
 notify = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -57,6 +70,16 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# T-031 (claude-code-ext R5 handle-type validation): trybuild goldens
+# assert `validate_scene!`-based compile errors when a scene wires the
+# `claude-code` view's `subagents` attribute to a handle that is not a
+# `Stack<ClaudeCodeSubagent>`. Dev-only — never ships in the rlib.
+trybuild = "1"
+# T-031 re-uses the `validate_scene!` proc-macro (re-exported by
+# ark-scene) for KDL-level handle-kind validation. Already a dep via the
+# top-level `ark-scene = { path = ... }` line; named here again under
+# [dev-dependencies] is NOT needed because cargo treats the production
+# dep as in-scope for tests too.
 # T-016 envelope test: the test harness evaluates `event.payload.*`
 # expressions against a minimal `rhai::Engine` to prove the translator's
 # payload shape is readable from scene reactions. A real scene-runtime

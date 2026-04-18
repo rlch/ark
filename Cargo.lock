@@ -304,6 +304,8 @@ name = "ark-ext-claude-code"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ark-ext-derive",
+ "ark-ext-metadata-types",
  "ark-ext-proto",
  "ark-scene",
  "ark-types",
@@ -311,6 +313,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "clap 4.6.0",
+ "inventory",
  "notify 7.0.0",
  "rhai",
  "serde",
@@ -320,6 +323,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "trybuild",
 ]
 
 [[package]]

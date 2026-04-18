@@ -1,0 +1,13 @@
+error: tests/ui/fixtures/handle_kind_mismatch.kdl:4:9: view type `claude-code.claude-code-subagent` declared by extension `claude-code` with kind=`stack` but used in a `pane` context (kind=`pane`)
+  --> tests/ui/handle_kind_mismatch.rs:12:1
+   |
+12 | / validate_scene! {
+13 | |     manifests: [
+14 | |         r#"extension {
+15 | |             name "claude-code"
+...  |
+29 | | "#,
+30 | | }
+   | |_^
+   |
+   = note: this error originates in the macro `validate_scene` (in Nightly builds, run with -Z macro-backtrace for more info)

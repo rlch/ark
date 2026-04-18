@@ -59,6 +59,7 @@
 use ark_ext_proto::{
     ArkExtension, ControlVerbsRequest, ControlVerbsResponse, ExtResult, OnSessionEndRequest,
     OnSessionEndResponse, OnSessionStartRequest, OnSessionStartResponse, OpaqueJson,
+    SceneCompileHookRequest, SceneCompileHookResponse,
 };
 use ark_types::{CoreEvent, EventSink};
 use async_trait::async_trait;
@@ -69,6 +70,7 @@ pub mod hook_payload;
 pub mod settings_json;
 pub mod socket;
 pub mod transcript;
+pub mod view;
 
 pub use hook_event::{HookEvent, UnknownHookEvent};
 pub use hook_payload::{EXT_NAME, HookPayload, NdjsonLine, flat_event_name, payload_to_ext_event};
@@ -85,6 +87,9 @@ pub use transcript::{
     SharedDirWatcher, TailCursor, TranscriptDirEvent, TranscriptDirWatcher, TranscriptEvent,
     TranscriptTail, TranscriptWatcher, encode_cwd, extract_transcript_parent_from_payload,
     spawn_log_sink, start_watcher,
+};
+pub use view::{
+    ClaudeCodeSubagent, ClaudeCodeSubagentAttrs, ClaudeCodeSubagentView, ClaudeCodeView,
 };
 
 /// Basename of the T-020 sentinel file dropped next to the cc-hook
@@ -213,6 +218,59 @@ pub struct ClaudeCodeExtension {
     /// cheap to clone and safe to share across the spawned accept-loop
     /// task.
     event_sink: Option<EventSink>,
+
+    /// T-032 (R5b): `match_cmds` config — list of raw `command cmd=<X>`
+    /// values that should have `CLAUDE_HOOK_SOCKET=<session-sock-path>`
+    /// injected into their pane env at scene-compile time. Default
+    /// empty = the raw-cmd fallback is OFF (scene authors must opt in
+    /// by setting `[claude-code] match_cmds = ["claude"]` in their
+    /// extension config). This is the R5b fallback for scene authors
+    /// who use the untyped `command cmd="claude"` form instead of the
+    /// typed `claude-code` view (T-029). No typed subagent fan-out is
+    /// provided by the fallback — see T-033 regression.
+    match_cmds: Vec<String>,
+}
+
+/// T-032 R5b shape of a `scene_compile_hook` env injection request. An
+/// extension returns one of these per pane whose raw command-view kind
+/// matched [`ClaudeCodeExtension::match_cmds`]. The outer response
+/// serializes the list under the `env_injections` key.
+///
+/// Wire shape (JSON):
+///
+/// ```json
+/// {
+///   "env_injections": [
+///     { "pane_id": "chat", "env": { "CLAUDE_HOOK_SOCKET": "/path/to.sock" } }
+///   ]
+/// }
+/// ```
+///
+/// The scene compiler (or a future supervisor-side consumer once the
+/// `partial_scene` shape is pinned) reads this and merges the env
+/// entries into the matched pane's launch env. When `match_cmds` is
+/// empty, the response carries an empty list — the hook is a no-op.
+///
+/// Public so scene-compiler / supervisor-side consumers can parse the
+/// response without redefining the shape.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EnvInjection {
+    /// Scene pane-id the env should be merged into.
+    pub pane_id: String,
+    /// Env keys → values to merge. Later entries override earlier ones
+    /// per the scene-compile-merge convention.
+    pub env: std::collections::BTreeMap<String, String>,
+}
+
+/// Container carried in [`SceneCompileHookResponse::contributions`] —
+/// list of env injections plus a list of diagnostic notes.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SceneCompileContributions {
+    /// Env injections — see [`EnvInjection`]. Empty when `match_cmds`
+    /// is empty (default) OR when the partial scene declares no panes
+    /// matching any `match_cmds` entry.
+    #[serde(default)]
+    pub env_injections: Vec<EnvInjection>,
 }
 
 impl ClaudeCodeExtension {
@@ -221,7 +279,10 @@ impl ClaudeCodeExtension {
     /// published onto the core bus — useful for unit tests, CLI-only
     /// dry-runs, and any context where the supervisor isn't involved.
     pub fn new() -> Self {
-        Self { event_sink: None }
+        Self {
+            event_sink: None,
+            match_cmds: Vec::new(),
+        }
     }
 
     /// Construct a [`ClaudeCodeExtension`] wired to an [`EventSink`] so
@@ -234,6 +295,7 @@ impl ClaudeCodeExtension {
     pub fn with_event_sink(sink: EventSink) -> Self {
         Self {
             event_sink: Some(sink),
+            match_cmds: Vec::new(),
         }
     }
 
@@ -241,6 +303,23 @@ impl ClaudeCodeExtension {
     /// tests that want to confirm the injection took effect.
     pub fn event_sink(&self) -> Option<&EventSink> {
         self.event_sink.as_ref()
+    }
+
+    /// T-032 R5b: set the `match_cmds` list used by
+    /// [`Self::scene_compile_hook`]. Builder-style for chaining in
+    /// test + supervisor wiring. Default is empty — the raw-cmd
+    /// fallback is OFF unless the user explicitly opts in via
+    /// `[claude-code] match_cmds = [...]` in their config.
+    #[must_use]
+    pub fn with_match_cmds(mut self, cmds: Vec<String>) -> Self {
+        self.match_cmds = cmds;
+        self
+    }
+
+    /// Borrow the configured `match_cmds` list. Exposed primarily for
+    /// tests that want to confirm the config injection took effect.
+    pub fn match_cmds(&self) -> &[String] {
+        &self.match_cmds
     }
 }
 
@@ -411,6 +490,127 @@ impl ArkExtension for ClaudeCodeExtension {
         Ok(OnSessionEndResponse::default())
     }
 
+    /// T-032 + T-033 (R5b): raw-`command cmd=<X>` fallback. For every
+    /// pane in `req.partial_scene` whose view is of kind `command` and
+    /// whose `cmd` argument matches one of `self.match_cmds`, emit a
+    /// pane-env injection adding `CLAUDE_HOOK_SOCKET=<session-sock-
+    /// path>`. When `match_cmds` is empty (the default — R5b is opt-in)
+    /// no injections are emitted; the response is an empty list.
+    ///
+    /// # Scope bounds
+    ///
+    /// * NO typed subagent fan-out is provided by the fallback. Scene
+    ///   authors who want `Stack<ClaudeCodeSubagent>` fan-out MUST use
+    ///   the typed [`ClaudeCodeView`] (T-029/T-030) — not the raw
+    ///   command form. T-033 regression asserts this boundary.
+    /// * Subagent events still flow via the cc-hook socket / ExtEvent
+    ///   bus (reused from T-014); user Rhai reactions can still fire
+    ///   regardless of view type.
+    ///
+    /// # `partial_scene` shape (conservative parser)
+    ///
+    /// The extension protocol's `partial_scene` is declared as
+    /// [`ark_ext_proto::OpaqueJson`] (a JSON-encoded string) because its
+    /// shape is not yet pinned at the trait level. v0.1 parses a tiny
+    /// subset in a tolerant fashion:
+    ///
+    /// ```json
+    /// {
+    ///   "panes": [
+    ///     { "id": "chat", "view": { "kind": "command", "cmd": "claude" } }
+    ///   ]
+    /// }
+    /// ```
+    ///
+    /// Any pane whose `view.kind == "command"` AND `view.cmd` matches
+    /// an entry in `self.match_cmds` contributes one env injection.
+    /// Panes without an `id` field are skipped (no injection target).
+    ///
+    /// The socket path is derived from `$ARK_STATE_DIR`-resolved
+    /// layout + the scene's session id when present, falling back to
+    /// the extension's install-time canonical path. Because the
+    /// `partial_scene` shape doesn't carry the session id yet, v0.1
+    /// stamps the path as `<state>/sessions/<sid>/cc-hook.sock` using
+    /// a placeholder `__latest__` id when no session id is provided.
+    /// (The consumer merging the env injection into pane launch knows
+    /// the real session id and can post-process.)
+    async fn scene_compile_hook(
+        &self,
+        req: SceneCompileHookRequest,
+    ) -> ExtResult<SceneCompileHookResponse> {
+        let mut contributions = SceneCompileContributions::default();
+
+        // Fast-path: disabled by default. No point walking the
+        // partial-scene JSON if no cmd matches are configured.
+        if self.match_cmds.is_empty() {
+            let contributions_json = serde_json::to_string(&contributions)
+                .unwrap_or_else(|_| "{\"env_injections\":[]}".to_string());
+            return Ok(SceneCompileHookResponse {
+                contributions: contributions_json,
+            });
+        }
+
+        // Resolve the cc-hook socket path. We stamp a stable
+        // `<state>/sessions/<sid>/cc-hook.sock` path here — consumers
+        // substitute the real session id on merge. Shape-wise this is
+        // identical to what `CcHookSocket::bind` produces in
+        // `on_session_start`, so downstream code can treat both sources
+        // uniformly.
+        let socket_path = placeholder_session_socket_path();
+
+        // Parse the partial_scene JSON. Malformed / missing JSON is
+        // non-fatal — fallback is pure additive enhancement, NEVER a
+        // scene-compile blocker.
+        let scene_json: serde_json::Value = match serde_json::from_str(&req.partial_scene) {
+            Ok(v) => v,
+            Err(e) => {
+                debug!(error = %e, "claude-code: scene_compile_hook: partial_scene failed to parse as JSON; no injections");
+                let contributions_json = serde_json::to_string(&contributions)
+                    .unwrap_or_else(|_| "{\"env_injections\":[]}".to_string());
+                return Ok(SceneCompileHookResponse {
+                    contributions: contributions_json,
+                });
+            }
+        };
+
+        let panes = scene_json.get("panes").and_then(|v| v.as_array());
+        if let Some(panes) = panes {
+            for pane in panes {
+                let Some(pane_id) = pane.get("id").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                let Some(view) = pane.get("view") else {
+                    continue;
+                };
+                let kind = view.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                if kind != "command" {
+                    continue;
+                }
+                let Some(cmd) = view.get("cmd").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if !self.match_cmds.iter().any(|c| c == cmd) {
+                    continue;
+                }
+                let mut env = std::collections::BTreeMap::new();
+                env.insert(
+                    "CLAUDE_HOOK_SOCKET".to_string(),
+                    socket_path.to_string_lossy().into_owned(),
+                );
+                contributions.env_injections.push(EnvInjection {
+                    pane_id: pane_id.to_string(),
+                    env,
+                });
+            }
+        }
+
+        let contributions_json = serde_json::to_string(&contributions)
+            .unwrap_or_else(|_| "{\"env_injections\":[]}".to_string());
+        Ok(SceneCompileHookResponse {
+            contributions: contributions_json,
+        })
+    }
+
     /// T-022 + T-023: advertise the two control verbs this extension
     /// contributes to `ark control`:
     ///
@@ -540,6 +740,34 @@ impl ClaudeCodeExtension {
             .map(|p| p.to_path_buf())
             .unwrap_or_else(cc_hook_install_path);
         install_cc_hook_at(&target)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// T-032 helper — placeholder cc-hook socket path for scene_compile_hook
+// ---------------------------------------------------------------------------
+
+/// Placeholder cc-hook socket path stamped by
+/// [`ClaudeCodeExtension::scene_compile_hook`].
+///
+/// Shape: `<state>/sessions/__latest__/cc-hook.sock` where `<state>` is
+/// resolved from the ark `StateLayout` env vars. Consumers that know the
+/// real session id substitute it for `__latest__` when merging the env
+/// injection into pane launch.
+///
+/// The `__latest__` placeholder is the same convention the T-022
+/// `install-hooks` control verb uses — any reader that follows the
+/// install-hooks contract already knows how to interpret it. cc-hook's
+/// fail-open branch (T-009) keeps the no-live-session state a no-op.
+fn placeholder_session_socket_path() -> std::path::PathBuf {
+    match ark_types::StateLayout::from_env() {
+        Ok(layout) => {
+            // Use the same session-dir layout as CcHookSocket::bind but
+            // with the __latest__ placeholder id.
+            let fallback_id = ark_types::SessionId::new("__latest__");
+            layout.session_dir(&fallback_id).join("cc-hook.sock")
+        }
+        Err(_) => std::path::PathBuf::from("/tmp/ark/sessions/__latest__/cc-hook.sock"),
     }
 }
 

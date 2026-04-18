@@ -1,0 +1,13 @@
+error: tests/ui/fixtures/unknown_subagents_view.kdl:4:9: unknown view type `claude-code.claude-subagents` — no installed extension declares this view
+  --> tests/ui/unknown_subagents_view.rs:9:1
+   |
+ 9 | / validate_scene! {
+10 | |     manifests: [
+11 | |         r#"extension {
+12 | |             name "claude-code"
+...  |
+26 | | "#,
+27 | | }
+   | |_^
+   |
+   = note: this error originates in the macro `validate_scene` (in Nightly builds, run with -Z macro-backtrace for more info)
