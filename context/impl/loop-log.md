@@ -71,3 +71,8 @@ Overall: 45/134 (34%). Next: Tier 2 (engine-claude-code + event-bus consumers, 1
 
 ### Iteration 11 — 2026-04-14 (Tier 2 W1)
 - 3 parallel packets. T-046 (ark-hook skeleton, commit a7a289c, 12 tests, 6 files), T-052 (settings.local.json injection, commit 9370e71, 12 tests, sha256 checksum + .ark-backup + deep-merge), T-059+T-060+T-061 (consumers state_writer/status_pipe/hook_dispatcher, commit 2c43e37, 10 tests, ark-core+=ark-config dep no cycle, F-037 closed Lagged(n) warn-log in every recv loop). Packet A paused for solution-set fork on clap exit-2 behavior; user picked B (keep Cli::parse, exit 2 only on arg-validation = loud setup bug; all runtime errors still fail-open). Build P, tests 308/308 workspace. Next: T-047 (hook payload parser, deps T-046+T-005 met) + T-053 (transcript tailer, deps T-052+T-005 met) + T-058 (engine preflight, deps T-046 met).
+
+### Iteration Tier-0 — 2026-04-18 — phase-2
+- Wave 1 (Tier 0): 4 parallel general-purpose opus agents. T-001/T-002/T-003/T-045 all COMPLETE. Commits: 20c21e6, b8e07ab, 8547655, 1544dab. Build P, Tests P (1648).
+- Codex tier-gate: 3 findings. F-003 fix 3133529. F-001 deferred→T-046 (facet-kdl limitation, pre-existing). F-002 deferred→T-043 sequenced.
+- Next: Tier 1 — T-004..T-007 (ark-view type primitives: HandleKind, HandleId, View traits, InvalidationCause).

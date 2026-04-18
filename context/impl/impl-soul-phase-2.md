@@ -1,0 +1,35 @@
+---
+created: "2026-04-18"
+last_edited: "2026-04-18"
+---
+# Implementation Tracking: Soul Phase 2
+
+Build site: context/plans/build-site-soul-phase-2.md
+
+Ledger is prepend-only. Newest entries at top. Append completion rows below as tasks land.
+
+## Task Status
+
+| Task | Tier | Kit R | Status | SHA | Notes |
+|------|------|-------|--------|-----|-------|
+| T-001 | 0 | ark-view R1 | DONE | `20c21e6` | new crate `crates/ark-view/` + root Cargo.toml; dep budget bounded (facet+serde+serde_json+thiserror) |
+| T-002 | 0 | ext-surface R3 | DONE | `b8e07ab` | deleted `intent_register` RPC; `intent_dispatch` retained; gen-extension-spec EXPECTED_METHODS updated |
+| T-003 | 0 | ext-surface R4 | DONE | `8547655` | added `config_sections`+`reload_gates` Vec fields + decl structs; downstream construction sites patched |
+| T-045 | 0 | ext-surface R1 | DONE | `1544dab` | `CoreEvent::SessionEnded` gains `exit: ExitReason`; new enum `{Normal, Error(String), Cancelled}` `#[non_exhaustive]`; also patched `kill.rs`/`orchestration.rs` prod sites |
+| F-003 fix | 0 | — | DONE | `3133529` | Codex tier-gate: flatten `exit` to scalar string on FlatEvent; scene selectors can now match `exit="cancelled"` |
+| T-004..T-044 | 1-8 | various | PENDING | — | see build site |
+
+## Wave Log
+
+### Wave 1 — 2026-04-18 — Tier 0
+- 4 parallel opus agents (general-purpose, not ck:task-builder per memory). T-001/T-002/T-045 committed self; T-003 interrupted mid-commit, parent took ownership (per memory feedback_subagents — verify sha before marking DONE).
+- Codex tier-gate review (`codex exec review --base 21d4c20`) found 3:
+  - **F-001 [P1]** facet-kdl 0.42 sibling-Vec<T> ambiguity — **PRE-EXISTING** systemic limitation. Test file documents this explicitly; pre-T-003 `intents/events/views` fields already live with it. Workaround: extension.kdl authored manifests work by node name. **Deferred as T-046 (new) — needs facet-kdl upgrade or discriminator attr.**
+  - **F-002 [P1]** `intent/register` removed without proto bump — **INTENTIONAL per T-043 build-site sequencing**. T-043 (last Tier 8 task) bumps `CURRENT_PROTOCOL_VERSION::new(1,0)→::new(1,1)`. Build site explicitly lands the version bump last so conformance tests catch missing surface. Deferred as-designed.
+  - **F-003 [P2]** ExitReason emits object on FlatEvent — **fixed inline** (`3133529`). Scalar `exit` + separate `exit_message` projection.
+- Tier 0 complete. 5 commits. 1648 tests pass (+3 from T-003 roundtrip).
+
+## Deferred findings
+
+- **F-001** → new task **T-046** (create as Tier 8.5 remediation): facet-kdl sibling-Vec discriminator. Either upgrade crate or add rename attrs. Blocks kit R4 end-to-end acceptance.
+- **F-002** → tracked by existing T-043 (Tier 8 proto bump). No action beyond completing T-043.
