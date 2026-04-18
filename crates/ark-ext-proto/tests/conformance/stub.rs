@@ -8,12 +8,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use ark_ext_proto::{
     ArkExtension, CancelRequest, CancelResponse, ExtResult, HostFsReadRequest, HostFsReadResponse,
-    InitializeRequest, InitializeResponse, IntentDispatchRequest, IntentDispatchResponse,
-    IntentRegisterRequest, IntentRegisterResponse, LogLevel, LogWriteRequest, LogWriteResponse,
-    PingRequest, PingResponse, ProgressRequest, ProgressResponse, ShutdownRequest, ShutdownResponse,
-    TaskCancelRequest, TaskCancelResponse, TaskCreateRequest, TaskCreateResponse, TaskGetRequest,
-    TaskGetResponse, TaskId, UiKeybindRegisterRequest, UiKeybindRegisterResponse,
-    UiStatusPushRequest, UiStatusPushResponse,
+    InitializeRequest, InitializeResponse, IntentDispatchRequest, IntentDispatchResponse, LogLevel,
+    LogWriteRequest, LogWriteResponse, PingRequest, PingResponse, ProgressRequest, ProgressResponse,
+    ShutdownRequest, ShutdownResponse, TaskCancelRequest, TaskCancelResponse, TaskCreateRequest,
+    TaskCreateResponse, TaskGetRequest, TaskGetResponse, TaskId, UiKeybindRegisterRequest,
+    UiKeybindRegisterResponse, UiStatusPushRequest, UiStatusPushResponse,
 };
 use async_trait::async_trait;
 
@@ -105,13 +104,6 @@ impl ArkExtension for ConformanceStub {
         _req: TaskCancelRequest,
     ) -> ExtResult<TaskCancelResponse> {
         Ok(TaskCancelResponse::default())
-    }
-
-    async fn intent_register(
-        &self,
-        _req: IntentRegisterRequest,
-    ) -> ExtResult<IntentRegisterResponse> {
-        Ok(IntentRegisterResponse::default())
     }
 
     async fn intent_dispatch(

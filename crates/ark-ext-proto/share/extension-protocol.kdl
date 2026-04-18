@@ -271,26 +271,6 @@ protocol {
         }
 
         // -- Intents --
-        method "intent/register" {
-            kind "request"
-            description "`intent/register` — extension advertises a named intent. Namespace rule: `<ext-name>.<intent>` (R10). Re-registering an intent already registered by this extension replaces it; colliding with another extension's intent returns [`ExtensionError::InvalidParams`]."
-            params {
-                field "name" {
-                    description "Fully-qualified intent name."
-                    type "string"
-                    plural #false
-                    required #true
-                }
-                field "args_schema" {
-                    description "Argument schema as JSON-Schema. Ark validates `intent/dispatch` args against this schema before forwarding."
-                    type "string"
-                    plural #false
-                    required #true
-                }
-            }
-            result {
-            }
-        }
         method "intent/unregister" {
             kind "request"
             description "`intent/unregister` — drop a prior intent registration."
@@ -1079,28 +1059,6 @@ protocol {
                     required #true
                 }
             }
-        }
-        type "IntentRegisterRequest" {
-            description "`intent/register` — extension advertises a named intent. Namespace rule: `<ext-name>.<intent>` (R10). Re-registering an intent already registered by this extension replaces it; colliding with another extension's intent returns [`ExtensionError::InvalidParams`]."
-            kind "struct"
-            fields {
-                field "name" {
-                    description "Fully-qualified intent name."
-                    type "string"
-                    plural #false
-                    required #true
-                }
-                field "args_schema" {
-                    description "Argument schema as JSON-Schema. Ark validates `intent/dispatch` args against this schema before forwarding."
-                    type "string"
-                    plural #false
-                    required #true
-                }
-            }
-        }
-        type "IntentRegisterResponse" {
-            description "Void response for [`ArkExtension::intent_register`]."
-            kind "struct"
         }
         type "IntentUnregisterRequest" {
             description "`intent/unregister` — drop a prior intent registration."

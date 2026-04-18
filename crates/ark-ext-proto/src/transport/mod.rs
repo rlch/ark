@@ -29,8 +29,8 @@ use crate::{
     ExtensionError, HostFsReadRequest, HostFsReadResponse, HostFsWriteRequest, HostFsWriteResponse,
     HostNetFetchRequest, HostNetFetchResponse, HostProcSpawnRequest, HostProcSpawnResponse,
     InitializeRequest, InitializeResponse, InitializedRequest, InitializedResponse,
-    IntentDispatchRequest, IntentDispatchResponse, IntentRegisterRequest, IntentRegisterResponse,
-    IntentUnregisterRequest, IntentUnregisterResponse, LogSetLevelRequest, LogSetLevelResponse,
+    IntentDispatchRequest, IntentDispatchResponse, IntentUnregisterRequest,
+    IntentUnregisterResponse, LogSetLevelRequest, LogSetLevelResponse,
     LogWriteRequest, LogWriteResponse, PingRequest, PingResponse, ProgressRequest,
     ProgressResponse, ProtocolVersion, SceneGetRootRequest, SceneGetRootResponse, SessionToken,
     ShutdownRequest, ShutdownResponse, TaskCancelRequest, TaskCancelResponse, TaskCreateRequest,
@@ -230,13 +230,6 @@ pub trait ExtensionClient: Send + Sync {
     ) -> ExtResult<EventNotifyResponse>;
 
     // -- Intents -------------------------------------------------------------
-
-    /// `intent/register`.
-    async fn intent_register(
-        &self,
-        req: IntentRegisterRequest,
-        opts: RequestOptions,
-    ) -> ExtResult<IntentRegisterResponse>;
 
     /// `intent/unregister`.
     async fn intent_unregister(

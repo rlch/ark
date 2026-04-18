@@ -32,8 +32,8 @@
 //! * **Event bus** — [`ArkExtension::event_subscribe`],
 //!   [`ArkExtension::event_unsubscribe`], [`ArkExtension::event_emit`],
 //!   [`ArkExtension::event_notify`].
-//! * **Intents** — [`ArkExtension::intent_register`],
-//!   [`ArkExtension::intent_unregister`], [`ArkExtension::intent_dispatch`].
+//! * **Intents** — [`ArkExtension::intent_unregister`],
+//!   [`ArkExtension::intent_dispatch`].
 //! * **UI (keybind / status)** — [`ArkExtension::ui_keybind_register`],
 //!   [`ArkExtension::ui_keybind_unregister`], [`ArkExtension::ui_status_push`].
 //! * **UI (panes)** — [`ArkExtension::ui_pane_request`],
@@ -720,23 +720,6 @@ pub struct EventNotifyResponse {}
 // Intents
 // ---------------------------------------------------------------------------
 
-/// `intent/register` — extension advertises a named intent. Namespace rule:
-/// `<ext-name>.<intent>` (R10). Re-registering an intent already registered
-/// by this extension replaces it; colliding with another extension's intent
-/// returns [`ExtensionError::InvalidParams`].
-#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct IntentRegisterRequest {
-    /// Fully-qualified intent name.
-    pub name: String,
-    /// Argument schema as JSON-Schema. Ark validates `intent/dispatch`
-    /// args against this schema before forwarding.
-    pub args_schema: OpaqueJson,
-}
-
-/// Void response for [`ArkExtension::intent_register`].
-#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct IntentRegisterResponse {}
-
 /// `intent/unregister` — drop a prior intent registration.
 #[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct IntentUnregisterRequest {
@@ -1182,14 +1165,6 @@ pub trait ArkExtension: Send + Sync {
     }
 
     // -- Intents -------------------------------------------------------------
-
-    /// `intent/register`. Default: [`ExtensionError::method_not_found`].
-    async fn intent_register(
-        &self,
-        _req: IntentRegisterRequest,
-    ) -> ExtResult<IntentRegisterResponse> {
-        Err(ExtensionError::method_not_found("intent/register"))
-    }
 
     /// `intent/unregister`. Default: [`ExtensionError::method_not_found`].
     async fn intent_unregister(

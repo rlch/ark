@@ -653,14 +653,6 @@ impl ExtensionClient for NdjsonClient {
 
     // -- Intents -------------------------------------------------------------
 
-    async fn intent_register(
-        &self,
-        req: IntentRegisterRequest,
-        opts: RequestOptions,
-    ) -> ExtResult<IntentRegisterResponse> {
-        self.call("intent/register", req, opts).await
-    }
-
     async fn intent_unregister(
         &self,
         req: IntentUnregisterRequest,
@@ -1015,14 +1007,6 @@ impl NdjsonServer {
                 |e, r| async move { e.event_emit(r).await },
             )
             .await,
-            "intent/register" => {
-                dispatch_typed::<E, IntentRegisterRequest, IntentRegisterResponse, _>(
-                    ext,
-                    req.params,
-                    |e, r| async move { e.intent_register(r).await },
-                )
-                .await
-            }
             "intent/unregister" => {
                 dispatch_typed::<E, IntentUnregisterRequest, IntentUnregisterResponse, _>(
                     ext,

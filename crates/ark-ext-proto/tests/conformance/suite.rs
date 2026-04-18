@@ -17,9 +17,9 @@ use std::time::Duration;
 
 use ark_ext_proto::{
     Capabilities, EventEmitRequest, ExtensionClient, ExtensionError, IntentDispatchRequest,
-    IntentRegisterRequest, LogLevel, LogWriteRequest, PingRequest, ProtocolVersion,
-    RequestOptions, ShutdownRequest, TaskCancelRequest, TaskCreateRequest, TaskGetRequest,
-    UiKeybindRegisterRequest, UiStatusPushRequest,
+    LogLevel, LogWriteRequest, PingRequest, ProtocolVersion, RequestOptions, ShutdownRequest,
+    TaskCancelRequest, TaskCreateRequest, TaskGetRequest, UiKeybindRegisterRequest,
+    UiStatusPushRequest,
 };
 
 /// Conformance case: handshake with a compatible MAJOR succeeds.
@@ -111,19 +111,8 @@ pub async fn task_lifecycle(client: Arc<dyn ExtensionClient>) {
         .expect("task/cancel");
 }
 
-/// Conformance case: `intent/register` then `intent/dispatch` round-trip.
+/// Conformance case: `intent/dispatch` round-trip.
 pub async fn intent_round_trip(client: Arc<dyn ExtensionClient>) {
-    let _ = client
-        .intent_register(
-            IntentRegisterRequest {
-                name: "stub.demo".into(),
-                args_schema: "{}".into(),
-            },
-            RequestOptions::default(),
-        )
-        .await
-        .expect("intent/register");
-
     let resp = client
         .intent_dispatch(
             IntentDispatchRequest {

@@ -177,14 +177,6 @@ impl ExtensionClient for InProcClient {
 
     // -- Intents -------------------------------------------------------------
 
-    async fn intent_register(
-        &self,
-        req: IntentRegisterRequest,
-        _opts: RequestOptions,
-    ) -> ExtResult<IntentRegisterResponse> {
-        self.ext.intent_register(req).await
-    }
-
     async fn intent_unregister(
         &self,
         req: IntentUnregisterRequest,

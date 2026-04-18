@@ -178,13 +178,6 @@ fn method_table() -> Vec<MethodEntry> {
         },
         // -- Intents -----------------------------------------------------
         MethodEntry {
-            method: "intent/register",
-            section: "Intents",
-            request: IntentRegisterRequest::SHAPE,
-            response: IntentRegisterResponse::SHAPE,
-            kind: Kind::Request,
-        },
-        MethodEntry {
             method: "intent/unregister",
             section: "Intents",
             request: IntentUnregisterRequest::SHAPE,
@@ -647,7 +640,6 @@ mod tests {
         "event/unsubscribe",
         "event/emit",
         "event/notify",
-        "intent/register",
         "intent/unregister",
         "intent/dispatch",
         "ui/keybind/register",
