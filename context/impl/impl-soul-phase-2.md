@@ -42,7 +42,12 @@ Ledger is prepend-only. Newest entries at top. Append completion rows below as t
 | T-023 | 4 | ext-surface R4 | DONE | `d6a67bf` | ViewDecl.kind = Option<StringNode> ("pane"\|"stack"); downstream construction sites patched |
 | T-003 doctest fix | 4 | — | DONE | `8815508` | ark-ext-metadata doctest construction missed config_sections/reload_gates |
 | F-010/F-011 fix | 4 | — | PARTIAL | `<pending>` | F-010 kind=stack gap now warn-logged in scene/ext/binding.rs (full consumption at T-034); F-011 gen-extension-spec serde-transparent limitation deferred to tooling task |
-| T-024..T-044 | 5-8 | various | PENDING | — | see build site |
+| T-024 | 5 | ext-surface R6 | DONE | `117af17` | PHASE_2_CAPABILITY_FLAGS const with exactly 8 flags; set-equality + naming-convention tests |
+| T-025 | 5 | ext-surface R7 | DONE | `380700c` | #[derive(View)] + #[ark_view(...)] attribute; auto-name from PascalCase→kebab-case |
+| T-026 | 5 | ext-surface R7 | DONE | `d691db7` | #[derive(CommandView)] + #[derive(ZellijView)] marker derives (PATH A — minimal, no cross-derive magic) |
+| T-027 | 5 | ext-surface R7 | DONE | `d691db7` | #[ark_extension(capabilities="...")] auto-advertise via inherent ARK_CAPABILITIES const |
+| F-012/F-014 fix | 5 | — | DONE | `bfde279` | generics preserved via split_for_impl() (Extension/View/CommandView/ZellijView); attribute rename doc |
+| T-028..T-044 | 6-8 | various | PENDING | — | see build site |
 
 ## Wave Log
 

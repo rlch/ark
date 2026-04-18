@@ -96,3 +96,8 @@ Overall: 45/134 (34%). Next: Tier 2 (engine-claude-code + event-bus consumers, 1
 - Wave 5: T-018+T-019+T-021+T-022 (ad001b7) + T-023 (d6a67bf); T-020 unblocked (7a24239); doctest fix (8815508). Build P, Tests P (1721).
 - Codex tier-gate: 2 findings. F-010 [P1] kind unconsumed — warn-log added + T-034 deferral. F-011 [P2] spec gen tooling — deferred. Gate: accept deferrals, advance.
 - Next: Tier 5 — T-024..T-027 (capability taxonomy + #[derive(View/CommandView/ZellijView)] + auto-advertise on Extension derive).
+
+### Iteration Tier-5 — 2026-04-18 — phase-2
+- Wave 6a: T-024 (117af17) + T-025 (380700c) parallel. Wave 6b: T-026 + T-027 (d691db7) bundled. Build P, Tests P (1723).
+- Codex tier-gate: 3 findings. F-012/F-014 fixed inline (bfde279 — generics via split_for_impl, attribute-rename doc). F-013 accepted — theoretical breakage, no production users.
+- Next: Tier 6 — T-028..T-036 (supervisor-side: capability dispatcher + load sequence + list/doctor + config + scene validator + reload gate + suppression map — 9 tasks, host-dispatch kit).
