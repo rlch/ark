@@ -90,36 +90,58 @@ where
 ///
 /// Returns:
 /// - `true` — method is either ungated (no capability requirement) or
-///   the ext advertised the gating capability;
-/// - `false` — method is gated and the ext did not advertise the flag.
-///   Callers skip the call entirely; no log per kit R6.
+///   the ext advertised the gating capability AND hasn't been marked
+///   as an opt-out (via [`warn_advertised_but_unimplemented`]);
+/// - `false` — method is gated and either (a) the ext did not
+///   advertise the flag, or (b) a prior call observed
+///   `method_not_found` and marked the pair as an opt-out.
+///   Callers skip the call entirely; no log on the skip path per kit R6.
 pub fn should_dispatch(ext_name: &str, method: &str) -> bool {
     let Some(required_cap) = capability_for_method(method) else {
         return true; // Ungated method — always dispatch.
     };
+    // Opt-out short-circuit: an ext that returned method_not_found
+    // once is treated as opted out for the rest of the session, even
+    // though it advertises the capability. Prevents repeated pointless
+    // RPC attempts against a partially-implemented ext (F-015).
+    if is_opted_out(ext_name, method) {
+        return false;
+    }
     let reg = registry().lock().expect("cap registry poisoned");
     reg.get(ext_name).is_some_and(|c| c.has(required_cap))
 }
 
-/// Warn-once dedup for advertised-but-unimplemented pairs.
-static WARNED_PAIRS: OnceLock<Mutex<HashSet<(String, String)>>> = OnceLock::new();
+/// Session-scoped set of `(ext, method)` pairs the host has marked as
+/// opted-out after observing a `method_not_found` response. Entries
+/// are additive; there is no un-opt-out path short of supervisor
+/// restart (session-scoped semantics).
+static OPTED_OUT: OnceLock<Mutex<HashSet<(String, String)>>> = OnceLock::new();
 
-fn warned_pairs() -> &'static Mutex<HashSet<(String, String)>> {
-    WARNED_PAIRS.get_or_init(|| Mutex::new(HashSet::new()))
+fn opted_out() -> &'static Mutex<HashSet<(String, String)>> {
+    OPTED_OUT.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn is_opted_out(ext_name: &str, method: &str) -> bool {
+    let key = (ext_name.to_string(), method.to_string());
+    opted_out().lock().expect("opted_out poisoned").contains(&key)
 }
 
 /// Emit a warn-once log when a dispatch proceeded (capability advertised)
 /// but the extension returned MethodNotFound. Dedups on (ext, method)
-/// across the entire supervisor process lifetime.
+/// across the entire supervisor process lifetime. Also records the
+/// pair as opted-out so subsequent [`should_dispatch`] calls return
+/// false without round-tripping to the ext (F-015).
 pub fn warn_advertised_but_unimplemented(ext_name: &str, method: &str) {
     let key = (ext_name.to_string(), method.to_string());
-    let mut warned = warned_pairs().lock().expect("warned set poisoned");
-    if warned.insert(key) {
+    // Opt-out insert — first caller wins. Subsequent
+    // `should_dispatch(ext, method)` returns false without RPC.
+    let inserted = opted_out().lock().expect("opted_out poisoned").insert(key.clone());
+    if inserted {
         tracing::warn!(
             target: "ark.supervisor.ext_dispatch",
             ext = %ext_name,
             method = %method,
-            "extension advertised capability but returned method_not_found; treating as opt-out"
+            "extension advertised capability but returned method_not_found; treating as opt-out for remainder of session"
         );
     }
 }
@@ -204,11 +226,11 @@ mod tests {
     fn warn_advertised_but_unimplemented_dedups() {
         // Can't easily assert tracing output here, but we can assert
         // the dedup set grows monotonically.
-        let before = warned_pairs().lock().unwrap().len();
+        let before = opted_out().lock().unwrap().len();
         warn_advertised_but_unimplemented("ext-dedup", "pane/emit");
         warn_advertised_but_unimplemented("ext-dedup", "pane/emit");
         warn_advertised_but_unimplemented("ext-dedup", "pane/emit");
-        let after = warned_pairs().lock().unwrap().len();
+        let after = opted_out().lock().unwrap().len();
         assert_eq!(after, before + 1, "subsequent warns should be deduped");
     }
 
