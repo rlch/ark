@@ -15,6 +15,8 @@ pub mod typed;
 pub mod view;
 pub use handle::{HandleId, HandleKind};
 pub use invalidation::InvalidationCause;
-pub use suppression::ParamsHash;
-pub use typed::{Pane, Stack, TabHandle};
+pub use suppression::{hash_params, ParamsHash, SceneHandleName, SuppressionPolicy};
+pub use typed::{Pane, PaneAttrs, PaneLike, Stack, TabHandle};
+#[doc(hidden)]
+pub use typed::__trybuild_pane_ctor;
 pub use view::{CommandView, View, ZellijView};

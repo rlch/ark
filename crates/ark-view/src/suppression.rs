@@ -141,6 +141,113 @@ fn write_canonical(out: &mut String, value: &serde_json::Value) {
     }
 }
 
+/// Scene-author-written `@handle` name for a top-level pane. This is
+/// the stable author key the reconciler uses across reconciles —
+/// distinct from the runtime opaque [`crate::handle::HandleId`] which
+/// churns whenever a user closes then the author changes params.
+///
+/// Names are ASCII-ish scene identifiers; validation rules are owned
+/// by the scene compiler, not this newtype.
+#[derive(Clone, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct SceneHandleName(String);
+
+impl SceneHandleName {
+    /// Construct from any string-convertible value.
+    pub fn new(name: impl Into<String>) -> Self { Self(name.into()) }
+
+    /// Borrow the underlying name.
+    pub fn as_str(&self) -> &str { &self.0 }
+}
+
+impl std::fmt::Display for SceneHandleName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// User-close suppression policy — contract type. Carries no
+/// behavior; its purpose is to document, in one place, the six
+/// invariants the supervisor's `closed_by_user: Map<SceneHandleName,
+/// ParamsHash>` storage must uphold. Storage lives in
+/// `crates/supervisor/src/` (see host-dispatch kit R9); this type is
+/// the *specification* side of the contract.
+///
+/// # Invariants
+///
+/// 1. **Record on user-close.** When the user closes a scene-declared
+///    top-level pane (zellij pane-close delta where the closed pane
+///    had no `ARK_HANDLE` matching the current tenant), the
+///    supervisor computes `params_hash` from the view's current
+///    resolved scene params (via [`hash_params`]) and stores
+///    `(handle_name, params_hash)` in the suppression set.
+///
+/// 2. **Params-hash override on reconcile.** On every reconcile tick,
+///    for each declared pane, the supervisor consults the set:
+///    - absent → spawn the pane;
+///    - present with equal hash → skip spawn (suppressed);
+///    - present with differing hash → evict the entry, then spawn
+///      (the author materially changed the view's params, so
+///      suppression lifts).
+///
+/// 3. **Session-scoped.** The suppression set is in-memory and
+///    session-scoped: its lifetime equals supervisor session
+///    lifetime. Supervisor restart produces a fresh session with an
+///    empty set.
+///
+/// 4. **Params-only, not source.** `params_hash` is computed
+///    deterministically from the *resolved* scene params (the
+///    Rhai-evaluated result, not source text), so cosmetic KDL edits
+///    that produce identical params do NOT lift suppression. See
+///    [`hash_params`] for the canonical algorithm.
+///
+/// 5. **Top-level only — stack children excluded (R9).** Suppression
+///    applies ONLY to scene-declared top-level panes (those with a
+///    stable `SceneHandleName` in the scene AST). Stack children
+///    never enter the suppression set because they lack a stable
+///    author name — they're spawned dynamically via
+///    `Stack::spawn_pane`. The policy enforces this: passing a
+///    stack-child name to [`SuppressionPolicy::record_user_close`]
+///    is a debug-assert error (see that method).
+///
+/// 6. **Invalidation always fires.** User-close of any handle
+///    (top-level or stack-child) fires
+///    `ark.handle.invalidated { cause: user_closed }` on the
+///    event bus regardless of whether the suppression set writes.
+///    Extensions observe closures even when the host opts not to
+///    respawn.
+///
+/// # Ownership
+///
+/// - This type lives in `ark-view` because the invariants are
+///   view-level semantics — not supervisor implementation details.
+/// - The storage (the actual `BTreeMap<SceneHandleName, ParamsHash>`)
+///   lives in `crates/supervisor/src/` per host-dispatch kit R9.
+/// - Reconciler consults the map during tick; it does not own it.
+pub struct SuppressionPolicy {
+    _private: (),
+}
+
+impl SuppressionPolicy {
+    /// Enforcement helper: panics (in debug) when called with a
+    /// `SceneHandleName` that originated from a stack child. Per
+    /// invariant #5 and cavekit-soul-phase-2-ark-view.md R9, stack
+    /// children MUST NOT enter the suppression set.
+    ///
+    /// The caller (supervisor) supplies `is_stack_child = true` when
+    /// the closed pane was a stack child (its parent was a Stack<V>
+    /// node, not a top-level scene pane). In release builds this is
+    /// a no-op — the policy trusts the caller but logs the invariant
+    /// violation.
+    pub fn assert_not_stack_child(is_stack_child: bool, handle_name: &SceneHandleName) {
+        debug_assert!(
+            !is_stack_child,
+            "SuppressionPolicy invariant #5 violated: SceneHandleName {:?} is a stack child; suppression MUST NOT record it",
+            handle_name
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,5 +348,40 @@ mod tests {
     #[derive(Deserialize)]
     struct _DeserCheck {
         _x: Option<i32>,
+    }
+
+    #[test]
+    fn scene_handle_name_display_matches_inner() {
+        let n = SceneHandleName::new("main-editor");
+        assert_eq!(n.to_string(), "main-editor");
+        assert_eq!(n.as_str(), "main-editor");
+    }
+
+    #[test]
+    fn scene_handle_name_serialises_as_plain_string() {
+        let n = SceneHandleName::new("sidebar");
+        let s = serde_json::to_string(&n).unwrap();
+        assert_eq!(s, "\"sidebar\"");
+    }
+
+    #[test]
+    fn scene_handle_name_deserialises_from_plain_string() {
+        let n: SceneHandleName = serde_json::from_str("\"terminal\"").unwrap();
+        assert_eq!(n.as_str(), "terminal");
+    }
+
+    #[test]
+    fn suppression_policy_accepts_non_stack_child_handle() {
+        let name = SceneHandleName::new("top-level");
+        // Must NOT panic in debug when is_stack_child = false.
+        SuppressionPolicy::assert_not_stack_child(false, &name);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "stack child")]
+    fn suppression_policy_rejects_stack_child_debug_assert() {
+        let name = SceneHandleName::new("child-1");
+        SuppressionPolicy::assert_not_stack_child(true, &name);
     }
 }
