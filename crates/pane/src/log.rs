@@ -119,7 +119,10 @@ pub fn one_liner(ev: &CoreEvent) -> (String, String) {
             "ark.core.session_started".to_string(),
             format!("spec {}", spec.id.as_str()),
         ),
-        CoreEvent::SessionEnded { terminated_at } => (
+        CoreEvent::SessionEnded {
+            terminated_at,
+            exit: _,
+        } => (
             "ark.core.session_ended".to_string(),
             format!("terminated {}", terminated_at.format("%H:%M:%S")),
         ),
@@ -460,6 +463,7 @@ mod tests {
         let ts = Utc.with_ymd_and_hms(2026, 4, 14, 10, 30, 15).unwrap();
         let ev = CoreEvent::SessionEnded {
             terminated_at: ts,
+            exit: ark_types::ExitReason::Normal,
         };
         let (k, s) = one_liner(&ev);
         assert_eq!(k, "ark.core.session_ended");

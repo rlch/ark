@@ -207,6 +207,7 @@ mod tests {
 
         tx.send(CoreEvent::SessionEnded {
             terminated_at: Utc::now(),
+            exit: ark_types::ExitReason::Normal,
         })
         .unwrap();
 

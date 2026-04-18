@@ -29,6 +29,28 @@ pub enum LogLevel {
     Error,
 }
 
+/// Terminal state of a session when [`CoreEvent::SessionEnded`] is emitted.
+/// Per phase-2-design-decisions.md §R-5.
+///
+/// Serialised with an adjacent `kind`/`value` tag so unit variants still
+/// flatten to a stable snake_case string while the `Error(String)` variant
+/// carries its payload in a predictable `value` slot. The enum is
+/// `#[non_exhaustive]`: downstream matches must use a wildcard arm so
+/// future terminal reasons can land without breaking consumers.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ExitReason {
+    /// Session ended cleanly — methodology reported a normal terminal state.
+    Normal,
+    /// Session ended in an error state. Payload is a human-readable
+    /// explanation; not intended to be programmatically parsed.
+    Error(String),
+    /// Session ended because it was cancelled (user-initiated or
+    /// supervisor-initiated shutdown before a natural terminal state).
+    Cancelled,
+}
+
 /// Extension-emitted event ride-along. Every non-core event rides inside a
 /// `CoreEvent::Ext(ExtEvent)` envelope so the core bus stays flat.
 ///
@@ -59,8 +81,13 @@ pub enum CoreEvent {
     Error { error: String },
     /// Session lifecycle: spawn.
     SessionStarted { spec: SessionSpec },
-    /// Session lifecycle: termination.
-    SessionEnded { terminated_at: DateTime<Utc> },
+    /// Session lifecycle: termination. `exit` records the terminal state
+    /// (see [`ExitReason`]); production sites emit `ExitReason::Normal`
+    /// unless the methodology signals an error or a cancellation.
+    SessionEnded {
+        terminated_at: DateTime<Utc>,
+        exit: ExitReason,
+    },
     /// Extension-emitted event. See [`ExtEvent`].
     Ext(ExtEvent),
 }
@@ -105,9 +132,12 @@ impl From<&CoreEvent> for FlatEvent {
                 name: "ark.core.session_started".to_string(),
                 payload: serde_json::json!({ "spec": spec }),
             },
-            CoreEvent::SessionEnded { terminated_at } => FlatEvent {
+            CoreEvent::SessionEnded { terminated_at, exit } => FlatEvent {
                 name: "ark.core.session_ended".to_string(),
-                payload: serde_json::json!({ "terminated_at": terminated_at }),
+                payload: serde_json::json!({
+                    "terminated_at": terminated_at,
+                    "exit": exit,
+                }),
             },
             CoreEvent::Ext(ext) => FlatEvent::from(ext),
         }
@@ -158,6 +188,15 @@ mod tests {
             },
             CoreEvent::SessionEnded {
                 terminated_at: Utc::now(),
+                exit: ExitReason::Normal,
+            },
+            CoreEvent::SessionEnded {
+                terminated_at: Utc::now(),
+                exit: ExitReason::Error("boom".to_string()),
+            },
+            CoreEvent::SessionEnded {
+                terminated_at: Utc::now(),
+                exit: ExitReason::Cancelled,
             },
             CoreEvent::Ext(ExtEvent {
                 ext: "acp-client".to_string(),
@@ -208,6 +247,52 @@ mod tests {
             error: "boom".to_string(),
         };
         assert_eq!(FlatEvent::from(&err).name, "ark.core.error");
+    }
+
+    #[test]
+    fn exit_reason_serde_roundtrip_all_variants() {
+        let variants = [
+            ExitReason::Normal,
+            ExitReason::Error("disk full".to_string()),
+            ExitReason::Cancelled,
+        ];
+        for ex in &variants {
+            let json = serde_json::to_string(ex).expect("ser");
+            let back: ExitReason = serde_json::from_str(&json).expect("de");
+            assert_eq!(&back, ex, "exit reason roundtrip mismatch: {json}");
+        }
+    }
+
+    #[test]
+    fn exit_reason_serde_snake_case_tag() {
+        // Tag is the stable public contract — lock the snake_case shape.
+        assert_eq!(
+            serde_json::to_value(ExitReason::Normal).unwrap(),
+            serde_json::json!({ "kind": "normal" })
+        );
+        assert_eq!(
+            serde_json::to_value(ExitReason::Cancelled).unwrap(),
+            serde_json::json!({ "kind": "cancelled" })
+        );
+        assert_eq!(
+            serde_json::to_value(ExitReason::Error("nope".to_string())).unwrap(),
+            serde_json::json!({ "kind": "error", "value": "nope" })
+        );
+    }
+
+    #[test]
+    fn flat_event_from_core_session_ended_includes_exit() {
+        let ts = Utc::now();
+        let ev = CoreEvent::SessionEnded {
+            terminated_at: ts,
+            exit: ExitReason::Error("crashed".to_string()),
+        };
+        let flat = FlatEvent::from(&ev);
+        assert_eq!(flat.name, "ark.core.session_ended");
+        assert!(flat.payload.get("terminated_at").is_some());
+        let exit = flat.payload.get("exit").expect("exit key present");
+        assert_eq!(exit.get("kind").and_then(|v| v.as_str()), Some("error"));
+        assert_eq!(exit.get("value").and_then(|v| v.as_str()), Some("crashed"));
     }
 
     #[test]

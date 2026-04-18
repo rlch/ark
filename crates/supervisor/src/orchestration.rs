@@ -302,6 +302,7 @@ pub async fn run_supervisor_with(
     // Final SessionEnded event so consumers observe a terminal record.
     let _ = events.send(CoreEvent::SessionEnded {
         terminated_at: Utc::now(),
+        exit: ark_types::ExitReason::Normal,
     });
 
     // ---- Step 14: drain consumer tasks ----

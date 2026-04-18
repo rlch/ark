@@ -50,6 +50,7 @@ mod tests {
     fn sample_event() -> CoreEvent {
         CoreEvent::SessionEnded {
             terminated_at: Utc::now(),
+            exit: crate::event::ExitReason::Normal,
         }
     }
 

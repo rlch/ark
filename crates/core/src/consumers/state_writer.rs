@@ -83,7 +83,7 @@ pub async fn state_writer(
                                 warn!(error = %e, "state_writer: status.json seed failed");
                             }
                         }
-                        CoreEvent::SessionEnded { terminated_at } => {
+                        CoreEvent::SessionEnded { terminated_at, .. } => {
                             if let Err(e) = update_terminated_at(&layout, &id, *terminated_at) {
                                 warn!(error = %e, "state_writer: status.json terminated_at update failed");
                             }
@@ -310,6 +310,7 @@ mod tests {
         let end_ts = Utc::now();
         tx.send(CoreEvent::SessionEnded {
             terminated_at: end_ts,
+            exit: ark_types::ExitReason::Normal,
         })
         .unwrap();
 

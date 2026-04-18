@@ -38,7 +38,7 @@ pub fn canonical_fields(kind: EventKind) -> Option<&'static [&'static str]> {
         EventKind::Log => Some(&["level", "message", "target"]),
         EventKind::Error => Some(&["error"]),
         EventKind::SessionStarted => Some(&["spec"]),
-        EventKind::SessionEnded => Some(&["terminated_at"]),
+        EventKind::SessionEnded => Some(&["terminated_at", "exit"]),
         EventKind::Ext => None,
     }
 }

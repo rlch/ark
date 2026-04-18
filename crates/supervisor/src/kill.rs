@@ -149,6 +149,7 @@ pub async fn kill_handler(
     // Step 3b: broadcast the canonical "session terminal" signal.
     let ended_ev = CoreEvent::SessionEnded {
         terminated_at: Utc::now(),
+        exit: ark_types::ExitReason::Cancelled,
     };
     if let Err(err) = event_bus.send(ended_ev) {
         warn!(%err, "kill_handler: could not emit CoreEvent::SessionEnded");

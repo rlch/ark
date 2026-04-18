@@ -14,7 +14,7 @@
 //! flag — option (b) in the kit's acceptance criteria.
 //!
 //! Orchestrator-backed sessions (Phase 2+ extensions) are expected to
-//! publish `CoreEvent::SessionEnded { terminated_at }` when their
+//! publish `CoreEvent::SessionEnded { terminated_at, exit }` when their
 //! methodology decides the session is terminal; this module observes
 //! that signal and closes the session in the mux.
 
@@ -63,7 +63,7 @@ pub async fn apply_auto_close_policy(
                 return Ok(());
             }
             ev = bus.recv() => match ev {
-                Ok(CoreEvent::SessionEnded { terminated_at }) => {
+                Ok(CoreEvent::SessionEnded { terminated_at, .. }) => {
                     debug!(
                         session = %session_id.as_str(),
                         name = session_name,
@@ -172,6 +172,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             let _ = sender.send(CoreEvent::SessionEnded {
                 terminated_at: Utc::now(),
+                exit: ark_types::ExitReason::Normal,
             });
         });
 
