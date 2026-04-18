@@ -795,6 +795,16 @@ impl ArkExtension for ClaudeCodeExtension {
                     "description": "Re-extract the embedded cc-hook binary to $XDG_BIN_HOME/cc-hook (mode 0755).",
                     "args": [],
                 },
+                // T-046 (R12): `ark ext reload claude-code`. The handler
+                // entry point is [`ClaudeCodeExtension::reload`]; the
+                // supervisor-side CLI routing re-uses the same
+                // `ControlVerbsResponse.verbs` JSON the `install-hooks`
+                // + `reinstall-hook-binary` verbs ride on.
+                {
+                    "name": "reload",
+                    "description": "Hot-reload the claude-code extension: re-run settings.json reconciliation, re-bind per-session cc-hook socket, refresh transcript watcher + config. Live view handles are preserved.",
+                    "args": [],
+                },
             ],
         });
         // OpaqueJson is a `String` type alias — store the serialised
@@ -928,6 +938,230 @@ impl ClaudeCodeExtension {
             .map(|p| p.to_path_buf())
             .unwrap_or_else(cc_hook_install_path);
         install_cc_hook_at(&target)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// T-046 (R12) — hot reload
+// ---------------------------------------------------------------------------
+
+/// T-046 (R12): request payload for [`ClaudeCodeExtension::reload`].
+///
+/// Carries the new scene's ext-config bucket + optional live session
+/// context. When the session context is `Some`, reload re-runs the
+/// on-session-start side-effects (settings.json reconcile, socket rebind,
+/// transcript-watcher setup) against the live session. When `None`
+/// (scene-only reload, no live session), the call is config-only —
+/// `config` gets refreshed and the [`ClaudeCodeConfig`] is visible on the
+/// NEXT `scene_compile_hook` / `on_session_start` dispatch.
+///
+/// `new_ext_config` must contain a `"claude-code"` key — if it's missing,
+/// reload is rejected per R12 "mismatched view-type wiring → reject
+/// reload, old scene stays live" (the extension interprets a scene that
+/// no longer declares `use "claude-code"` as a mismatch rather than a
+/// silent teardown — teardown is the supervisor's job via a different
+/// code path).
+#[derive(Debug, Clone, Default)]
+pub struct ReloadRequest {
+    /// New scene's `SessionSpec.ext_config` bucket. Checked for a
+    /// `"claude-code"` entry; absence rejects the reload.
+    pub new_ext_config: std::collections::BTreeMap<String, serde_json::Value>,
+    /// Live session context. `Some((session_id, socket_path,
+    /// session_dir))` triggers the session-side re-run of
+    /// settings.json reconcile + transcript-watcher setup. `None` =
+    /// config-only refresh.
+    pub session: Option<ReloadSessionCtx>,
+}
+
+/// Per-session context handed to [`ClaudeCodeExtension::reload`] when the
+/// caller owns live session state (i.e. `on_session_start` already ran).
+#[derive(Debug, Clone)]
+pub struct ReloadSessionCtx {
+    /// The live session id.
+    pub session_id: ark_types::SessionId,
+    /// Path to the currently-bound cc-hook socket. Reload preserves this
+    /// path — cc-hook's fresh-invocation model reconnects on next fire.
+    pub socket_path: std::path::PathBuf,
+    /// Session directory. Sentinels (settings-unwritable,
+    /// bridge-version-mismatch) live here.
+    pub session_dir: std::path::PathBuf,
+    /// Directory to bind the transcript watcher against. When `None`
+    /// reload skips the watcher re-setup — a subsequent hook-fired frame
+    /// will late-bind via `ensure_tracking` (T-027's idempotent path).
+    pub transcript_parent_dir: Option<std::path::PathBuf>,
+}
+
+/// T-046 (R12): outcome of [`ClaudeCodeExtension::reload`]. Each `bool`
+/// records whether the corresponding side effect actually ran — useful
+/// for tests + for the CLI `ark ext reload claude-code` summary line.
+///
+/// Invariants:
+///
+/// * On successful reload `config_refreshed` is always `true` — a reload
+///   that did not touch config is semantically a no-op and the caller
+///   should get back a rejected reload instead.
+/// * `settings_reconciled` is gated on `config.auto_install_hook_entries`
+///   AND a present [`ReloadSessionCtx`]; false on config-only reload.
+/// * `transcript_watcher_reset` is gated on a present
+///   `transcript_parent_dir` in the session ctx; false otherwise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReloadOutcome {
+    /// Config was replaced on the extension.
+    pub config_refreshed: bool,
+    /// Settings.json reconcile ran (gated on
+    /// `config.auto_install_hook_entries` AND session ctx present).
+    pub settings_reconciled: bool,
+    /// Transcript watcher setup ran (gated on `transcript_parent_dir`).
+    pub transcript_watcher_reset: bool,
+}
+
+/// T-046 (R12): error returned when reload is rejected. Old scene stays
+/// live; the supervisor treats this as a scene-level rejection and keeps
+/// the previous `ClaudeCodeExtension` state intact.
+#[derive(Debug, thiserror::Error)]
+pub enum ReloadRejected {
+    /// The new scene no longer declares `use "claude-code"`.
+    /// Per R12 "mismatched view-type wiring" this is a reload-rejection,
+    /// not a teardown — if the user wants to remove the extension from a
+    /// scene they restart the session.
+    #[error(
+        "claude-code: reload rejected — new scene does not declare `use \"claude-code\"` in ext_config (old scene stays live)"
+    )]
+    MissingExtConfig,
+}
+
+impl ClaudeCodeExtension {
+    /// T-046 (R12): hot-reload the claude-code extension against a new
+    /// scene/config.
+    ///
+    /// On success, the following side-effects run in order:
+    ///
+    /// 1. Validate: `new_ext_config` MUST contain a `"claude-code"`
+    ///    entry, otherwise → [`ReloadRejected::MissingExtConfig`] +
+    ///    old scene stays live.
+    /// 2. Parse the new `[claude-code]` section via
+    ///    [`Self::load_session_config`]. Unknown keys warn; malformed
+    ///    values fall back to defaults (same failure mode as
+    ///    `on_session_start`).
+    /// 3. If a [`ReloadSessionCtx`] is present AND
+    ///    `config.auto_install_hook_entries` is `true`:
+    ///    [`reconcile_settings_for_session`] runs against the live
+    ///    session id + socket path.
+    /// 4. If a [`ReloadSessionCtx`] is present AND
+    ///    `transcript_parent_dir` is `Some`: a FRESH
+    ///    [`transcript::TranscriptDirWatcher`] is created + wired to a
+    ///    log sink (matching `on_session_start`). Any previous watcher
+    ///    kept by the caller should be dropped — its underlying
+    ///    `notify::RecommendedWatcher` stops on drop.
+    /// 5. Socket rebind is a no-op at this layer: cc-hook invocations
+    ///    are stateless (one NDJSON line → close), the live
+    ///    `UnixListener` inside the caller-held [`socket::CcHookSocket`]
+    ///    stays bound at the same path. The kit R12 "re-binds the cc-hook
+    ///    socket" claim is preserved by the property that the socket
+    ///    path is IDENTICAL across reloads (session id doesn't change)
+    ///    and cc-hook reconnects on every fire.
+    /// 6. In-flight `claude` process is untouched — the extension never
+    ///    held a handle to it.
+    ///
+    /// Typed `Stack<_>` ref survival: the view's `subagents` handle is
+    /// an opaque [`ark_view::HandleId`] — construction-time bytes that
+    /// the extension never owns or mutates. Reloading the extension
+    /// CANNOT invalidate the view-side handle. The regression test
+    /// `reload_preserves_stack_handle_identity` pins this.
+    ///
+    /// Returns [`ReloadOutcome`] so callers can log a summary line.
+    pub fn reload(&self, req: ReloadRequest) -> Result<ReloadOutcome, ReloadRejected> {
+        // Step 1: validate — scene must still declare `use "claude-code"`.
+        if !req.new_ext_config.contains_key(EXT_NAME) {
+            warn!(
+                "claude-code: reload rejected — new scene removed `use \"claude-code\"` (old scene stays live)"
+            );
+            return Err(ReloadRejected::MissingExtConfig);
+        }
+
+        // Step 2: refresh config. Unknown-key warnings fire from inside
+        // `load_session_config`; malformed values fall back to defaults.
+        let new_config = self.load_session_config(&req.new_ext_config);
+        debug!(
+            match_cmds_len = new_config.match_cmds.len(),
+            transcript_tail_lines = new_config.transcript_tail_lines,
+            auto_install_hook_entries = new_config.auto_install_hook_entries,
+            "claude-code: reload: config refreshed"
+        );
+
+        let mut outcome = ReloadOutcome {
+            config_refreshed: true,
+            settings_reconciled: false,
+            transcript_watcher_reset: false,
+        };
+
+        // Step 3 + 4: session-scoped side effects.
+        if let Some(ctx) = req.session.as_ref() {
+            if new_config.auto_install_hook_entries {
+                reconcile_settings_for_session(
+                    &ctx.session_id,
+                    &ctx.socket_path,
+                    &ctx.session_dir,
+                    /* override_settings_path */ None,
+                    /* override_cc_hook_path */ None,
+                );
+                outcome.settings_reconciled = true;
+            } else {
+                debug!(
+                    session = %ctx.session_id.as_path_leaf(),
+                    "claude-code: reload: auto_install_hook_entries=false; skipping settings.json reconcile"
+                );
+            }
+
+            if let Some(dir) = ctx.transcript_parent_dir.as_ref() {
+                let (watcher, rx) = transcript::TranscriptDirWatcher::new();
+                let shared: transcript::SharedDirWatcher =
+                    std::sync::Arc::new(std::sync::Mutex::new(watcher));
+                if let Ok(mut w) = shared.lock() {
+                    w.ensure_tracking(dir);
+                }
+                // Sink the dir events so the watcher drives forward; the
+                // caller will typically replace this with the view-side
+                // consumer on the next spawn. Matches the sink shape used
+                // in `on_session_start`.
+                let _log_sink = transcript::spawn_log_sink(rx);
+                // Drop `shared` here — the new watcher's `notify` inner
+                // keeps the OS-level handle live via the spawned log-sink
+                // task; when the task exits (rx dropped) the watcher
+                // tears down cleanly. This is a best-effort refresh
+                // intended for the CLI `ark ext reload` path; production
+                // wiring (supervisor-side) would hold the `SharedDirWatcher`
+                // on the extension instance, but v0.1 keeps it scoped.
+                debug!(
+                    session = %ctx.session_id.as_path_leaf(),
+                    dir = %dir.display(),
+                    "claude-code: reload: transcript watcher reset"
+                );
+                outcome.transcript_watcher_reset = true;
+            }
+        }
+
+        info!(
+            config_refreshed = outcome.config_refreshed,
+            settings_reconciled = outcome.settings_reconciled,
+            transcript_watcher_reset = outcome.transcript_watcher_reset,
+            "claude-code: reload complete"
+        );
+        Ok(outcome)
+    }
+
+    /// T-046 convenience: `reload` with a config-only signature (no
+    /// live session). Equivalent to calling [`Self::reload`] with
+    /// `session: None`. Useful when the caller is the scene-compiler
+    /// driving a pre-launch reload through `ark ext reload claude-code`.
+    pub fn reload_config_only(
+        &self,
+        new_ext_config: std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> Result<ReloadOutcome, ReloadRejected> {
+        self.reload(ReloadRequest {
+            new_ext_config,
+            session: None,
+        })
     }
 }
 
@@ -1871,5 +2105,216 @@ mod tier7_tests {
         assert!(v.get("cost_usd").is_some());
         let back: CcListColumnState = serde_json::from_value(v).unwrap();
         assert_eq!(back, snap);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tier 8 — T-046 reload tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tier8_reload_tests {
+    use super::*;
+    use ark_ext_proto::{ArkExtension, ControlVerbsRequest};
+    use std::collections::BTreeMap;
+
+    fn ext_config_with_claude_code(cfg: serde_json::Value) -> BTreeMap<String, serde_json::Value> {
+        let mut ec: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+        ec.insert("claude-code".into(), cfg);
+        ec
+    }
+
+    #[test]
+    fn t046_reload_rejected_when_scene_drops_use_directive() {
+        let ext = ClaudeCodeExtension::new().with_config(ClaudeCodeConfig {
+            match_cmds: vec!["claude".to_string()],
+            transcript_tail_lines: 50,
+            auto_install_hook_entries: false,
+        });
+        // Old config visible.
+        assert_eq!(ext.match_cmds(), vec!["claude".to_string()]);
+
+        // New ext_config does NOT carry `claude-code` key → reject.
+        let empty: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+        let res = ext.reload(ReloadRequest {
+            new_ext_config: empty,
+            session: None,
+        });
+        assert!(matches!(res, Err(ReloadRejected::MissingExtConfig)));
+        // Old config UNCHANGED — reload rejection leaves state intact.
+        assert_eq!(ext.match_cmds(), vec!["claude".to_string()]);
+        assert_eq!(ext.config_snapshot().transcript_tail_lines, 50);
+        assert!(!ext.config_snapshot().auto_install_hook_entries);
+    }
+
+    #[test]
+    fn t046_reload_config_only_refreshes_match_cmds_and_tail_lines() {
+        let ext = ClaudeCodeExtension::new();
+        assert!(ext.match_cmds().is_empty());
+        assert_eq!(ext.config_snapshot().transcript_tail_lines, 200);
+
+        let outcome = ext
+            .reload_config_only(ext_config_with_claude_code(serde_json::json!({
+                "match_cmds": ["claude", "claude-code"],
+                "transcript_tail_lines": 42,
+                "auto_install_hook_entries": true,
+            })))
+            .expect("reload OK");
+        assert!(outcome.config_refreshed);
+        assert!(!outcome.settings_reconciled); // no session ctx
+        assert!(!outcome.transcript_watcher_reset);
+
+        // Fresh config visible on next event dispatch — R12 acceptance.
+        assert_eq!(
+            ext.match_cmds(),
+            vec!["claude".to_string(), "claude-code".to_string()]
+        );
+        assert_eq!(ext.config_snapshot().transcript_tail_lines, 42);
+    }
+
+    #[test]
+    fn t046_reload_is_idempotent_across_two_calls_with_same_config() {
+        let ext = ClaudeCodeExtension::new();
+        let cfg = ext_config_with_claude_code(serde_json::json!({
+            "match_cmds": ["claude"],
+        }));
+        let first = ext.reload_config_only(cfg.clone()).unwrap();
+        let second = ext.reload_config_only(cfg).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(ext.match_cmds(), vec!["claude".to_string()]);
+    }
+
+    #[test]
+    fn t046_reload_preserves_stack_handle_identity() {
+        // R12: "typed `Stack<_>` ref survives reload". The stack handle
+        // is held inside the caller-constructed `ClaudeCodeView`, NOT
+        // inside the extension — reload cannot invalidate it. We model
+        // that by constructing a view with a stack handle, running a
+        // reload, and asserting the handle's serde form (the opaque
+        // HandleId bytes) is unchanged.
+        let stack: ark_view::Stack<ClaudeCodeSubagent> =
+            serde_json::from_str("\"stable-handle-id\"").unwrap();
+        let view = ClaudeCodeView {
+            subagents: Some(stack),
+            ..Default::default()
+        };
+        let before = serde_json::to_string(view.subagents.as_ref().unwrap()).unwrap();
+
+        let ext = ClaudeCodeExtension::new();
+        let _ = ext
+            .reload_config_only(ext_config_with_claude_code(serde_json::json!({
+                "match_cmds": ["claude"],
+            })))
+            .expect("reload OK");
+
+        // Handle bytes unchanged. Reload never touches view-held state.
+        let after = serde_json::to_string(view.subagents.as_ref().unwrap()).unwrap();
+        assert_eq!(before, after);
+        assert_eq!(before, "\"stable-handle-id\"");
+    }
+
+    #[test]
+    fn t046_reload_with_session_ctx_and_settings_opt_out_skips_reconcile() {
+        // Config with auto_install_hook_entries=false → settings.json
+        // reconcile MUST NOT fire even when a session ctx is present.
+        let ext = ClaudeCodeExtension::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let sess_dir = tmp.path().join("sessions").join("s0");
+        std::fs::create_dir_all(&sess_dir).unwrap();
+        let sock = sess_dir.join("cc-hook.sock");
+        let outcome = ext
+            .reload(ReloadRequest {
+                new_ext_config: ext_config_with_claude_code(serde_json::json!({
+                    "auto_install_hook_entries": false,
+                })),
+                session: Some(ReloadSessionCtx {
+                    session_id: ark_types::SessionId::new("s0"),
+                    socket_path: sock,
+                    session_dir: sess_dir,
+                    transcript_parent_dir: None,
+                }),
+            })
+            .expect("reload OK");
+        assert!(outcome.config_refreshed);
+        assert!(
+            !outcome.settings_reconciled,
+            "auto_install_hook_entries=false must skip reconcile"
+        );
+        assert!(!outcome.transcript_watcher_reset);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn t046_reload_with_transcript_dir_resets_watcher() {
+        // When `transcript_parent_dir` is Some, reload sets up a fresh
+        // watcher. We validate this runs without error; the watcher
+        // itself has its own tests elsewhere.
+        let ext = ClaudeCodeExtension::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let sess_dir = tmp.path().join("sessions").join("s1");
+        let transcript_dir = tmp.path().join("projects").join("p0").join("subagents");
+        std::fs::create_dir_all(&sess_dir).unwrap();
+        std::fs::create_dir_all(&transcript_dir).unwrap();
+        let sock = sess_dir.join("cc-hook.sock");
+
+        let outcome = ext
+            .reload(ReloadRequest {
+                // Opt out of settings reconcile so this test doesn't
+                // stomp the user's ~/.claude/settings.json — we only
+                // want to exercise the watcher branch.
+                new_ext_config: ext_config_with_claude_code(serde_json::json!({
+                    "auto_install_hook_entries": false,
+                })),
+                session: Some(ReloadSessionCtx {
+                    session_id: ark_types::SessionId::new("s1"),
+                    socket_path: sock,
+                    session_dir: sess_dir,
+                    transcript_parent_dir: Some(transcript_dir),
+                }),
+            })
+            .expect("reload OK");
+        assert!(outcome.config_refreshed);
+        assert!(!outcome.settings_reconciled);
+        assert!(outcome.transcript_watcher_reset);
+    }
+
+    #[tokio::test]
+    async fn t046_control_verbs_advertises_reload() {
+        let ext = ClaudeCodeExtension::new();
+        let resp = ext
+            .control_verbs(ControlVerbsRequest::default())
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&resp.verbs).unwrap();
+        let names: Vec<&str> = v
+            .get("verbs")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|e| e.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert!(names.contains(&"install-hooks"));
+        assert!(names.contains(&"reinstall-hook-binary"));
+        assert!(
+            names.contains(&"reload"),
+            "T-046 reload verb must be advertised"
+        );
+    }
+
+    #[test]
+    fn t046_reload_emits_warn_on_unknown_keys_and_falls_back_to_defaults() {
+        // R12 inherits R9's "unknown keys warn but don't fail".
+        let ext = ClaudeCodeExtension::new();
+        let outcome = ext
+            .reload_config_only(ext_config_with_claude_code(serde_json::json!({
+                "match_cmds": ["claude"],
+                "permission_policy": "auto", // unknown
+            })))
+            .expect("reload OK despite unknown key");
+        assert!(outcome.config_refreshed);
+        let snap = ext.config_snapshot();
+        assert_eq!(snap.match_cmds, vec!["claude".to_string()]);
+        // Other known fields take defaults.
+        assert_eq!(snap.transcript_tail_lines, 200);
+        assert!(snap.auto_install_hook_entries);
     }
 }

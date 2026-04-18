@@ -255,11 +255,17 @@ async fn control_verbs_advertises_install_and_reinstall() {
         .expect("control_verbs");
     let parsed: serde_json::Value = serde_json::from_str(&resp.verbs).unwrap();
     let verbs = parsed.get("verbs").unwrap().as_array().unwrap();
-    assert_eq!(verbs.len(), 2);
+    // T-046 added a third verb (`reload`). Assert at-least-2 + explicit
+    // membership so a future additional verb doesn't break this pin.
+    assert!(verbs.len() >= 2);
     let names: Vec<&str> = verbs
         .iter()
         .filter_map(|v| v.get("name").and_then(|n| n.as_str()))
         .collect();
     assert!(names.contains(&"install-hooks"));
     assert!(names.contains(&"reinstall-hook-binary"));
+    assert!(
+        names.contains(&"reload"),
+        "T-046 reload verb must be advertised"
+    );
 }

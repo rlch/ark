@@ -75,6 +75,14 @@ tempfile = { workspace = true }
 # `claude-code` view's `subagents` attribute to a handle that is not a
 # `Stack<ClaudeCodeSubagent>`. Dev-only — never ships in the rlib.
 trybuild = "1"
+# T-048 (claude-code-ext R13 PTY-level smoke): no cross-crate bin
+# resolution needed. The fixture crate's `mock-claude-cc` binary is
+# equivalent to inline NDJSON synthesis for the reduced gate — cargo's
+# `CARGO_BIN_EXE_X` env var is only defined for binaries in the SAME
+# package as the test, so a cross-crate invocation would need a
+# `build.rs`-based resolver. For v0.1 the smoke test inlines the
+# equivalent synthetic timeline. When `ark-test-harness` lands, the
+# full PTY gate can plumb this through a cargo-internal build.rs.
 # T-031 re-uses the `validate_scene!` proc-macro (re-exported by
 # ark-scene) for KDL-level handle-kind validation. Already a dep via the
 # top-level `ark-scene = { path = ... }` line; named here again under
