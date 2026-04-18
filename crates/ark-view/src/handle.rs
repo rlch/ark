@@ -11,6 +11,12 @@
 /// kinds zellij itself distinguishes. The old `Command` and `Plugin`
 /// variants conflated render-mode with handle-kind; view-type info now
 /// lives exclusively on the typed wrapper `Pane<V>` (see R3/R4).
+///
+/// `#[non_exhaustive]` lets future Rust consumers add match arms
+/// without Rust-side breakage. It does **not** buy wire-format forward
+/// compatibility: a 1.0 peer receiving a 1.1 variant over serde will
+/// still fail with `unknown variant`. Any new kind requires a peer
+/// protocol bump (see `CURRENT_PROTOCOL_VERSION`).
 #[derive(
     Copy,
     Clone,
@@ -48,7 +54,7 @@ pub enum HandleKind {
     facet::Facet,
 )]
 #[serde(transparent)]
-pub struct HandleId(pub String);
+pub struct HandleId(String);
 
 impl HandleId {
     /// Construct from any string-convertible value.
@@ -153,7 +159,7 @@ mod tests {
     #[test]
     fn handle_id_deserializes_from_plain_string() {
         let id: HandleId = serde_json::from_str("\"abc-123\"").unwrap();
-        assert_eq!(id, HandleId("abc-123".to_string()));
+        assert_eq!(id, HandleId::new("abc-123"));
         assert_eq!(id.as_str(), "abc-123");
     }
 

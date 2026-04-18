@@ -9,10 +9,16 @@
 
 /// Terminal cause for a scene-declared handle. Exactly three causes
 /// in v0.1; `#[non_exhaustive]` allows future causes to land without
-/// breaking downstream `match` consumers.
+/// Rust-side match breakage in downstream crates.
 ///
 /// Serialises to stable snake_case strings — these strings are the
 /// wire contract consumers pattern-match against.
+///
+/// `#[non_exhaustive]` **does not** buy wire forward-compat: a peer
+/// on an older protocol receiving a new variant will fail serde with
+/// `unknown variant`. Any new cause requires a peer-protocol bump
+/// (see `CURRENT_PROTOCOL_VERSION` in `ark-ext-proto`) and the
+/// corresponding capability flag.
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize, facet::Facet)]
 #[serde(rename_all = "snake_case")]
 #[repr(u8)]
