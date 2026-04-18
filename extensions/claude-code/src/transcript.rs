@@ -56,9 +56,11 @@ use std::fs;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 
 use notify::{RecursiveMode, Watcher};
-use tracing::{debug, warn};
+use tokio::sync::mpsc as tokio_mpsc;
+use tracing::{debug, info, warn};
 
 /// Coarse signal emitted by a [`TranscriptWatcher`] when the OS reports
 /// a filesystem change under the watched directory. The payload is
@@ -324,6 +326,278 @@ fn notify_to_io_err(e: notify::Error) -> std::io::Error {
     std::io::Error::other(format!("notify: {e}"))
 }
 
+/// T-025 plan-name alias for [`TailCursor`]. The build site names the
+/// type `TranscriptTail` (shared across R6 views + R11 list columns);
+/// the salvaged T-007 implementation already lives on [`TailCursor`]
+/// with identical semantics (byte-offset cursor, truncation / rotation
+/// handling, missing-file → empty-vec). The alias keeps downstream
+/// view-tier code (T-036) free to write `TranscriptTail::new(path)` as
+/// the plan reads while preserving the existing test surface.
+pub type TranscriptTail = TailCursor;
+
+// ---------------------------------------------------------------------------
+// T-027 — `notify`-based session transcript-dir watcher
+// ---------------------------------------------------------------------------
+
+/// Internal-wire event emitted by [`TranscriptDirWatcher`].
+///
+/// Per R8, the subagent-transcript file-creation signal is NOT promoted
+/// to a core-bus [`ark_types::ExtEvent`] — the authoritative subagent
+/// lifecycle source is the `SubagentStart` hook via cc-hook (T-037).
+/// This channel is a thin internal wiring surface that view consumers
+/// (T-035 / T-036) subscribe to when they want the raw filesystem
+/// heads-up. For Tier 5 the receiver end is drained by a log-only
+/// debug sink — real consumers land with views in Tier 6.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TranscriptDirEvent {
+    /// A new file appeared directly under `<dir>/subagents/`. Carries
+    /// the absolute path notify reported. NO ExtEvent is derived from
+    /// this — views may use it to eagerly open a [`TranscriptTail`] on
+    /// the file, but the authoritative subagent lifecycle signal is the
+    /// `SubagentStart` hook (R8 acceptance criterion).
+    SubagentTranscriptCreated(PathBuf),
+    /// A modify / create / any-kind fs event landed under the tracked
+    /// directory (or its `subagents/` subdir) for a path that is NOT a
+    /// new file directly under `subagents/`. Callers correlate by file
+    /// name to decide whether to re-poll a cached [`TranscriptTail`].
+    TranscriptModified(PathBuf),
+}
+
+/// T-027 + T-028 — recursive `notify` watcher over the active session's
+/// transcript directory + its `subagents/` subdirectory.
+///
+/// Owns a `notify::RecommendedWatcher` and a `tokio::sync::mpsc`
+/// sender. [`Self::ensure_tracking`] is the only public mutator; it
+/// derives the tracked dir from the `transcript_path.parent()` of the
+/// first cc-hook payload (per decisions doc R-14 the payload carries
+/// an absolute transcript path — no encoding probe needed). The call
+/// is idempotent: re-invoking with the same parent is a no-op;
+/// re-invoking with a different parent replaces the prior watch.
+///
+/// Missing-directory semantics (T-028 acceptance):
+///  - `ensure_tracking(dir)` on a dir that does not yet exist logs
+///    `awaiting transcript dir` at INFO + leaves the watcher in the
+///    "no active watch" state. The extension does NOT error.
+///  - Callers re-invoke `ensure_tracking` when a later payload signals
+///    the dir now exists (Claude Code creates it on first session
+///    event) — this works because every hook fire routes through the
+///    accept loop which calls `ensure_tracking` unconditionally.
+pub struct TranscriptDirWatcher {
+    /// Keeps the notify watcher alive; replaced wholesale when
+    /// `ensure_tracking` switches directories. `None` when no
+    /// directory is being watched (e.g. `ensure_tracking` was called
+    /// for a dir that did not yet exist).
+    watcher: Option<notify::RecommendedWatcher>,
+    /// Path of the currently-watched parent dir; `None` until the
+    /// first successful `ensure_tracking`.
+    tracked_dir: Option<PathBuf>,
+    /// Sender half of the internal event channel. Cloned into the
+    /// notify event-handler closure; receivers are Tier 6 views.
+    tx: tokio_mpsc::UnboundedSender<TranscriptDirEvent>,
+}
+
+impl std::fmt::Debug for TranscriptDirWatcher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TranscriptDirWatcher")
+            .field("tracked_dir", &self.tracked_dir)
+            .field("watcher_active", &self.watcher.is_some())
+            .finish()
+    }
+}
+
+impl TranscriptDirWatcher {
+    /// Build a fresh watcher with no active subscription. Returns the
+    /// watcher + the receiver end of the internal event channel. The
+    /// watcher itself is not `Clone` — wrap in `Arc<Mutex<…>>` if
+    /// multiple publishers need to hand it around (the extension does
+    /// exactly this so the accept-loop task can call `ensure_tracking`
+    /// on each incoming hook frame).
+    pub fn new() -> (Self, tokio_mpsc::UnboundedReceiver<TranscriptDirEvent>) {
+        let (tx, rx) = tokio_mpsc::unbounded_channel();
+        (
+            Self {
+                watcher: None,
+                tracked_dir: None,
+                tx,
+            },
+            rx,
+        )
+    }
+
+    /// Current tracked directory, if any. `None` before the first
+    /// successful `ensure_tracking`, or after an `ensure_tracking` that
+    /// targetted a missing dir (T-028 "watcher logs + waits").
+    pub fn tracked_dir(&self) -> Option<&Path> {
+        self.tracked_dir.as_deref()
+    }
+
+    /// Ensure a recursive notify watch is active on `dir`. Idempotent:
+    ///
+    ///  - Already watching `dir` → no-op.
+    ///  - Watching a different dir → drop old watcher + bind new one.
+    ///  - `dir` does not exist → log INFO `awaiting transcript dir` +
+    ///    clear any prior watch; subsequent call once the dir appears
+    ///    installs the watch (T-028).
+    ///  - notify registration errored → log WARN + leave prior watch
+    ///    in place. The extension never fails a session on watcher
+    ///    trouble (fail-open philosophy from R2 + R8).
+    pub fn ensure_tracking(&mut self, dir: &Path) {
+        let dir_owned = dir.to_path_buf();
+
+        if self.tracked_dir.as_deref() == Some(dir) && self.watcher.is_some() {
+            debug!(
+                dir = %dir.display(),
+                "claude-code: transcript dir watcher already tracking"
+            );
+            return;
+        }
+
+        if !dir.exists() {
+            info!(
+                dir = %dir.display(),
+                "claude-code: awaiting transcript dir; will bind once it appears"
+            );
+            // Drop any prior watcher + clear the tracked dir so a
+            // later ensure_tracking call (same or different dir)
+            // re-evaluates from scratch.
+            self.watcher = None;
+            self.tracked_dir = None;
+            return;
+        }
+
+        // notify handler closure — runs on notify's internal thread.
+        // Clones the tx so the closure owns a sender independent of
+        // `self.tx` (watcher may outlive the lock-holder across
+        // replacements).
+        let tx = self.tx.clone();
+        let handler = move |res: notify::Result<notify::Event>| {
+            let Ok(event) = res else { return };
+            for path in event.paths.iter() {
+                // "New file under `<dir>/subagents/`" = the subagent-
+                // transcript-created signal. We correlate by the
+                // penultimate path component rather than exact parent
+                // equality because macOS FSEvents reports
+                // `/private`-prefixed canonical paths that don't `==`
+                // the watched prefix (same quirk covered in the
+                // legacy `start_watcher` above).
+                let parent_leaf = path
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str());
+                let is_create = matches!(
+                    event.kind,
+                    notify::EventKind::Create(_)
+                        | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
+                );
+                let ev = if is_create && parent_leaf == Some("subagents") {
+                    TranscriptDirEvent::SubagentTranscriptCreated(path.clone())
+                } else {
+                    TranscriptDirEvent::TranscriptModified(path.clone())
+                };
+                // Receivers gone = loop torn down; stop emitting.
+                if tx.send(ev).is_err() {
+                    break;
+                }
+            }
+        };
+
+        let mut watcher = match notify::recommended_watcher(handler) {
+            Ok(w) => w,
+            Err(e) => {
+                warn!(
+                    dir = %dir.display(),
+                    error = %e,
+                    "claude-code: notify watcher construction failed; skipping tracking"
+                );
+                return;
+            }
+        };
+        if let Err(e) = watcher.watch(&dir_owned, RecursiveMode::Recursive) {
+            warn!(
+                dir = %dir.display(),
+                error = %e,
+                "claude-code: notify recursive watch failed; skipping tracking"
+            );
+            return;
+        }
+
+        // A recursive watch on `dir` already covers `dir/subagents`
+        // even when that subdir doesn't exist yet (notify catches the
+        // subdir creation + its contents because of RecursiveMode).
+        // We leave an explicit best-effort watch on `subagents/`
+        // intentionally OFF — the recursive parent watch is
+        // authoritative and double-watching causes duplicate events
+        // on some platforms.
+
+        debug!(
+            dir = %dir.display(),
+            "claude-code: transcript dir watcher bound"
+        );
+        self.watcher = Some(watcher);
+        self.tracked_dir = Some(dir_owned);
+    }
+}
+
+/// Spawn a log-only Tier-5 consumer of [`TranscriptDirEvent`]s. Real
+/// view-tier consumers land in T-035 / T-036; this sink mirrors the
+/// Tier 2 "wire it up but just log for now" pattern so the channel is
+/// drained and the watcher never wedges on a full unbounded buffer.
+///
+/// Returns the spawned task's `JoinHandle` so the caller can abort it
+/// at session end. The task exits cleanly when every sender is
+/// dropped.
+pub fn spawn_log_sink(
+    mut rx: tokio_mpsc::UnboundedReceiver<TranscriptDirEvent>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                TranscriptDirEvent::SubagentTranscriptCreated(path) => {
+                    debug!(
+                        path = %path.display(),
+                        "claude-code: subagent transcript file created (watcher)"
+                    );
+                }
+                TranscriptDirEvent::TranscriptModified(path) => {
+                    debug!(
+                        path = %path.display(),
+                        "claude-code: transcript modified (watcher)"
+                    );
+                }
+            }
+        }
+    })
+}
+
+/// Arc-wrapped watcher handle held by the extension.
+///
+/// The extension clones the handle into the socket accept-loop task so
+/// each incoming cc-hook frame can invoke [`TranscriptDirWatcher::ensure_tracking`]
+/// with the parent of its `transcript_path`. Idempotency is handled
+/// inside `ensure_tracking` — the Mutex merely serialises transitions.
+pub type SharedDirWatcher = Arc<Mutex<TranscriptDirWatcher>>;
+
+/// Extract `transcript_path` from a cc-hook payload's `extra` bag, if
+/// present + absolute + a string-shaped JSON value. Returns the
+/// **parent directory** — the thing [`TranscriptDirWatcher::ensure_tracking`]
+/// consumes — not the file itself.
+///
+/// Per decisions doc R-14 (kit R8) the hook payload carries an
+/// absolute `transcript_path` on every fire; this helper simply
+/// surfaces the parent dir for watcher binding. Missing key, wrong
+/// type, relative path, or no parent → `None`; caller treats as "no
+/// watcher binding this fire", not as an error.
+pub fn extract_transcript_parent_from_payload(
+    extra: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> Option<PathBuf> {
+    let raw = extra.get("transcript_path")?.as_str()?;
+    let path = Path::new(raw);
+    if !path.is_absolute() {
+        return None;
+    }
+    path.parent().map(PathBuf::from)
+}
+
 /// Resolve the inode of a stat'd file on unix, `None` on non-unix
 /// platforms (inode-based rotation detection is best-effort).
 #[cfg(unix)]
@@ -477,5 +751,163 @@ mod tests {
     fn encode_cwd_replaces_slashes_with_dashes() {
         assert_eq!(encode_cwd(Path::new("/Users/rjm/repo")), "-Users-rjm-repo");
         assert_eq!(encode_cwd(Path::new("~/work")), "work");
+    }
+
+    // -----------------------------------------------------------------------
+    // T-027 / T-028 — TranscriptDirWatcher unit coverage
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn transcript_tail_is_tail_cursor_alias() {
+        // T-025: plan-name alias. This pin guards against a refactor
+        // that accidentally splits the two types — downstream view
+        // code (T-036) writes `TranscriptTail::new(path)` expecting
+        // the cursor semantics proven out above.
+        let tmp = TempDir::new().unwrap();
+        let mut t: TranscriptTail = TranscriptTail::new(tmp.path().join("no.jsonl"));
+        assert!(t.poll_new_lines().expect("ok").is_empty());
+    }
+
+    #[test]
+    fn extract_parent_from_payload_accepts_absolute() {
+        let mut extra = std::collections::BTreeMap::new();
+        extra.insert(
+            "transcript_path".to_string(),
+            serde_json::json!("/tmp/projects/abc/session.jsonl"),
+        );
+        let got = extract_transcript_parent_from_payload(&extra).expect("some");
+        assert_eq!(got, PathBuf::from("/tmp/projects/abc"));
+    }
+
+    #[test]
+    fn extract_parent_from_payload_rejects_relative_and_missing() {
+        let empty = std::collections::BTreeMap::new();
+        assert!(extract_transcript_parent_from_payload(&empty).is_none());
+
+        let mut bad_type = std::collections::BTreeMap::new();
+        bad_type.insert(
+            "transcript_path".to_string(),
+            serde_json::json!({"nope": true}),
+        );
+        assert!(extract_transcript_parent_from_payload(&bad_type).is_none());
+
+        let mut relative = std::collections::BTreeMap::new();
+        relative.insert(
+            "transcript_path".to_string(),
+            serde_json::json!("projects/abc/session.jsonl"),
+        );
+        assert!(extract_transcript_parent_from_payload(&relative).is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dir_watcher_missing_dir_leaves_no_active_watch() {
+        // T-028 acceptance: watcher logs + waits when the dir is
+        // missing. Here we just assert the no-active-watch invariant;
+        // the log assertion lives in the integration test which uses
+        // a scoped tracing subscriber.
+        let tmp = TempDir::new().unwrap();
+        let missing = tmp.path().join("projects").join("abc");
+        let (mut w, _rx) = TranscriptDirWatcher::new();
+        w.ensure_tracking(&missing);
+        assert!(
+            w.tracked_dir().is_none(),
+            "missing dir must not install a watch"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dir_watcher_binds_on_existing_dir_and_is_idempotent() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let (mut w, _rx) = TranscriptDirWatcher::new();
+        w.ensure_tracking(&dir);
+        assert_eq!(w.tracked_dir(), Some(dir.as_path()));
+
+        // Second call on same dir: idempotent no-op (watcher stays
+        // bound; tracked_dir unchanged).
+        w.ensure_tracking(&dir);
+        assert_eq!(w.tracked_dir(), Some(dir.as_path()));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dir_watcher_emits_subagent_transcript_created() {
+        // T-027 acceptance: new file under `<dir>/subagents/` is an
+        // internal `SubagentTranscriptCreated` wire event (NOT an
+        // ExtEvent — R8 authoritative lifecycle is the hook).
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().to_path_buf();
+        std::fs::create_dir_all(dir.join("subagents")).unwrap();
+
+        let (mut w, mut rx) = TranscriptDirWatcher::new();
+        w.ensure_tracking(&dir);
+
+        // Notify needs a moment to register.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        write_line(&dir.join("subagents").join("agent-123.jsonl"), "hello");
+
+        // Poll-with-timeout (macOS FSEvents has variable latency).
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut saw_subagent = false;
+        while std::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(150), rx.recv()).await {
+                Ok(Some(TranscriptDirEvent::SubagentTranscriptCreated(path))) => {
+                    assert!(path.file_name().unwrap() == "agent-123.jsonl");
+                    saw_subagent = true;
+                    break;
+                }
+                Ok(Some(TranscriptDirEvent::TranscriptModified(_))) => {
+                    // Coarse create/modify on the parent path — keep
+                    // draining until we see the subagent-specific one
+                    // (notify ordering varies per platform).
+                    continue;
+                }
+                Ok(None) => break,  // channel closed
+                Err(_) => continue, // timeout — keep draining
+            }
+        }
+        assert!(
+            saw_subagent,
+            "expected a SubagentTranscriptCreated event within 3s"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dir_watcher_reacts_once_missing_dir_appears() {
+        // T-028 acceptance: watcher logs + waits when dir is missing,
+        // reacts when it appears. Here we drive the "dir created
+        // later" path through two `ensure_tracking` invocations (the
+        // accept-loop calls ensure_tracking on every hook frame, so
+        // idempotency + late-bind is the natural wiring).
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("projects").join("abc");
+
+        let (mut w, mut rx) = TranscriptDirWatcher::new();
+        w.ensure_tracking(&dir);
+        assert!(w.tracked_dir().is_none(), "missing dir: no watch");
+
+        // Claude Code creates the dir.
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Next hook frame: accept-loop re-invokes ensure_tracking.
+        w.ensure_tracking(&dir);
+        assert_eq!(w.tracked_dir(), Some(dir.as_path()));
+
+        // Now a transcript write lands an event.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        write_line(&dir.join("session.jsonl"), "payload");
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut saw = false;
+        while std::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_millis(150), rx.recv()).await {
+                Ok(Some(_)) => {
+                    saw = true;
+                    break;
+                }
+                Ok(None) => break,
+                Err(_) => continue,
+            }
+        }
+        assert!(saw, "expected an event after late-bind");
     }
 }

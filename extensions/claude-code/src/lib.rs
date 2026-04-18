@@ -81,7 +81,11 @@ pub use socket::{
     BRIDGE_VERSION_MISMATCH_SENTINEL, BridgeVersionMismatch, CRATE_VERSION, CcHookSocket,
     CcHookSocketError, SocketEvent, record_mismatch_sentinel,
 };
-pub use transcript::{TailCursor, TranscriptEvent, TranscriptWatcher, encode_cwd, start_watcher};
+pub use transcript::{
+    SharedDirWatcher, TailCursor, TranscriptDirEvent, TranscriptDirWatcher, TranscriptEvent,
+    TranscriptTail, TranscriptWatcher, encode_cwd, extract_transcript_parent_from_payload,
+    spawn_log_sink, start_watcher,
+};
 
 /// Basename of the T-020 sentinel file dropped next to the cc-hook
 /// socket when `on_session_start` cannot reconcile `settings.json`.
@@ -322,12 +326,25 @@ impl ArkExtension for ClaudeCodeExtension {
             /* override_cc_hook_path */ None,
         );
 
+        // T-027: spawn a fresh `TranscriptDirWatcher` per session. The
+        // accept-loop closure below invokes `ensure_tracking` on each
+        // `HookFired` frame with the parent of the payload's
+        // `transcript_path` — idempotent, late-binds when the dir
+        // appears (T-028 acceptance). The Tier-5 consumer is a
+        // log-only sink (`spawn_log_sink`); real Tier-6 view consumers
+        // (T-035 / T-036) will replace or multiplex this sink.
+        let (dir_watcher, dir_rx) = transcript::TranscriptDirWatcher::new();
+        let dir_watcher: transcript::SharedDirWatcher =
+            std::sync::Arc::new(std::sync::Mutex::new(dir_watcher));
+        let _log_sink_handle = transcript::spawn_log_sink(dir_rx);
+
         // T-014: if a construction-time `EventSink` was provided,
         // publish every decoded HookFired frame onto the core bus via
         // `CoreEvent::Ext(ExtEvent)`. Bus send errors only happen when
         // every receiver has been dropped (session teardown); we log +
         // continue rather than crash the accept loop.
         let sink = self.event_sink.clone();
+        let watcher_for_loop = dir_watcher.clone();
         tokio::spawn(async move {
             sock.accept_loop(move |ev| match ev {
                 socket::SocketEvent::HookFired { event, ext_event } => {
@@ -337,6 +354,30 @@ impl ArkExtension for ClaudeCodeExtension {
                         has_sink = sink.is_some(),
                         "claude-code: cc-hook frame decoded"
                     );
+                    // T-027: every frame gets a shot at binding the
+                    // transcript-dir watcher. `ensure_tracking` is
+                    // idempotent; once bound, subsequent frames are
+                    // cheap no-ops. We pull the path from the verbatim
+                    // payload ExtEvent (not the typed HookPayload)
+                    // because `ExtEvent::payload` is the stable
+                    // cross-crate surface — `transcript_path` lives
+                    // there under `HookPayload.extra` on the way in.
+                    if let Some(parent) = ext_event
+                        .payload
+                        .get("transcript_path")
+                        .and_then(|v| v.as_str())
+                        .map(std::path::Path::new)
+                        .filter(|p| p.is_absolute())
+                        .and_then(|p| p.parent().map(std::path::PathBuf::from))
+                    {
+                        match watcher_for_loop.lock() {
+                            Ok(mut w) => w.ensure_tracking(&parent),
+                            Err(e) => warn!(
+                                error = %e,
+                                "claude-code: transcript dir watcher mutex poisoned; skipping ensure_tracking"
+                            ),
+                        }
+                    }
                     if let Some(bus) = sink.as_ref() {
                         if let Err(e) = bus.send(CoreEvent::Ext(ext_event)) {
                             warn!(
