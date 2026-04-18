@@ -876,6 +876,60 @@ pub struct StackClearRequest {
 pub struct StackClearResponse {}
 
 // ---------------------------------------------------------------------------
+// Session lifecycle hooks (Phase 2 ext-surface R1)
+// ---------------------------------------------------------------------------
+
+/// `on_session_start` request — ark calls this at session spawn so the
+/// extension can attach per-session state without polling events. Per
+/// `phase-2-design-decisions.md` §R-5 the hook fires BEFORE the session's
+/// first engine event is emitted, so extensions see a complete
+/// [`ark_types::SessionSpec`] before any scene reactivity kicks in.
+///
+/// The `spec` field is carried as [`OpaqueJson`] (a JSON-encoded
+/// `ark_types::SessionSpec`) because `ark_types::SessionSpec` does not
+/// derive `facet::Facet`; adding that derive would widen `ark-types`'
+/// dependency surface and is out of scope for T-020. Consumers decode
+/// with `serde_json::from_str::<ark_types::SessionSpec>(&req.spec)`.
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OnSessionStartRequest {
+    /// JSON-encoded [`ark_types::SessionSpec`] — session name, id, cwd,
+    /// scene path, env overrides, per-extension config. Decode with
+    /// `serde_json::from_str`.
+    pub spec: OpaqueJson,
+}
+
+/// Void response for [`ArkExtension::on_session_start`]. Dedicated
+/// struct (rather than `()`) so MINOR-level evolution can add fields
+/// without a protocol bump (kit #4c).
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct OnSessionStartResponse {}
+
+/// `on_session_end` request — ark calls at session termination with the
+/// terminal [`ark_types::event::ExitReason`] per
+/// `phase-2-design-decisions.md` §R-5.
+///
+/// `spec` and `exit` are both carried as [`OpaqueJson`] — `ark_types`
+/// types do not derive `facet::Facet` (see [`OnSessionStartRequest`]
+/// note). Decode `spec` with
+/// `serde_json::from_str::<ark_types::SessionSpec>(&req.spec)` and
+/// `exit` with `serde_json::from_str::<ark_types::event::ExitReason>(&req.exit)`.
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OnSessionEndRequest {
+    /// JSON-encoded [`ark_types::SessionSpec`] of the session that ended.
+    pub spec: OpaqueJson,
+    /// JSON-encoded [`ark_types::event::ExitReason`] — one of
+    /// `{"kind":"normal"}`, `{"kind":"cancelled"}`,
+    /// `{"kind":"error","value":"<msg>"}`.
+    pub exit: OpaqueJson,
+}
+
+/// Void response for [`ArkExtension::on_session_end`]. Dedicated struct
+/// (rather than `()`) so MINOR-level evolution can add fields without a
+/// protocol bump (kit #4c).
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct OnSessionEndResponse {}
+
+// ---------------------------------------------------------------------------
 // Feature-group hooks (Phase 2 ext-surface R2)
 // ---------------------------------------------------------------------------
 
@@ -1415,6 +1469,29 @@ pub trait ArkExtension: Send + Sync {
         Err(ExtensionError::method_not_found("stack/clear"))
     }
 
+    // -- Session lifecycle hooks (Phase 2 ext-surface R1) --------------------
+
+    /// `on_session_start` — fires once per session at spawn, before the
+    /// first engine event. Default: [`ExtensionError::method_not_found`];
+    /// extensions that need per-session state override this.
+    async fn on_session_start(
+        &self,
+        _req: OnSessionStartRequest,
+    ) -> ExtResult<OnSessionStartResponse> {
+        Err(ExtensionError::method_not_found("on_session_start"))
+    }
+
+    /// `on_session_end` — fires once per session at termination with the
+    /// terminal [`ark_types::event::ExitReason`]. Default:
+    /// [`ExtensionError::method_not_found`]; extensions that need
+    /// teardown hooks override this.
+    async fn on_session_end(
+        &self,
+        _req: OnSessionEndRequest,
+    ) -> ExtResult<OnSessionEndResponse> {
+        Err(ExtensionError::method_not_found("on_session_end"))
+    }
+
     // -- Feature-group hooks (Phase 2 ext-surface R2) ------------------------
 
     /// `scene_compile_hook`. Default: [`ExtensionError::method_not_found`].
@@ -1698,6 +1775,40 @@ mod tests {
         assert_send_sync_clone::<ListColumnsResponse>();
     }
 
+    /// T-020 AC: session lifecycle hook request/response types exist and
+    /// carry the derives the rest of the crate relies on.
+    #[test]
+    fn on_session_lifecycle_structs_exist() {
+        fn assert_s_s_c<T: Send + Sync + Clone + std::fmt::Debug>() {}
+        assert_s_s_c::<OnSessionStartRequest>();
+        assert_s_s_c::<OnSessionStartResponse>();
+        assert_s_s_c::<OnSessionEndRequest>();
+        assert_s_s_c::<OnSessionEndResponse>();
+    }
+
+    /// T-020 AC: `OnSessionEndRequest::exit` carries a JSON-encoded
+    /// [`ark_types::event::ExitReason`]. Verifies the dep wiring is
+    /// sound by round-tripping each variant through the OpaqueJson
+    /// channel the struct holds.
+    #[test]
+    fn on_session_end_carries_exit_reason_variants() {
+        use ark_types::event::ExitReason;
+        for variant in [
+            ExitReason::Normal,
+            ExitReason::Cancelled,
+            ExitReason::Error("boom".to_string()),
+        ] {
+            let encoded = serde_json::to_string(&variant).expect("serialise");
+            let req = OnSessionEndRequest {
+                spec: "null".into(),
+                exit: encoded.clone(),
+            };
+            let back: ExitReason =
+                serde_json::from_str(&req.exit).expect("deserialise exit");
+            assert_eq!(back, variant);
+        }
+    }
+
     /// T-018 / kit R6 AC: the stack-spawn response carries a single
     /// `handle` field and serialises as exactly `{ "handle": "<id>" }`.
     #[test]
@@ -1811,6 +1922,23 @@ mod tests {
                     .await
                     .unwrap_err(),
             ),
+            (
+                "on_session_start",
+                ext.on_session_start(OnSessionStartRequest {
+                    spec: "null".into(),
+                })
+                .await
+                .unwrap_err(),
+            ),
+            (
+                "on_session_end",
+                ext.on_session_end(OnSessionEndRequest {
+                    spec: "null".into(),
+                    exit: "{\"kind\":\"normal\"}".into(),
+                })
+                .await
+                .unwrap_err(),
+            ),
         ];
 
         for (expected_method, err) in expectations {
@@ -1835,6 +1963,8 @@ mod tests {
             "stack/spawn_pane",
             "stack/close_child",
             "stack/clear",
+            "on_session_start",
+            "on_session_end",
             "scene_compile_hook",
             "control_verbs",
             "doctor_checks",

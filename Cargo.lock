@@ -332,6 +332,7 @@ dependencies = [
 name = "ark-ext-proto"
 version = "0.1.0"
 dependencies = [
+ "ark-types",
  "ark-view",
  "async-trait",
  "facet",

@@ -32,9 +32,11 @@ use crate::{
     InitializeRequest, InitializeResponse, InitializedRequest, InitializedResponse,
     IntentDispatchRequest, IntentDispatchResponse, IntentUnregisterRequest,
     IntentUnregisterResponse, ListColumnsRequest, ListColumnsResponse, LogSetLevelRequest,
-    LogSetLevelResponse, LogWriteRequest, LogWriteResponse, PaneCloseRequest, PaneCloseResponse,
-    PaneEmitRequest, PaneEmitResponse, PaneReplaceViewRequest, PaneReplaceViewResponse,
-    PingRequest, PingResponse, ProgressRequest, ProgressResponse, ProtocolVersion,
+    LogSetLevelResponse, LogWriteRequest, LogWriteResponse, OnSessionEndRequest,
+    OnSessionEndResponse, OnSessionStartRequest, OnSessionStartResponse, PaneCloseRequest,
+    PaneCloseResponse, PaneEmitRequest, PaneEmitResponse, PaneReplaceViewRequest,
+    PaneReplaceViewResponse, PingRequest, PingResponse, ProgressRequest, ProgressResponse,
+    ProtocolVersion,
     SceneCompileHookRequest, SceneCompileHookResponse, SceneGetRootRequest, SceneGetRootResponse,
     SessionToken, ShutdownRequest, ShutdownResponse, StackClearRequest, StackClearResponse,
     StackCloseChildRequest, StackCloseChildResponse, StackSpawnPaneRequest, StackSpawnPaneResponse,
@@ -331,6 +333,22 @@ pub trait ExtensionClient: Send + Sync {
         req: StackClearRequest,
         opts: RequestOptions,
     ) -> ExtResult<StackClearResponse>;
+
+    // -- Session lifecycle hooks (Phase 2 ext-surface R1) --------------------
+
+    /// `on_session_start`.
+    async fn on_session_start(
+        &self,
+        req: OnSessionStartRequest,
+        opts: RequestOptions,
+    ) -> ExtResult<OnSessionStartResponse>;
+
+    /// `on_session_end`.
+    async fn on_session_end(
+        &self,
+        req: OnSessionEndRequest,
+        opts: RequestOptions,
+    ) -> ExtResult<OnSessionEndResponse>;
 
     // -- Feature-group hooks (Phase 2 ext-surface R2) ------------------------
 

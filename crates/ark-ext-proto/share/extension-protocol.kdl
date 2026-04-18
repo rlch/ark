@@ -550,6 +550,42 @@ protocol {
             }
         }
 
+        // -- Session lifecycle hooks --
+        method "on_session_start" {
+            kind "request"
+            description "`on_session_start` request — ark calls this at session spawn so the extension can attach per-session state without polling events. Per `phase-2-design-decisions.md` §R-5 the hook fires BEFORE the session's first engine event is emitted, so extensions see a complete [`ark_types::SessionSpec`] before any scene reactivity kicks in.  The `spec` field is carried as [`OpaqueJson`] (a JSON-encoded `ark_types::SessionSpec`) because `ark_types::SessionSpec` does not derive `facet::Facet`; adding that derive would widen `ark-types`' dependency surface and is out of scope for T-020. Consumers decode with `serde_json::from_str::<ark_types::SessionSpec>(&req.spec)`."
+            params {
+                field "spec" {
+                    description "JSON-encoded [`ark_types::SessionSpec`] — session name, id, cwd, scene path, env overrides, per-extension config. Decode with `serde_json::from_str`."
+                    type "string"
+                    plural #false
+                    required #true
+                }
+            }
+            result {
+            }
+        }
+        method "on_session_end" {
+            kind "request"
+            description "`on_session_end` request — ark calls at session termination with the terminal [`ark_types::event::ExitReason`] per `phase-2-design-decisions.md` §R-5.  `spec` and `exit` are both carried as [`OpaqueJson`] — `ark_types` types do not derive `facet::Facet` (see [`OnSessionStartRequest`] note). Decode `spec` with `serde_json::from_str::<ark_types::SessionSpec>(&req.spec)` and `exit` with `serde_json::from_str::<ark_types::event::ExitReason>(&req.exit)`."
+            params {
+                field "spec" {
+                    description "JSON-encoded [`ark_types::SessionSpec`] of the session that ended."
+                    type "string"
+                    plural #false
+                    required #true
+                }
+                field "exit" {
+                    description "JSON-encoded [`ark_types::event::ExitReason`] — one of `{\"kind\":\"normal\"}`, `{\"kind\":\"cancelled\"}`, `{\"kind\":\"error\",\"value\":\"<msg>\"}`."
+                    type "string"
+                    plural #false
+                    required #true
+                }
+            }
+            result {
+            }
+        }
+
         // -- Feature-group hooks --
         method "scene_compile_hook" {
             kind "request"
@@ -1374,6 +1410,44 @@ protocol {
         }
         type "LogWriteResponse" {
             description "Void response for [`ArkExtension::log_write`]."
+            kind "struct"
+        }
+        type "OnSessionEndRequest" {
+            description "`on_session_end` request — ark calls at session termination with the terminal [`ark_types::event::ExitReason`] per `phase-2-design-decisions.md` §R-5.  `spec` and `exit` are both carried as [`OpaqueJson`] — `ark_types` types do not derive `facet::Facet` (see [`OnSessionStartRequest`] note). Decode `spec` with `serde_json::from_str::<ark_types::SessionSpec>(&req.spec)` and `exit` with `serde_json::from_str::<ark_types::event::ExitReason>(&req.exit)`."
+            kind "struct"
+            fields {
+                field "spec" {
+                    description "JSON-encoded [`ark_types::SessionSpec`] of the session that ended."
+                    type "string"
+                    plural #false
+                    required #true
+                }
+                field "exit" {
+                    description "JSON-encoded [`ark_types::event::ExitReason`] — one of `{\"kind\":\"normal\"}`, `{\"kind\":\"cancelled\"}`, `{\"kind\":\"error\",\"value\":\"<msg>\"}`."
+                    type "string"
+                    plural #false
+                    required #true
+                }
+            }
+        }
+        type "OnSessionEndResponse" {
+            description "Void response for [`ArkExtension::on_session_end`]. Dedicated struct (rather than `()`) so MINOR-level evolution can add fields without a protocol bump (kit #4c)."
+            kind "struct"
+        }
+        type "OnSessionStartRequest" {
+            description "`on_session_start` request — ark calls this at session spawn so the extension can attach per-session state without polling events. Per `phase-2-design-decisions.md` §R-5 the hook fires BEFORE the session's first engine event is emitted, so extensions see a complete [`ark_types::SessionSpec`] before any scene reactivity kicks in.  The `spec` field is carried as [`OpaqueJson`] (a JSON-encoded `ark_types::SessionSpec`) because `ark_types::SessionSpec` does not derive `facet::Facet`; adding that derive would widen `ark-types`' dependency surface and is out of scope for T-020. Consumers decode with `serde_json::from_str::<ark_types::SessionSpec>(&req.spec)`."
+            kind "struct"
+            fields {
+                field "spec" {
+                    description "JSON-encoded [`ark_types::SessionSpec`] — session name, id, cwd, scene path, env overrides, per-extension config. Decode with `serde_json::from_str`."
+                    type "string"
+                    plural #false
+                    required #true
+                }
+            }
+        }
+        type "OnSessionStartResponse" {
+            description "Void response for [`ArkExtension::on_session_start`]. Dedicated struct (rather than `()`) so MINOR-level evolution can add fields without a protocol bump (kit #4c)."
             kind "struct"
         }
         type "PaneCloseRequest" {

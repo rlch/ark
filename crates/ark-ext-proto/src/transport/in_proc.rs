@@ -287,6 +287,24 @@ impl ExtensionClient for InProcClient {
         self.ext.stack_clear(req).await
     }
 
+    // -- Session lifecycle hooks (Phase 2 ext-surface R1) --------------------
+
+    async fn on_session_start(
+        &self,
+        req: OnSessionStartRequest,
+        _opts: RequestOptions,
+    ) -> ExtResult<OnSessionStartResponse> {
+        self.ext.on_session_start(req).await
+    }
+
+    async fn on_session_end(
+        &self,
+        req: OnSessionEndRequest,
+        _opts: RequestOptions,
+    ) -> ExtResult<OnSessionEndResponse> {
+        self.ext.on_session_end(req).await
+    }
+
     // -- Feature-group hooks (Phase 2 ext-surface R2) ------------------------
 
     async fn scene_compile_hook(

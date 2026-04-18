@@ -271,6 +271,21 @@ fn method_table() -> Vec<MethodEntry> {
             response: StackClearResponse::SHAPE,
             kind: Kind::Request,
         },
+        // -- Session lifecycle hooks (Phase 2 ext-surface R1) -----------
+        MethodEntry {
+            method: "on_session_start",
+            section: "Session lifecycle hooks",
+            request: OnSessionStartRequest::SHAPE,
+            response: OnSessionStartResponse::SHAPE,
+            kind: Kind::Request,
+        },
+        MethodEntry {
+            method: "on_session_end",
+            section: "Session lifecycle hooks",
+            request: OnSessionEndRequest::SHAPE,
+            response: OnSessionEndResponse::SHAPE,
+            kind: Kind::Request,
+        },
         // -- Feature-group hooks (Phase 2 ext-surface R2) ---------------
         MethodEntry {
             method: "scene_compile_hook",
@@ -725,6 +740,8 @@ mod tests {
         "stack/spawn_pane",
         "stack/close_child",
         "stack/clear",
+        "on_session_start",
+        "on_session_end",
         "scene_compile_hook",
         "control_verbs",
         "doctor_checks",

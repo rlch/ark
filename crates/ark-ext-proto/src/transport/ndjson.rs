@@ -785,6 +785,24 @@ impl ExtensionClient for NdjsonClient {
         self.call("stack/clear", req, opts).await
     }
 
+    // -- Session lifecycle hooks (Phase 2 ext-surface R1) --------------------
+
+    async fn on_session_start(
+        &self,
+        req: OnSessionStartRequest,
+        opts: RequestOptions,
+    ) -> ExtResult<OnSessionStartResponse> {
+        self.call("on_session_start", req, opts).await
+    }
+
+    async fn on_session_end(
+        &self,
+        req: OnSessionEndRequest,
+        opts: RequestOptions,
+    ) -> ExtResult<OnSessionEndResponse> {
+        self.call("on_session_end", req, opts).await
+    }
+
     // -- Feature-group hooks (Phase 2 ext-surface R2) ------------------------
 
     async fn scene_compile_hook(
@@ -1203,6 +1221,22 @@ impl NdjsonServer {
                 |e, r| async move { e.stack_clear(r).await },
             )
             .await,
+            "on_session_start" => {
+                dispatch_typed::<E, OnSessionStartRequest, OnSessionStartResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.on_session_start(r).await },
+                )
+                .await
+            }
+            "on_session_end" => {
+                dispatch_typed::<E, OnSessionEndRequest, OnSessionEndResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.on_session_end(r).await },
+                )
+                .await
+            }
             "scene_compile_hook" => {
                 dispatch_typed::<E, SceneCompileHookRequest, SceneCompileHookResponse, _>(
                     ext,
