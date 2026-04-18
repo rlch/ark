@@ -117,8 +117,8 @@ impl ResponseError {
     /// Convert a wire error into [`ExtensionError`]. The standard
     /// JSON-RPC codes (`-32601`, `-32602`) map onto matching variants;
     /// the ark-extended codes (`-32003` capability-denied, `-32004`
-    /// unsupported-version, `-32005` crashed) map onto their typed
-    /// variants. Everything else funnels into
+    /// unsupported-version, `-32005` crashed, `-32006` handle-gone)
+    /// map onto their typed variants. Everything else funnels into
     /// [`ExtensionError::Internal`] with the raw message.
     pub fn into_extension_error(self) -> ExtensionError {
         match self.code {
@@ -134,6 +134,27 @@ impl ResponseError {
             // Internal with the message preserved so callers still
             // see the diagnostic.
             -32005 => ExtensionError::Internal(self.message),
+            -32006 => {
+                // `ext-proto/handle-gone` — structured payload rides
+                // in `data` as `{ "handle": "<id>", "cause": "<tag>" }`.
+                // If `data` is absent or malformed, fall back to
+                // Internal preserving the message so the caller still
+                // sees the diagnostic.
+                let data = self.data.as_ref().and_then(|v| v.as_object());
+                let handle = data
+                    .and_then(|o| o.get("handle"))
+                    .and_then(|v| v.as_str())
+                    .map(ark_view::HandleId::new);
+                let cause = data
+                    .and_then(|o| o.get("cause"))
+                    .and_then(|v| serde_json::from_value::<ark_view::InvalidationCause>(v.clone()).ok());
+                match (handle, cause) {
+                    (Some(handle), Some(cause)) => {
+                        ExtensionError::HandleGone { handle, cause }
+                    }
+                    _ => ExtensionError::Internal(self.message),
+                }
+            }
             _ => ExtensionError::Internal(self.message),
         }
     }
@@ -1176,6 +1197,18 @@ fn error_response(id: u64, e: &ExtensionError) -> Response {
         ExtensionError::HandleGone { .. } => -32006,
         ExtensionError::Internal(_) => -32000,
     };
+    // HandleGone carries structured payload (handle + cause) the peer
+    // needs to reconstruct the typed variant. Encode as an object with
+    // the `code` string alongside the fields. Other variants keep the
+    // plain-string `data` shape for back-compat.
+    let data = match e {
+        ExtensionError::HandleGone { handle, cause } => Some(serde_json::json!({
+            "code": e.code(),
+            "handle": handle,
+            "cause": cause,
+        })),
+        _ => Some(Value::String(e.code().to_string())),
+    };
     Response {
         jsonrpc: "2.0".into(),
         id: Some(id),
@@ -1183,7 +1216,7 @@ fn error_response(id: u64, e: &ExtensionError) -> Response {
         error: Some(ResponseError {
             code,
             message: e.to_string(),
-            data: Some(Value::String(e.code().to_string())),
+            data,
         }),
     }
 }
@@ -1217,6 +1250,40 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use tokio::io::duplex;
+
+    #[test]
+    fn handle_gone_wire_roundtrip_preserves_handle_and_cause() {
+        use ark_view::{HandleId, InvalidationCause};
+        let original = ExtensionError::HandleGone {
+            handle: HandleId::new("abc-123"),
+            cause: InvalidationCause::UserClosed,
+        };
+        let encoded = error_response(1, &original);
+        let resp_err = encoded.error.expect("error present");
+        assert_eq!(resp_err.code, -32006, "wire code for HandleGone");
+        let decoded = resp_err.into_extension_error();
+        match decoded {
+            ExtensionError::HandleGone { handle, cause } => {
+                assert_eq!(handle.as_str(), "abc-123");
+                assert!(matches!(cause, InvalidationCause::UserClosed));
+            }
+            other => panic!("expected HandleGone, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn handle_gone_decoder_falls_back_to_internal_when_data_missing() {
+        // Malformed payload (no structured fields) → Internal fallback.
+        let malformed = ResponseError {
+            code: -32006,
+            message: "handle gone".into(),
+            data: None,
+        };
+        match malformed.into_extension_error() {
+            ExtensionError::Internal(msg) => assert_eq!(msg, "handle gone"),
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
 
     /// Stub extension that returns a non-default `PingResponse` so
     /// tests can assert the round-trip actually reached the impl.

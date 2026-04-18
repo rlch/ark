@@ -65,13 +65,19 @@ impl SessionHandles {
 
     /// Look up a scene-declared pane by its author name. Returns
     /// `None` when absent (suppressed / removed / never declared) OR
-    /// when the declared kind is not [`HandleKind::Pane`]. The `V`
-    /// type parameter is a pure compile-time marker; runtime
-    /// view-type identity is the supervisor's problem — this method
-    /// returns whatever `Pane<V>` the caller types against, even if
-    /// the scene declared a different view type (a stub for R10's
-    /// "V-mismatch returns None + warn log" — full enforcement lands
-    /// alongside the host dispatcher in a later tier).
+    /// when the declared kind is not [`HandleKind::Pane`].
+    ///
+    /// ## View-type enforcement (partial — see [`pane_by_name_typed`])
+    ///
+    /// Kit R10 requires V-mismatch to return `None` + warn log. Rust's
+    /// stable-identity-for-`V` mechanism is `#[derive(View)]` (T-025),
+    /// which will stamp a `const VIEW_TYPE: &'static str` on every
+    /// annotated view type. Until T-025 lands, this untyped path
+    /// trusts the caller — a mismatched `V` produces a `Pane<V>`
+    /// whose subsequent typed ops will misroute.
+    ///
+    /// Callers who need enforcement TODAY use [`pane_by_name_typed`]
+    /// and pass the scene-declared view-type token explicitly.
     pub fn pane_by_name<V: View>(&self, name: &SceneHandleName) -> Option<Pane<V>> {
         let rec = self.table.get(name)?;
         if rec.kind != HandleKind::Pane {
@@ -80,9 +86,36 @@ impl SessionHandles {
             self.warn_kind_mismatch(name, rec.kind, HandleKind::Pane);
             return None;
         }
-        // R10: view-type mismatch would return None + warn log here too.
-        // Token comparison requires the caller to pass in its view
-        // token; T-016 ships the shape, host-dispatch wires the check.
+        // TODO(T-025): compare `V`'s derive-stamped `VIEW_TYPE` against
+        // `rec.declared_view_type`; warn-log + None on mismatch.
+        Some(Pane::from_handle(rec.handle.clone()))
+    }
+
+    /// Variant of [`pane_by_name`] with explicit view-type enforcement.
+    /// Returns `None` + warn-log when the scene-declared view type
+    /// for this handle name differs from `declared_view_type`.
+    ///
+    /// Use this when you know the token statically (e.g. you authored
+    /// the scene and know `@handle` is `"<ext>.<view>"`) and want
+    /// R10's mismatch rejection today. `#[derive(View)]` in T-025
+    /// will fold this into [`pane_by_name`] automatically.
+    pub fn pane_by_name_typed<V: View>(
+        &self,
+        name: &SceneHandleName,
+        declared_view_type: &str,
+    ) -> Option<Pane<V>> {
+        let rec = self.table.get(name)?;
+        if rec.kind != HandleKind::Pane {
+            self.warn_kind_mismatch(name, rec.kind, HandleKind::Pane);
+            return None;
+        }
+        if rec.declared_view_type.as_deref() != Some(declared_view_type) {
+            eprintln!(
+                "[ark-view] SessionHandles view-type mismatch on {name:?}: declared {:?}, caller requested {declared_view_type:?}",
+                rec.declared_view_type
+            );
+            return None;
+        }
         Some(Pane::from_handle(rec.handle.clone()))
     }
 
