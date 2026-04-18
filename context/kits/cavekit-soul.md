@@ -580,14 +580,22 @@ Peer-review via Codex.
 
 ### Phase 2: Extension supervisor hooks
 
-- Extend the `ArkExtension` trait with the new methods
-  (`on_session_start`, `on_session_end`, `control_verbs`,
-  `permission_dispatcher`, `scene_compile_hook`, `doctor_checks`,
-  `list_columns`). Single minor version bump.
-- `ark-ext-proto::ArkExtensionMetadata` surface grows; derive macro
-  (`ark-ext-derive`) picks up the new arms.
-- `ark list` columns + `ark doctor` checks become ext-fan-in.
-- Integration tests with a stub in-proc extension.
+**Decomposed into 4 sub-kits + overview.** Start at
+[`cavekit-soul-phase-2-overview.md`](cavekit-soul-phase-2-overview.md)
+for the domain index, sibling table (`ark-view`, `ext-surface`,
+`host-dispatch`, `tests`), dependency order, and open items.
+
+Design-level decisions that shaped the decomposition are locked in
+[`context/plans/phase-2-design-decisions.md`](../plans/phase-2-design-decisions.md)
+(four points, 2026-04-18 interview): `permission_dispatcher` drop,
+manifest-driven intent registration, typed handles in a new
+`crates/ark-view` with method-per-op RPC + 3-cause invalidation, and
+LSP-shape capability-flag + `method_not_found` back-compat. `ark-ext-proto`
+`CURRENT_PROTOCOL_VERSION` bumps 1.0 → 1.1 at Phase 2 completion as a
+single MINOR batch.
+
+~36 R's across 4 sub-kits. `/ck:map` on the overview generates the
+build graph.
 
 ### Phase 3 (folded into Phase 1): Delete ACP outright
 
