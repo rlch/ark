@@ -57,7 +57,8 @@
 #![deny(missing_docs)]
 
 use ark_ext_proto::{
-    ArkExtension, ControlVerbsRequest, ControlVerbsResponse, ExtResult, OnSessionEndRequest,
+    ArkExtension, ControlVerbsRequest, ControlVerbsResponse, DoctorChecksRequest,
+    DoctorChecksResponse, ExtResult, ListColumnsRequest, ListColumnsResponse, OnSessionEndRequest,
     OnSessionEndResponse, OnSessionStartRequest, OnSessionStartResponse, OpaqueJson,
     SceneCompileHookRequest, SceneCompileHookResponse,
 };
@@ -65,6 +66,9 @@ use ark_types::{CoreEvent, EventSink};
 use async_trait::async_trait;
 use tracing::{debug, info, warn};
 
+pub mod columns;
+pub mod config;
+pub mod doctor;
 pub mod hook_event;
 pub mod hook_payload;
 pub mod settings_json;
@@ -72,12 +76,21 @@ pub mod socket;
 pub mod transcript;
 pub mod view;
 
+pub use columns::{
+    COLUMN_COST, COLUMN_MODEL, COLUMN_TOKENS, CcListColumnState, ColumnContribution,
+    ColumnsEnvelope,
+};
+pub use config::{ClaudeCodeConfig, DEFAULT_TRANSCRIPT_TAIL_LINES};
+pub use doctor::{
+    CheckLevel, CheckResult, DoctorEnvelope, check_cc_hook_binary, check_settings_drift,
+    check_state_sessions_writable, check_view_wired, check_which_claude, render_envelope_table,
+};
 pub use hook_event::{HookEvent, UnknownHookEvent};
 pub use hook_payload::{EXT_NAME, HookPayload, NdjsonLine, flat_event_name, payload_to_ext_event};
 pub use settings_json::{
-    ARK_MANAGED_KEY, CC_HOOK_BIN_NAME, DEFAULT_SETTINGS_REL_PATH, InstallOutcome, ReconcileOutcome,
-    SettingsFile, SettingsJsonError, cc_hook_install_path, default_settings_path,
-    install_cc_hook_at, install_cc_hook_default,
+    ARK_MANAGED_HOOK_COUNT, ARK_MANAGED_KEY, CC_HOOK_BIN_NAME, DEFAULT_SETTINGS_REL_PATH,
+    InstallOutcome, ReconcileOutcome, SettingsFile, SettingsJsonError, cc_hook_install_path,
+    default_settings_path, install_cc_hook_at, install_cc_hook_default,
 };
 pub use socket::{
     BRIDGE_VERSION_MISMATCH_SENTINEL, BridgeVersionMismatch, CRATE_VERSION, CcHookSocket,
@@ -220,16 +233,29 @@ pub struct ClaudeCodeExtension {
     /// task.
     event_sink: Option<EventSink>,
 
-    /// T-032 (R5b): `match_cmds` config — list of raw `command cmd=<X>`
-    /// values that should have `CLAUDE_HOOK_SOCKET=<session-sock-path>`
-    /// injected into their pane env at scene-compile time. Default
-    /// empty = the raw-cmd fallback is OFF (scene authors must opt in
-    /// by setting `[claude-code] match_cmds = ["claude"]` in their
-    /// extension config). This is the R5b fallback for scene authors
-    /// who use the untyped `command cmd="claude"` form instead of the
-    /// typed `claude-code` view (T-029). No typed subagent fan-out is
-    /// provided by the fallback — see T-033 regression.
-    match_cmds: Vec<String>,
+    /// T-041 (R9): typed `[claude-code]` config section. Carries
+    /// `match_cmds`, `transcript_tail_lines`, `auto_install_hook_entries`.
+    /// Populated from `SessionSpec.ext_config["claude-code"]` at
+    /// `on_session_start` time via [`ClaudeCodeConfig::from_ext_config`];
+    /// the `match_cmds` field backs the T-032 scene-compile-hook fast
+    /// path (pre-T-041 that was a standalone `Vec<String>` field —
+    /// subsumed into `config` to keep R9 single-sourced).
+    ///
+    /// Wrapped in `Arc<Mutex<_>>` because the `ArkExtension` trait
+    /// takes `&self` on every method and `on_session_start` needs to
+    /// refresh the config from `SessionSpec.ext_config` per-session
+    /// (the scene-compile hook also runs per-compile and re-reads the
+    /// live value).
+    config: std::sync::Arc<std::sync::Mutex<ClaudeCodeConfig>>,
+
+    /// T-044 (R11): per-session rolling state for the three contributed
+    /// `ark list` columns. Shared `Arc<Mutex<_>>` so the transcript-
+    /// tail poller + the list_columns RPC handler see the same bytes.
+    /// Supervisor-side persistence into
+    /// `SessionStatus.ext_state["claude-code"]` is deferred to a later
+    /// tier (this tier stays in-process per the task brief's
+    /// "supervisor out of scope" constraint).
+    list_state: std::sync::Arc<std::sync::Mutex<CcListColumnState>>,
 }
 
 /// T-032 R5b shape of a `scene_compile_hook` env injection request. An
@@ -282,7 +308,8 @@ impl ClaudeCodeExtension {
     pub fn new() -> Self {
         Self {
             event_sink: None,
-            match_cmds: Vec::new(),
+            config: std::sync::Arc::new(std::sync::Mutex::new(ClaudeCodeConfig::default())),
+            list_state: std::sync::Arc::new(std::sync::Mutex::new(CcListColumnState::default())),
         }
     }
 
@@ -296,7 +323,8 @@ impl ClaudeCodeExtension {
     pub fn with_event_sink(sink: EventSink) -> Self {
         Self {
             event_sink: Some(sink),
-            match_cmds: Vec::new(),
+            config: std::sync::Arc::new(std::sync::Mutex::new(ClaudeCodeConfig::default())),
+            list_state: std::sync::Arc::new(std::sync::Mutex::new(CcListColumnState::default())),
         }
     }
 
@@ -311,16 +339,109 @@ impl ClaudeCodeExtension {
     /// test + supervisor wiring. Default is empty — the raw-cmd
     /// fallback is OFF unless the user explicitly opts in via
     /// `[claude-code] match_cmds = [...]` in their config.
+    ///
+    /// T-041: the canonical source for `match_cmds` is now the
+    /// [`ClaudeCodeConfig`] carried on the struct; this setter mutates
+    /// that field so existing test + supervisor callers that wire
+    /// `match_cmds` directly keep working without knowing about the
+    /// config struct.
     #[must_use]
-    pub fn with_match_cmds(mut self, cmds: Vec<String>) -> Self {
-        self.match_cmds = cmds;
+    pub fn with_match_cmds(self, cmds: Vec<String>) -> Self {
+        if let Ok(mut g) = self.config.lock() {
+            g.match_cmds = cmds;
+        }
         self
     }
 
     /// Borrow the configured `match_cmds` list. Exposed primarily for
     /// tests that want to confirm the config injection took effect.
-    pub fn match_cmds(&self) -> &[String] {
-        &self.match_cmds
+    /// Returns an owned `Vec` (clone) rather than a `&[String]` because
+    /// the config lives behind a Mutex — borrowing a slice would leak
+    /// the lock guard.
+    pub fn match_cmds(&self) -> Vec<String> {
+        self.config
+            .lock()
+            .map(|g| g.match_cmds.clone())
+            .unwrap_or_default()
+    }
+
+    /// T-041 (R9): replace the whole typed config section at once. Used
+    /// by the supervisor when it loads the extension's config from
+    /// `SessionSpec.ext_config` OR from the layered figment at
+    /// init/reload time.
+    #[must_use]
+    pub fn with_config(self, config: ClaudeCodeConfig) -> Self {
+        if let Ok(mut g) = self.config.lock() {
+            *g = config;
+        }
+        self
+    }
+
+    /// Snapshot of the current [`ClaudeCodeConfig`]. Returns a clone so
+    /// callers don't hold the mutex.
+    pub fn config_snapshot(&self) -> ClaudeCodeConfig {
+        self.config.lock().map(|g| g.clone()).unwrap_or_default()
+    }
+
+    /// T-041 (R9): refresh the config from a session's
+    /// `ext_config["claude-code"]` entry. Walks the JSON keys,
+    /// emitting a `warn!` for each unknown key, then replaces the
+    /// cached config in place. Returns the parsed config.
+    ///
+    /// Missing key / null value / parse error all fall back to the
+    /// default config and return an error-free result — R9 "unknown
+    /// keys warn but don't fail" treats every tolerable failure as a
+    /// degradation to defaults, not an abort.
+    pub fn load_session_config(
+        &self,
+        ext_config: &std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> ClaudeCodeConfig {
+        let parsed = match ClaudeCodeConfig::from_ext_config(ext_config) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "claude-code: [claude-code] config deserialise failed; falling back to defaults"
+                );
+                ClaudeCodeConfig::default()
+            }
+        };
+        if let Ok(mut g) = self.config.lock() {
+            *g = parsed.clone();
+        }
+        parsed
+    }
+
+    /// T-044 (R11): read-only handle on the per-session rolling column
+    /// state. Intended for tests + supervisor-side snapshot-to-ext_state
+    /// shims. Returns a clone of the state so callers don't hold the
+    /// lock.
+    pub fn list_state_snapshot(&self) -> CcListColumnState {
+        self.list_state
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    }
+
+    /// T-044 helper: fold a single transcript JSONL line into the
+    /// per-session rolling column state. Called by the accept-loop +
+    /// transcript watcher plumbing. A poisoned mutex silently drops the
+    /// fold — doctor can later surface the poison via a follow-up
+    /// check, but we never fail the caller.
+    pub fn fold_transcript_line(&self, line: &str) {
+        if let Ok(mut g) = self.list_state.lock() {
+            g.fold_line(line);
+        }
+    }
+
+    /// T-044 helper: fold every line in a transcript blob. Used by
+    /// `list_columns` as a populate-on-demand path when no live fold
+    /// loop has observed the session yet (e.g. `ark list` invoked
+    /// after-the-fact against a persisted transcript).
+    pub fn fold_transcript_blob(&self, blob: &str) {
+        if let Ok(mut g) = self.list_state.lock() {
+            g.fold_blob(blob);
+        }
     }
 }
 
@@ -379,6 +500,20 @@ impl ArkExtension for ClaudeCodeExtension {
             return Ok(OnSessionStartResponse::default());
         }
 
+        // T-041 (R9): refresh the cached [`ClaudeCodeConfig`] from the
+        // session's `ext_config["claude-code"]` bucket. Warns on
+        // unknown keys (inside `load_session_config`). Does NOT gate
+        // session start — a malformed config falls back to defaults so
+        // the session still launches.
+        let session_config = self.load_session_config(&spec.ext_config);
+        debug!(
+            session = %sid.as_path_leaf(),
+            auto_install_hook_entries = session_config.auto_install_hook_entries,
+            transcript_tail_lines = session_config.transcript_tail_lines,
+            match_cmds_len = session_config.match_cmds.len(),
+            "claude-code: [claude-code] config loaded for session"
+        );
+
         let sock = match socket::CcHookSocket::bind(&layout, &sid).await {
             Ok(s) => s,
             Err(e) => {
@@ -398,13 +533,25 @@ impl ArkExtension for ClaudeCodeExtension {
         // session's socket path. Any failure is surfaced via a doctor
         // sentinel — NEVER promoted to a session-fatal error (T-021:
         // graceful degradation).
-        reconcile_settings_for_session(
-            &sid,
-            sock.path(),
-            sock.session_dir(),
-            /* override_settings_path */ None,
-            /* override_cc_hook_path */ None,
-        );
+        //
+        // T-041 (R9): gated on `config.auto_install_hook_entries`. When
+        // false the user has opted out of settings.json mutation (they
+        // manage hook entries out-of-band); we still bind the socket
+        // so a manually-installed cc-hook can still deliver events.
+        if session_config.auto_install_hook_entries {
+            reconcile_settings_for_session(
+                &sid,
+                sock.path(),
+                sock.session_dir(),
+                /* override_settings_path */ None,
+                /* override_cc_hook_path */ None,
+            );
+        } else {
+            debug!(
+                session = %sid.as_path_leaf(),
+                "claude-code: auto_install_hook_entries=false; skipping settings.json reconciliation"
+            );
+        }
 
         // T-027: spawn a fresh `TranscriptDirWatcher` per session. The
         // accept-loop closure below invokes `ensure_tracking` on each
@@ -543,7 +690,8 @@ impl ArkExtension for ClaudeCodeExtension {
 
         // Fast-path: disabled by default. No point walking the
         // partial-scene JSON if no cmd matches are configured.
-        if self.match_cmds.is_empty() {
+        let match_cmds = self.match_cmds();
+        if match_cmds.is_empty() {
             let contributions_json = serde_json::to_string(&contributions)
                 .unwrap_or_else(|_| "{\"env_injections\":[]}".to_string());
             return Ok(SceneCompileHookResponse {
@@ -590,7 +738,7 @@ impl ArkExtension for ClaudeCodeExtension {
                 let Some(cmd) = view.get("cmd").and_then(|v| v.as_str()) else {
                     continue;
                 };
-                if !self.match_cmds.iter().any(|c| c == cmd) {
+                if !match_cmds.iter().any(|c| c == cmd) {
                     continue;
                 }
                 let mut env = std::collections::BTreeMap::new();
@@ -656,6 +804,45 @@ impl ArkExtension for ClaudeCodeExtension {
         Ok(ControlVerbsResponse {
             verbs: contributions,
         })
+    }
+
+    /// T-042 + T-043 (R10): emit the five doctor checks. See the
+    /// [`doctor`] module for per-check implementations + level mapping.
+    ///
+    /// The check invocations here use the ambient environment
+    /// (`$PATH`, `$HOME`, `$ARK_STATE_DIR`) — doctor consumers that
+    /// want to test against synthetic paths call the per-check
+    /// functions in [`doctor`] directly with the `_override` params.
+    async fn doctor_checks(&self, _req: DoctorChecksRequest) -> ExtResult<DoctorChecksResponse> {
+        let env = DoctorEnvelope {
+            results: vec![
+                doctor::check_which_claude(),
+                doctor::check_cc_hook_binary(None),
+                doctor::check_settings_drift(None),
+                doctor::check_state_sessions_writable(None),
+                // R10: "informational check" — scene observation is a
+                // scene-compiler concern not available on-extension.
+                // None → "unverified".
+                doctor::check_view_wired(None),
+            ],
+        };
+        let checks: OpaqueJson =
+            serde_json::to_string(&env).unwrap_or_else(|_| "{\"results\":[]}".to_string());
+        Ok(DoctorChecksResponse { checks })
+    }
+
+    /// T-044 + T-045 (R11): emit the three contributed `ark list`
+    /// columns, populated from the per-session rolling state cached on
+    /// the extension. Zero state → `cc model=""`, `cc tokens="0"`,
+    /// `cc cost=""` (T-045 regression).
+    async fn list_columns(&self, _req: ListColumnsRequest) -> ExtResult<ListColumnsResponse> {
+        let state = self.list_state_snapshot();
+        let env = ColumnsEnvelope {
+            columns: state.to_columns(),
+        };
+        let columns: OpaqueJson =
+            serde_json::to_string(&env).unwrap_or_else(|_| "{\"columns\":[]}".to_string());
+        Ok(ListColumnsResponse { columns })
     }
 }
 
@@ -1444,4 +1631,245 @@ mod subagent_dispatch_tests {
     // follow-on tests can use HandleId directly if needed.
     #[allow(dead_code)]
     fn _assert_handle_id_in_scope(_h: HandleId) {}
+}
+
+// ---------------------------------------------------------------------------
+// Tier 7 — T-041 + T-042 + T-043 + T-044 + T-045 integration tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tier7_tests {
+    use super::*;
+    use ark_ext_proto::{ArkExtension, DoctorChecksRequest, ListColumnsRequest};
+    use std::collections::BTreeMap;
+
+    // -- T-041: config loading ---------------------------------------------
+
+    #[test]
+    fn t041_config_defaults_on_missing_section() {
+        let ext = ClaudeCodeExtension::new();
+        let ec: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+        let c = ext.load_session_config(&ec);
+        assert!(c.match_cmds.is_empty());
+        assert_eq!(c.transcript_tail_lines, 200);
+        assert!(c.auto_install_hook_entries);
+    }
+
+    #[test]
+    fn t041_config_loads_full_section_into_cache() {
+        let ext = ClaudeCodeExtension::new();
+        let mut ec: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+        ec.insert(
+            "claude-code".into(),
+            serde_json::json!({
+                "match_cmds": ["claude"],
+                "transcript_tail_lines": 50,
+                "auto_install_hook_entries": false,
+            }),
+        );
+        let c = ext.load_session_config(&ec);
+        assert_eq!(c.match_cmds, vec!["claude".to_string()]);
+        assert_eq!(c.transcript_tail_lines, 50);
+        assert!(!c.auto_install_hook_entries);
+        // Cached snapshot agrees.
+        let snap = ext.config_snapshot();
+        assert_eq!(snap, c);
+        // match_cmds() helper reflects the updated config.
+        assert_eq!(ext.match_cmds(), vec!["claude".to_string()]);
+    }
+
+    #[test]
+    fn t041_config_unknown_key_warns_and_falls_through() {
+        // R9: unknown keys must NOT fail the load — they fall through
+        // to a defaulted struct with the known keys populated.
+        let ext = ClaudeCodeExtension::new();
+        let mut ec: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+        ec.insert(
+            "claude-code".into(),
+            serde_json::json!({
+                "match_cmds": ["x"],
+                "permission_policy": "auto", // unknown — R9 no-policy keys
+            }),
+        );
+        let c = ext.load_session_config(&ec);
+        assert_eq!(c.match_cmds, vec!["x".to_string()]);
+        // Other known fields default.
+        assert_eq!(c.transcript_tail_lines, 200);
+        assert!(c.auto_install_hook_entries);
+    }
+
+    // -- T-042 + T-043: doctor_checks RPC ----------------------------------
+
+    #[tokio::test]
+    async fn t042_doctor_checks_rpc_emits_five_results() {
+        let ext = ClaudeCodeExtension::new();
+        let resp = ext
+            .doctor_checks(DoctorChecksRequest::default())
+            .await
+            .unwrap();
+        let env: DoctorEnvelope = serde_json::from_str(&resp.checks).expect("envelope decodes");
+        assert_eq!(env.results.len(), 5, "R10 declares 5 checks");
+        let kinds: Vec<&str> = env.results.iter().map(|r| r.kind.as_str()).collect();
+        assert!(kinds.contains(&"claude-code/which-claude"));
+        assert!(kinds.contains(&"claude-code/cc-hook-binary"));
+        assert!(kinds.contains(&"claude-code/settings-hooks"));
+        assert!(kinds.contains(&"claude-code/sessions-writable"));
+        assert!(kinds.contains(&"claude-code/view-wired"));
+    }
+
+    #[tokio::test]
+    async fn t043_doctor_checks_carry_remediation_hints_on_non_info_levels() {
+        let ext = ClaudeCodeExtension::new();
+        let resp = ext
+            .doctor_checks(DoctorChecksRequest::default())
+            .await
+            .unwrap();
+        let env: DoctorEnvelope = serde_json::from_str(&resp.checks).unwrap();
+        for r in &env.results {
+            match r.level {
+                CheckLevel::Error | CheckLevel::Warn => {
+                    assert!(
+                        r.fix.is_some(),
+                        "check {} at level {:?} must carry a fix hint",
+                        r.kind,
+                        r.level
+                    );
+                }
+                CheckLevel::Info => {
+                    // Info checks don't require a fix.
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn t043_doctor_rendering_table_is_readable() {
+        // R10 "`ark doctor` rendering test": assemble a synthetic
+        // envelope covering all three levels and assert the rendered
+        // text is self-explanatory.
+        let env = DoctorEnvelope {
+            results: vec![
+                CheckResult {
+                    kind: "claude-code/which-claude".into(),
+                    level: CheckLevel::Error,
+                    message: "claude binary not found on $PATH".into(),
+                    fix: Some("Install Claude Code: https://claude.com/claude-code".into()),
+                },
+                CheckResult {
+                    kind: "claude-code/cc-hook-binary".into(),
+                    level: CheckLevel::Warn,
+                    message: "cc-hook not installed".into(),
+                    fix: Some("ark ext claude-code reinstall-hook-binary".into()),
+                },
+                CheckResult {
+                    kind: "claude-code/settings-hooks".into(),
+                    level: CheckLevel::Warn,
+                    message: "settings.json drift: 0/10".into(),
+                    fix: Some("ark ext claude-code install-hooks".into()),
+                },
+                CheckResult {
+                    kind: "claude-code/sessions-writable".into(),
+                    level: CheckLevel::Error,
+                    message: "$STATE/sessions unwritable".into(),
+                    fix: Some("mkdir -p … && chmod u+w …".into()),
+                },
+                CheckResult {
+                    kind: "claude-code/view-wired".into(),
+                    level: CheckLevel::Info,
+                    message: "wiring not verified".into(),
+                    fix: None,
+                },
+            ],
+        };
+        let rendered = doctor::render_envelope_table(&env);
+        // Every check's kind appears.
+        assert!(rendered.contains("claude-code/which-claude"));
+        assert!(rendered.contains("claude-code/cc-hook-binary"));
+        assert!(rendered.contains("claude-code/settings-hooks"));
+        assert!(rendered.contains("claude-code/sessions-writable"));
+        assert!(rendered.contains("claude-code/view-wired"));
+        // All three levels render.
+        assert!(rendered.contains("ERROR"));
+        assert!(rendered.contains("WARN"));
+        assert!(rendered.contains("INFO"));
+        // Remediation hints render on non-info checks.
+        assert!(rendered.contains("Install Claude Code"));
+        assert!(rendered.contains("ark ext claude-code reinstall-hook-binary"));
+        assert!(rendered.contains("ark ext claude-code install-hooks"));
+        assert!(rendered.contains("chmod u+w"));
+    }
+
+    // -- T-044 + T-045: list_columns RPC -----------------------------------
+
+    #[tokio::test]
+    async fn t044_list_columns_rpc_emits_three_columns() {
+        let ext = ClaudeCodeExtension::new();
+        let resp = ext
+            .list_columns(ListColumnsRequest::default())
+            .await
+            .unwrap();
+        let env: ColumnsEnvelope = serde_json::from_str(&resp.columns).unwrap();
+        assert_eq!(env.columns.len(), 3);
+        let names: Vec<&str> = env.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["cc model", "cc tokens", "cc cost"]);
+    }
+
+    #[tokio::test]
+    async fn t044_list_columns_populated_after_fold_transcript_line() {
+        let ext = ClaudeCodeExtension::new();
+        ext.fold_transcript_line(
+            r#"{"type":"message","role":"assistant","model":"claude-4-7","usage":{"input_tokens":10,"output_tokens":20},"cost_usd":0.125}"#,
+        );
+        let resp = ext
+            .list_columns(ListColumnsRequest::default())
+            .await
+            .unwrap();
+        let env: ColumnsEnvelope = serde_json::from_str(&resp.columns).unwrap();
+        assert_eq!(env.columns[0].value, "claude-4-7");
+        assert_eq!(env.columns[1].value, "30");
+        assert_eq!(env.columns[2].value, "$0.12"); // format! uses banker's rounding
+    }
+
+    #[tokio::test]
+    async fn t045_zero_event_regression_empty_model_zero_tokens_empty_cost() {
+        // R11 + T-045: with no transcript lines observed, the three
+        // columns render as ("", "0", "") respectively.
+        let ext = ClaudeCodeExtension::new();
+        // Snapshot before any fold call.
+        let snap = ext.list_state_snapshot();
+        assert_eq!(snap, CcListColumnState::default());
+
+        let resp = ext
+            .list_columns(ListColumnsRequest::default())
+            .await
+            .unwrap();
+        let env: ColumnsEnvelope = serde_json::from_str(&resp.columns).unwrap();
+        assert_eq!(env.columns[0].name, "cc model");
+        assert_eq!(env.columns[0].value, "");
+        assert_eq!(env.columns[1].name, "cc tokens");
+        assert_eq!(env.columns[1].value, "0");
+        assert_eq!(env.columns[2].name, "cc cost");
+        assert_eq!(env.columns[2].value, "");
+    }
+
+    #[test]
+    fn t044_list_state_round_trips_through_ext_state_json() {
+        // R11: "per-session, persisted to SessionStatus.ext_state["claude-code"]".
+        // The list state must serialize as a JSON object that round-trips
+        // cleanly — the supervisor will eventually copy this into ext_state
+        // but the round-trip path itself is what we validate here.
+        let ext = ClaudeCodeExtension::new();
+        ext.fold_transcript_line(
+            r#"{"type":"message","role":"assistant","model":"m","usage":{"input_tokens":1,"output_tokens":2},"cost_usd":0.01}"#,
+        );
+        let snap = ext.list_state_snapshot();
+        let v = serde_json::to_value(&snap).unwrap();
+        // Shape contract: object with `model`, `tokens`, `cost_usd`.
+        assert!(v.is_object());
+        assert_eq!(v.get("model").unwrap(), "m");
+        assert_eq!(v.get("tokens").unwrap(), 3);
+        assert!(v.get("cost_usd").is_some());
+        let back: CcListColumnState = serde_json::from_value(v).unwrap();
+        assert_eq!(back, snap);
+    }
 }

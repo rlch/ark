@@ -72,6 +72,12 @@ use crate::hook_event::HookEvent;
 /// user-authored and preserved verbatim.
 pub const ARK_MANAGED_KEY: &str = "ark_managed";
 
+/// Number of ark-managed hook entries a fully-reconciled
+/// `~/.claude/settings.json` is expected to carry — one per
+/// [`HookEvent::ALL`] kind. T-042 (doctor `settings-hooks` drift check)
+/// reads this constant to decide whether the file is drift-free.
+pub const ARK_MANAGED_HOOK_COUNT: usize = HookEvent::ALL.len();
+
 /// Default filename for the Claude Code settings file, relative to
 /// `$HOME`. Exposed for tests + doctor checks that need to assert the
 /// canonical location.
@@ -230,6 +236,33 @@ impl SettingsFile {
     /// preservation of unknown keys.
     pub fn value(&self) -> &Value {
         &self.value
+    }
+
+    /// Count of ark-managed entries across every hook kind. Used by
+    /// [`crate::doctor::check_settings_drift`] to decide whether the
+    /// file is fully reconciled. An entry contributes to the count iff
+    /// it carries `ARK_MANAGED_KEY = true` at the entry level.
+    pub fn ark_managed_hook_count(&self) -> usize {
+        let Some(hooks) = self.value.get("hooks").and_then(Value::as_object) else {
+            return 0;
+        };
+        let mut total = 0usize;
+        for kind in HookEvent::ALL {
+            let wire = kind.as_str();
+            if let Some(arr) = hooks.get(wire).and_then(Value::as_array) {
+                for entry in arr {
+                    if is_ark_managed(entry) {
+                        total += 1;
+                        // Kit pins ONE ark entry per kind; count each
+                        // kind at most once for this drift check (extra
+                        // ark entries are modeled as `removed` by
+                        // reconcile, not drift for doctor purposes).
+                        break;
+                    }
+                }
+            }
+        }
+        total
     }
 
     /// Walk the 10 hook kinds, replacing any `ark_managed: true` entry
