@@ -42,15 +42,20 @@
 // as a whole has already accepted the heap cost.
 #![allow(clippy::result_large_err)]
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use kdl::{KdlDocument, KdlEntry, KdlEntryFormat, KdlNode, KdlValue};
 use miette::{NamedSource, SourceSpan};
 
 use crate::ast::LayoutNode;
 use crate::ast::layout::{ColNode, Handle, LayoutChild, PaneNode, RowNode, TabNode, ViewRef};
+use crate::context::build_spawn_scope;
 use crate::error::SceneError;
 use crate::id::SceneId;
+use crate::interp::{parse_interp, render_interp};
+use crate::rhai::{Engine, RhaiScope};
 use crate::suggest::format_suggestions;
 use crate::view::{ViewRegistry, resolve_or_suggest};
 
@@ -84,6 +89,82 @@ impl Default for TerminalSize {
             rows: DEFAULT_TERMINAL_ROWS,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Spawn-time Rhai interpolation context
+// ---------------------------------------------------------------------------
+
+/// Runtime context for resolving `{Rhai}` brace-holes in layout string
+/// values at `compile_layout_kdl` time.
+///
+/// Bindings exposed to the spawn scope (per R8):
+///
+/// - `cwd` — the session's working directory as a string.
+/// - `id` — the session identifier (typically `SessionId::as_path_leaf()`).
+/// - `name` — the human-readable session label.
+/// - `env` — the session's environment map (`rhai::Map` of
+///   `String -> String`).
+///
+/// Scene strings that contain no brace-holes are emitted verbatim; strings
+/// with holes are rendered by parsing + evaluating each hole expression
+/// against a fresh [`build_spawn_scope`]-built scope.
+#[derive(Debug, Clone)]
+pub struct SpawnContext<'a> {
+    /// Absolute working-directory path string.
+    pub cwd: &'a str,
+    /// Session id string (usually `SessionId::as_path_leaf()`).
+    pub id: &'a str,
+    /// Human-readable session label.
+    pub name: &'a str,
+    /// Per-session environment variable map.
+    pub env: &'a BTreeMap<String, String>,
+}
+
+impl<'a> SpawnContext<'a> {
+    /// An inert [`SpawnContext`] with every binding set to an empty string
+    /// and an empty env map.
+    ///
+    /// Used by tests + call sites that do not yet plumb real session
+    /// context. Scene strings with `{Rhai}` holes that reference these
+    /// bindings will still evaluate — they'll just resolve to empty
+    /// strings — which is the right failure mode for "compile without
+    /// session info" callers (the reconciler pre-session, smoke tests of
+    /// layout lowering, and the full `compile_layout_kdl` backward-compat
+    /// surface).
+    pub fn empty() -> SpawnContext<'static> {
+        static EMPTY_ENV: OnceLock<BTreeMap<String, String>> = OnceLock::new();
+        let env = EMPTY_ENV.get_or_init(BTreeMap::new);
+        SpawnContext { cwd: "", id: "", name: "", env }
+    }
+}
+
+/// Render a scene-authored string through the spawn-time Rhai interpolation
+/// pipeline.
+///
+/// Returns the raw string verbatim when it contains no `{Rhai}` holes
+/// (fast path — no engine invocation). Otherwise parses the string into
+/// segments, builds a fresh spawn scope from `ctx`, and evaluates each
+/// hole expression against that scope.
+///
+/// Each invocation builds a fresh [`Engine`] and [`rhai::Scope`]; the
+/// engine is cheap to construct (ark's scene Rhai engine is tuned for
+/// sub-millisecond startup with a 10k-operation cap + 32-deep expression
+/// limit) so the per-call overhead is minimal relative to the layout
+/// lowering cost. Callers that want to cache an engine across many
+/// renders can inline the same logic via [`parse_interp`] +
+/// [`render_interp`] directly.
+#[allow(clippy::result_large_err)]
+fn render_spawn_str(raw: &str, ctx: &SpawnContext<'_>) -> Result<String, SceneError> {
+    // Fast path: no `{` means no holes (and `{{` / `}}` escapes can't
+    // occur without a leading `{`). Preserve the literal verbatim.
+    if !raw.contains('{') {
+        return Ok(raw.to_string());
+    }
+    let engine = Engine::new();
+    let segments = parse_interp(&engine, raw, RhaiScope::Spawn)?;
+    let mut scope = build_spawn_scope(ctx.cwd, ctx.id, ctx.name, ctx.env);
+    render_interp(&segments, &engine, &mut scope)
 }
 
 // ---------------------------------------------------------------------------
@@ -122,6 +203,38 @@ pub fn compile_layout_kdl_with_terminal(
     registry: &ViewRegistry,
     term: TerminalSize,
 ) -> Result<KdlDocument, SceneError> {
+    let empty = SpawnContext::empty();
+    compile_layout_kdl_full(layout, registry, term, &empty)
+}
+
+/// [`compile_layout_kdl`] with an explicit [`SpawnContext`] used to
+/// resolve `{Rhai}` brace-holes in layout string values (tab `cwd=`,
+/// tab `name=`, pane `name=` via handle, etc.).
+///
+/// Callers that have session context (cwd / id / name / env) available
+/// MUST go through this entry point so emitted KDL carries fully
+/// resolved values that zellij can consume. Callers without context
+/// (tests, pre-session smoke paths) can fall through to the simpler
+/// [`compile_layout_kdl`] which uses an inert [`SpawnContext::empty`].
+#[allow(clippy::result_large_err)]
+pub fn compile_layout_kdl_with_ctx(
+    layout: &LayoutNode,
+    registry: &ViewRegistry,
+    ctx: &SpawnContext<'_>,
+) -> Result<KdlDocument, SceneError> {
+    compile_layout_kdl_full(layout, registry, TerminalSize::default(), ctx)
+}
+
+/// Full-fidelity layout lowering — terminal size + spawn-time
+/// interpolation context. The reconciler uses this once it has learned
+/// both the real terminal size and the session's cwd/id/name/env.
+#[allow(clippy::result_large_err)]
+pub fn compile_layout_kdl_full(
+    layout: &LayoutNode,
+    registry: &ViewRegistry,
+    term: TerminalSize,
+    ctx: &SpawnContext<'_>,
+) -> Result<KdlDocument, SceneError> {
     // Reject empty layouts — zellij requires at least one tab.
     // This catches both static empty layouts and post-predicate-filtering
     // layouts where all tabs were excluded by `when=` guards (F-0012).
@@ -134,14 +247,14 @@ pub fn compile_layout_kdl_with_terminal(
         });
     }
 
-    let ctx = LayoutCompileCtx { registry, term };
+    let compile_ctx = LayoutCompileCtx { registry, term, spawn: ctx };
     let mut doc = KdlDocument::new();
 
     let mut layout_node = KdlNode::new("layout");
     let mut layout_body = KdlDocument::new();
 
     for tab in &layout.tabs {
-        ctx.emit_tab(tab, &mut layout_body)?;
+        compile_ctx.emit_tab(tab, &mut layout_body)?;
     }
 
     layout_node.set_children(layout_body);
@@ -160,6 +273,7 @@ pub fn compile_layout_kdl_with_terminal(
 struct LayoutCompileCtx<'a> {
     registry: &'a ViewRegistry,
     term: TerminalSize,
+    spawn: &'a SpawnContext<'a>,
 }
 
 impl<'a> LayoutCompileCtx<'a> {
@@ -179,11 +293,18 @@ impl<'a> LayoutCompileCtx<'a> {
 
         let mut tab_node = KdlNode::new("tab");
         // Zellij `name="…"` — use the user-set `name` when provided,
-        // otherwise fall back to the bare handle identifier.
-        let display_name = tab.name.clone().unwrap_or_else(|| handle.name().to_string());
+        // otherwise fall back to the bare handle identifier. Render the
+        // user-supplied value through the spawn-time Rhai interpolation
+        // pipeline so `{cwd}` / `{id}` / `{name}` / `{env.*}` holes
+        // resolve to concrete strings before emission.
+        let display_name = match &tab.name {
+            Some(raw) => render_spawn_str(raw, self.spawn)?,
+            None => handle.name().to_string(),
+        };
         tab_node.push(str_prop("name", &display_name));
         if let Some(cwd) = &tab.cwd {
-            tab_node.push(str_prop("cwd", cwd));
+            let rendered = render_spawn_str(cwd, self.spawn)?;
+            tab_node.push(str_prop("cwd", &rendered));
         }
         if matches!(tab.focus.as_deref(), Some("true")) {
             tab_node.push(bool_prop("focus", true));

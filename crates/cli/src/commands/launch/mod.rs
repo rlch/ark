@@ -129,11 +129,12 @@ pub fn run_with(
 
     let session = derive_session_name(session_flag);
     let scene_file = resolve_scene_file(&ctx.config_dir, &cwd, scene_flag);
-    let compiled = compile::compile_scene_to_layout(scene_file.as_deref())?;
 
-    // Build the session spec for the supervisor. Post-cavekit-soul Phase 1
-    // the bare launch constructs a plain `SessionSpec`; orchestrator /
-    // engine / cmd concepts have re-homed inside extensions.
+    // Build the session spec FIRST so scene layout compilation can
+    // interpolate `{cwd}` / `{id}` / `{name}` / `{env.*}` brace-holes
+    // against real session values. Post-cavekit-soul Phase 1 the bare
+    // launch constructs a plain `SessionSpec`; orchestrator / engine /
+    // cmd concepts have re-homed inside extensions.
     let spec = SessionSpec {
         id: SessionId::new(&session),
         name: session.clone(),
@@ -143,6 +144,14 @@ pub fn run_with(
         created_at: Utc::now(),
         ext_config: BTreeMap::new(),
     };
+
+    let compiled = compile::compile_scene_to_layout(
+        scene_file.as_deref(),
+        &spec.cwd.display().to_string(),
+        &spec.id.as_path_leaf(),
+        &spec.name,
+        &spec.env,
+    )?;
 
     let state_layout = StateLayout::new(
         ctx.state_dir.clone(),

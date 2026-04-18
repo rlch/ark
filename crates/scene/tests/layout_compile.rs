@@ -4,8 +4,11 @@
 //! pipeline, and asserts the resulting zellij KDL has the expected
 //! shape. Complements the unit tests in `src/compile/layout.rs`.
 
+use std::collections::BTreeMap;
+
 use ark_scene::ast::layout::{LayoutChild, PaneNode, TabNode, ViewRef};
 use ark_scene::ast::{LayoutNode, SceneBodyNode};
+use ark_scene::compile::layout::{compile_layout_kdl_with_ctx, SpawnContext};
 use ark_scene::compile::{compile_layout_kdl, write_layout_artifact};
 use ark_scene::parse::parse_scene;
 use ark_scene::view::ViewRegistry;
@@ -309,4 +312,113 @@ fn walk_entries(doc: &KdlDocument, f: &mut dyn FnMut(&KdlValue)) {
             walk_entries(c, f);
         }
     }
+}
+
+// --------------------------------------------------------------------------
+// Spawn-time `{Rhai}` brace-hole interpolation at layout-compile time
+// --------------------------------------------------------------------------
+
+#[test]
+fn tab_cwd_rhai_hole_renders_to_spawn_cwd() {
+    let layout = LayoutNode {
+        tabs: vec![TabNode {
+            handle: "@main".to_string(),
+            cwd: Some("{cwd}".to_string()),
+            name: None,
+            focus: Some("true".to_string()),
+            when: None,
+            body: vec![LayoutChild::Pane(shell_pane("p"))],
+        }],
+    };
+
+    let env: BTreeMap<String, String> = BTreeMap::new();
+    let ctx = SpawnContext {
+        cwd: "/real/working/dir",
+        id: "abc",
+        name: "demo",
+        env: &env,
+    };
+    let doc = compile_layout_kdl_with_ctx(&layout, &ViewRegistry::with_primitives(), &ctx)
+        .expect("compile with ctx");
+    let rendered = doc.to_string();
+
+    // Zellij KDL v1 serialises `/` as `\/` inside string literals.
+    // Accept either rendering.
+    let ok_slash = rendered.contains(r#"cwd="/real/working/dir""#)
+        || rendered.contains(r#"cwd="\/real\/working\/dir""#);
+    assert!(ok_slash, "expected resolved cwd; got: {rendered}");
+    assert!(
+        !rendered.contains("{cwd}"),
+        "expected literal {{cwd}} to be gone; got: {rendered}"
+    );
+    // Re-parse guard — output must still be valid KDL (v1 + v2 parser).
+    KdlDocument::parse(&rendered).expect("interp-rendered layout must re-parse");
+}
+
+#[test]
+fn tab_cwd_literal_round_trips_unchanged() {
+    // Literal (no brace-holes) cwd value must be emitted verbatim even
+    // when a SpawnContext is supplied — the render path has a fast-path
+    // for strings without `{`.
+    let layout = LayoutNode {
+        tabs: vec![TabNode {
+            handle: "@main".to_string(),
+            cwd: Some("/literal/path".to_string()),
+            name: Some("LiteralName".to_string()),
+            focus: None,
+            when: None,
+            body: vec![LayoutChild::Pane(shell_pane("p"))],
+        }],
+    };
+
+    let env: BTreeMap<String, String> = BTreeMap::new();
+    let ctx = SpawnContext {
+        cwd: "/unused",
+        id: "unused-id",
+        name: "unused-name",
+        env: &env,
+    };
+    let doc = compile_layout_kdl_with_ctx(&layout, &ViewRegistry::with_primitives(), &ctx)
+        .expect("literal cwd must compile");
+    let rendered = doc.to_string();
+    let ok_cwd = rendered.contains(r#"cwd="/literal/path""#)
+        || rendered.contains(r#"cwd="\/literal\/path""#);
+    assert!(ok_cwd, "expected literal cwd preserved; got: {rendered}");
+    assert!(
+        rendered.contains("name=LiteralName") || rendered.contains(r#"name="LiteralName""#),
+        "expected literal name preserved; got: {rendered}"
+    );
+}
+
+#[test]
+fn tab_name_rhai_hole_renders_to_session_name() {
+    let layout = LayoutNode {
+        tabs: vec![TabNode {
+            handle: "@main".to_string(),
+            cwd: None,
+            name: Some("{name}-main".to_string()),
+            focus: None,
+            when: None,
+            body: vec![LayoutChild::Pane(shell_pane("p"))],
+        }],
+    };
+
+    let env: BTreeMap<String, String> = BTreeMap::new();
+    let ctx = SpawnContext {
+        cwd: "/cwd",
+        id: "id123",
+        name: "demo",
+        env: &env,
+    };
+    let doc = compile_layout_kdl_with_ctx(&layout, &ViewRegistry::with_primitives(), &ctx)
+        .expect("compile with ctx");
+    let rendered = doc.to_string();
+    assert!(
+        rendered.contains(r#"name="demo-main""#),
+        "expected resolved tab name `demo-main`; got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("{name}"),
+        "expected literal {{name}} to be gone; got: {rendered}"
+    );
 }

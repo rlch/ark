@@ -7,10 +7,12 @@
 //! artifact path + the resolved scene file path (propagated into the
 //! `AgentSpec` so the supervisor can hot-reload from the same source).
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use ark_scene::ast::SceneBodyNode;
-use ark_scene::compile::{compile_layout_kdl, compile_scene, write_layout_artifact};
+use ark_scene::compile::layout::{compile_layout_kdl_with_ctx, SpawnContext};
+use ark_scene::compile::{compile_scene, write_layout_artifact};
 use ark_scene::compose::compose_scene;
 use ark_scene::parse::parse_scene;
 use ark_scene::rhai::Engine;
@@ -33,8 +35,18 @@ pub(super) struct CompiledLayout {
 /// Returns `Ok(CompiledLayout { layout_path: None })` when
 /// `scene_file` is `None` — the caller relies on zellij's built-in
 /// default layout.
+///
+/// The `cwd` / `session_id` / `session_name` / `env` arguments populate
+/// a [`SpawnContext`] that resolves `{Rhai}` brace-holes in scene
+/// string values (tab `cwd=`, tab `name=`, etc.) at layout-compile
+/// time so the emitted KDL carries concrete paths / labels zellij can
+/// consume rather than literal `{cwd}` placeholders.
 pub(super) fn compile_scene_to_layout(
     scene_file: Option<&Path>,
+    cwd: &str,
+    session_id: &str,
+    session_name: &str,
+    env: &BTreeMap<String, String>,
 ) -> Result<CompiledLayout, CliError> {
     let Some(path) = scene_file else {
         return Ok(CompiledLayout { layout_path: None });
@@ -96,8 +108,16 @@ pub(super) fn compile_scene_to_layout(
         render_mode: RenderMode::ZellijView,
         config_schema: None,
     });
-    let kdl_doc = compile_layout_kdl(layout, &registry).map_err(|e| CliError::Generic {
-        reason: format!("layout compile `{}`: {e}", path.display()),
+    let spawn_ctx = SpawnContext {
+        cwd,
+        id: session_id,
+        name: session_name,
+        env,
+    };
+    let kdl_doc = compile_layout_kdl_with_ctx(layout, &registry, &spawn_ctx).map_err(|e| {
+        CliError::Generic {
+            reason: format!("layout compile `{}`: {e}", path.display()),
+        }
     })?;
     let artifact_path =
         write_layout_artifact(&kdl_doc, &compiled.ir.id).map_err(|e| CliError::Generic {
