@@ -108,3 +108,14 @@ pub use plugin_lifecycle::{
 pub mod scene_runtime;
 pub use scene_runtime::{CompiledScene, SceneSource, compile_scene_for_runtime};
 
+// T-028 / cavekit-soul-phase-2-host-dispatch R6: capability-aware RPC
+// dispatcher. Static capability→method table + per-ext registry for
+// gating outbound RPC calls on advertised capabilities. T-029 populates
+// the registry at handshake; callers invoke `should_dispatch` before
+// sending, and `warn_advertised_but_unimplemented` on MethodNotFound.
+pub mod ext_dispatch;
+pub use ext_dispatch::{
+    ExtensionCapabilities, capability_for_method, record_capabilities, should_dispatch,
+    warn_advertised_but_unimplemented,
+};
+
