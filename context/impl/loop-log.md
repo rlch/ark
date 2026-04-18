@@ -4,6 +4,13 @@ last_edited: "2026-04-19"
 ---
 # Loop Log
 
+### Wave cleanup-A-Tier0 — 2026-04-19 — cavekit-soul cleanup Packet A Tier 0 (T-001 + T-002)
+
+- head pre-wave `216c675`. serial main. scope: `crates/cli/Cargo.toml` + `context/impl/cleanup-*.md` only.
+- T-001 PRECOND. salvage map recorded. `git grep -l READ_ONLY_TOOLS extensions/` = 1 hit (ext lib.rs). `ls extensions/claude-code/bin/cc-hook/` = `main.rs` (471 LOC). Cavekit orch NOT salvaged (phase-1 stub, delete outright). permission.rs types re-declared ext-local per ext lib.rs §35-40 (NOT re-exported from ark_types). gate: GREEN.
+- T-002 CLI SHIM. dropped `[[bin]] ark-hook` stanza, `required-features=["_binstall_shim"]`, `[features] _binstall_shim` block, F-706/F-710 prose. reworded binstall bin-dir comment for single-binary layout. kept `default-run = "ark"`. `grep -c 'ark-hook\|_binstall_shim' crates/cli/Cargo.toml` = 0. `cargo check -p ark-cli` → 0 errors.
+- Tier 1 next: orchestrator crates + hook crate delete; factory.rs ref-patch (not delete — Packet B owns factory.rs whole).
+
 ### PHASE CLOSE-OUT — claude-code-ext build site COMPLETE — 2026-04-19
 
 - **48/48 tasks DONE** (T-026 deleted; T-008a stubbed; T-046 reload via control-verb + inherent method; T-048 reduced PTY gate with full-zellij harness pending post-v0.1 `ark-test-harness`).
