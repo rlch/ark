@@ -21,7 +21,7 @@ Test layers for ark. Covers: trait contract tests (every Engine / Orchestrator i
 - [ ] No `Multiplexer`, `TabOps`, `PluginPipe`, or other single-impl mux-facing trait exists in the workspace. Grep rule: `rg 'trait (Mux|TabOps|TabGraph|PluginPipe|StatusChannel|PipeSender)'` returns no matches
 - [ ] Every new trait impl of Engine or Orchestrator passes the relevant suite before merge
 - [ ] Suites run in CI as part of `cargo test --workspace`
-**Dependencies:** cavekit-architecture, cavekit-overview (principle 9)
+**Dependencies:** cavekit-soul (supersedes cavekit-architecture; Phase 5 deletes Engine/Orchestrator traits — R1's contract suites retarget to per-extension tests), cavekit-overview (principle 9)
 
 ### R2: Fixtures
 **Description:** Reproducible test data.
@@ -31,7 +31,7 @@ Test layers for ark. Covers: trait contract tests (every Engine / Orchestrator i
 - [ ] `tests/fixtures/hook-payloads/` — example claude hook JSON for each supported event
 - [ ] Fixtures are small, committed, documented in a README
 - [ ] Helper crate `ark-test-fixtures` re-exports path constants
-**Dependencies:** cavekit-engine-claude-code, cavekit-orchestrator-cavekit
+**Dependencies:** cavekit-claude-code.md (R13 — mock-claude fixture; supersedes deleted cavekit-engine-claude-code.md). Cavekit orchestrator kit deleted; its fixture needs either drop or rehome in a follow-up pass.
 
 ### R3: Unit tests per crate
 **Description:** Ordinary `#[test]` functions covering module-level logic.
@@ -130,5 +130,5 @@ jobs:
 - Load / stress tests (many agents concurrent) — not v1 priority
 
 ## Cross-References
-- cavekit-architecture.md — trait definitions
+- cavekit-soul.md — Engine/Orchestrator traits deleted in Phase 5 (R1's trait-contract suites retarget to per-extension tests: cavekit-claude-code R13, cavekit-pi R22)
 - all other kits — each references its contract test subset

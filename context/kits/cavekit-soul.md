@@ -617,18 +617,45 @@ native hook JSON via `ark-hook` + control socket, including Claude's
 approval UX works without ACP. Pi / Codex / Gemini each get their own
 extension with their own native protocol (separate kits).
 
-### Phase 4: Claude Code + Cavekit → extensions
+### Phase 4: Delete ark-side Claude Code + Cavekit; rehome Claude Code into `extensions/claude-code/` (2026-04-18 scope cut, revised same day)
 
-- `crates/orchestrators/claude-code/` + `crates/hook/` (as `cc-hook`
-  binary) + `crates/types/src/permission.rs` (tool taxonomy) +
-  config's `[engine.claude_code]` / `[orchestrator.claude_code]`
-  schema sections merge into `extensions/claude-code/`.
-- `crates/orchestrators/cavekit/` → `extensions/cavekit/`. Worktree
-  cleanup (`Kill { remove_worktree }`) migrates to a cavekit-ext
-  kill-time hook.
-- `HookEntry.on_orchestrator` → `on_extension`.
-- Config sections per-extension — extensions register their own
-  schemas via the ext-proto surface.
+Ark-side crates are deleted. Claude Code's *functional content* migrates
+to `extensions/claude-code/` as v0.1's first engine integration — see
+`cavekit-claude-code.md`. Cavekit orchestrator is deleted outright (no
+extension rehoming; Cavekit methodology stays external).
+
+- Delete `crates/orchestrators/claude-code/` (its transcript-tail logic
+  migrates into `extensions/claude-code/`).
+- Delete `crates/orchestrators/cavekit/` (no rehoming).
+- Delete `crates/hook/` (the `ark-hook` binary crate). Salvaged into
+  `extensions/claude-code/bin/cc-hook/` per `cavekit-claude-code.md` R1.
+- Delete `crates/types/src/permission.rs` (Claude Code tool taxonomy).
+  **Not restored** in v0.1 — Claude Code's own TUI owns permission UX;
+  policy content preserved in git for the MCP-control stretch work.
+- Config schema: remove `[engine.claude_code]`, `[orchestrator.cavekit]`,
+  `[orchestrator.claude_code]`, `[engines.*]`, `[acp]` (ACP already gone
+  in Phase 3). Remove `HookEntry.on_orchestrator` entirely — no
+  orchestrator hooks remain at ark level. The `[claude-code]` section
+  appears instead as an ext-registered config section (per
+  `cavekit-claude-code.md` R9).
+- `Kill { remove_worktree }` flag removed; worktree cleanup was cavekit-
+  methodology-specific and ark no longer runs methodologies natively.
+- `ark-hook` ark-side binary deleted. `ark pane log` is the only
+  remaining state-reading CLI surface at ark level. `cc-hook` (the
+  claude-code extension's hook binary) lives in the extension, not ark.
+- Kit files deleted from `context/kits/`:
+  `cavekit-engine-claude-code.md`, `cavekit-orchestrator-claude-code.md`,
+  `cavekit-orchestrator-cavekit.md`, `cavekit-hook-ipc.md`. Superseded
+  by `cavekit-claude-code.md` (consolidated single-crate extension
+  spec).
+
+Rationale: v0.1 integrates with exactly one engine (Claude Code) via
+the extension pattern — validates the Phase 2 ext-hook surface + the
+2026-04-18 typed-handle + stack scene revision against the user's
+actual daily-driver workflow. Cavekit methodology lives outside ark —
+user invokes its CLI directly in a pane when wanted. Pi follows in
+v0.2 as the second engine integration (`cavekit-pi.md` status
+DEFERRED; content preserved).
 
 ### Phase 5: Delete `Engine` / `Orchestrator` from core
 

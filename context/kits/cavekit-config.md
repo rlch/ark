@@ -162,7 +162,7 @@ picker_plugin_path = "~/.config/zellij/plugins/ark-picker.wasm"
 
 ## Cross-References
 - cavekit-cli.md — `ark config` subcommand
-- cavekit-engine-claude-code.md — consumes `[engine.claude_code]`
-- cavekit-orchestrator-cavekit.md — consumes `[orchestrator.cavekit]`
-- cavekit-orchestrator-claude-code.md — consumes `[orchestrator.claude_code]`
+- cavekit-claude-code.md — registers `[claude-code]` section via ext-owned config (R9); replaces prior `[engine.claude_code]` / `[orchestrator.claude_code]` / `[orchestrator.cavekit]` sections (deleted 2026-04-18, soul Phase 4)
+- cavekit-pi.md — registers `[pi.core]` / `[pi.subagents]` / `[pi.control]` sections (DEFERRED v0.2)
 - cavekit-mux-zellij.md — consumes `[mux.zellij]`
+- cavekit-soul.md — Phase 4 schema changes (removes `[engine.*]`, `[orchestrator.*]`, `[acp]`; ext-registered sections replace)

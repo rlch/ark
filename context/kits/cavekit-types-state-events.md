@@ -138,8 +138,8 @@ Foundational data types (AgentId, AgentSpec, AgentEvent, Outcome), the on-disk s
 - Event replay timing fidelity — v1 stores ts only, no monotonic clock for strict ordering
 
 ## Cross-References
-- cavekit-architecture.md — consumes these types throughout traits
+- cavekit-soul.md — consumes these types (supersedes cavekit-architecture.md); Phase 1 migrates AgentSpec/Status/Id → SessionSpec/Status/Id + `CoreEvent::Ext(ExtEvent)`
 - cavekit-supervisor.md — owns EventBus, writes state
 - cavekit-cli.md — `ark list` reads status.json, `ark pane log` tails events.jsonl
-- cavekit-engine-claude-code.md — producers of Tool/Permission/Message events
-- cavekit-orchestrator-cavekit.md — producers of Progress/Iteration/Phase events
+- cavekit-claude-code.md — producer of `claude-code.*` ExtEvents (tool use, subagent lifecycle, notifications); see R3 for event-kind mapping
+- cavekit-pi.md (DEFERRED v0.2) — producer of `pi.*` + `pi-subagents.*` ExtEvents

@@ -1,6 +1,6 @@
 ---
 created: "2026-04-15"
-last_edited: "2026-04-16"
+last_edited: "2026-04-18"
 supersedes: cavekit-scene.md
 ---
 
@@ -15,9 +15,9 @@ Ark's extensibility has **two layers**:
 | Layer | What | Audience | Lifecycle |
 |---|---|---|---|
 | **Scene** (this spec) | User-facing KDL config declaring layout + reactions + keybinds + extension activation + composition | Scene author (end user) | Parsed at `ark` launch; reconciled at runtime |
-| **Extension** (this spec) | Bundles providing views, intents, events. Three delivery modes: compiled-in, subprocess, zellij-wasm. Includes ACP agent capability. | Extension author | Session-long; loaded when `use`d |
+| **Extension** (this spec) | Bundles providing views, intents, events. Three delivery modes: compiled-in, subprocess, zellij-wasm. | Extension author | Session-long; loaded when `use`d |
 
-The scene is the one artifact a user writes by hand. Extensions provide capabilities. ACP (Agent Client Protocol) is an extension capability, not a separate layer — any extension can speak ACP by declaring `capabilities { agent { speaks "acp" } }`.
+The scene is the one artifact a user writes by hand. Extensions provide capabilities — views, intents, events, supervisor-side lifecycle hooks (see cavekit-soul.md Phase 2). Ark is agnostic to agent protocols; any engine integrates via the same extension pattern.
 
 One scene file = one composed configuration for one `ark` session.
 
@@ -41,10 +41,10 @@ One scene file = one composed configuration for one `ark` session.
 **Acceptance Criteria:**
 - [ ] `use`, `include`, `on`, `bind`, `mode`, `clear-reactions`, `clear-bind`, `disable-extension` legal only at scene root.
 - [ ] `tab` legal only inside `layout { }`. No bare `pane`/`row`/`col` at layout root.
-- [ ] `row`, `col`, `pane` legal inside `tab` or nested inside another `row`/`col`.
-- [ ] `when=` attribute legal on `tab`, `pane`, `row`, `col`, and individual op nodes inside `on`/`bind` bodies.
-- [ ] `@handle` required on every `tab` and `pane` node. Compile error if missing.
-- [ ] Handle namespace is flat and scene-scoped. Tab + pane handles share one namespace. Duplicate handle = `error[scene/handle-clash]`.
+- [ ] `row`, `col`, `pane`, `stack` legal inside `tab` or nested inside another `row`/`col`/`stack`.
+- [ ] `when=` attribute legal on `tab`, `pane`, `row`, `col`, `stack`, and individual op nodes inside `on`/`bind` bodies.
+- [ ] `@handle` required on every `tab`, `pane`, and `stack` node. Compile error if missing.
+- [ ] Handle namespace is flat and scene-scoped. Tab + pane + stack handles share one namespace. Duplicate handle = `error[scene/handle-clash]`.
 - [ ] Scope violation produces `error[scene/misplaced-node]` with parent-node context.
 
 ### R3: Layout DSL
@@ -57,7 +57,8 @@ One scene file = one composed configuration for one `ark` session.
 - [ ] Layout body contains only `tab @handle { … }` nodes. No bare panes/rows/cols at root.
 - [ ] `tab @handle` attributes: `cwd` (string, Rhai interp), `name` (string), `focus` (bool, exactly one per layout), `when` (Rhai predicate).
 - [ ] `row { … }` = horizontal split. `col { … }` = vertical split. Compile to zellij `pane split_direction="horizontal"/"vertical"`.
-- [ ] `pane @handle` = leaf node. Must contain exactly one view child node (the content). Compile error if zero or >1.
+- [ ] `pane @handle` = leaf node. Must contain exactly one view child node (the content). Compile error if zero or >1. See R6 for view-type declaration semantics.
+- [ ] `stack @handle { … }` = dynamic container legal inside `tab`, `row`, `col`. Accepts static children at compile (optional) AND dynamic children spawned at runtime via the `spawn_into` op or a view's `StackHandle::spawn_pane` (R17). Empty body (`stack @h {}`) is legal; it declares a container that starts empty. Compiles to a zellij pane stack (one child expanded, siblings collapsed as header rows). Sized per `span=`/`cells=` just like `row`/`col`. Child expansion follows zellij-default behaviour (user-controlled, last-focused expands).
 
 **Sizing — spans:**
 - [ ] `span=N` — relative weight within container. Siblings normalize to 100% at render. Compiles to zellij `size="N%"`.
@@ -115,7 +116,7 @@ One scene file = one composed configuration for one `ark` session.
 
 ### R6: Views
 
-**Description:** A **view** is what fills a pane. Replaces the prior "plugin" concept. One view per pane.
+**Description:** A **view** is what fills a pane. Replaces the prior "plugin" concept. The view alias inside a `pane` or `stack` brace is *both* a content declaration AND a type declaration — the scene compiler produces typed handles (`Pane<V>` / `Stack<V>`, see R17) that downstream ops and view attrs can constrain.
 
 **Acceptance Criteria:**
 - [ ] Three tiers, same namespace:
@@ -126,10 +127,14 @@ One scene file = one composed configuration for one `ark` session.
 - [ ] `command` primitive: `pane @x { command cmd="X" args=["A","B"] }` → zellij `pane { command "env" "ARK_HANDLE=x" "X"; args "A" "B" }`.
 - [ ] `shell` primitive: `pane @x { shell }` → zellij `pane { command "env" "ARK_HANDLE=x" "$SHELL" }`.
 - [ ] `edit` primitive: `pane @x { edit path="file.rs" }` → zellij `pane { edit "file.rs" }`. Opens in `$EDITOR`.
-- [ ] View rendering mode determined by Rust trait impl:
-  - `CommandView` → pane runs a command binary (zellij native subprocess).
-  - `ZellijView` → pane loads a zellij wasm plugin.
-- [ ] Extension views receive typed pane handles: `CommandPane` (for CommandView) or `PluginPane` (for ZellijView). Compiler validates intent target types.
+- [ ] View rendering mode is determined by which marker trait the view's Rust impl wears:
+  - `impl CommandView for V` → pane runs a command binary (zellij native subprocess). Affords `Pane<V>::{env(), write_stdin(), pid()}`.
+  - `impl ZellijView for V` → pane loads a zellij wasm plugin. Affords `Pane<V>::pipe()`.
+  - Affordances are gated by the trait impl at the type layer — calling `pane.pipe()` on a `Pane<CommandSomething>` is a compile error in ext code, not a runtime check.
+- [ ] **Pane view-type declaration:** `pane @h { foo attrs… }` declares the pane's static type as `Pane<FooView>`. This type flows into any intent, view attr, or op that references `@h` and enables compile-time view-type validation.
+- [ ] **Stack view-type declaration:** `stack @h { foo }` declares the stack homogeneous in `FooView`: children added dynamically must be `Pane<FooView>`. `stack @h {}` declares the stack heterogeneous (`Stack<dyn View>`); any view may spawn inside. Mixed constraint: `stack @h { foo | bar }` declares `Stack<OneOf<FooView, BarView>>` (children may be either alias).
+- [ ] **Pane view-type union:** `pane @h { foo | bar }` declares `Pane<OneOf<FooView, BarView>>` — the pane's view may be `replace_view`d between the declared members at runtime. Outside the union = compile error at the call site.
+- [ ] **View-type attr references (R17):** view attrs may accept typed handle references — e.g. `pi logs=@logs subagents=@subagents`. The view's facet SHAPE declares the expected handle class and view-type bound. Mismatch = `error[scene/view-type-mismatch]` at `ark scene check`.
 
 ### R7: Op vocabulary
 
@@ -137,17 +142,19 @@ One scene file = one composed configuration for one `ark` session.
 
 **Acceptance Criteria:**
 
-**Pane/tab ops (polymorphic via typed handles):**
-- [ ] `focus @handle` — tab or pane (compiler resolves from handle type).
+**Pane/tab/stack ops (polymorphic via typed handles):**
+- [ ] `focus @handle` — tab, pane, or stack child (compiler resolves from handle type).
 - [ ] `close @handle` — tab or pane.
 - [ ] `rename @handle to="name"` — tab only.
-- [ ] `resize @handle direction=<dir> by=<inc|dec>` — pane only.
-- [ ] `move @handle to=<anchor>` — pane.
-- [ ] `pin @handle` / `unpin @handle` — overlay pane.
+- [ ] `resize @handle direction=<dir> by=<inc|dec>` — pane or stack.
+- [ ] `move @handle to=<anchor>` — pane only.
+- [ ] `pin @handle` / `unpin @handle` — overlay pane only.
+- [ ] `clear @stack` — close every dynamic child of the stack. Static children declared in scene are preserved. Stack-handle only.
 
 **Spawn ops:**
 - [ ] `spawn @handle { <view> }` — create tiled pane.
 - [ ] `spawn @handle overlay pos=<pos> size=<WxH> { <view> }` — create overlay pane.
+- [ ] `spawn_into @stack { <view> attrs… }` — spawn a dynamic child into the stack. The declared child constraint (R6) validates at compile; inserting a view outside the stack's declared type = `error[scene/view-type-mismatch]`.
 - [ ] `new_tab @handle name="name" cwd="path"` — create tab.
 
 **Mode ops:**
@@ -158,13 +165,6 @@ One scene file = one composed configuration for one `ark` session.
 - [ ] `pipe from=@handle to=@handle payload="…"` — multi-target, both panes.
 - [ ] `emit "<event-name>" { <kv payload> }` — emit UserEvent.
 - [ ] `set_status text="…" severity=<level> ttl_ms=<int>` — global, status bar extension.
-
-**ACP ops (sub-namespaced `acp.*`):**
-- [ ] `acp.prompt text="…"` — send user message into ACP agent session.
-- [ ] `acp.cancel` — cancel in-flight turn.
-- [ ] `acp.permit request_id="…" outcome=<allow|reject_once|reject_always>` — respond to permission request.
-- [ ] `acp.set_mode mode="…"` — set agent mode (plan/edit/etc).
-- [ ] ACP ops no-op with warning if no ACP-capable extension active.
 
 **Control ops:**
 - [ ] `exec script="…" shell="…" timeout_ms=<int>` — run shell script.
@@ -251,7 +251,7 @@ One scene file = one composed configuration for one `ark` session.
 
 ### R10: Extensions
 
-**Description:** Everything is an extension. No shipped-vs-user distinction in format or API. Extensions provide views, intents, events, and optionally ACP agent capability.
+**Description:** Everything is an extension. No shipped-vs-user distinction in format or API. Extensions provide views, intents, events, and supervisor-side lifecycle hooks.
 
 **Acceptance Criteria:**
 
@@ -278,10 +278,9 @@ One scene file = one composed configuration for one `ark` session.
 - [ ] Lazy. Extension loaded only when scene `use`s it.
 
 **Agent as extension capability:**
-- [ ] No `agent { }` scene-root block. ACP is an extension capability.
-- [ ] Extension manifest declares `capabilities { agent { speaks "acp" } }` + launch spec.
-- [ ] Scene activates via `use "claude-code"`. ACP handshake at session start.
-- [ ] ACP events emitted as `ark.acp.*` on the bus (protocol-level namespace, any ACP-speaking extension emits there).
+- [ ] No `agent { }` scene-root block. No privileged agent protocol.
+- [ ] Extensions integrate engines via supervisor-side hooks (see cavekit-soul.md Phase 2): `on_session_start`, `control_verbs`, `register_intents`, scene-registered views.
+- [ ] Scene activates extensions via `use "<name>"`. Each ext sets up its own engine protocol handling in `on_session_start` (e.g. pi-core opens its bridge socket per cavekit-pi.md R2).
 
 **Extension can have protocol + views:**
 - [ ] One extension, one `use`. Protocol handler (subprocess/compiled-in) + view renderer (CommandView/ZellijView) as two runtime components under one name.
@@ -313,7 +312,7 @@ One scene file = one composed configuration for one `ark` session.
 **Description:** Every compile-time and runtime error surfaces via `miette`.
 
 **Acceptance Criteria:**
-- [ ] Error codes namespaced: `scene/*`, `ext/*`, `op/*`, `acp/*`. Rhai errors nest under `scene/rhai-*` (`scene/rhai-scope-mismatch`, `scene/rhai-eval`, `scene/rhai-oom`).
+- [ ] Error codes namespaced: `scene/*`, `ext/*`, `op/*`. Rhai errors nest under `scene/rhai-*` (`scene/rhai-scope-mismatch`, `scene/rhai-eval`, `scene/rhai-oom`).
 - [ ] All errors implement `miette::Diagnostic` with `code()`, `severity()`, `help()`, `labels()`.
 - [ ] Every AST node retains origin span; included fragment contributions track source file + line.
 - [ ] `ark scene check` exits non-zero on any error, prints every diagnostic.
@@ -338,7 +337,7 @@ One scene file = one composed configuration for one `ark` session.
 - [ ] `ark ext add <source>` — install from `github:`, `path:`, `url:`.
 - [ ] `ark ext list` / `info <name>` / `inspect <path>` / `remove <name>` / `update [name]` — manage extensions.
 - [ ] `ark ext info <name>` lists available scene fragments.
-- [ ] `ark doctor` — diagnostics (verify default scene, extensions, ACP agent).
+- [ ] `ark doctor` — diagnostics (verify default scene, loaded extensions; per-ext preflight checks fan in per cavekit-soul.md Phase 2).
 - [ ] No `ark spawn`. Bare `ark` = default session (matches zellij idiom).
 
 ### R14: Hot reload
@@ -347,7 +346,7 @@ One scene file = one composed configuration for one `ark` session.
 
 **Acceptance Criteria:**
 - [ ] `reload_scene` op + `ark scene reload --session <name>` CLI both enter reconcile path.
-- [ ] **Turn-inflight gate:** if any ACP session has a `session/prompt` awaiting response, queue reload. Apply when every session receives a `stopReason`.
+- [ ] **Turn-inflight gate:** extensions may register a reload-gate via Phase 2 hooks (a pending engine turn blocks scene reload until the ext reports quiescent). Bare sessions + sessions with no gate-registering ext always reload immediately.
 - [ ] Reconcile algorithm:
   1. Re-parse + validate. On failure: keep old, surface error via `set_status`. Do NOT tear down.
   2. Re-evaluate all `when=` predicates with current context.
@@ -384,15 +383,17 @@ One scene file = one composed configuration for one `ark` session.
   - UI: `ui/keybind/register`, `ui/keybind/unregister`, `ui/status/push`
   - Workspace: `workspace/applyEdit`, `workspace/configuration`, `workspace/showMessage`
 - [ ] Version negotiation: dual scheme — semver `protocolVersion` + capability flags.
-- [ ] Agent-lifecycle methods use ACP (external standard), not extension protocol.
+- [ ] Engine-lifecycle methods are extension-private; each extension speaks whatever protocol fits its engine (e.g. pi-core's unix-socket bridge per cavekit-pi.md R2). No privileged agent protocol in the scene layer.
 - [ ] Per-call timeout 5s default; extensions extend via `$/progress` heartbeats.
 - [ ] Supervision: subprocess shutdown sequence stdin-close → 2s → SIGTERM → SIGKILL. Crash → `error[ext/crashed]` event.
 
-### R17: Rust DX — code-generated manifest
+### R17: Rust DX — code-generated manifest + typed handles
 
-**Description:** Extension authors in Rust declare everything via derives + trait impls. Zero manifest files.
+**Description:** Extension authors in Rust declare everything via derives + trait impls. Zero manifest files. Pane and stack handles are parametric on their declared view type (`Pane<V>`, `Stack<V>`); the derive macro + scene compiler co-operate to produce compile-time-checked intent signatures.
 
 **Acceptance Criteria:**
+
+**Derives:**
 - [ ] One crate = one extension. All derives in the same crate auto-group via `module_path!()`.
 - [ ] `#[derive(Facet, Extension)] #[extension(name = "…")]` — extension identity + config schema.
 - [ ] `#[derive(Facet, View)]` — view config schema. Exactly one view per pane.
@@ -400,16 +401,34 @@ One scene file = one composed configuration for one `ark` session.
 - [ ] `#[ark::intent]` on methods:
   - On `impl ExtensionStruct` → global intent (no pane target).
   - On `impl ViewStruct` → targeted intent (pane handle required in scene).
-- [ ] View render mode via trait impl:
-  - `impl CommandView for V` → pane runs a command binary.
-  - `impl ZellijView for V` → pane loads a zellij wasm plugin.
-- [ ] Typed pane handles:
-  - `CommandView` intents receive `&CommandPane` (`.env()`, `.write_stdin()`, `.pid()`).
-  - `ZellijView` intents receive `&PluginPane` (`.pipe()`).
-  - Both provide `.emit()` and `.handle()`.
+
+**Handle kinds (structural — no view-type info):**
+- [ ] `HandleKind = { Tab, Pane, Stack }`. Retired: `Command`, `Plugin` (these were view render modes, not reference kinds — they move onto the view's trait impl, below).
+
+**Typed handles (parametric on view type):**
+- [ ] `struct TabHandle(Handle)` — tab identity; non-parametric.
+- [ ] `struct Pane<V: View>` — pane whose content is a `V`. Wraps a `Handle` + `PhantomData<V>`.
+- [ ] `struct Stack<V: View>` — container of `Pane<V>` children (compiles to zellij pane stack; one child expanded at a time per zellij default). `Stack<dyn View>` for heterogeneous. Affords: `spawn_pane(attrs) -> Pane<V>`, `close_child(&Pane<V>)`, `children() -> Vec<Pane<V>>`, `clear()`.
+- [ ] Common trait: `trait PaneLike { fn handle(&self) -> &Handle; fn emit<E: Event>(&self, e: E); }` implemented by every typed handle.
+
+**View marker traits (gate affordances):**
+- [ ] `trait View` — base marker; every view impls it.
+- [ ] `trait CommandView: View` — subprocess-rendered views. `impl<V: CommandView> Pane<V> { fn env() -> String; fn write_stdin(&self, bytes: &[u8]); fn pid(&self) -> Option<u32>; }`.
+- [ ] `trait ZellijView: View` — wasm-plugin-rendered views. `impl<V: ZellijView> Pane<V> { fn pipe(&self, msg: Value); }`.
+- [ ] Extensions may define additional view traits for capability groups (e.g. `trait DiffView: View`) and gate intents on them.
+
+**Typed intent signatures:**
+- [ ] `#[ark::intent]` methods on `impl ViewStruct` receive `&Pane<Self>` as the target argument by default. Example: `impl PiView { #[ark::intent] fn focus_subagent(&self, pane: &Pane<Self>, id: &str) { … } }`.
+- [ ] Intents may declare additional typed handles from scene as args: `fn scroll_to_hunk(&self, pane: &Pane<DiffView>, hunk: usize)`. Compiler validates the `@handle` passed in the scene resolves to `Pane<DiffView>`; otherwise `error[scene/view-type-mismatch]`.
+- [ ] Typed handles flow through the registry via code-generated stubs: the `#[ark::intent]` macro emits a type-erased `dyn Intent` adapter that re-materialises `Pane<V>` from the CompiledScene's view-table at dispatch entry, then calls the typed method. `IntentRegistry` stays object-safe and keyed on `(op-name, Handle)`.
+- [ ] View attrs that take handle refs (e.g. `pi logs=@logs subagents=@subagents`) declare their expected typed-handle class in the facet SHAPE. Scene compiler validates each attr against the referenced handle's declared view type.
+
+**Events:**
 - [ ] Events emitted via `ctx.emit(E)` (extension-scoped) or `pane.emit(E)` (view-scoped + source handle). Auto-namespaced by extension name.
 - [ ] Extensions can only emit own events. Open subscription to any event. Scene-mediated cross-extension wiring.
 - [ ] Extension dependencies: normal crate deps. Import event/intent types from other extension crates for type-safe subscription.
+
+**Config:**
 - [ ] Config ownership: extension owns schema + defaults (struct fields + `#[facet(default)]`). Scene author owns values (`use "ext" config { … }`). Ark validates at `ark scene check`.
 
 ## Runtime model
@@ -440,7 +459,7 @@ CompiledScene
 3. Launch zellij with `--layout <path>`.
 4. Start extension protocol handlers (subprocess/compiled-in).
 5. Register event-bus subscribers.
-6. If ACP-capable extension active: start ACP handshake.
+6. Extensions receive `on_session_start` (soul Phase 2); engine-speaking exts (e.g. pi-core) bring up their own protocol wiring at this point.
 
 ### At runtime — event
 
@@ -459,10 +478,8 @@ CompiledScene
 ## Out of Scope (v1)
 
 - **`extends` composition** — dropped. Flat-first via `include`.
-- **`wasm-component` delivery (WASI p2 sandbox)** — deferred to v0.3+.
-- **Multi-agent UX** — multi-`use` of ACP extensions works mechanically; UX design deferred.
+- **`wasm-component` delivery (WASI p2 sandbox)** — deferred.
 - **Auto-merge sidecar fragments** — opt-in `include` only.
-- **`stack` (tabbed pane cluster)** — deferred.
 - **Reactive state** — modes cover 80%.
 - **Swap-tiled-layout exposure** — modes supersede.
 - **Multi-pane overlay containers** — single-pane overlay attr for v1.
@@ -471,16 +488,20 @@ CompiledScene
 - **Minijinja** — removed. Rhai everywhere.
 - **CEL** — removed. Rhai expression-only mode replaces it (2026-04-16 revision; see changelog).
 - **`ark spawn` verb** — removed. Bare `ark` = default session.
+- **ACP (`acp.*` ops, ACP extension capability)** — removed 2026-04-18. Engines integrate as extensions via the ext-hook surface; ACP is not privileged in ark.
+- **Cavekit orchestrator** — removed 2026-04-18. No extension rehoming; gone outright.
+- **Claude Code ark-side crates** — removed 2026-04-18 but **rehomed same day** into `extensions/claude-code/` (hook-based integration, not ACP). See `cavekit-claude-code.md`.
 
 ## Cross-References
 
+- cavekit-soul.md — supersedes cavekit-architecture.md; phase plan for the v0.1 migration.
 - cavekit-mux-zellij.md — zellij subprocess integration, layout rendering.
-- cavekit-types-state-events.md — `AgentEvent` enum; R4 selectors match on kind + fields.
+- cavekit-types-state-events.md — SessionSpec/SessionStatus + `CoreEvent` after soul Phase 1; R4 selectors match on kind + fields.
 - cavekit-supervisor.md — scene compilation + event bus registration.
 - cavekit-config.md — figment-layered config for scene path defaults.
 - cavekit-cli.md — `ark scene` + `ark ext` subcommand trees.
-- cavekit-hook-ipc.md — ark-bus plugin IPC surface.
-- [Agent Client Protocol](https://agentclientprotocol.com) — ACP reference (extension capability, not core).
+- cavekit-claude-code.md — claude-code extension (v0.1's first consumer of the ext-hook surface + typed handles + stacks).
+- cavekit-pi.md — pi extension family (DEFERRED v0.2; second consumer pattern).
 
 ## Design Decisions Locked
 
@@ -490,8 +511,11 @@ CompiledScene
 | Parse stack | `facet` + `facet-kdl` + `kdl` 6.5 (formatter) + `miette` | Active sponsorship; one derive covers parse/reflect/schema/LSP-hover |
 | Expression language | Rhai expression-only mode (`rhai` crate). CEL + Minijinja dead. | One language for `when=` + `{expr}` interpolation; Rust-native syntax; `Engine::new_raw` + symbol disables guarantee non-TC |
 | View noun | "view" replaces "plugin" / "provider" | What fills a pane |
-| View rendering | Trait-based: `CommandView` / `ZellijView` | Type system determines render mode |
-| Pane handles | `@handle` required on all tabs + panes | Reconciler identity keys; compile-time validation |
+| View rendering | Trait-based: `CommandView` / `ZellijView`; affordances gated by trait impl on `Pane<V>` | Type system determines render mode + exposed methods |
+| Typed pane handles | `Pane<V: View>` (generic over declared view); `Stack<V>` for dynamic containers | View-type validation at compile time; replaces runtime `HandleKind::{Command, Plugin}` |
+| `HandleKind` | `{ Tab, Pane, Stack }` — structural only | View-type info lives on the typed wrapper, not the kind |
+| Pane handles | `@handle` required on all tabs + panes + stacks | Reconciler identity keys; compile-time validation |
+| Stacks | `stack @h { <view> }` layout primitive (= zellij pane stack); dynamic children spawned via `spawn_into` op or `StackHandle::spawn_pane` | Lets views act as coordinators with typed sinks; avoids handle-interpolation (`@sub-{id}`) patterns; reuses zellij's native stack UX |
 | Handle namespace | Flat, scene-scoped | Simple; clash = compile error |
 | Layout vocabulary | `row`/`col`/`span`/`cells`/`overlay` (ark-native) | Zellij is render backend, not vocabulary source |
 | Sizing | Spans (relative weight) + cells (fixed) | Compose cleanly; no percentage arithmetic |
@@ -499,7 +523,7 @@ CompiledScene
 | Modes | Named alternate layouts via override-layout | Explicit, not pane-count-triggered |
 | Conditional | `when=` on tabs/panes → reconciler creates/removes | K8s desired-state model |
 | Extensions | Everything is an extension; no shipped-vs-user distinction | Format parity (VSCode/HA/K8s pattern) |
-| Agent protocol | ACP as extension capability | Not privileged; ark is a terminal IDE, not an AI terminal |
+| Agent protocol | None privileged. Each engine-speaking extension owns its protocol (e.g. pi-core's unix-socket bridge). | Ark is a terminal IDE; engines are ordinary extensions |
 | Delivery modes (v1) | compiled-in / subprocess / zellij-wasm | 3 modes; WASI p2 deferred |
 | Manifest DX | Code-generated from derives + trait impls; one-crate-per-extension; zero annotation | Cleanest Rust DX |
 | Composition | `include` only; no `extends` | Flat-first; Docker Compose lesson |
@@ -508,12 +532,20 @@ CompiledScene
 | CLI entry | Bare `ark` = default session | Match zellij idiom; no `spawn` verb |
 | Default scene | Embedded asset; shell + status bar; no agent | Minimum viable terminal IDE baseline |
 | Keybind notation | Zellij-native quoted strings (`"Alt d"`) | Direct pass-through; fewer bugs |
-| ACP ops | Sub-namespaced `acp.*` | KDL-legal (dots); consistent; was `acp/` which is invalid KDL |
 | Event emission | Own-namespace only; open subscription | Namespace integrity; trace-friendly |
 | Cross-ext wiring | Scene-mediated (events → scene → intents) | Extensions stay decoupled |
 | Naming | Scene (theatrical); Extension (VSCode/Zed convention); View (what fills a pane) | Industry-aligned |
 
 ## Changelog
+
+### 2026-04-18 — Typed view-parametric handles + `stack` primitive; scope cut (ACP + cavekit orchestrator removed; claude-code rehomed to extension)
+
+- **Affected:** R3 (Layout DSL — adds `stack`), R6 (Views — view alias becomes type declaration; union syntax), R7 (Op vocabulary — adds `spawn_into`, `clear`), R17 (Rust DX — `CommandPane`/`PluginPane` retire, replaced with parametric `Pane<V>`, `Stack<V>`; `HandleKind` narrows), Design Decisions table. **Out-of-scope:** `stack` un-deferred; ACP ops (`acp.*`) deleted entirely.
+- **Summary (typed handles):** `HandleKind::{Command, Plugin}` conflated reference kind with runtime render mode. Split: `HandleKind` narrows to `{Tab, Pane, Stack}` (structural); render-mode + affordances move to marker traits on the view (`CommandView`, `ZellijView`). Typed handles become parametric (`Pane<V: View>`, `Stack<V: View>`). View aliases inside `pane`/`stack` braces now *declare* the view type; scene compiler validates handle-typed view attrs (e.g. `pi logs=@logs`) against the referenced handle's declared view. Ext intents bind precisely — `fn scroll(pane: &Pane<DiffView>)` is a compile check. `#[ark::intent]` macro stays erased at the registry boundary by re-materialising typed handles from the CompiledScene view-table.
+- **Summary (stack):** New `stack @h { … }` layout primitive = zellij pane stack (one child expanded, rest collapsed). Un-defers the `stack` out-of-scope note. Supports dynamic containers — essential for views that coordinate fan-out (pi-core's subagent stack). Un-deferring is the right call because pi is the first dynamic-fanout consumer and `row`/`col` can't model variable-membership without ugly splits.
+- **Summary (scope cut):** ACP + Cavekit orchestrator deleted from ark as part of soul Phases 3 + 4. Extension-owned ACP ops (`acp.*`) gone. Claude Code ark-side crates also deleted but **rehomed same day** into `extensions/claude-code/` as v0.1's first engine integration (hook-based, not ACP). Pi deferred to v0.2. `cavekit-engine-claude-code.md`, `cavekit-orchestrator-*.md`, `cavekit-hook-ipc.md` kit files deleted — superseded by consolidated `cavekit-claude-code.md`. See cavekit-soul.md Phase 4 + cavekit-overview.md milestones + context/plans/handoff-2026-04-18-claude-code-first-pivot.md.
+- **Driven by:** pi-extension planning session (cavekit-pi.md DRAFT); scope cut 2026-04-18 focused v0.1 on a single engine integration.
+- **Commits:** design-only; no code commits (pre-implementation).
 
 ### 2026-04-16 — Rhai expression-only mode (supersedes CEL)
 

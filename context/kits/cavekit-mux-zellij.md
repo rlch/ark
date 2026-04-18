@@ -96,7 +96,7 @@ The orchestrator can call `mux.create_tab` further at any time (e.g., review tab
 - Headless / no-UI zellij — v1 assumes a TTY; CI tests mock the executor
 
 ## Cross-References
-- cavekit-architecture.md — ZellijMux ownership in World (R3) and type spec (R4)
+- cavekit-soul.md — ZellijMux ownership in World; concrete type (no mux trait) per scene v3 locked decisions (supersedes cavekit-architecture.md)
 - cavekit-layouts.md — KDL templates and shipped layouts
 - cavekit-plugin-status.md — consumes `ark-status` pipes
 - cavekit-plugin-picker.md — consumes `ark-picker` pipes

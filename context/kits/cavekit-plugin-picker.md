@@ -7,12 +7,12 @@ last_edited: "2026-04-16"
 
 > **v0.1 (shipped inline, current content):** zellij wasm plugin loaded by the built-in default scene as `plugin "picker" { source "shipped:picker"; mount "floating" }` with a default keybind (e.g., `Alt p`). The R1–R7 acceptance criteria below describe this runtime.
 >
-> **v0.3 (ported to ark-native extension, per plan T-10.10):** `ark-picker` becomes an ark extension with `ExtensionMetadata` + sidecar scene fragment. Default scene migrates to `use "picker"` form. Inline compat retained indefinitely.
+> **Port to ark-native extension (scene R17):** `ark-picker` becomes an ark extension with `ExtensionMetadata` + sidecar scene fragment. Default scene migrates to `use "picker"` form. Inline compat retained indefinitely.
 >
-> **v0.3 adds: ACP permission-modal surface.** The picker becomes the fallback renderer in the scene R17 5-tier permission-dispatch precedence (security-deny → auto-deny → auto-confirm → auto-allow → picker). On receiving a control-socket-forwarded `UserEvent:ark.acp.permission_requested` (only when no scene rule matches OR `auto-confirm` fires), picker shows a modal with `{tool, params, options}`; user selection routes back via `ark-hook permit --request-id <id> --outcome <…>` per cavekit-hook-ipc R1. Late responses (after ACP timeout) dropped silently by supervisor.
+> **2026-04-18 scope cut:** ACP permission-modal feature removed. ACP was deleted from ark; there are no permission requests for the picker to render. Picker is now purely a session-management UI.
 
 ## Scope
-`ark-picker.wasm` — interactive zellij plugin modeled on zellij's built-in session-manager. Fuzzy-searchable list of active agents, detail expansion, kill/rename, new-agent form, **ACP permission modals (v0.3+)**. Triggers session switch via zellij-tile actions. Sends administrative commands + `ark-hook permit` to ark host via control socket (see cavekit-hook-ipc).
+`ark-picker.wasm` — interactive zellij plugin modeled on zellij's built-in session-manager. Fuzzy-searchable list of active sessions, detail expansion, kill/rename, new-session form. Triggers session switch via zellij-tile actions. Sends administrative commands to the ark host via the per-session control socket.
 
 ## Reference
 Mirrors zellij's `default-plugins/session-manager/` in Zellij repo. Uses SingleScreenMode pattern (filter + results in one screen). Uses `zellij-tile` primitives + `fuzzy-matcher` (SkimMatcherV2). No ratatui.
@@ -60,7 +60,7 @@ Mirrors zellij's `default-plugins/session-manager/` in Zellij repo. Uses SingleS
 - [ ] Incremental updates: supervisors pipe to `ark-picker` target on every event; plugin updates its cache
 - [ ] 2s timer: re-render for timing-sensitive fields (stall age, "5m ago" counters) AND re-scan socket dir for liveness changes
 - [ ] Per-agent detail (R5): on demand, `connect()` to that agent's socket and send `{"cmd":"Status"}` for the full snapshot (avoids polling every agent)
-**Dependencies:** cavekit-types-state-events, cavekit-hook-ipc R4
+**Dependencies:** cavekit-types-state-events, cavekit-supervisor.md R3 + R4 (per-session control socket, kakoune model)
 
 ### R4: List screen (W1 wireframe)
 **Description:** Main screen layout, fuzzy search, per-agent summary.
@@ -98,7 +98,7 @@ Mirrors zellij's `default-plugins/session-manager/` in Zellij repo. Uses SingleS
 - [ ] On exec failure (binary missing, validation error): plugin transitions to `Error(stderr)` screen
 - [ ] On success: plugin returns to List screen; new agent appears once its socket binds and supervisors pipe their first event (typically <500ms)
 - [ ] **Why subprocess not socket:** "no agents alive → no socket → can't spawn" deadlock is removed at the cost of fork+exec latency (~10ms, irrelevant for human-triggered actions). Precedent: wezterm `wezterm cli`'s connect-or-spawn pattern, coarsened.
-**Dependencies:** cavekit-hook-ipc R4
+**Dependencies:** cavekit-supervisor.md R3 + R4 (per-session control socket, kakoune model)
 
 ### R7: Kill + rename + resurrect + detach
 **Description:** Administrative actions on selected agent. Live actions (Kill/Rename/Forget) connect to that agent's per-supervisor socket. Resurrect (dead supervisor) execs `ark`.
@@ -111,7 +111,7 @@ Mirrors zellij's `default-plugins/session-manager/` in Zellij repo. Uses SingleS
 - [ ] `r` on a crashed agent (no live socket): plugin reads `$STATE/agents/{id}/spec.json`, then `run_command`s `ark` with the same params (same path as R6 New-agent). Old agent's state dir archived to `$STATE/archive/{date}/{id}/` first.
 - [ ] All confirmations in-place; no leaving the picker
 - [ ] On socket connect failure mid-flow (supervisor died between list refresh and action): plugin shows "agent no longer alive — refresh? [y/n]" and re-runs R3 bootstrap on `y`
-**Dependencies:** R4, cavekit-hook-ipc R4 + R5
+**Dependencies:** R4, cavekit-supervisor.md R3 + R4 (per-session control socket, kakoune model) + R5
 
 ### R8: Switch action
 **Description:** `Enter` on a row — switch to that agent's zellij session.
@@ -268,7 +268,7 @@ Mirrors zellij's `default-plugins/session-manager/` in Zellij repo. Uses SingleS
 
 ## Cross-References
 - cavekit-plugin-status.md — companion plugin
-- cavekit-hook-ipc.md — control socket protocol for administrative commands
+- cavekit-supervisor.md — per-session control socket protocol for administrative commands (R3/R4; supersedes deleted cavekit-hook-ipc.md)
 - cavekit-mux-zellij.md — session switching
 - cavekit-types-state-events.md — event shapes
 - cavekit-distribution.md — wasm embedding

@@ -38,7 +38,7 @@ The ephemeral per-agent supervisor process. Forked from the bare `ark` CLI call,
 - [ ] After detach, supervisor:
   1. Creates `StateDir` (writes `spec.json`, initial `status.json { phase: Starting }`)
   2. Acquires exclusive file lock `$STATE/locks/{id}.lock`
-  3. **Binds control socket** at `${XDG_RUNTIME_DIR:-/tmp}/ark-$UID/agents/{id}.sock` (creates parent dir 0700 if absent). Listener installed on tokio runtime; serves protocol per cavekit-hook-ipc.md R4 + R5. See R7 below for lifecycle.
+  3. **Binds control socket** at `${XDG_RUNTIME_DIR:-/tmp}/ark-$UID/agents/{id}.sock` (creates parent dir 0700 if absent). Listener installed on tokio runtime; serves NDJSON request/response protocol per R7 below (kakoune per-session socket model).
   4. Sets up logging (tracing → `supervisor.log`)
   5. Loads config (figment-layered per cavekit-config — `config.toml` at `$XDG_CONFIG_HOME/ark/`)
   6. **Resolves scene path** via `resolve_scene_path()` (plan T-8.0 precedence: `--scene` flag → `ARK_SCENE` env → `./.ark/scene.kdl` → `$XDG_CONFIG_HOME/<appname>/scenes/default.kdl` → built-in default)
@@ -59,7 +59,7 @@ The ephemeral per-agent supervisor process. Forked from the bare `ark` CLI call,
   21. `state.finalize(&outcome)` — writes final status.json, moves agent dir to archive if configured
   22. **Unlinks control socket** (Drop guard fires; SIGTERM/SIGINT handler covers signal paths — see R7)
   23. Releases lock, exits with outcome-derived exit code
-**Dependencies:** R2, cavekit-architecture, cavekit-scene R10/R14/R16/R17
+**Dependencies:** R2, cavekit-soul (supersedes cavekit-architecture), cavekit-scene R10/R14/R16/R17
 
 ### R4: Kill semantics
 **Description:** Handle SIGTERM and `ark kill` gracefully.
@@ -96,7 +96,7 @@ The ephemeral per-agent supervisor process. Forked from the bare `ark` CLI call,
 **Dependencies:** cavekit-config, cavekit-mux-zellij
 
 ### R7: Control socket lifecycle
-**Description:** Each supervisor owns its own per-agent unix socket for picker/CLI commands (Kill, Rename, Forget, Status, Ping). No daemon. See cavekit-hook-ipc.md R4 for the full kakoune-model rationale.
+**Description:** Each supervisor owns its own per-agent unix socket for picker/CLI commands (Kill, Rename, Forget, Status, Ping). No daemon. Kakoune `kak -l` model: one socket per agent under `$XDG_RUNTIME_DIR/ark-$UID/agents/`, picker enumerates via `read_dir`, stale sockets GC'd by reachability. (Supersedes the deleted cavekit-hook-ipc.md kit — that content consolidated into this R7.)
 **Acceptance Criteria:**
 - [ ] Socket bound in step 3 of R3, immediately after StateDir + lock acquisition (before any potentially-slow engine work) so picker can reach the agent as soon as `ark` returns
 - [ ] Path: `${XDG_RUNTIME_DIR:-/tmp}/ark-$UID/agents/{id}.sock`. Parent dir mode 0700, socket mode 0700.
@@ -112,11 +112,11 @@ The ephemeral per-agent supervisor process. Forked from the bare `ark` CLI call,
   - Normal exit: `reclaim_name(true)` Drop guard on listener calls `unlink()` (R3 step 17)
   - SIGTERM/SIGINT: `signal_hook` handler explicitly `std::fs::remove_file`s socket path before triggering `world.cancel` (R4) — Drop does NOT run on signals
   - Panic with `panic = "abort"`: Drop also skipped — `signal_hook` SIGABRT handler covers this
-  - SIGKILL or hard crash: socket file remains stale; GC'd by next picker/CLI scan via reachability check (cavekit-hook-ipc.md R4)
+  - SIGKILL or hard crash: socket file remains stale; GC'd by next picker/CLI scan via reachability check (50ms connect attempt; `ECONNREFUSED`/`ENOENT` → `unlink()` — cavekit-plugin-picker.md R3)
 - [ ] No file lock around bind — agent-id uniqueness (ULID per cavekit-types-state-events) prevents collision; if collision somehow occurs, bind fails fast and parent CLI exits with error
 - [ ] Bind failure is fatal — supervisor exits with non-zero; parent CLI surfaces error to user
 - [ ] Auth: socket file mode 0700 (local user only). No tokens.
-**Dependencies:** R3, cavekit-hook-ipc R4
+**Dependencies:** R3, cavekit-plugin-picker.md R3 (for reachability-GC contract)
 
 ## Error isolation
 - Supervisor crashes do NOT affect other running supervisors — each is its own process
@@ -131,8 +131,9 @@ The ephemeral per-agent supervisor process. Forked from the bare `ark` CLI call,
 - Signals beyond SIGTERM/SIGINT/SIGKILL — no SIGUSR* handlers v1
 
 ## Cross-References
-- cavekit-architecture.md R5 — ownership rules
+- cavekit-soul.md — ownership rules + Phase 1 main-loop rewrite + Phase 5 trait deletions (supersedes cavekit-architecture.md)
 - cavekit-types-state-events.md R5 — state dir schema
 - cavekit-cli.md R4 — `ark kill`
 - cavekit-mux-zellij.md — tab close calls
-- cavekit-engine-claude-code.md — engine preflight / install / teardown
+- cavekit-claude-code.md — v0.1 first engine integration: extension owns preflight/install/teardown via ext-hook surface (supersedes deleted cavekit-engine-claude-code.md)
+- cavekit-plugin-picker.md — control-socket consumer; R3 reachability-GC contract

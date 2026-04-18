@@ -75,7 +75,7 @@ Zellij KDL tab layouts — user-composable, shipped defaults, templating variabl
 - [ ] Review-phase layout for cavekit: `review`
 - [ ] Per-spawn: `--layout` flag overrides
 - [ ] Per-user global: `config.orchestrator.{slug}.default_layout`
-**Dependencies:** cavekit-config, cavekit-orchestrator-cavekit, cavekit-orchestrator-claude-code
+**Dependencies:** cavekit-config. NOTE: R3's orchestrator-keyed default layouts are pre-scope-cut (2026-04-18); post-cut, layout defaults bind to scene `use "…"` declarations (cavekit-scene.md R10) rather than deleted `[orchestrator.*]` sections. This kit's R3 body needs revision in a follow-up pass.
 
 ## Wireframes (ASCII, visual reference)
 
@@ -234,5 +234,5 @@ layout {
   Scene-shaped ports of every shipped layout live in `scenes/*.kdl` (T-14.2).
 - cavekit-mux-zellij.md R5 — layout rendering
 - cavekit-pane-commands.md — pane subcommands referenced in layouts
-- cavekit-orchestrator-cavekit.md / cavekit-orchestrator-claude-code.md — layout selection
+- cavekit-claude-code.md — v0.1 engine extension; scene `use "claude-code"` drives layout selection (supersedes deleted orchestrator kits)
 - cavekit-config.md — `default_layout` keys
