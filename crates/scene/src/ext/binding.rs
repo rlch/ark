@@ -101,8 +101,20 @@ pub fn resolve_binding(metadata: &ExtensionMetadata) -> ExtensionBinding {
     };
 
     // ── Render mode ────────────────────────────────────────────────
+    // TODO(T-034): consume `view.kind` here. When kind == "stack", the
+    // view-type validator should route through Stack<V> semantics rather
+    // than treating it as a pane. Until T-034 lands, we warn-log so the
+    // gap is observable instead of silent (Codex tier-4 F-010).
     let render_mode = match metadata.views.first() {
         Some(view) => {
+            if let Some(kind_node) = &view.kind {
+                if kind_node.value == "stack" {
+                    eprintln!(
+                        "[scene/ext] ViewDecl.kind=\"stack\" for {:?} is parsed but not yet consumed; will be wired in T-034. Treating as pane until then.",
+                        view.name,
+                    );
+                }
+            }
             let component = &view.component.value;
             if component.ends_with("Plugin") {
                 RenderMode::Plugin {
