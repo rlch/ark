@@ -90,6 +90,7 @@ pub use transcript::{
 };
 pub use view::{
     ClaudeCodeSubagent, ClaudeCodeSubagentAttrs, ClaudeCodeSubagentView, ClaudeCodeView,
+    SubagentState, SubagentStatus, format_subagent_title, format_transcript_lines,
 };
 
 /// Basename of the T-020 sentinel file dropped next to the cc-hook
@@ -859,4 +860,588 @@ pub fn reconcile_settings_for_session(
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// T-035 / T-037 — SubagentRegistry: per-subagent state cache + event dispatch
+// ---------------------------------------------------------------------------
+
+use ark_types::ExtEvent;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+
+/// T-037 event-dispatch outcome. Emitted by [`SubagentRegistry::on_ext_event`]
+/// so callers can forward the resulting `RenamePane` payload through
+/// the host's `pane/emit` RPC (T-035).
+///
+/// `id` is the subagent id; `payload` is the
+/// `{ "kind": "RenamePane", "name": <title> }` JSON the kit pins in R6.
+/// Callers that don't care about emission (e.g. untyped / fallback
+/// scenes) can still observe the event flow — the registry caches state
+/// either way. A cached miss (event for an unknown `id`) returns `None`.
+#[derive(Debug, Clone)]
+pub struct RenamePaneEmission {
+    /// Subagent id the payload targets. Host maps this back to the
+    /// corresponding stack-child `Pane<ClaudeCodeSubagent>` handle.
+    pub id: String,
+    /// `pane/emit` payload. Shape pinned at
+    /// `{ "kind": "RenamePane", "name": <string> }`.
+    pub payload: serde_json::Value,
+}
+
+/// T-035 + T-037: per-session cache of subagent state + the entry point
+/// the socket-reader accept-loop calls on each ExtEvent. Lives on
+/// [`ClaudeCodeExtension`]; shared across the accept-loop task and any
+/// future `ClaudeCodeView`-driven consumers via `Arc<Mutex<_>>`.
+///
+/// Filtering: [`Self::on_ext_event`] responds to the three event kinds
+/// R6 + R7 list — `claude-code.subagent.start`,
+/// `claude-code.subagent.stop`, and `claude-code.pre-tool-use`. Any
+/// other `kind` is ignored and returns `None`.
+///
+/// Data flow:
+///
+/// 1. `subagent.start` creates a fresh [`SubagentState`] keyed on
+///    `payload.agent_id` with `status = Running` and
+///    `agent_type = payload.agent_type`.
+/// 2. `pre-tool-use` looks up the entry by `payload.agent_id` and
+///    updates `last_tool` in place. **Missing `agent_id`** — the
+///    main-session `PreToolUse` hook fires without it — drops the event
+///    (no main-session subagent to update).
+/// 3. `subagent.stop` transitions `status` to `Done` / `Failed`
+///    according to `payload.success`.
+///
+/// Each handled event returns a fresh [`RenamePaneEmission`] so the
+/// caller can drive `pane/emit`.
+#[derive(Debug, Default, Clone)]
+pub struct SubagentRegistry {
+    /// `agent_id → SubagentState`.
+    inner: Arc<Mutex<HashMap<String, SubagentState>>>,
+}
+
+impl SubagentRegistry {
+    /// Construct an empty registry.
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Snapshot of all tracked subagents' state, primarily for tests.
+    /// Returns a cloned `HashMap` so callers don't hold the lock.
+    pub fn snapshot(&self) -> HashMap<String, SubagentState> {
+        self.inner.lock().map(|g| g.clone()).unwrap_or_default()
+    }
+
+    /// Read one tracked subagent's state (test / doctor introspection).
+    pub fn get(&self, id: &str) -> Option<SubagentState> {
+        self.inner.lock().ok().and_then(|g| g.get(id).cloned())
+    }
+
+    /// T-037 event dispatch. Consume an [`ExtEvent`] — if it is one of
+    /// the three subagent-related kinds this registry filters, updates
+    /// the cached state and returns the resulting [`RenamePaneEmission`].
+    /// Events for unknown subagent ids (e.g. a `subagent.stop` without
+    /// a prior `subagent.start`) still update state defensively, so
+    /// a fresh registry can pick up mid-session.
+    ///
+    /// Returns `None` for:
+    /// * ExtEvents not in `{subagent.start, subagent.stop, pre-tool-use}`.
+    /// * `pre-tool-use` events with no `agent_id` (the main-session
+    ///   `PreToolUse` hook) — no subagent context to update.
+    /// * Any event whose payload is missing `agent_id`.
+    pub fn on_ext_event(&self, event: &ExtEvent) -> Option<RenamePaneEmission> {
+        if event.ext != EXT_NAME {
+            return None;
+        }
+        match event.kind.as_str() {
+            "subagent.start" => {
+                let id = event.payload.get("agent_id").and_then(|v| v.as_str())?;
+                let agent_type = event
+                    .payload
+                    .get("agent_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("subagent");
+                let state = SubagentState::new(id, agent_type);
+                let emission = RenamePaneEmission {
+                    id: id.to_string(),
+                    payload: ClaudeCodeSubagentView::rename_pane_payload(&state),
+                };
+                if let Ok(mut g) = self.inner.lock() {
+                    g.insert(id.to_string(), state);
+                }
+                Some(emission)
+            }
+            "subagent.stop" => {
+                let id = event.payload.get("agent_id").and_then(|v| v.as_str())?;
+                // Claude Code's SubagentStop payload carries `success:
+                // bool` — true → Done, false → Failed. When absent
+                // (unusual), default defensively to `Done`.
+                let success = event
+                    .payload
+                    .get("success")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                let new_status = if success {
+                    SubagentStatus::Done
+                } else {
+                    SubagentStatus::Failed
+                };
+                let mut g = match self.inner.lock() {
+                    Ok(g) => g,
+                    Err(_) => return None,
+                };
+                let state = g.entry(id.to_string()).or_insert_with(|| {
+                    // Defensive: a Stop without a prior Start can
+                    // happen if the extension mounts mid-session. Stamp
+                    // a synthetic entry so the title reflects the
+                    // transition; agent_type falls back to a sentinel.
+                    SubagentState::new(id, "subagent")
+                });
+                state.status = new_status;
+                Some(RenamePaneEmission {
+                    id: id.to_string(),
+                    payload: ClaudeCodeSubagentView::rename_pane_payload(state),
+                })
+            }
+            "pre-tool-use" => {
+                // Main-session PreToolUse fires without agent_id —
+                // ignore; only subagent-scoped tool use updates title.
+                let id = event.payload.get("agent_id").and_then(|v| v.as_str())?;
+                let tool = event
+                    .payload
+                    .get("tool_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let mut g = match self.inner.lock() {
+                    Ok(g) => g,
+                    Err(_) => return None,
+                };
+                let state = g.get_mut(id)?;
+                state.last_tool = Some(tool.to_string());
+                Some(RenamePaneEmission {
+                    id: id.to_string(),
+                    payload: ClaudeCodeSubagentView::rename_pane_payload(state),
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// T-038 / T-039 / T-040 — ClaudeCodeView fan-out to Stack<ClaudeCodeSubagent>
+// ---------------------------------------------------------------------------
+
+/// T-038 fan-out outcome. Emitted by
+/// [`ClaudeCodeView::on_subagent_start`] when a new `subagent.start`
+/// event lands AND the view's `subagents` handle is `Some` AND the
+/// `agent_id` is NOT already in the spawned-set.
+///
+/// `attrs` carries the typed [`ClaudeCodeSubagentAttrs`] the host
+/// consumer will pass through `Stack<_>::spawn_pane`. v0.1 `PaneAttrs`
+/// is empty (see `ark-view::typed::PaneAttrs`), so the typed attrs are
+/// emitted separately for the host to correlate with the spawned child
+/// at wiring time (T-046). The downstream mapping
+/// `attrs → Pane<ClaudeCodeSubagentView>` is pinned in
+/// [`ClaudeCodeSubagentAttrs`].
+#[derive(Debug, Clone)]
+pub struct SubagentFanOut {
+    /// Typed attrs identifying the subagent + its transcript path.
+    pub attrs: ClaudeCodeSubagentAttrs,
+}
+
+/// Per-`ClaudeCodeView` spawn tracker. Separate from [`SubagentRegistry`]
+/// because one extension can mount multiple `ClaudeCodeView` instances
+/// (e.g. a scene with two `claude-code` panes, each with its own
+/// `subagents` stack); every view gets its OWN idempotency set so a
+/// duplicate `agent_id` across views each spawns once into its
+/// respective stack.
+#[derive(Debug, Default, Clone)]
+pub struct ClaudeCodeSpawnSet {
+    inner: Arc<Mutex<HashSet<String>>>,
+}
+
+impl ClaudeCodeSpawnSet {
+    /// Construct an empty spawn set.
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    /// Return `true` iff `id` has NOT been spawned yet; atomically
+    /// records it so subsequent calls return `false`. Idempotency hook
+    /// for T-038's duplicate-start guard.
+    fn claim(&self, id: &str) -> bool {
+        match self.inner.lock() {
+            Ok(mut g) => g.insert(id.to_string()),
+            Err(_) => false,
+        }
+    }
+
+    /// Whether `id` is in the set (read-only, tests).
+    pub fn contains(&self, id: &str) -> bool {
+        self.inner.lock().map(|g| g.contains(id)).unwrap_or(false)
+    }
+
+    /// Count of spawned children (tests).
+    pub fn len(&self) -> usize {
+        self.inner.lock().map(|g| g.len()).unwrap_or(0)
+    }
+
+    /// Whether the spawn set is empty (clippy-friendly companion to `len`).
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl ClaudeCodeView {
+    /// T-038 + T-039 + T-040: process a `claude-code.subagent.start`
+    /// (T-038), `claude-code.subagent.stop` (T-039) OR other event
+    /// against this view's `subagents` handle.
+    ///
+    /// Returns `Some(SubagentFanOut)` ONLY when all of:
+    /// * `event.ext == "claude-code"` AND `event.kind == "subagent.start"`.
+    /// * `self.subagents.is_some()` (T-040: `None` no-ops).
+    /// * `event.payload.agent_id` is a non-empty string.
+    /// * `agent_id` was NOT already claimed in `spawn_set` (idempotent
+    ///   on duplicate `subagent.start` per T-038).
+    ///
+    /// For `subagent.stop`: returns `None` — per R7 / T-039 the view
+    /// does NOT remove the child, leaving the tile in place for the
+    /// user. Status transition lands via [`SubagentRegistry::on_ext_event`]
+    /// which the extension dispatches in parallel.
+    ///
+    /// For any other kind: returns `None`.
+    ///
+    /// Note — `transcript_path` is read from `agent_transcript_path`,
+    /// Claude Code's canonical field name on `SubagentStart`. A missing
+    /// field stamps an empty string — the downstream subagent view
+    /// tolerates an empty transcript path (render_transcript_tail
+    /// reports a missing-file as no lines).
+    pub fn on_ext_event(
+        &self,
+        event: &ExtEvent,
+        spawn_set: &ClaudeCodeSpawnSet,
+    ) -> Option<SubagentFanOut> {
+        if event.ext != EXT_NAME {
+            return None;
+        }
+        if event.kind != "subagent.start" {
+            // T-039: subagent.stop does NOT remove or fan-out; T-040:
+            // None subagents handle no-ops regardless.
+            return None;
+        }
+        // T-040: subagents == None → no fan-out (events still reach
+        // user reactions via the broader bus — this method just
+        // short-circuits the typed spawn).
+        self.subagents.as_ref()?;
+
+        let id = event
+            .payload
+            .get("agent_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())?;
+        // T-038 idempotency guard.
+        if !spawn_set.claim(id) {
+            return None;
+        }
+        let transcript_path = event
+            .payload
+            .get("agent_transcript_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        Some(SubagentFanOut {
+            attrs: ClaudeCodeSubagentAttrs {
+                id: id.to_string(),
+                transcript_path,
+            },
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// T-035 / T-037 / T-038 / T-039 / T-040 — tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod subagent_dispatch_tests {
+    use super::*;
+    use ark_types::ExtEvent;
+    use ark_view::{HandleId, Stack};
+
+    fn ev(kind: &str, payload: serde_json::Value) -> ExtEvent {
+        ExtEvent {
+            ext: EXT_NAME.to_string(),
+            kind: kind.to_string(),
+            payload,
+        }
+    }
+
+    fn stub_stack() -> Stack<ClaudeCodeSubagent> {
+        // `Stack::from_handle` is crate-private on `ark-view`; the
+        // serde-round-trip is the public path to construct a test
+        // handle from outside the crate (see ark-view/src/typed.rs
+        // tests).
+        serde_json::from_str::<Stack<ClaudeCodeSubagent>>("\"stub-stack\"")
+            .expect("stub stack deserialisation")
+    }
+
+    fn view_with_subagents() -> ClaudeCodeView {
+        ClaudeCodeView {
+            model: None,
+            args: vec![],
+            cwd: None,
+            subagents: Some(stub_stack()),
+        }
+    }
+
+    // -- T-035 + T-037: SubagentRegistry dispatch ----------------------------
+
+    #[test]
+    fn registry_subagent_start_inserts_running_state() {
+        let reg = SubagentRegistry::new();
+        let e = ev(
+            "subagent.start",
+            serde_json::json!({
+                "agent_id": "agent-1",
+                "agent_type": "code-writer",
+                "agent_transcript_path": "/tmp/a.jsonl",
+            }),
+        );
+        let out = reg.on_ext_event(&e).expect("emission");
+        assert_eq!(out.id, "agent-1");
+        assert_eq!(out.payload.get("kind").unwrap(), "RenamePane");
+        assert_eq!(
+            out.payload.get("name").unwrap(),
+            "code-writer · running · -"
+        );
+        let s = reg.get("agent-1").unwrap();
+        assert_eq!(s.status, SubagentStatus::Running);
+        assert_eq!(s.agent_type, "code-writer");
+    }
+
+    #[test]
+    fn registry_pre_tool_use_updates_last_tool() {
+        let reg = SubagentRegistry::new();
+        let _ = reg.on_ext_event(&ev(
+            "subagent.start",
+            serde_json::json!({
+                "agent_id": "agent-1",
+                "agent_type": "writer",
+            }),
+        ));
+        let out = reg
+            .on_ext_event(&ev(
+                "pre-tool-use",
+                serde_json::json!({ "agent_id": "agent-1", "tool_name": "Edit" }),
+            ))
+            .expect("emission");
+        assert_eq!(out.payload.get("name").unwrap(), "writer · running · Edit");
+        assert_eq!(
+            reg.get("agent-1").unwrap().last_tool.as_deref(),
+            Some("Edit")
+        );
+    }
+
+    #[test]
+    fn registry_pre_tool_use_without_agent_id_ignored() {
+        let reg = SubagentRegistry::new();
+        // Main-session PreToolUse (no agent_id) → no emission.
+        assert!(
+            reg.on_ext_event(&ev(
+                "pre-tool-use",
+                serde_json::json!({ "tool_name": "Edit" }),
+            ))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn registry_pre_tool_use_unknown_agent_ignored() {
+        let reg = SubagentRegistry::new();
+        assert!(
+            reg.on_ext_event(&ev(
+                "pre-tool-use",
+                serde_json::json!({ "agent_id": "ghost", "tool_name": "Edit" }),
+            ))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn registry_subagent_stop_success_transitions_to_done() {
+        let reg = SubagentRegistry::new();
+        let _ = reg.on_ext_event(&ev(
+            "subagent.start",
+            serde_json::json!({"agent_id": "a", "agent_type": "t"}),
+        ));
+        let out = reg
+            .on_ext_event(&ev(
+                "subagent.stop",
+                serde_json::json!({"agent_id": "a", "success": true}),
+            ))
+            .expect("emission");
+        assert_eq!(out.payload.get("name").unwrap(), "t · done · -");
+        assert_eq!(reg.get("a").unwrap().status, SubagentStatus::Done);
+    }
+
+    #[test]
+    fn registry_subagent_stop_failure_transitions_to_failed() {
+        let reg = SubagentRegistry::new();
+        let _ = reg.on_ext_event(&ev(
+            "subagent.start",
+            serde_json::json!({"agent_id": "a", "agent_type": "t"}),
+        ));
+        let out = reg
+            .on_ext_event(&ev(
+                "subagent.stop",
+                serde_json::json!({"agent_id": "a", "success": false}),
+            ))
+            .expect("emission");
+        assert_eq!(out.payload.get("name").unwrap(), "t · failed · -");
+        assert_eq!(reg.get("a").unwrap().status, SubagentStatus::Failed);
+    }
+
+    #[test]
+    fn registry_subagent_stop_without_start_synthesises_state() {
+        let reg = SubagentRegistry::new();
+        // Defensive: no prior start → we still record the terminal
+        // status so a mid-session mount can still render.
+        let out = reg
+            .on_ext_event(&ev(
+                "subagent.stop",
+                serde_json::json!({"agent_id": "late", "success": true}),
+            ))
+            .expect("emission");
+        assert_eq!(out.payload.get("name").unwrap(), "subagent · done · -");
+    }
+
+    #[test]
+    fn registry_ignores_other_ext_events() {
+        let reg = SubagentRegistry::new();
+        assert!(
+            reg.on_ext_event(&ev("post-tool-use", serde_json::json!({"agent_id": "a"}),))
+                .is_none()
+        );
+        assert!(
+            reg.on_ext_event(&ExtEvent {
+                ext: "other-ext".to_string(),
+                kind: "subagent.start".to_string(),
+                payload: serde_json::json!({"agent_id": "a", "agent_type": "t"}),
+            })
+            .is_none()
+        );
+    }
+
+    // -- T-038: fan-out -------------------------------------------------------
+
+    #[test]
+    fn fan_out_on_subagent_start_when_subagents_is_some() {
+        let v = view_with_subagents();
+        let set = ClaudeCodeSpawnSet::new();
+        let e = ev(
+            "subagent.start",
+            serde_json::json!({
+                "agent_id": "agent-xyz",
+                "agent_type": "writer",
+                "agent_transcript_path": "/tmp/x.jsonl",
+            }),
+        );
+        let f = v.on_ext_event(&e, &set).expect("fan-out");
+        assert_eq!(f.attrs.id, "agent-xyz");
+        assert_eq!(f.attrs.transcript_path, "/tmp/x.jsonl");
+        assert!(set.contains("agent-xyz"));
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn fan_out_is_idempotent_on_duplicate_agent_id() {
+        let v = view_with_subagents();
+        let set = ClaudeCodeSpawnSet::new();
+        let e = ev(
+            "subagent.start",
+            serde_json::json!({
+                "agent_id": "dup",
+                "agent_type": "writer",
+                "agent_transcript_path": "/tmp/d.jsonl",
+            }),
+        );
+        assert!(v.on_ext_event(&e, &set).is_some());
+        assert!(v.on_ext_event(&e, &set).is_none());
+        assert_eq!(set.len(), 1);
+    }
+
+    // -- T-039: subagent.stop does NOT remove or fan-out ---------------------
+
+    #[test]
+    fn fan_out_on_subagent_stop_returns_none_and_does_not_modify_set() {
+        let v = view_with_subagents();
+        let set = ClaudeCodeSpawnSet::new();
+        let start = ev(
+            "subagent.start",
+            serde_json::json!({
+                "agent_id": "keep",
+                "agent_type": "t",
+                "agent_transcript_path": "/tmp/k.jsonl",
+            }),
+        );
+        let _ = v.on_ext_event(&start, &set);
+        let stop = ev(
+            "subagent.stop",
+            serde_json::json!({"agent_id": "keep", "success": true}),
+        );
+        // No fan-out on stop.
+        assert!(v.on_ext_event(&stop, &set).is_none());
+        // Spawn set UNCHANGED — child stays live (T-039).
+        assert!(set.contains("keep"));
+        assert_eq!(set.len(), 1);
+    }
+
+    // -- T-040: subagents = None no-ops -------------------------------------
+
+    #[test]
+    fn fan_out_when_subagents_is_none_noops() {
+        let v = ClaudeCodeView::default(); // subagents: None
+        assert!(v.subagents.is_none());
+        let set = ClaudeCodeSpawnSet::new();
+        let e = ev(
+            "subagent.start",
+            serde_json::json!({
+                "agent_id": "orphan",
+                "agent_type": "writer",
+                "agent_transcript_path": "/tmp/o.jsonl",
+            }),
+        );
+        assert!(v.on_ext_event(&e, &set).is_none());
+        // Nothing was claimed — set stays empty so a later wiring that
+        // DOES have a subagents handle isn't biased by the no-op path.
+        assert_eq!(set.len(), 0);
+    }
+
+    #[test]
+    fn fan_out_none_handle_still_allows_registry_dispatch_for_user_reactions() {
+        // T-040 acceptance: events still flow via the registry /
+        // broader ExtEvent bus even when fan-out is off. The registry
+        // is the canonical user-visible state cache; verifying it
+        // updates independently of the view's fan-out decision proves
+        // the two surfaces are correctly decoupled.
+        let v = ClaudeCodeView::default();
+        let set = ClaudeCodeSpawnSet::new();
+        let reg = SubagentRegistry::new();
+        let e = ev(
+            "subagent.start",
+            serde_json::json!({"agent_id": "z", "agent_type": "t"}),
+        );
+        assert!(v.on_ext_event(&e, &set).is_none());
+        assert!(reg.on_ext_event(&e).is_some());
+        assert_eq!(reg.get("z").unwrap().status, SubagentStatus::Running);
+    }
+
+    // unused import for HandleId is a diagnostic — import is kept so
+    // follow-on tests can use HandleId directly if needed.
+    #[allow(dead_code)]
+    fn _assert_handle_id_in_scope(_h: HandleId) {}
 }
