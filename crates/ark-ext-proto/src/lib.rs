@@ -296,6 +296,29 @@ impl ProtocolVersion {
 /// `client_version` default.
 pub const CURRENT_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(1, 0);
 
+/// v1 capability-flag taxonomy (Phase 2 ext-surface R6).
+///
+/// These are the ONLY capability flags Phase 2 introduces. Each flag
+/// gates a group of trait methods + manifest surfaces added by this
+/// phase; see the `<flag> → method` mapping in cavekit-soul-phase-2-
+/// ext-surface.md R6. Naming convention per decision #4a:
+/// `<domain>.<feature>.v<N>`. Bumping `v<N>` is a breaking change
+/// within the feature group.
+///
+/// Adding a flag here outside the 8-flag slate in Phase 2 is a kit
+/// violation — the `phase_2_capability_flag_set_is_exactly_eight`
+/// test enforces set equality.
+pub const PHASE_2_CAPABILITY_FLAGS: &[&str] = &[
+    "view.pane.v1",
+    "view.stack.v1",
+    "ext.lifecycle.v1",
+    "ext.scene_compile_hook.v1",
+    "ext.control_verbs.v1",
+    "ext.doctor.v1",
+    "ext.list_columns.v1",
+    "ext.reload_gate.v1",
+];
+
 /// Object-of-objects capability bag per R10 — `{ ui: {…}, intents: {…},
 /// events: {…}, host: {…}, agent: {…} }`. The wire shape is opaque
 /// JSON ([`OpaqueJson`]) because every category's body schema lives in
@@ -1993,5 +2016,48 @@ mod tests {
             rendered.contains("SceneReloadDropped"),
             "expected cause tag in display, got {rendered:?}"
         );
+    }
+
+    #[test]
+    fn phase_2_capability_flag_set_is_exactly_eight() {
+        assert_eq!(PHASE_2_CAPABILITY_FLAGS.len(), 8);
+        // Set-equality check — catches drift (dupes, typos).
+        let set: std::collections::BTreeSet<&&str> = PHASE_2_CAPABILITY_FLAGS.iter().collect();
+        assert_eq!(set.len(), 8, "no duplicates");
+        let expected: std::collections::BTreeSet<&str> = [
+            "view.pane.v1",
+            "view.stack.v1",
+            "ext.lifecycle.v1",
+            "ext.scene_compile_hook.v1",
+            "ext.control_verbs.v1",
+            "ext.doctor.v1",
+            "ext.list_columns.v1",
+            "ext.reload_gate.v1",
+        ]
+        .iter()
+        .copied()
+        .collect();
+        let got: std::collections::BTreeSet<&str> =
+            PHASE_2_CAPABILITY_FLAGS.iter().copied().collect();
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn phase_2_flags_follow_naming_convention() {
+        // <domain>.<feature>.v<N> — at least 3 dotted segments, last is v<digit>.
+        for flag in PHASE_2_CAPABILITY_FLAGS {
+            let parts: Vec<&str> = flag.split('.').collect();
+            assert!(parts.len() >= 3, "{flag} must have ≥3 segments");
+            let last = parts.last().unwrap();
+            assert!(
+                last.starts_with('v'),
+                "{flag} last segment must start with 'v'"
+            );
+            let digits = &last[1..];
+            assert!(
+                !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()),
+                "{flag} version segment must be v<digits>"
+            );
+        }
     }
 }
