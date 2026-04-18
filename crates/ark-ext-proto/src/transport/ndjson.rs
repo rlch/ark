@@ -735,6 +735,90 @@ impl ExtensionClient for NdjsonClient {
         self.call("ui/pane/close", req, opts).await
     }
 
+    // -- Pane / Stack handle ops (Phase 2 R6) --------------------------------
+
+    async fn pane_emit(
+        &self,
+        req: PaneEmitRequest,
+        opts: RequestOptions,
+    ) -> ExtResult<PaneEmitResponse> {
+        self.call("pane/emit", req, opts).await
+    }
+
+    async fn pane_replace_view(
+        &self,
+        req: PaneReplaceViewRequest,
+        opts: RequestOptions,
+    ) -> ExtResult<PaneReplaceViewResponse> {
+        self.call("pane/replace_view", req, opts).await
+    }
+
+    async fn pane_close(
+        &self,
+        req: PaneCloseRequest,
+        opts: RequestOptions,
+    ) -> ExtResult<PaneCloseResponse> {
+        self.call("pane/close", req, opts).await
+    }
+
+    async fn stack_spawn_pane(
+        &self,
+        req: StackSpawnPaneRequest,
+        opts: RequestOptions,
+    ) -> ExtResult<StackSpawnPaneResponse> {
+        self.call("stack/spawn_pane", req, opts).await
+    }
+
+    async fn stack_close_child(
+        &self,
+        req: StackCloseChildRequest,
+        opts: RequestOptions,
+    ) -> ExtResult<StackCloseChildResponse> {
+        self.call("stack/close_child", req, opts).await
+    }
+
+    async fn stack_clear(
+        &self,
+        req: StackClearRequest,
+        opts: RequestOptions,
+    ) -> ExtResult<StackClearResponse> {
+        self.call("stack/clear", req, opts).await
+    }
+
+    // -- Feature-group hooks (Phase 2 ext-surface R2) ------------------------
+
+    async fn scene_compile_hook(
+        &self,
+        req: SceneCompileHookRequest,
+        opts: RequestOptions,
+    ) -> ExtResult<SceneCompileHookResponse> {
+        self.call("scene_compile_hook", req, opts).await
+    }
+
+    async fn control_verbs(
+        &self,
+        req: ControlVerbsRequest,
+        opts: RequestOptions,
+    ) -> ExtResult<ControlVerbsResponse> {
+        self.call("control_verbs", req, opts).await
+    }
+
+    async fn doctor_checks(
+        &self,
+        req: DoctorChecksRequest,
+        opts: RequestOptions,
+    ) -> ExtResult<DoctorChecksResponse> {
+        self.call("doctor_checks", req, opts).await
+    }
+
+    async fn list_columns(
+        &self,
+        req: ListColumnsRequest,
+        opts: RequestOptions,
+    ) -> ExtResult<ListColumnsResponse> {
+        self.call("list_columns", req, opts).await
+    }
+
     // -- Workspace -----------------------------------------------------------
 
     async fn workspace_apply_edit(
@@ -1077,6 +1161,80 @@ impl NdjsonServer {
                 |e, r| async move { e.ui_pane_close(r).await },
             )
             .await,
+            "pane/emit" => dispatch_typed::<E, PaneEmitRequest, PaneEmitResponse, _>(
+                ext,
+                req.params,
+                |e, r| async move { e.pane_emit(r).await },
+            )
+            .await,
+            "pane/replace_view" => {
+                dispatch_typed::<E, PaneReplaceViewRequest, PaneReplaceViewResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.pane_replace_view(r).await },
+                )
+                .await
+            }
+            "pane/close" => dispatch_typed::<E, PaneCloseRequest, PaneCloseResponse, _>(
+                ext,
+                req.params,
+                |e, r| async move { e.pane_close(r).await },
+            )
+            .await,
+            "stack/spawn_pane" => {
+                dispatch_typed::<E, StackSpawnPaneRequest, StackSpawnPaneResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.stack_spawn_pane(r).await },
+                )
+                .await
+            }
+            "stack/close_child" => {
+                dispatch_typed::<E, StackCloseChildRequest, StackCloseChildResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.stack_close_child(r).await },
+                )
+                .await
+            }
+            "stack/clear" => dispatch_typed::<E, StackClearRequest, StackClearResponse, _>(
+                ext,
+                req.params,
+                |e, r| async move { e.stack_clear(r).await },
+            )
+            .await,
+            "scene_compile_hook" => {
+                dispatch_typed::<E, SceneCompileHookRequest, SceneCompileHookResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.scene_compile_hook(r).await },
+                )
+                .await
+            }
+            "control_verbs" => {
+                dispatch_typed::<E, ControlVerbsRequest, ControlVerbsResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.control_verbs(r).await },
+                )
+                .await
+            }
+            "doctor_checks" => {
+                dispatch_typed::<E, DoctorChecksRequest, DoctorChecksResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.doctor_checks(r).await },
+                )
+                .await
+            }
+            "list_columns" => {
+                dispatch_typed::<E, ListColumnsRequest, ListColumnsResponse, _>(
+                    ext,
+                    req.params,
+                    |e, r| async move { e.list_columns(r).await },
+                )
+                .await
+            }
             "host/fs/read" => dispatch_typed::<E, HostFsReadRequest, HostFsReadResponse, _>(
                 ext,
                 req.params,

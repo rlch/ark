@@ -23,25 +23,29 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use crate::{
-    CURRENT_PROTOCOL_VERSION, CancelRequest, CancelResponse, Capabilities, EventEmitRequest,
+    CURRENT_PROTOCOL_VERSION, CancelRequest, CancelResponse, Capabilities, ControlVerbsRequest,
+    ControlVerbsResponse, DoctorChecksRequest, DoctorChecksResponse, EventEmitRequest,
     EventEmitResponse, EventNotifyRequest, EventNotifyResponse, EventSubscribeRequest,
     EventSubscribeResponse, EventUnsubscribeRequest, EventUnsubscribeResponse, ExtResult,
     ExtensionError, HostFsReadRequest, HostFsReadResponse, HostFsWriteRequest, HostFsWriteResponse,
     HostNetFetchRequest, HostNetFetchResponse, HostProcSpawnRequest, HostProcSpawnResponse,
     InitializeRequest, InitializeResponse, InitializedRequest, InitializedResponse,
     IntentDispatchRequest, IntentDispatchResponse, IntentUnregisterRequest,
-    IntentUnregisterResponse, LogSetLevelRequest, LogSetLevelResponse,
-    LogWriteRequest, LogWriteResponse, PingRequest, PingResponse, ProgressRequest,
-    ProgressResponse, ProtocolVersion, SceneGetRootRequest, SceneGetRootResponse, SessionToken,
-    ShutdownRequest, ShutdownResponse, TaskCancelRequest, TaskCancelResponse, TaskCreateRequest,
-    TaskCreateResponse, TaskGetRequest, TaskGetResponse, TaskId, UiKeybindRegisterRequest,
-    UiKeybindRegisterResponse, UiKeybindUnregisterRequest, UiKeybindUnregisterResponse,
-    UiPaneCloseRequest, UiPaneCloseResponse, UiPaneRequestRequest, UiPaneRequestResponse,
-    UiStatusPushRequest, UiStatusPushResponse, WorkspaceApplyEditRequest,
-    WorkspaceApplyEditResponse, WorkspaceConfigurationRequest, WorkspaceConfigurationResponse,
-    WorkspaceShowDocumentRequest, WorkspaceShowDocumentResponse, WorkspaceShowMessageRequest,
-    WorkspaceShowMessageRequestRequest, WorkspaceShowMessageRequestResponse,
-    WorkspaceShowMessageResponse,
+    IntentUnregisterResponse, ListColumnsRequest, ListColumnsResponse, LogSetLevelRequest,
+    LogSetLevelResponse, LogWriteRequest, LogWriteResponse, PaneCloseRequest, PaneCloseResponse,
+    PaneEmitRequest, PaneEmitResponse, PaneReplaceViewRequest, PaneReplaceViewResponse,
+    PingRequest, PingResponse, ProgressRequest, ProgressResponse, ProtocolVersion,
+    SceneCompileHookRequest, SceneCompileHookResponse, SceneGetRootRequest, SceneGetRootResponse,
+    SessionToken, ShutdownRequest, ShutdownResponse, StackClearRequest, StackClearResponse,
+    StackCloseChildRequest, StackCloseChildResponse, StackSpawnPaneRequest, StackSpawnPaneResponse,
+    TaskCancelRequest, TaskCancelResponse, TaskCreateRequest, TaskCreateResponse, TaskGetRequest,
+    TaskGetResponse, TaskId, UiKeybindRegisterRequest, UiKeybindRegisterResponse,
+    UiKeybindUnregisterRequest, UiKeybindUnregisterResponse, UiPaneCloseRequest,
+    UiPaneCloseResponse, UiPaneRequestRequest, UiPaneRequestResponse, UiStatusPushRequest,
+    UiStatusPushResponse, WorkspaceApplyEditRequest, WorkspaceApplyEditResponse,
+    WorkspaceConfigurationRequest, WorkspaceConfigurationResponse, WorkspaceShowDocumentRequest,
+    WorkspaceShowDocumentResponse, WorkspaceShowMessageRequest, WorkspaceShowMessageRequestRequest,
+    WorkspaceShowMessageRequestResponse, WorkspaceShowMessageResponse,
 };
 
 pub mod in_proc;
@@ -283,6 +287,80 @@ pub trait ExtensionClient: Send + Sync {
         req: UiPaneCloseRequest,
         opts: RequestOptions,
     ) -> ExtResult<UiPaneCloseResponse>;
+
+    // -- Pane / Stack handle ops (Phase 2 R6) --------------------------------
+
+    /// `pane/emit`.
+    async fn pane_emit(
+        &self,
+        req: PaneEmitRequest,
+        opts: RequestOptions,
+    ) -> ExtResult<PaneEmitResponse>;
+
+    /// `pane/replace_view`.
+    async fn pane_replace_view(
+        &self,
+        req: PaneReplaceViewRequest,
+        opts: RequestOptions,
+    ) -> ExtResult<PaneReplaceViewResponse>;
+
+    /// `pane/close`.
+    async fn pane_close(
+        &self,
+        req: PaneCloseRequest,
+        opts: RequestOptions,
+    ) -> ExtResult<PaneCloseResponse>;
+
+    /// `stack/spawn_pane`.
+    async fn stack_spawn_pane(
+        &self,
+        req: StackSpawnPaneRequest,
+        opts: RequestOptions,
+    ) -> ExtResult<StackSpawnPaneResponse>;
+
+    /// `stack/close_child`.
+    async fn stack_close_child(
+        &self,
+        req: StackCloseChildRequest,
+        opts: RequestOptions,
+    ) -> ExtResult<StackCloseChildResponse>;
+
+    /// `stack/clear`.
+    async fn stack_clear(
+        &self,
+        req: StackClearRequest,
+        opts: RequestOptions,
+    ) -> ExtResult<StackClearResponse>;
+
+    // -- Feature-group hooks (Phase 2 ext-surface R2) ------------------------
+
+    /// `scene_compile_hook`.
+    async fn scene_compile_hook(
+        &self,
+        req: SceneCompileHookRequest,
+        opts: RequestOptions,
+    ) -> ExtResult<SceneCompileHookResponse>;
+
+    /// `control_verbs`.
+    async fn control_verbs(
+        &self,
+        req: ControlVerbsRequest,
+        opts: RequestOptions,
+    ) -> ExtResult<ControlVerbsResponse>;
+
+    /// `doctor_checks`.
+    async fn doctor_checks(
+        &self,
+        req: DoctorChecksRequest,
+        opts: RequestOptions,
+    ) -> ExtResult<DoctorChecksResponse>;
+
+    /// `list_columns`.
+    async fn list_columns(
+        &self,
+        req: ListColumnsRequest,
+        opts: RequestOptions,
+    ) -> ExtResult<ListColumnsResponse>;
 
     // -- Workspace -----------------------------------------------------------
 

@@ -780,6 +780,162 @@ pub struct IntentDispatchResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Pane / Stack handle ops (Phase 2 R6)
+// ---------------------------------------------------------------------------
+
+/// `pane/emit` — push an extension-owned event into the pane.
+///
+/// Fields typed `OpaqueJson` rather than `serde_json::Value` because
+/// facet does not yet provide a blanket SHAPE impl for
+/// `serde_json::Value`; see the module-level note on [`OpaqueJson`].
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PaneEmitRequest {
+    /// Target pane handle (opaque id; see ark-view R5).
+    pub handle: ark_view::HandleId,
+    /// Event kind (extension's `<ext>.<kind>` form).
+    pub kind: String,
+    /// Free-form JSON payload the extension defines for this kind.
+    /// Carried as [`OpaqueJson`]; the extension's own manifest / schema
+    /// governs the shape.
+    pub payload: OpaqueJson,
+}
+
+/// Void response for [`ArkExtension::pane_emit`].
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct PaneEmitResponse {}
+
+/// `pane/replace_view` — swap the renderer currently mounted on a pane.
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PaneReplaceViewRequest {
+    /// Target pane handle.
+    pub handle: ark_view::HandleId,
+    /// New view-type token (`"<ext>.<view>"`). The host enforces that
+    /// the token is registered in some extension's manifest.
+    pub view_type: String,
+    /// New view body — JSON payload the incoming view type's
+    /// constructor consumes. Shape is opaque at this layer; carried as
+    /// [`OpaqueJson`] per the facet/serde_json note above.
+    pub view_body: OpaqueJson,
+}
+
+/// Void response for [`ArkExtension::pane_replace_view`].
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct PaneReplaceViewResponse {}
+
+/// `pane/close` — close the pane (invalidates its handle).
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PaneCloseRequest {
+    /// Target pane handle.
+    pub handle: ark_view::HandleId,
+}
+
+/// Void response for [`ArkExtension::pane_close`].
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct PaneCloseResponse {}
+
+/// `stack/spawn_pane` — spawn a new child pane into the stack.
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct StackSpawnPaneRequest {
+    /// Target stack handle.
+    pub stack: ark_view::HandleId,
+    /// Attrs payload — v0.1 is intentionally opaque JSON. Later tiers
+    /// formalise PaneAttrs; keeping opaque here preserves MINOR room.
+    pub attrs: OpaqueJson,
+}
+
+/// Reply for [`ArkExtension::stack_spawn_pane`] — carries the new
+/// child pane's opaque handle id (kit R6 AC: single `handle` field).
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct StackSpawnPaneResponse {
+    /// Opaque handle id of the newly-spawned child pane.
+    pub handle: ark_view::HandleId,
+}
+
+/// `stack/close_child` — close one child pane without tearing the stack.
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct StackCloseChildRequest {
+    /// Target stack handle.
+    pub stack: ark_view::HandleId,
+    /// Child pane handle to close.
+    pub handle: ark_view::HandleId,
+}
+
+/// Void response for [`ArkExtension::stack_close_child`].
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct StackCloseChildResponse {}
+
+/// `stack/clear` — close every child pane, leaving the stack itself.
+#[derive(Facet, Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct StackClearRequest {
+    /// Target stack handle.
+    pub stack: ark_view::HandleId,
+}
+
+/// Void response for [`ArkExtension::stack_clear`].
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct StackClearResponse {}
+
+// ---------------------------------------------------------------------------
+// Feature-group hooks (Phase 2 ext-surface R2)
+// ---------------------------------------------------------------------------
+
+/// `scene_compile_hook` request — carries the partial scene AST so the
+/// extension can contribute layout nodes, intent bindings, etc.
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SceneCompileHookRequest {
+    /// Opaque partial-scene snapshot. Exact shape is pinned in
+    /// `cavekit-soul-phase-2-host-dispatch.md` when the first caller
+    /// materialises; kept as [`OpaqueJson`] here so scene-side
+    /// schema changes don't ripple into this crate.
+    pub partial_scene: OpaqueJson,
+}
+
+/// Reply for [`ArkExtension::scene_compile_hook`] — extension's
+/// contributions to fold back into the scene.
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SceneCompileHookResponse {
+    /// Opaque contributions payload; shape pinned alongside the
+    /// request when host-dispatch wires the first caller.
+    pub contributions: OpaqueJson,
+}
+
+/// `control_verbs` request — ark collecting the verbs this extension
+/// contributes to `ark control`.
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ControlVerbsRequest {}
+
+/// Reply for [`ArkExtension::control_verbs`].
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ControlVerbsResponse {
+    /// Verb specs (opaque JSON here; host-dispatch pins shape).
+    pub verbs: OpaqueJson,
+}
+
+/// `doctor_checks` request — ark collecting the doctor checks this
+/// extension contributes.
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct DoctorChecksRequest {}
+
+/// Reply for [`ArkExtension::doctor_checks`].
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct DoctorChecksResponse {
+    /// Check descriptors or results (opaque JSON).
+    pub checks: OpaqueJson,
+}
+
+/// `list_columns` request — ark collecting the columns this extension
+/// contributes to `ark list`.
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ListColumnsRequest {}
+
+/// Reply for [`ArkExtension::list_columns`].
+#[derive(Facet, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ListColumnsResponse {
+    /// Column specs (name + value-resolver reference, opaque JSON).
+    pub columns: OpaqueJson,
+}
+
+// ---------------------------------------------------------------------------
 // UI — keybind / status
 // ---------------------------------------------------------------------------
 
@@ -1204,11 +1360,93 @@ pub trait ArkExtension: Send + Sync {
     }
 
     /// `intent/dispatch`. Default: [`ExtensionError::method_not_found`].
+    ///
+    /// Per phase-2 ext-surface R5: intent registration now flows through
+    /// the manifest (loader-owned), but `intent_dispatch` MUST remain on
+    /// the trait — loader-constructed shims invoke it every dispatch.
+    /// Removing or renaming this method would be a MAJOR protocol bump
+    /// (decision #4c). Phase 2 forbids that change; T-022 pins the
+    /// contract.
     async fn intent_dispatch(
         &self,
         _req: IntentDispatchRequest,
     ) -> ExtResult<IntentDispatchResponse> {
         Err(ExtensionError::method_not_found("intent/dispatch"))
+    }
+
+    // -- Pane / Stack handle ops (Phase 2 R6) --------------------------------
+
+    /// `pane/emit`. Default: [`ExtensionError::method_not_found`].
+    async fn pane_emit(&self, _req: PaneEmitRequest) -> ExtResult<PaneEmitResponse> {
+        Err(ExtensionError::method_not_found("pane/emit"))
+    }
+
+    /// `pane/replace_view`. Default: [`ExtensionError::method_not_found`].
+    async fn pane_replace_view(
+        &self,
+        _req: PaneReplaceViewRequest,
+    ) -> ExtResult<PaneReplaceViewResponse> {
+        Err(ExtensionError::method_not_found("pane/replace_view"))
+    }
+
+    /// `pane/close`. Default: [`ExtensionError::method_not_found`].
+    async fn pane_close(&self, _req: PaneCloseRequest) -> ExtResult<PaneCloseResponse> {
+        Err(ExtensionError::method_not_found("pane/close"))
+    }
+
+    /// `stack/spawn_pane`. Default: [`ExtensionError::method_not_found`].
+    async fn stack_spawn_pane(
+        &self,
+        _req: StackSpawnPaneRequest,
+    ) -> ExtResult<StackSpawnPaneResponse> {
+        Err(ExtensionError::method_not_found("stack/spawn_pane"))
+    }
+
+    /// `stack/close_child`. Default: [`ExtensionError::method_not_found`].
+    async fn stack_close_child(
+        &self,
+        _req: StackCloseChildRequest,
+    ) -> ExtResult<StackCloseChildResponse> {
+        Err(ExtensionError::method_not_found("stack/close_child"))
+    }
+
+    /// `stack/clear`. Default: [`ExtensionError::method_not_found`].
+    async fn stack_clear(&self, _req: StackClearRequest) -> ExtResult<StackClearResponse> {
+        Err(ExtensionError::method_not_found("stack/clear"))
+    }
+
+    // -- Feature-group hooks (Phase 2 ext-surface R2) ------------------------
+
+    /// `scene_compile_hook`. Default: [`ExtensionError::method_not_found`].
+    async fn scene_compile_hook(
+        &self,
+        _req: SceneCompileHookRequest,
+    ) -> ExtResult<SceneCompileHookResponse> {
+        Err(ExtensionError::method_not_found("scene_compile_hook"))
+    }
+
+    /// `control_verbs`. Default: [`ExtensionError::method_not_found`].
+    async fn control_verbs(
+        &self,
+        _req: ControlVerbsRequest,
+    ) -> ExtResult<ControlVerbsResponse> {
+        Err(ExtensionError::method_not_found("control_verbs"))
+    }
+
+    /// `doctor_checks`. Default: [`ExtensionError::method_not_found`].
+    async fn doctor_checks(
+        &self,
+        _req: DoctorChecksRequest,
+    ) -> ExtResult<DoctorChecksResponse> {
+        Err(ExtensionError::method_not_found("doctor_checks"))
+    }
+
+    /// `list_columns`. Default: [`ExtensionError::method_not_found`].
+    async fn list_columns(
+        &self,
+        _req: ListColumnsRequest,
+    ) -> ExtResult<ListColumnsResponse> {
+        Err(ExtensionError::method_not_found("list_columns"))
     }
 
     // -- UI: keybind / status ------------------------------------------------
@@ -1427,6 +1665,184 @@ mod tests {
             cause: ark_view::InvalidationCause::UserClosed,
         };
         assert_eq!(e.code(), "ext-proto/handle-gone");
+    }
+
+    // -- Phase 2 RPC surface (T-018 / T-019 / T-021 / T-022) ---------------
+
+    /// T-018 AC: named request + response types exist, carry the derives
+    /// the rest of the crate relies on, and can be used from generic
+    /// bounds. Also doubles as a compile-time smoke test that Facet /
+    /// serde derives succeeded.
+    #[test]
+    fn phase_2_rpc_request_structs_exist() {
+        fn assert_send_sync_clone<T: Send + Sync + Clone + std::fmt::Debug>() {}
+        assert_send_sync_clone::<PaneEmitRequest>();
+        assert_send_sync_clone::<PaneEmitResponse>();
+        assert_send_sync_clone::<PaneReplaceViewRequest>();
+        assert_send_sync_clone::<PaneReplaceViewResponse>();
+        assert_send_sync_clone::<PaneCloseRequest>();
+        assert_send_sync_clone::<PaneCloseResponse>();
+        assert_send_sync_clone::<StackSpawnPaneRequest>();
+        assert_send_sync_clone::<StackSpawnPaneResponse>();
+        assert_send_sync_clone::<StackCloseChildRequest>();
+        assert_send_sync_clone::<StackCloseChildResponse>();
+        assert_send_sync_clone::<StackClearRequest>();
+        assert_send_sync_clone::<StackClearResponse>();
+        assert_send_sync_clone::<SceneCompileHookRequest>();
+        assert_send_sync_clone::<SceneCompileHookResponse>();
+        assert_send_sync_clone::<ControlVerbsRequest>();
+        assert_send_sync_clone::<ControlVerbsResponse>();
+        assert_send_sync_clone::<DoctorChecksRequest>();
+        assert_send_sync_clone::<DoctorChecksResponse>();
+        assert_send_sync_clone::<ListColumnsRequest>();
+        assert_send_sync_clone::<ListColumnsResponse>();
+    }
+
+    /// T-018 / kit R6 AC: the stack-spawn response carries a single
+    /// `handle` field and serialises as exactly `{ "handle": "<id>" }`.
+    #[test]
+    fn stack_spawn_pane_response_carries_single_handle_field() {
+        let r = StackSpawnPaneResponse {
+            handle: ark_view::HandleId::new("new-child"),
+        };
+        assert_eq!(r.handle.as_str(), "new-child");
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v, serde_json::json!({ "handle": "new-child" }));
+    }
+
+    /// T-022: `intent_dispatch` MUST survive Phase 2 (decision #4c —
+    /// removing / renaming it is MAJOR). Dispatch through the default
+    /// impl exercises the path.
+    #[tokio::test]
+    async fn intent_dispatch_survives_phase_2() {
+        let ext = StubExt;
+        let err = ext
+            .intent_dispatch(IntentDispatchRequest {
+                name: "mycorp.do".into(),
+                args: "null".into(),
+            })
+            .await
+            .unwrap_err();
+        match err {
+            ExtensionError::MethodNotFound(m) => assert_eq!(m, "intent/dispatch"),
+            other => panic!("expected MethodNotFound, got {other:?}"),
+        }
+    }
+
+    /// T-019 + T-021: every new trait method's default impl returns
+    /// `method_not_found` with the expected wire name.
+    #[tokio::test]
+    async fn phase_2_new_trait_methods_default_to_method_not_found() {
+        let ext = StubExt;
+        let h = ark_view::HandleId::new("h");
+
+        let expectations: &[(&str, ExtensionError)] = &[
+            (
+                "pane/emit",
+                ext.pane_emit(PaneEmitRequest {
+                    handle: h.clone(),
+                    kind: "k".into(),
+                    payload: "null".into(),
+                })
+                .await
+                .unwrap_err(),
+            ),
+            (
+                "pane/replace_view",
+                ext.pane_replace_view(PaneReplaceViewRequest {
+                    handle: h.clone(),
+                    view_type: "x.v".into(),
+                    view_body: "null".into(),
+                })
+                .await
+                .unwrap_err(),
+            ),
+            (
+                "pane/close",
+                ext.pane_close(PaneCloseRequest { handle: h.clone() })
+                    .await
+                    .unwrap_err(),
+            ),
+            (
+                "stack/spawn_pane",
+                ext.stack_spawn_pane(StackSpawnPaneRequest {
+                    stack: h.clone(),
+                    attrs: "null".into(),
+                })
+                .await
+                .unwrap_err(),
+            ),
+            (
+                "stack/close_child",
+                ext.stack_close_child(StackCloseChildRequest {
+                    stack: h.clone(),
+                    handle: h.clone(),
+                })
+                .await
+                .unwrap_err(),
+            ),
+            (
+                "stack/clear",
+                ext.stack_clear(StackClearRequest { stack: h.clone() })
+                    .await
+                    .unwrap_err(),
+            ),
+            (
+                "scene_compile_hook",
+                ext.scene_compile_hook(SceneCompileHookRequest::default())
+                    .await
+                    .unwrap_err(),
+            ),
+            (
+                "control_verbs",
+                ext.control_verbs(ControlVerbsRequest::default())
+                    .await
+                    .unwrap_err(),
+            ),
+            (
+                "doctor_checks",
+                ext.doctor_checks(DoctorChecksRequest::default())
+                    .await
+                    .unwrap_err(),
+            ),
+            (
+                "list_columns",
+                ext.list_columns(ListColumnsRequest::default())
+                    .await
+                    .unwrap_err(),
+            ),
+        ];
+
+        for (expected_method, err) in expectations {
+            match err {
+                ExtensionError::MethodNotFound(m) => assert_eq!(m, expected_method),
+                other => panic!(
+                    "expected MethodNotFound({expected_method}), got {other:?}"
+                ),
+            }
+        }
+    }
+
+    /// Lock the wire method names used in the ndjson server dispatch
+    /// block so a rename elsewhere trips here too (kit R6 + ext-surface
+    /// R2 AC).
+    #[test]
+    fn phase_2_method_name_goldens() {
+        let names = [
+            "pane/emit",
+            "pane/replace_view",
+            "pane/close",
+            "stack/spawn_pane",
+            "stack/close_child",
+            "stack/clear",
+            "scene_compile_hook",
+            "control_verbs",
+            "doctor_checks",
+            "list_columns",
+        ];
+        for n in names {
+            assert!(!n.is_empty());
+        }
     }
 
     /// Display string MUST surface both the handle id and the cause tag

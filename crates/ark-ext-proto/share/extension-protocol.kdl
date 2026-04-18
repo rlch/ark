@@ -422,6 +422,198 @@ protocol {
             }
         }
 
+        // -- Pane/Stack handle ops --
+        method "pane/emit" {
+            kind "request"
+            description "`pane/emit` — push an extension-owned event into the pane.  Fields typed `OpaqueJson` rather than `serde_json::Value` because facet does not yet provide a blanket SHAPE impl for `serde_json::Value`; see the module-level note on [`OpaqueJson`]."
+            params {
+                field "handle" {
+                    description "Target pane handle (opaque id; see ark-view R5)."
+                    type "HandleId"
+                    plural #false
+                    required #true
+                }
+                field "kind" {
+                    description "Event kind (extension's `<ext>.<kind>` form)."
+                    type "string"
+                    plural #false
+                    required #true
+                }
+                field "payload" {
+                    description "Free-form JSON payload the extension defines for this kind. Carried as [`OpaqueJson`]; the extension's own manifest / schema governs the shape."
+                    type "string"
+                    plural #false
+                    required #true
+                }
+            }
+            result {
+            }
+        }
+        method "pane/replace_view" {
+            kind "request"
+            description "`pane/replace_view` — swap the renderer currently mounted on a pane."
+            params {
+                field "handle" {
+                    description "Target pane handle."
+                    type "HandleId"
+                    plural #false
+                    required #true
+                }
+                field "view_type" {
+                    description "New view-type token (`\"<ext>.<view>\"`). The host enforces that the token is registered in some extension's manifest."
+                    type "string"
+                    plural #false
+                    required #true
+                }
+                field "view_body" {
+                    description "New view body — JSON payload the incoming view type's constructor consumes. Shape is opaque at this layer; carried as [`OpaqueJson`] per the facet/serde_json note above."
+                    type "string"
+                    plural #false
+                    required #true
+                }
+            }
+            result {
+            }
+        }
+        method "pane/close" {
+            kind "request"
+            description "`pane/close` — close the pane (invalidates its handle)."
+            params {
+                field "handle" {
+                    description "Target pane handle."
+                    type "HandleId"
+                    plural #false
+                    required #true
+                }
+            }
+            result {
+            }
+        }
+        method "stack/spawn_pane" {
+            kind "request"
+            description "`stack/spawn_pane` — spawn a new child pane into the stack."
+            params {
+                field "stack" {
+                    description "Target stack handle."
+                    type "HandleId"
+                    plural #false
+                    required #true
+                }
+                field "attrs" {
+                    description "Attrs payload — v0.1 is intentionally opaque JSON. Later tiers formalise PaneAttrs; keeping opaque here preserves MINOR room."
+                    type "string"
+                    plural #false
+                    required #true
+                }
+            }
+            result {
+                field "handle" {
+                    description "Opaque handle id of the newly-spawned child pane."
+                    type "HandleId"
+                    plural #false
+                    required #true
+                }
+            }
+        }
+        method "stack/close_child" {
+            kind "request"
+            description "`stack/close_child` — close one child pane without tearing the stack."
+            params {
+                field "stack" {
+                    description "Target stack handle."
+                    type "HandleId"
+                    plural #false
+                    required #true
+                }
+                field "handle" {
+                    description "Child pane handle to close."
+                    type "HandleId"
+                    plural #false
+                    required #true
+                }
+            }
+            result {
+            }
+        }
+        method "stack/clear" {
+            kind "request"
+            description "`stack/clear` — close every child pane, leaving the stack itself."
+            params {
+                field "stack" {
+                    description "Target stack handle."
+                    type "HandleId"
+                    plural #false
+                    required #true
+                }
+            }
+            result {
+            }
+        }
+
+        // -- Feature-group hooks --
+        method "scene_compile_hook" {
+            kind "request"
+            description "`scene_compile_hook` request — carries the partial scene AST so the extension can contribute layout nodes, intent bindings, etc."
+            params {
+                field "partial_scene" {
+                    description "Opaque partial-scene snapshot. Exact shape is pinned in `cavekit-soul-phase-2-host-dispatch.md` when the first caller materialises; kept as [`OpaqueJson`] here so scene-side schema changes don't ripple into this crate."
+                    type "string"
+                    plural #false
+                    required #true
+                }
+            }
+            result {
+                field "contributions" {
+                    description "Opaque contributions payload; shape pinned alongside the request when host-dispatch wires the first caller."
+                    type "string"
+                    plural #false
+                    required #true
+                }
+            }
+        }
+        method "control_verbs" {
+            kind "request"
+            description "`control_verbs` request — ark collecting the verbs this extension contributes to `ark control`."
+            params {
+            }
+            result {
+                field "verbs" {
+                    description "Verb specs (opaque JSON here; host-dispatch pins shape)."
+                    type "string"
+                    plural #false
+                    required #true
+                }
+            }
+        }
+        method "doctor_checks" {
+            kind "request"
+            description "`doctor_checks` request — ark collecting the doctor checks this extension contributes."
+            params {
+            }
+            result {
+                field "checks" {
+                    description "Check descriptors or results (opaque JSON)."
+                    type "string"
+                    plural #false
+                    required #true
+                }
+            }
+        }
+        method "list_columns" {
+            kind "request"
+            description "`list_columns` request — ark collecting the columns this extension contributes to `ark list`."
+            params {
+            }
+            result {
+                field "columns" {
+                    description "Column specs (name + value-resolver reference, opaque JSON)."
+                    type "string"
+                    plural #false
+                    required #true
+                }
+            }
+        }
+
         // -- Workspace --
         method "workspace/applyEdit" {
             kind "request"
@@ -742,6 +934,38 @@ protocol {
             description "Void response for [`ArkExtension::cancel`]."
             kind "struct"
         }
+        type "ControlVerbsRequest" {
+            description "`control_verbs` request — ark collecting the verbs this extension contributes to `ark control`."
+            kind "struct"
+        }
+        type "ControlVerbsResponse" {
+            description "Reply for [`ArkExtension::control_verbs`]."
+            kind "struct"
+            fields {
+                field "verbs" {
+                    description "Verb specs (opaque JSON here; host-dispatch pins shape)."
+                    type "string"
+                    plural #false
+                    required #true
+                }
+            }
+        }
+        type "DoctorChecksRequest" {
+            description "`doctor_checks` request — ark collecting the doctor checks this extension contributes."
+            kind "struct"
+        }
+        type "DoctorChecksResponse" {
+            description "Reply for [`ArkExtension::doctor_checks`]."
+            kind "struct"
+            fields {
+                field "checks" {
+                    description "Check descriptors or results (opaque JSON)."
+                    type "string"
+                    plural #false
+                    required #true
+                }
+            }
+        }
         type "EventEmitRequest" {
             description "`event/emit` — extension publishes an event onto ark's bus. Namespace prefix MUST be the extension's own `<ext-name>.<event>` (R11) — ark rejects `ark.core.*` writes with `ext/reserved-namespace`."
             kind "struct"
@@ -831,6 +1055,17 @@ protocol {
         type "EventUnsubscribeResponse" {
             description "Void response for [`ArkExtension::event_unsubscribe`]."
             kind "struct"
+        }
+        type "HandleId" {
+            description "Opaque per-handle string identifier. Collapses every typed handle (`Pane<V>`, `Stack<V>`, `TabHandle`) to a single wire-format string.  The `V` type parameter on typed wrappers is compile-time-only; the wire format carries only this id (see R5). Consumers MUST treat the id as opaque — no splitting, pattern-matching, or prefix-sniffing."
+            kind "struct"
+            fields {
+                field "0" {
+                    type "string"
+                    plural #false
+                    required #true
+                }
+            }
         }
         type "HostFsReadRequest" {
             description "`host/fs/read` — wasm-component extension reads a file via the host. Subprocess extensions MUST use OS syscalls directly; calling this from a subprocess returns [`ExtensionError::CapabilityDenied`] per R16."
@@ -1076,6 +1311,22 @@ protocol {
             description "Void response for [`ArkExtension::intent_unregister`]."
             kind "struct"
         }
+        type "ListColumnsRequest" {
+            description "`list_columns` request — ark collecting the columns this extension contributes to `ark list`."
+            kind "struct"
+        }
+        type "ListColumnsResponse" {
+            description "Reply for [`ArkExtension::list_columns`]."
+            kind "struct"
+            fields {
+                field "columns" {
+                    description "Column specs (name + value-resolver reference, opaque JSON)."
+                    type "string"
+                    plural #false
+                    required #true
+                }
+            }
+        }
         type "LogLevel" {
             description "Log severity for [`ArkExtension::log_write`] calls, aligned with LSP `window/logMessage` message types and the `tracing` crate's `Level`."
             kind "enum"
@@ -1125,6 +1376,78 @@ protocol {
             description "Void response for [`ArkExtension::log_write`]."
             kind "struct"
         }
+        type "PaneCloseRequest" {
+            description "`pane/close` — close the pane (invalidates its handle)."
+            kind "struct"
+            fields {
+                field "handle" {
+                    description "Target pane handle."
+                    type "HandleId"
+                    plural #false
+                    required #true
+                }
+            }
+        }
+        type "PaneCloseResponse" {
+            description "Void response for [`ArkExtension::pane_close`]."
+            kind "struct"
+        }
+        type "PaneEmitRequest" {
+            description "`pane/emit` — push an extension-owned event into the pane.  Fields typed `OpaqueJson` rather than `serde_json::Value` because facet does not yet provide a blanket SHAPE impl for `serde_json::Value`; see the module-level note on [`OpaqueJson`]."
+            kind "struct"
+            fields {
+                field "handle" {
+                    description "Target pane handle (opaque id; see ark-view R5)."
+                    type "HandleId"
+                    plural #false
+                    required #true
+                }
+                field "kind" {
+                    description "Event kind (extension's `<ext>.<kind>` form)."
+                    type "string"
+                    plural #false
+                    required #true
+                }
+                field "payload" {
+                    description "Free-form JSON payload the extension defines for this kind. Carried as [`OpaqueJson`]; the extension's own manifest / schema governs the shape."
+                    type "string"
+                    plural #false
+                    required #true
+                }
+            }
+        }
+        type "PaneEmitResponse" {
+            description "Void response for [`ArkExtension::pane_emit`]."
+            kind "struct"
+        }
+        type "PaneReplaceViewRequest" {
+            description "`pane/replace_view` — swap the renderer currently mounted on a pane."
+            kind "struct"
+            fields {
+                field "handle" {
+                    description "Target pane handle."
+                    type "HandleId"
+                    plural #false
+                    required #true
+                }
+                field "view_type" {
+                    description "New view-type token (`\"<ext>.<view>\"`). The host enforces that the token is registered in some extension's manifest."
+                    type "string"
+                    plural #false
+                    required #true
+                }
+                field "view_body" {
+                    description "New view body — JSON payload the incoming view type's constructor consumes. Shape is opaque at this layer; carried as [`OpaqueJson`] per the facet/serde_json note above."
+                    type "string"
+                    plural #false
+                    required #true
+                }
+            }
+        }
+        type "PaneReplaceViewResponse" {
+            description "Void response for [`ArkExtension::pane_replace_view`]."
+            kind "struct"
+        }
         type "PingRequest" {
             description "Liveness probe."
             kind "struct"
@@ -1155,6 +1478,30 @@ protocol {
             description "Void response for [`ArkExtension::progress`]."
             kind "struct"
         }
+        type "SceneCompileHookRequest" {
+            description "`scene_compile_hook` request — carries the partial scene AST so the extension can contribute layout nodes, intent bindings, etc."
+            kind "struct"
+            fields {
+                field "partial_scene" {
+                    description "Opaque partial-scene snapshot. Exact shape is pinned in `cavekit-soul-phase-2-host-dispatch.md` when the first caller materialises; kept as [`OpaqueJson`] here so scene-side schema changes don't ripple into this crate."
+                    type "string"
+                    plural #false
+                    required #true
+                }
+            }
+        }
+        type "SceneCompileHookResponse" {
+            description "Reply for [`ArkExtension::scene_compile_hook`] — extension's contributions to fold back into the scene."
+            kind "struct"
+            fields {
+                field "contributions" {
+                    description "Opaque contributions payload; shape pinned alongside the request when host-dispatch wires the first caller."
+                    type "string"
+                    plural #false
+                    required #true
+                }
+            }
+        }
         type "SceneGetRootRequest" {
             description "`scene/getRoot` — extension queries the currently-loaded scene path plus CWD (R16 \"scene intent channel\")."
             kind "struct"
@@ -1184,6 +1531,74 @@ protocol {
         type "ShutdownResponse" {
             description "Void response for [`ArkExtension::shutdown`]."
             kind "struct"
+        }
+        type "StackClearRequest" {
+            description "`stack/clear` — close every child pane, leaving the stack itself."
+            kind "struct"
+            fields {
+                field "stack" {
+                    description "Target stack handle."
+                    type "HandleId"
+                    plural #false
+                    required #true
+                }
+            }
+        }
+        type "StackClearResponse" {
+            description "Void response for [`ArkExtension::stack_clear`]."
+            kind "struct"
+        }
+        type "StackCloseChildRequest" {
+            description "`stack/close_child` — close one child pane without tearing the stack."
+            kind "struct"
+            fields {
+                field "stack" {
+                    description "Target stack handle."
+                    type "HandleId"
+                    plural #false
+                    required #true
+                }
+                field "handle" {
+                    description "Child pane handle to close."
+                    type "HandleId"
+                    plural #false
+                    required #true
+                }
+            }
+        }
+        type "StackCloseChildResponse" {
+            description "Void response for [`ArkExtension::stack_close_child`]."
+            kind "struct"
+        }
+        type "StackSpawnPaneRequest" {
+            description "`stack/spawn_pane` — spawn a new child pane into the stack."
+            kind "struct"
+            fields {
+                field "stack" {
+                    description "Target stack handle."
+                    type "HandleId"
+                    plural #false
+                    required #true
+                }
+                field "attrs" {
+                    description "Attrs payload — v0.1 is intentionally opaque JSON. Later tiers formalise PaneAttrs; keeping opaque here preserves MINOR room."
+                    type "string"
+                    plural #false
+                    required #true
+                }
+            }
+        }
+        type "StackSpawnPaneResponse" {
+            description "Reply for [`ArkExtension::stack_spawn_pane`] — carries the new child pane's opaque handle id (kit R6 AC: single `handle` field)."
+            kind "struct"
+            fields {
+                field "handle" {
+                    description "Opaque handle id of the newly-spawned child pane."
+                    type "HandleId"
+                    plural #false
+                    required #true
+                }
+            }
         }
         type "TaskCancelRequest" {
             description "`task/cancel` request — cooperative cancel on a running task."

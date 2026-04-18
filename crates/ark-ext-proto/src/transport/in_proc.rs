@@ -237,6 +237,90 @@ impl ExtensionClient for InProcClient {
         self.ext.ui_pane_close(req).await
     }
 
+    // -- Pane / Stack handle ops (Phase 2 R6) --------------------------------
+
+    async fn pane_emit(
+        &self,
+        req: PaneEmitRequest,
+        _opts: RequestOptions,
+    ) -> ExtResult<PaneEmitResponse> {
+        self.ext.pane_emit(req).await
+    }
+
+    async fn pane_replace_view(
+        &self,
+        req: PaneReplaceViewRequest,
+        _opts: RequestOptions,
+    ) -> ExtResult<PaneReplaceViewResponse> {
+        self.ext.pane_replace_view(req).await
+    }
+
+    async fn pane_close(
+        &self,
+        req: PaneCloseRequest,
+        _opts: RequestOptions,
+    ) -> ExtResult<PaneCloseResponse> {
+        self.ext.pane_close(req).await
+    }
+
+    async fn stack_spawn_pane(
+        &self,
+        req: StackSpawnPaneRequest,
+        _opts: RequestOptions,
+    ) -> ExtResult<StackSpawnPaneResponse> {
+        self.ext.stack_spawn_pane(req).await
+    }
+
+    async fn stack_close_child(
+        &self,
+        req: StackCloseChildRequest,
+        _opts: RequestOptions,
+    ) -> ExtResult<StackCloseChildResponse> {
+        self.ext.stack_close_child(req).await
+    }
+
+    async fn stack_clear(
+        &self,
+        req: StackClearRequest,
+        _opts: RequestOptions,
+    ) -> ExtResult<StackClearResponse> {
+        self.ext.stack_clear(req).await
+    }
+
+    // -- Feature-group hooks (Phase 2 ext-surface R2) ------------------------
+
+    async fn scene_compile_hook(
+        &self,
+        req: SceneCompileHookRequest,
+        _opts: RequestOptions,
+    ) -> ExtResult<SceneCompileHookResponse> {
+        self.ext.scene_compile_hook(req).await
+    }
+
+    async fn control_verbs(
+        &self,
+        req: ControlVerbsRequest,
+        _opts: RequestOptions,
+    ) -> ExtResult<ControlVerbsResponse> {
+        self.ext.control_verbs(req).await
+    }
+
+    async fn doctor_checks(
+        &self,
+        req: DoctorChecksRequest,
+        _opts: RequestOptions,
+    ) -> ExtResult<DoctorChecksResponse> {
+        self.ext.doctor_checks(req).await
+    }
+
+    async fn list_columns(
+        &self,
+        req: ListColumnsRequest,
+        _opts: RequestOptions,
+    ) -> ExtResult<ListColumnsResponse> {
+        self.ext.list_columns(req).await
+    }
+
     // -- Workspace -----------------------------------------------------------
 
     async fn workspace_apply_edit(
