@@ -1,8 +1,20 @@
 ---
 created: "2026-04-14"
-last_edited: "2026-04-14"
+last_edited: "2026-04-18"
 ---
 # Loop Log
+
+### Wave T-041 — 2026-04-18 — Tier 7 (tests R5)
+- T-041 (soul phase 2 tests R5): KDL-level view-type compile-error goldens. DONE.
+- New crate: `crates/scene-macros/` (proc-macro, `proc-macro = true`); workspace member. Deps: `syn 2`, `quote 1`, `proc-macro2 1`, `kdl 6.5`, `ark-ext-metadata-types` (path). No `ark-scene` dep — breaks would-be cycle via duplicate-~30-LOC ViewTypeTable slice (documented at top of `src/lib.rs`).
+- `ark_scene_macros::validate_scene!` proc-macro: structured input (`manifests: [...]`, `scene_path: "..."`, `scene: "..."`). Parses inline manifest + scene KDL via `kdl` crate directly (bypasses facet-kdl's bare-`item` Vec<T> disambiguation issue). Walks scene nodes, calls internal validator mirroring `validate_view_reference`, emits `compile_error!("<scene_path>:<line>:<col>: <plain-English>")` on any violation. Converts byte offset → 1-indexed line:col via newline-count.
+- Re-exported as `ark_scene::validate_scene` — fixtures write `use ark_scene::validate_scene;`.
+- Four R5 compile-fail fixtures + stderr goldens under `crates/scene/tests/ui/`: undeclared_view_type, view_type_mismatch_on_handle_attr, stack_child_under_non_stack_parent, handle_typed_attr_takes_non_handle. Each stderr has 1× `.kdl:line:col` hit (grep-asserted per kit R5).
+- Two compile-pass fixtures (valid_pane_and_stack_decls, cross_ext_view_reference) extended with a green-path `validate_scene!` invocation so the macro's happy path is pinned.
+- Existing 2 Rust-level compile-fail fixtures (view_decl_wrong_field_type, metadata_missing_views_field) KEPT — per kit instructions.
+- `view_types_trybuild.rs` harness updated: 6 compile-fail + 2 compile-pass; doc block points at `TRYBUILD=overwrite` for blessing.
+- Green: ark-scene 597 tests P, workspace `cargo test --workspace --lib` 1807 P, `cargo check --workspace --tests` 0 errors.
+- Next: T-042 integration + T-043 proto bump + T-044 CI gate.
 
 ### Iteration 1 — 2026-04-14
 - T-001+T-002: scaffold workspace + pin deps — DONE. Files: Cargo.toml, rust-toolchain.toml, .gitignore, crates/*/Cargo.toml, crates/*/src/{lib,main}.rs (12 crates). Build P, fmt P. Commit f20942a. Notes: ck:task-builder subagent failed twice (narration loop + 0 tool uses); fell back to inline (parent=opus matches EXECUTION_MODEL). Next: T-003 (AgentId) — only T-003 unblocked in Tier 0 by T-001 done.

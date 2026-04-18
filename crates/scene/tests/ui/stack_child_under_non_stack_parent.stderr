@@ -1,0 +1,13 @@
+error: tests/ui/fixtures/stack_child_under_non_stack_parent.kdl:5:9: spawn_into target `@parent` resolves to a `Pane<V>` handle but a `Stack<V>` parent is required — stack children must be nested under a stack
+  --> tests/ui/stack_child_under_non_stack_parent.rs:8:1
+   |
+ 8 | / validate_scene! {
+ 9 | |     manifests: [
+10 | |         r#"extension {
+11 | |             name "ext.a"
+...  |
+25 | | "#,
+26 | | }
+   | |_^
+   |
+   = note: this error originates in the macro `validate_scene` (in Nightly builds, run with -Z macro-backtrace for more info)

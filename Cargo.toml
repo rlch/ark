@@ -10,6 +10,13 @@ members = [
     # archived v2 crate as the canonical `ark-scene` package. Populated
     # incrementally by T-003..T-025+ per context/plans/build-site-scene.md.
     "crates/scene",
+    # T-041 (soul phase 2 tests R5): proc-macro crate exposing
+    # `validate_scene!` — KDL-level compile-time view-type validator
+    # backing `crates/scene/tests/ui/*` trybuild goldens. Stays below
+    # `ark-scene` in the DAG (ark-scene depends on ark-scene-macros to
+    # re-export the macro; scene-macros does NOT depend on ark-scene —
+    # breaks the would-be cycle by duplicating ~30 LOC of table logic).
+    "crates/scene-macros",
     # scene-v2-archive: REMOVED — all dependents migrated to v3 (2026-04-17).
     # Crate directory retained on disk as historical reference only.
     "crates/supervisor",

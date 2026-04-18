@@ -482,6 +482,7 @@ version = "0.1.0"
 dependencies = [
  "ark-ext-metadata-types",
  "ark-mux-zellij",
+ "ark-scene-macros",
  "ark-types",
  "ark-view",
  "async-trait",
@@ -501,6 +502,18 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "trybuild",
+]
+
+[[package]]
+name = "ark-scene-macros"
+version = "0.1.0"
+dependencies = [
+ "ark-ext-metadata-types",
+ "kdl 6.5.0",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]

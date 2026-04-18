@@ -1,0 +1,13 @@
+error: tests/ui/fixtures/view_type_mismatch.kdl:4:9: view type `ext.a.TerminalView` declared by extension `ext.a` with kind=`stack` but used in a `pane` context (kind=`pane`)
+  --> tests/ui/view_type_mismatch_on_handle_attr.rs:10:1
+   |
+10 | / validate_scene! {
+11 | |     manifests: [
+12 | |         r#"extension {
+13 | |             name "ext.a"
+...  |
+27 | | "#,
+28 | | }
+   | |_^
+   |
+   = note: this error originates in the macro `validate_scene` (in Nightly builds, run with -Z macro-backtrace for more info)

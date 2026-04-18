@@ -1,0 +1,13 @@
+error: tests/ui/fixtures/undeclared_view_type.kdl:4:9: unknown view type `ext.a.MyView` — no installed extension declares this view
+  --> tests/ui/undeclared_view_type.rs:8:1
+   |
+ 8 | / validate_scene! {
+ 9 | |     manifests: [
+10 | |         r#"extension {
+11 | |             name "ext.a"
+...  |
+24 | | "#,
+25 | | }
+   | |_^
+   |
+   = note: this error originates in the macro `validate_scene` (in Nightly builds, run with -Z macro-backtrace for more info)

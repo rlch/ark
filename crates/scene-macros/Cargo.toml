@@ -1,0 +1,40 @@
+[package]
+name = "ark-scene-macros"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# T-041 (cavekit-soul-phase-2-tests.md R5): compile-time view-type
+# validator proc-macro. Exposes `validate_scene!` which parses inline
+# extension manifests + a scene KDL blob at macro-expansion time, then
+# emits `compile_error!` with `.kdl:line:col` pointers whenever the
+# scene references a view type that is undeclared, declared with a
+# different kind, spawned into a non-stack parent, or bound to a
+# typed-handle attribute the wrong way round.
+#
+# The macro is standalone — it does NOT depend on `ark-scene` to avoid
+# a crate-dep cycle (ark-scene re-exports `validate_scene` from here).
+# It duplicates a tiny slice of the runtime validation logic (~30 LOC)
+# that's already tested in `ark-scene::compile::view_types`.
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
+# Parse inline manifest + scene KDL blobs with span info —
+# `kdl::KdlNode::name().span()` gives byte offsets we convert to
+# line:col for the `.kdl:line:col` pointer in the emitted
+# `compile_error!`. We bypass facet-kdl here: facet-kdl 0.42's
+# bare-`item` Vec<T> rendering trips up multi-Vec manifest parses;
+# hand-walking the `kdl` AST for the narrow `extension { views { … } }`
+# slice we need is both simpler and more robust for this use.
+kdl = { version = "6.5", features = ["v1-fallback"] }
+# Types crate supplies `ViewDecl` + `StringNode` — the primitives the
+# internal table stores. No other transitive deps.
+ark-ext-metadata-types = { path = "../ark-ext-metadata-types" }

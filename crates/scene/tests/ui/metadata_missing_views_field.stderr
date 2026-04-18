@@ -1,0 +1,5 @@
+error[E0063]: missing fields `capabilities`, `config`, `config_sections` and 2 other fields in initializer of `ExtensionMetadata`
+  --> tests/ui/metadata_missing_views_field.rs:11:13
+   |
+11 |     let _ = ExtensionMetadata {
+   |             ^^^^^^^^^^^^^^^^^ missing `capabilities`, `config`, `config_sections` and 2 other fields

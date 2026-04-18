@@ -70,6 +70,11 @@ ark-ext-metadata-types = { path = "../ark-ext-metadata-types" }
 # `ark-ext-proto`. Scene uses `Handle` for view bindings + op dispatch in
 # later tiers; dep edge added up-front so the workspace DAG is stable.
 ark-view = { path = "../ark-view" }
+# T-041 (soul phase 2 tests R5): proc-macro crate exporting
+# `validate_scene!` — compile-time KDL-level view-type validator
+# backing the trybuild goldens under `tests/ui/`. Re-exported at
+# `ark_scene::validate_scene` so fixtures can `use ark_scene::validate_scene`.
+ark-scene-macros = { path = "../scene-macros" }
 
 [[bin]]
 # T-140 (cavekit-scene R13 / Tier 15): scene schema emitter. Walks every
@@ -87,3 +92,9 @@ tempfile = { workspace = true }
 # diagnostic contract per R12. Rendered via `GraphicalReportHandler` with
 # the `unicode_nocolor` theme so review stays stable across terminals.
 insta = { workspace = true }
+# T-041 (soul phase 2, cavekit R5): compile-fail + compile-pass goldens for
+# the view-type symbol-table surface (T-034 `ViewTypeTable` +
+# `validate_view_reference`). Fixtures live under `tests/ui/` and the
+# harness test is `tests/view_types_trybuild.rs`. Dev-only: trybuild never
+# ships in the built `ark-scene` rlib.
+trybuild = "1"

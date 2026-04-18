@@ -23,6 +23,11 @@ pub use error::{Result, SceneError};
 pub use id::SceneId;
 pub use parse::{parse_scene, SceneIR};
 
+// T-041 (soul phase 2 tests R5): re-export the compile-time view-type
+// validator so trybuild fixtures carry a short `use ark_scene::validate_scene;`
+// line rather than pulling in the `ark-scene-macros` crate directly.
+pub use ark_scene_macros::validate_scene;
+
 pub mod ast;
 pub mod cache;
 pub mod suggest;

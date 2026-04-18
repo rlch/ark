@@ -1,0 +1,13 @@
+error: tests/ui/fixtures/handle_typed_attr_takes_non_handle.kdl:5:25: handle_attr `value` expects a `Pane<V>` handle reference (written as `@handle`) but got the string literal `some-literal-string` — typed-handle attributes cannot be bound to non-handle values
+  --> tests/ui/handle_typed_attr_takes_non_handle.rs:9:1
+   |
+ 9 | / validate_scene! {
+10 | |     manifests: [
+11 | |         r#"extension {
+12 | |             name "ext.a"
+...  |
+26 | | "#,
+27 | | }
+   | |_^
+   |
+   = note: this error originates in the macro `validate_scene` (in Nightly builds, run with -Z macro-backtrace for more info)
