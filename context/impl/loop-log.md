@@ -107,3 +107,8 @@ Overall: 45/134 (34%). Next: Tier 2 (engine-claude-code + event-bus consumers, 1
 - Commits: c5dbf78 (T-028), a949d40 (T-029+T-033 bundled), 5d742b7 (T-030+T-031+T-032 bundled), afa46d3 (T-034), 890dd17 (T-035), 59c1293 (T-036). Build P, Tests P (1799).
 - Codex tier-gate: F-015 [P1] fixed (4a594b7) — dispatcher opt-out on method_not_found. F-016 [P2] deferred to post-stub-harness.
 - Next: Tier 7 — T-037..T-042 (stub harness + matrices + trybuild + integration tests).
+
+### Iteration Tier-7-partial — 2026-04-18 — phase-2
+- Wave 8a (serial): T-037 (3863b1a) ark-ext-test-support stub crate. 9 tests green.
+- 7 tasks remain (T-038..T-044). Handoff written: handoff-2026-04-18-phase-2-tier-7-mid.md.
+- User rejected T-041 dispatch (trybuild deferral language) — next session should consider option (b) full KDL-level validator, or coordinate with user before defaulting to option (a).

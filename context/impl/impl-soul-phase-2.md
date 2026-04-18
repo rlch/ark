@@ -57,7 +57,8 @@ Ledger is prepend-only. Newest entries at top. Append completion rows below as t
 | T-035 | 6 | host-dispatch R5 | DONE | `890dd17` | reload gate dispatcher; AND Proceed/Defer; fail-open; ReloadDeferredPayload |
 | T-036 | 6 | host-dispatch R9 | DONE | `59c1293` | ClosedByUserMap (BTreeMap); consult() → Spawn/Skip/EvictAndSpawn |
 | F-015 fix | 6 | — | DONE | `4a594b7` | opt-out on method_not_found — future should_dispatch returns false |
-| T-037..T-044 | 7-8 | various | PENDING | — | see build site |
+| T-037 | 7 | tests R1 | DONE | `3863b1a` | new crate `ark-ext-test-support`; StubExtension + builder (5 config axes); 12 ArkExtension methods; call_log accessor; OpaqueJson payloads (not serde_json::Value — gotcha) |
+| T-038..T-044 | 7-8 | various | PENDING | — | see handoff-2026-04-18-phase-2-tier-7-mid.md |
 
 ## Wave Log
 
