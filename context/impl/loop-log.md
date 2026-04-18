@@ -81,3 +81,8 @@ Overall: 45/134 (34%). Next: Tier 2 (engine-claude-code + event-bus consumers, 1
 - Wave 2 (Tier 1): 3 parallel general-purpose opus agents. T-004+T-005/T-006/T-007 all COMPLETE. Commits: 6f31378, e913cb5, 541db89. Build P, Tests P (1666).
 - Codex tier-gate: 3×P2 (all P2, gate PROCEED). F-004/F-005/F-006 fixed inline: dc90de0. HandleId internals now private; doc-comments no longer overclaim wire-compat from #[non_exhaustive].
 - Next: Tier 2 — T-008..T-013 (Pane<V>, Stack<V>, TabHandle, PaneLike, marker-gated impls, ParamsHash, SuppressionPolicy).
+
+### Iteration Tier-2 — 2026-04-18 — phase-2
+- Wave 3a: T-008 (0ffc222) + T-012 (5b33711) parallel. Wave 3b: T-009/T-010/T-011 bundle (a904a98 + trybuild) + T-013 (cc5c02f) parallel. Build P, Tests P (1700).
+- Codex tier-gate: 1×P2 (F-007 spawn_pane aliasing). Fixed inline. Gate PROCEED.
+- Next: Tier 3 — T-014..T-017 (HandleGone ExtensionError, handle.invalidated event wire, SessionHandles, cross-crate exports).

@@ -22,9 +22,23 @@ Ledger is prepend-only. Newest entries at top. Append completion rows below as t
 | T-006 | 1 | ark-view R3 | DONE | `e913cb5` | View + CommandView + ZellijView marker traits (Send+Sync+'static) |
 | T-007 | 1 | ark-view R7 | DONE | `541db89` | InvalidationCause {UserClosed, SceneReloadDropped, SessionEnded} |
 | F-004/F-005/F-006 fix | 1 | — | DONE | `dc90de0` | HandleId pub-field → private; wire-compat doc clarification on both enums |
-| T-008..T-044 | 2-8 | various | PENDING | — | see build site |
+| T-008 | 2 | ark-view R4+R5 | DONE | `0ffc222` | Pane<V>/Stack<V>/TabHandle typed wrappers; PhantomData<fn()->V> for Send+Sync |
+| T-009 | 2 | ark-view R4 PaneLike | DONE | `a904a98` | PaneLike trait + impls for Pane/Stack |
+| T-010 | 2 | ark-view R4 marker-gated | DONE | `a904a98` | impl<V: CommandView> Pane<V> (env/write_stdin/pid); impl<V: ZellijView> Pane<V> (pipe); 4 trybuild negative tests with .stderr goldens |
+| T-011 | 2 | ark-view R4 Stack methods | DONE | `a904a98` | spawn_pane/close_child/children/clear; PaneAttrs struct |
+| T-012 | 2 | ark-view R8 ParamsHash | DONE | `5b33711` | blake3 of canonical-JSON; ParamsHash newtype `[u8;32]`; hash_params<T: Serialize>() |
+| T-013 | 2 | ark-view R8+R9 | DONE | `cc5c02f` | SceneHandleName + SuppressionPolicy contract type; 6 invariants documented; debug_assert on stack-child |
+| F-007 fix | 2 | — | DONE | pending | distinct synthetic handles from Stack::spawn_pane stub (atomic counter) |
+| T-014..T-044 | 3-8 | various | PENDING | — | see build site |
 
 ## Wave Log
+
+### Waves 3a+3b — 2026-04-18 — Tier 2
+- 3a (parallel 2): T-008 (0ffc222) + T-012 (5b33711). Both landed; PhantomData<fn()->V> to preserve Send+Sync; blake3 canonical JSON hash with hex serde.
+- 3b (parallel 2): T-009/T-010/T-011 bundle (a904a98, 12 tests + 4 trybuild compile-fail fixtures with .stderr goldens) + T-013 (cc5c02f, 5 tests + 6 invariants in SuppressionPolicy doc-comment).
+- Codex tier-gate: 1×P2 (F-007 spawn_pane aliasing). Fixed inline — atomic counter per stack-handle. Gate PROCEED.
+- 1700 tests pass workspace-wide (+34 since Tier 1 start; +53 total ark-view).
+- Next: Tier 3 — T-014..T-017 (HandleGone in ExtensionError, ark.handle.invalidated event wire, SessionHandles lookup, public exports + cross-crate deps).
 
 ### Wave 2 — 2026-04-18 — Tier 1
 - 3 parallel opus agents (T-004+T-005 packet, T-006 solo, T-007 solo). All COMPLETE. Commits: 6f31378, e913cb5, 541db89. Build P, Tests 1666 (+18 ark-view).
