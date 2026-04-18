@@ -4,6 +4,22 @@ last_edited: "2026-04-18"
 ---
 # Loop Log
 
+### Wave T-038 — 2026-04-18 — Tier 7 (tests R2)
+- T-038 (soul phase 2 tests R2): NDJSON subprocess stub. DONE.
+- New bin `ark-stub-ext` in crate `ark-ext-test-support` — `src/bin/ark-stub-ext.rs`. Bin wrap R1 StubExtension in `ark_ext_proto::transport::ndjson::NdjsonServer::serve`, pump stdin→stub→stdout. `tokio::main(flavor = "current_thread")` keep dep-budget tight. No new workspace dep needed — all pieces already in `ark-ext-proto`.
+- Config via env vars (caveman pick option-a from task spec — shell-scriptable, matches real ext pattern). Surface: `ARK_STUB_VERSION`, `ARK_STUB_CAPABILITIES`, `ARK_STUB_INTENTS`, `ARK_STUB_VIEW_TYPES` (csv `name:kind`), `ARK_STUB_METHODS` (csv of method names to register default-response handler for), `ARK_STUB_METHOD_NOT_FOUND_LIST` (csv of advertised-but-unimplemented markers). Documented at top of `src/bin/ark-stub-ext.rs`.
+- `register_default_handler(builder, method)` match-table maps 12 Phase-2 method names onto `with_method(name, |req| Ok(<Resp>::default()))` closures. Unknown methods fall through — trait default returns `method_not_found`, which is correct parity behaviour against in-process stub.
+- StackSpawnPaneResponse has no `Default` (carries HandleId) — construct with fixed `"stub-spawned"` handle. Other Phase-2 responses all derive Default.
+- Parity test `crates/ark-ext-test-support/tests/subprocess_parity.rs`:
+  - Build matching in-proc StubExtension via same manifest + capability + handler set.
+  - Spawn `ark-stub-ext` child with piped stdin/stdout, `stderr = inherit` so bin panics surface in test output.
+  - `rpc(stdin, stdout, id, method, params)` helper sends one JSON-RPC 2.0 request line, reads exactly one response line back. `NdjsonServer::serve` already flushes each response — no extra buffering hacks needed.
+  - 4-step scripted sequence: `pane/emit`, `pane/close`, `on_session_end` (all implemented on both legs) + `stack/clear` (unimplemented on both legs). Assert (a) subprocess `result` == `serde_json::to_value(in_proc_typed_response)` for the first 3; (b) subprocess error code == `-32601` for the 4th AND in-proc returns `ExtensionError::MethodNotFound`.
+  - Shutdown: drop stdin → child sees EOF → `NdjsonServer::serve` returns → process exits 0. `child.wait()` asserts `status.success()`.
+- GOTCHA: `CARGO_BIN_EXE_ark-stub-ext` was expected per cargo docs but cargo 1.93.0 on this workspace does not set it for integration tests (even with `cargo test -p <crate>`, no `CARGO_BIN_EXE_*` vars were present). `locate_bin()` falls back to `current_exe()` two-parents-up (`target/<profile>/deps/<testname>-<hash>` → `target/<profile>/ark-stub-ext`) with a clear diagnostic if the bin is missing. Panic message tells caller to run `cargo test -p ark-ext-test-support` (which builds bins) or explicit `cargo build -p ark-ext-test-support --bin ark-stub-ext`.
+- Not touched: supervisor, scene, cli, config, or any other crate. Only `crates/ark-ext-test-support/**` + 2 ledgers.
+- Validation: `cargo build -p ark-ext-test-support --bin ark-stub-ext` clean; `cargo test -p ark-ext-test-support --test subprocess_parity` 1/1 pass; `cargo test -p ark-ext-test-support` 8 unit + 1 integration + 1 doctest all green; `cargo build --workspace` clean; `cargo test --workspace --lib` all green (no regressions, tests count steady).
+
 ### Wave T-041 — 2026-04-18 — Tier 7 (tests R5)
 - T-041 (soul phase 2 tests R5): KDL-level view-type compile-error goldens. DONE.
 - New crate: `crates/scene-macros/` (proc-macro, `proc-macro = true`); workspace member. Deps: `syn 2`, `quote 1`, `proc-macro2 1`, `kdl 6.5`, `ark-ext-metadata-types` (path). No `ark-scene` dep — breaks would-be cycle via duplicate-~30-LOC ViewTypeTable slice (documented at top of `src/lib.rs`).

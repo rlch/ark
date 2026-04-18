@@ -23,5 +23,13 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 
+# T-038 (soul phase 2 cavekit-tests R2): NDJSON subprocess variant of
+# the R1 stub. The `ark-stub-ext` bin uses `NdjsonServer::serve` from
+# `ark-ext-proto` to pump stdin→StubExtension→stdout. Configuration is
+# read from env vars at startup (see `src/bin/ark-stub-ext.rs` doc).
+[[bin]]
+name = "ark-stub-ext"
+path = "src/bin/ark-stub-ext.rs"
+
 [dev-dependencies]
 # Self-tests only — tokio already pulled via `[dependencies]` above.
