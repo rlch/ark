@@ -341,3 +341,317 @@ mod tests {
         assert_eq!(decls.len(), 0);
     }
 }
+
+/// Reload-gate dispatcher (T-035).
+///
+/// Queries every extension's declared reload gates before the scene
+/// runtime commits a reload. AND-combines results: any single Defer
+/// vote aborts the reload; all-Proceed or fail-open errors allow the
+/// reload to proceed.
+///
+/// Per cavekit-soul-phase-2-host-dispatch.md R5.
+pub mod reload_gates {
+    use std::future::Future;
+    use std::pin::Pin;
+
+    /// Outcome of a single gate query.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum GateVote {
+        /// Gate consents to the reload.
+        Proceed,
+        /// Gate refuses; carries the reason for the `reload.deferred`
+        /// event surfaced to the status writer.
+        Defer { reason: String },
+    }
+
+    /// Per-gate identifier — `(ext_name, gate_name)`.
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    pub struct GateId {
+        pub ext_name: String,
+        pub gate_name: String,
+    }
+
+    /// Closure that queries a single gate. Supplied by the caller so
+    /// T-035 stays transport-agnostic — tests use an in-proc stub, prod
+    /// wires through the ndjson ext client.
+    pub type GateQueryFn<'a> = Box<
+        dyn Fn(
+                GateId,
+            ) -> Pin<
+                Box<
+                    dyn Future<
+                            Output = Result<
+                                GateVote,
+                                Box<dyn std::error::Error + Send + Sync + 'static>,
+                            >,
+                        > + Send
+                        + 'a,
+                >,
+            > + Send
+            + Sync
+            + 'a,
+    >;
+
+    /// Outcome of running all advertised gates.
+    #[derive(Debug, Clone)]
+    pub enum ReloadDecision {
+        /// Every gate voted Proceed (or failed open).
+        Proceed,
+        /// At least one gate voted Defer; carries every deferring vote so
+        /// the status writer can enumerate reasons per-ext.
+        Defer { deferrals: Vec<Deferral> },
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct Deferral {
+        pub ext_name: String,
+        pub gate_name: String,
+        pub reason: String,
+    }
+
+    /// Event payload for the `reload.deferred` ExtEvent surfaced to the
+    /// status writer when one or more gates defer. One event per deferring
+    /// gate — callers fan out.
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    pub struct ReloadDeferredPayload {
+        pub ext: String,
+        pub reason: String,
+    }
+
+    /// Run every advertised gate. Errors from a gate are treated as
+    /// Proceed (fail-open) and logged — per kit R5.
+    pub async fn run_reload_gates<'a>(
+        gates: &[GateId],
+        query: &GateQueryFn<'a>,
+    ) -> ReloadDecision {
+        let mut deferrals = Vec::new();
+        for gate_id in gates {
+            let result = query(gate_id.clone()).await;
+            match result {
+                Ok(GateVote::Proceed) => {
+                    tracing::debug!(
+                        target: "ark.supervisor.reload_gates",
+                        ext = %gate_id.ext_name,
+                        gate = %gate_id.gate_name,
+                        "gate voted proceed",
+                    );
+                }
+                Ok(GateVote::Defer { reason }) => {
+                    tracing::info!(
+                        target: "ark.supervisor.reload_gates",
+                        ext = %gate_id.ext_name,
+                        gate = %gate_id.gate_name,
+                        reason = %reason,
+                        "gate voted defer",
+                    );
+                    deferrals.push(Deferral {
+                        ext_name: gate_id.ext_name.clone(),
+                        gate_name: gate_id.gate_name.clone(),
+                        reason,
+                    });
+                }
+                Err(e) => {
+                    // Fail-open per kit R5: gate RPC error doesn't block
+                    // the reload; it logs a warning so ops can see the ext
+                    // is misbehaving.
+                    tracing::warn!(
+                        target: "ark.supervisor.reload_gates",
+                        ext = %gate_id.ext_name,
+                        gate = %gate_id.gate_name,
+                        error = %e,
+                        "gate query failed; treating as Proceed (fail-open)",
+                    );
+                }
+            }
+        }
+        if deferrals.is_empty() {
+            ReloadDecision::Proceed
+        } else {
+            ReloadDecision::Defer { deferrals }
+        }
+    }
+
+    /// Build the `reload.deferred` event payload list from a set of
+    /// deferrals — one payload per deferring gate.
+    pub fn deferrals_to_event_payloads(deferrals: &[Deferral]) -> Vec<ReloadDeferredPayload> {
+        deferrals
+            .iter()
+            .map(|d| ReloadDeferredPayload {
+                ext: d.ext_name.clone(),
+                reason: d.reason.clone(),
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        fn mk_query<F>(f: F) -> GateQueryFn<'static>
+        where
+            F: Fn(GateId) -> Result<GateVote, Box<dyn std::error::Error + Send + Sync + 'static>>
+                + Send
+                + Sync
+                + 'static,
+        {
+            let f = Arc::new(f);
+            Box::new(move |id| {
+                let f = f.clone();
+                Box::pin(async move { f(id) })
+            })
+        }
+
+        #[tokio::test]
+        async fn all_proceed_returns_proceed() {
+            let gates = vec![
+                GateId {
+                    ext_name: "a".into(),
+                    gate_name: "g1".into(),
+                },
+                GateId {
+                    ext_name: "b".into(),
+                    gate_name: "g2".into(),
+                },
+            ];
+            let q = mk_query(|_| Ok(GateVote::Proceed));
+            let r = run_reload_gates(&gates, &q).await;
+            match r {
+                ReloadDecision::Proceed => {}
+                other => panic!("expected Proceed, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn any_defer_returns_defer() {
+            let gates = vec![
+                GateId {
+                    ext_name: "a".into(),
+                    gate_name: "proceed".into(),
+                },
+                GateId {
+                    ext_name: "b".into(),
+                    gate_name: "defer".into(),
+                },
+            ];
+            let q = mk_query(|id: GateId| {
+                if id.gate_name == "defer" {
+                    Ok(GateVote::Defer {
+                        reason: "unsaved work".to_string(),
+                    })
+                } else {
+                    Ok(GateVote::Proceed)
+                }
+            });
+            match run_reload_gates(&gates, &q).await {
+                ReloadDecision::Defer { deferrals } => {
+                    assert_eq!(deferrals.len(), 1);
+                    assert_eq!(deferrals[0].ext_name, "b");
+                    assert_eq!(deferrals[0].reason, "unsaved work");
+                }
+                other => panic!("expected Defer, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn multiple_defers_all_collected() {
+            let gates = vec![
+                GateId {
+                    ext_name: "a".into(),
+                    gate_name: "g1".into(),
+                },
+                GateId {
+                    ext_name: "b".into(),
+                    gate_name: "g2".into(),
+                },
+            ];
+            let q = mk_query(|id: GateId| {
+                Ok(GateVote::Defer {
+                    reason: format!("{} says no", id.ext_name),
+                })
+            });
+            match run_reload_gates(&gates, &q).await {
+                ReloadDecision::Defer { deferrals } => {
+                    assert_eq!(deferrals.len(), 2);
+                }
+                _ => panic!("expected Defer"),
+            }
+        }
+
+        #[tokio::test]
+        async fn error_fails_open() {
+            let gates = vec![GateId {
+                ext_name: "failing".into(),
+                gate_name: "g".into(),
+            }];
+            let q = mk_query(|_| Err(std::io::Error::other("transport boom").into()));
+            match run_reload_gates(&gates, &q).await {
+                ReloadDecision::Proceed => {}
+                other => panic!("error should fail open (Proceed), got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn empty_gate_list_proceeds() {
+            let gates: Vec<GateId> = vec![];
+            let q = mk_query(|_| Ok(GateVote::Proceed));
+            match run_reload_gates(&gates, &q).await {
+                ReloadDecision::Proceed => {}
+                other => panic!("expected Proceed on empty list, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn deferrals_to_event_payloads_one_per_gate() {
+            let deferrals = vec![
+                Deferral {
+                    ext_name: "a".into(),
+                    gate_name: "g1".into(),
+                    reason: "r1".into(),
+                },
+                Deferral {
+                    ext_name: "a".into(),
+                    gate_name: "g2".into(),
+                    reason: "r2".into(),
+                },
+                Deferral {
+                    ext_name: "b".into(),
+                    gate_name: "g3".into(),
+                    reason: "r3".into(),
+                },
+            ];
+            let payloads = deferrals_to_event_payloads(&deferrals);
+            assert_eq!(payloads.len(), 3);
+            assert_eq!(payloads[0].ext, "a");
+            assert_eq!(payloads[0].reason, "r1");
+            assert_eq!(payloads[2].ext, "b");
+        }
+
+        #[tokio::test]
+        async fn query_invoked_once_per_gate() {
+            let counter = Arc::new(AtomicUsize::new(0));
+            let c = counter.clone();
+            let gates = vec![
+                GateId {
+                    ext_name: "a".into(),
+                    gate_name: "g".into(),
+                },
+                GateId {
+                    ext_name: "b".into(),
+                    gate_name: "g".into(),
+                },
+                GateId {
+                    ext_name: "c".into(),
+                    gate_name: "g".into(),
+                },
+            ];
+            let q = mk_query(move |_| {
+                c.fetch_add(1, Ordering::Relaxed);
+                Ok(GateVote::Proceed)
+            });
+            let _ = run_reload_gates(&gates, &q).await;
+            assert_eq!(counter.load(Ordering::Relaxed), 3);
+        }
+    }
+}

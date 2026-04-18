@@ -108,6 +108,12 @@ pub use plugin_lifecycle::{
 pub mod scene_runtime;
 pub use scene_runtime::{CompiledScene, SceneSource, compile_scene_for_runtime};
 
+// T-035 / cavekit-soul-phase-2-host-dispatch R5: reload-gate dispatcher.
+// Lives as a submodule of `scene_runtime` — gate votes arbitrate scene
+// reloads, so the dispatcher is scene-runtime concern. Re-exported so
+// consumers reach it via `ark_supervisor::reload_gates::...`.
+pub use scene_runtime::reload_gates;
+
 // T-028 / cavekit-soul-phase-2-host-dispatch R6: capability-aware RPC
 // dispatcher. Static capability→method table + per-ext registry for
 // gating outbound RPC calls on advertised capabilities. T-029 populates
