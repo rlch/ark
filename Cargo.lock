@@ -303,16 +303,21 @@ dependencies = [
 name = "ark-ext-claude-code"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "ark-ext-proto",
  "ark-scene",
  "ark-types",
  "ark-view",
  "async-trait",
+ "chrono",
+ "clap 4.6.0",
  "notify 7.0.0",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
