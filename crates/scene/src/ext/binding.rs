@@ -147,6 +147,7 @@ mod tests {
                 .map(|(n, component)| ViewDecl {
                     name: n.to_string(),
                     component: StringNode::new(*component),
+                    kind: None,
                 })
                 .collect(),
             config: ConfigSchema::default(),

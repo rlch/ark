@@ -444,6 +444,23 @@ pub struct ViewDecl {
     /// mount time. KDL-side is a child node: `component "<id>"`.
     #[facet(kdl::child)]
     pub component: StringNode,
+
+    /// Handle kind this view applies to — `"pane"` or `"stack"`.
+    /// Mirrors `ark_view::HandleKind` lowercase serde tag (see
+    /// `crates/ark-view/src/handle.rs`). ark-view sits below this
+    /// crate in the layer hierarchy, so the value is a string
+    /// discriminant here and resolved to the typed enum at scene-
+    /// compile time.
+    ///
+    /// Absent in the manifest = "pane" per the R17 conservative
+    /// default — existing pre-T-023 manifests (which omit this
+    /// node) continue to parse as pane views. KDL-side is an
+    /// optional child node: `kind "pane"` or `kind "stack"`.
+    ///
+    /// Per cavekit-soul-phase-2-ext-surface.md R4 +
+    /// build-site-soul-phase-2.md T-023.
+    #[facet(kdl::child, default)]
+    pub kind: Option<StringNode>,
 }
 
 /// Declaration of a named config sub-section exposed by the extension
@@ -726,6 +743,7 @@ mod tests {
             views: vec![ViewDecl {
                 name: "demo.panel".into(),
                 component: StringNode::new("DemoPanel"),
+                kind: None,
             }],
             config: ConfigSchema {
                 fields: vec![ConfigField {
@@ -892,6 +910,7 @@ mod tests {
         let v = ViewDecl {
             name: "ext.sidebar".into(),
             component: StringNode::new("SidebarView"),
+            kind: None,
         };
         assert_eq!(v.name, "ext.sidebar");
         assert_eq!(v.component.value, "SidebarView");
@@ -922,10 +941,12 @@ mod tests {
                 ViewDecl {
                     name: "viewer.main".into(),
                     component: StringNode::new("MainPanel"),
+                    kind: None,
                 },
                 ViewDecl {
                     name: "viewer.sidebar".into(),
                     component: StringNode::new("SidePanel"),
+                    kind: None,
                 },
             ],
             config: ConfigSchema::default(),

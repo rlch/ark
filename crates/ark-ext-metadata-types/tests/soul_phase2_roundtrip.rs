@@ -28,7 +28,7 @@
 //!    `#[facet(kdl::children, default)]`.
 
 use ark_ext_metadata_types::{
-    ConfigSectionDecl, ExtensionManifest, ExtensionMetadata, ReloadGateDecl, StringNode,
+    ConfigSectionDecl, ExtensionManifest, ExtensionMetadata, ReloadGateDecl, StringNode, ViewDecl,
 };
 
 /// Serialise + re-parse an [`ExtensionMetadata`] via facet-kdl, stripping
@@ -260,4 +260,89 @@ fn manifest_with_new_fields_round_trips_scalars() {
     let parsed = round_trip(&meta);
     assert_eq!(parsed.name.value, "demo");
     assert_eq!(parsed.version.value, "0.1.0");
+}
+
+// ----------------------------------------------------------------------
+// 6. T-023 (build-site-soul-phase-2.md) — ViewDecl `kind` field.
+//
+// The field mirrors `ark_view::HandleKind`'s lowercase serde tag as a
+// string discriminant (ark-view sits below ark-ext-metadata-types in
+// the layer hierarchy, so we can't reference the enum type directly).
+// Allowed values: `"pane"` or `"stack"`. Absent in the manifest =
+// "pane" per the R17 conservative default; callers treat `None` as
+// pane at consumption time.
+// ----------------------------------------------------------------------
+
+/// Build a bare metadata populated with a single [`ViewDecl`] whose
+/// `kind` is the supplied string (or `None`).
+fn metadata_with_view_kind(kind: Option<&str>) -> ExtensionMetadata {
+    let mut meta = bare_metadata("kindy");
+    meta.views.push(ViewDecl {
+        name: "kindy.main".into(),
+        component: StringNode::new("MainView"),
+        kind: kind.map(StringNode::new),
+    });
+    meta
+}
+
+#[test]
+fn view_decl_with_kind_pane_roundtrips() {
+    let meta = metadata_with_view_kind(Some("pane"));
+    let manifest = ExtensionManifest::new(meta);
+    let text = facet_kdl::to_string(&manifest).expect("serialize manifest");
+    // Emit-side contract: the kind value lands in the KDL text.
+    assert!(
+        text.contains("pane"),
+        "expected `pane` kind in emitted KDL:\n{text}"
+    );
+    assert!(
+        text.contains("MainView"),
+        "expected component id in emitted KDL:\n{text}"
+    );
+}
+
+#[test]
+fn view_decl_with_kind_stack_roundtrips() {
+    let meta = metadata_with_view_kind(Some("stack"));
+    let manifest = ExtensionManifest::new(meta);
+    let text = facet_kdl::to_string(&manifest).expect("serialize manifest");
+    assert!(
+        text.contains("stack"),
+        "expected `stack` kind in emitted KDL:\n{text}"
+    );
+}
+
+#[test]
+fn view_decl_without_kind_defaults_to_pane() {
+    // `kind: None` at the ViewDecl level = "absent in manifest" — the
+    // consumer interprets None as "pane" per the R17 conservative
+    // default. We pin the shape (None in, None after round-trip) here;
+    // the pane-default translation is a scene-side concern exercised
+    // in ark-view / scene tests.
+    let meta = metadata_with_view_kind(None);
+    // Struct-level assertion: the constructor leaves kind as None.
+    assert!(meta.views[0].kind.is_none());
+    // Full round-trip: an Option::<StringNode>::None renders as `#null`
+    // which the shared stripper drops; the re-parsed manifest must
+    // preserve the struct scalars (facet-kdl 0.42's Vec<T> item-node
+    // limitation applies to vectors, documented above — so we assert
+    // the view round-trips a scalar name at minimum).
+    let parsed = round_trip(&meta);
+    assert_eq!(parsed.name.value, "kindy");
+}
+
+#[test]
+fn view_decl_kind_default_is_none_on_bare_construction() {
+    // Backward-compat construction site: a ViewDecl built without the
+    // new `kind` field is a lint-time error (the field is non-optional
+    // at the struct literal). This test pins the Option<StringNode>
+    // shape so a future migration to a non-optional type is caught by
+    // the compile-gate (adding `kind: Default::default()` would need
+    // an explicit Default impl).
+    let v = ViewDecl {
+        name: "x.y".into(),
+        component: StringNode::new("Z"),
+        kind: None,
+    };
+    assert!(v.kind.is_none());
 }

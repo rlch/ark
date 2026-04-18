@@ -318,6 +318,7 @@ mod tests {
             views: vec![ViewDecl {
                 name: "roundtrip.main".into(),
                 component: StringNode::new("MainView"),
+                kind: None,
             }],
             capabilities: CapabilitySet::from_strs(&["exec"]),
             config_sections: vec![],
