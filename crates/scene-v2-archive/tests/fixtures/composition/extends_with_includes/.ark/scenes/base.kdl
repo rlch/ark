@@ -1,3 +1,0 @@
-scene "base" {
-    on "AgentReady" { exec }
-}

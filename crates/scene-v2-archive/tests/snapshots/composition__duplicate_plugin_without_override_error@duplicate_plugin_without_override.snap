@@ -1,8 +1,0 @@
----
-source: crates/scene/tests/composition.rs
-expression: rendered
----
-scene/duplicate-plugin
-
-  × duplicate `plugin "status"` declaration across merged scenes
-  help: R11: a later `plugin "<name>"` block must set `override=true` to replace an earlier declaration. Otherwise remove the duplicate or rename one of the plugins.

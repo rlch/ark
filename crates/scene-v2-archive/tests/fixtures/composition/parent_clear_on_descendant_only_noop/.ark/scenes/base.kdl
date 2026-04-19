@@ -1,3 +1,0 @@
-scene "base" {
-    clear-reactions selector="UserEvent:child.only"
-}

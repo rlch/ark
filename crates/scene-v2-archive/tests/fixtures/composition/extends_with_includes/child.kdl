@@ -1,5 +1,0 @@
-scene "child" {
-    extends "base"
-    include "frag.kdl"
-    on "UserEvent:user.ready" { emit }
-}

@@ -1,4 +1,0 @@
-scene "child" {
-    extends "base"
-    clear-reactions selector="AgentReady"
-}

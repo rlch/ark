@@ -1,6 +1,0 @@
-scene "child" {
-    extends "base"
-    on "UserEvent:child.ready" {
-        emit
-    }
-}

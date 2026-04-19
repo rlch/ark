@@ -1,6 +1,0 @@
-scene "s" {
-    plugin "picker" { source "shipped:picker" }
-    on "AgentReady" {
-        mount_plugin name="pickre"
-    }
-}

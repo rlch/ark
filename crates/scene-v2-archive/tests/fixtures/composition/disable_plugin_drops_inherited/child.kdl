@@ -1,4 +1,0 @@
-scene "child" {
-    extends "base"
-    disable-plugin "picker"
-}

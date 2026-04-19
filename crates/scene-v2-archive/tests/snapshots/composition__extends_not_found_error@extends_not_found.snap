@@ -1,9 +1,0 @@
----
-source: crates/scene/tests/composition.rs
-expression: rendered
----
-scene/extends-not-found
-
-  × extends target `ghost` not found on the scene search path
-  help: Scene-search-path rungs (in order): `./.ark/scenes/<name>.kdl`, `${XDG_CONFIG_HOME}/<appname>/scenes/<name>.kdl`, built-in shipped scenes. Either create the parent scene file or adjust the
-        `extends` argument.

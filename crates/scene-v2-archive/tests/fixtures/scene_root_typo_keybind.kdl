@@ -1,3 +1,0 @@
-scene "demo" {
-    keybnd "Alt p" intent="picker.show"
-}

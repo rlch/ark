@@ -1,6 +1,0 @@
-scene "s" {
-    plugin "status" { source "shipped:status" }
-    on "AgentReady" {
-        pipe plugin="ststus" { text "hi" }
-    }
-}

@@ -1,5 +1,0 @@
-scene "demo" {
-    tab "logs"
-    on "AgentReady" when="true" intent="picker.show" {
-    }
-}

@@ -1,6 +1,0 @@
-scene "fragment" {
-    on "UserEvent:splice.ready" {
-        emit
-    }
-    keybind "Alt q" intent="splice.quit"
-}

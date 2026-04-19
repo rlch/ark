@@ -1,3 +1,0 @@
-scene "demo" {
-    keybind "Alt p" if="agent.phase == 'ready'" intent="picker.show"
-}

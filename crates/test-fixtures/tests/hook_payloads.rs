@@ -2,7 +2,8 @@
 //!
 //! These tests assert that every event-type fixture in
 //! `tests/fixtures/hook-payloads/` exists, parses as JSON, and carries the
-//! envelope fields the `ark-hook` payload parser requires
+//! envelope fields the `cc-hook` payload parser requires (salvaged
+//! into `extensions/claude-code/bin/cc-hook/` 2026-04-18)
 //! (`session_id`, `cwd`, `hook_event_name`) plus the event-specific
 //! `hook_event_name` value expected for that fixture name.
 //!

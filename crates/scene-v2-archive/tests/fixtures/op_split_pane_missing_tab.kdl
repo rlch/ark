@@ -1,8 +1,0 @@
-scene "s" {
-    layout {
-        tab name="work" { pane }
-    }
-    on "AgentReady" {
-        split_pane into="wokr" side="right"
-    }
-}

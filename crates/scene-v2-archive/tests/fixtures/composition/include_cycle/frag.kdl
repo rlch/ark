@@ -1,3 +1,0 @@
-scene "frag" {
-    include "child.kdl"
-}

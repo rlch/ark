@@ -42,7 +42,10 @@ pub use lock::{LockError, LockGuard, acquire_lock};
 // T-066: per-supervisor socket command handlers (cavekit-hook-ipc R5).
 //
 // T-6.2 grew the surface with `Intent` / `Emit` / `Permit` for the
-// scene-bridge dispatchers (`ark-hook intent | emit | permit`).
+// scene-bridge dispatchers. Historically called by an `ark-hook` binary
+// (deleted 2026-04-18 Phase 4 cleanup); live v0.1 caller is the
+// auto-mounted `ark-bus` wasm plugin (whose dispatch paths are latent-
+// broken pending v0.2 CLI rewire — see context/plans/v0.2-backlog.md).
 pub mod commands;
 pub use commands::{IntentBridge, SignalSender, SupervisorCommandCtx, SupervisorCommandHandler};
 

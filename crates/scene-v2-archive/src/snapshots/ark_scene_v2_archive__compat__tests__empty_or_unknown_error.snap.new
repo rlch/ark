@@ -1,6 +1,0 @@
----
-source: crates/scene-v2-archive/src/compat.rs
-assertion_line: 262
-expression: err.to_string()
----
-scene file has neither a `scene { }` wrapper nor a top-level `layout { }`

@@ -1,4 +1,0 @@
-scene "demo" {
-    on "AgentReady" when="true" {
-    }
-}

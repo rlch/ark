@@ -1,8 +1,0 @@
----
-source: crates/scene/tests/composition.rs
-expression: rendered
----
-scene/duplicate-tab
-
-  × duplicate `tab "work"` across merged layouts
-  help: R11: layout `tab` names must be unique across composed scenes. Rename one of the tabs, or factor the shared tab into a base scene inherited via `extends`.

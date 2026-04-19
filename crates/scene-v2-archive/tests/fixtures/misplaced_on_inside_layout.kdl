@@ -1,7 +1,0 @@
-scene "demo" {
-    layout {
-        on "AgentReady" {
-            emit "demo.ready"
-        }
-    }
-}
