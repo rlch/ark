@@ -4,6 +4,23 @@ last_edited: "2026-04-19"
 ---
 # Loop Log
 
+### v0.1 CLOSE-OUT — 2026-04-18 — tag-eligible
+
+- Phase 1 (soul foundations): DONE
+- Phase 2 (soul surfaces): DONE 45/45
+- claude-code-ext: DONE 48/48
+- Cleanup: DONE 12/12
+- Final workspace: 2141 tests pass / 4 ignored / 0 fail (69 suites, 15.28s); Engine/Orchestrator trait surface DELETED (1226 LOC removed from `crates/core` + `crates/supervisor`); ark-hook binstall shim DELETED (Packet A T-002); orchestrator crates DELETED (Packet A T-003 + T-004); `crates/hook/` DELETED (Packet A T-005); `crates/types/src/permission.rs` DELETED (Packet A T-006); `factory.rs` DELETED (Packet B T-008); claude-code extension first-class; v0.1 tag-eligible (user owns the tag).
+- Carry-forward to v0.2: ark-bus plugin's `PathBuf::from("ark-hook")` runtime-spawn callsites (2 sites) — out-of-scope for Packet A/B; hidden `ark-hook intent/emit` panes will fail at runtime until rerouted.
+
+### Wave cleanup-B-T012 — 2026-04-18 — Packet B T-012 (v0.1 CLOSE-OUT green gate)
+
+- `cargo check --workspace --tests` = 0 err.
+- `cargo test --workspace --tests` = 2141 pass / 4 ignored / 0 fail (69 suites, 15.28s). was 2164 pre-T-010; net -23 = deleted mock engine + Engine/Orchestrator conformance suites that rode with engine.rs + engine_contract.rs + orchestrator.rs + orchestrator_contract.rs.
+- grep final (crates/): `pub trait Engine|pub trait Orchestrator` = 0. `ark_core::engine|ark_core::orchestrator` = 1 hit (doc-comment @ test-fixtures lib.rs:119 describing deletion). `engine_stub|build_engine|build_orchestrator` = 6 hits (all doc-comment trail describing deletions — 0 live code). `Option<Box<dyn Engine|Option<Box<dyn Orchestrator` = 2 hits (doc on `run_supervisor_with` recording cleanup-T-009 legacy signature). `TODO(cavekit-soul)` = 0.
+- PTY smoke: zellij 0.44.1 on PATH. `cargo test -p ark-cli --test launch_pty -- real_zellij_accepts_compiled_default_layout` = 1 pass.
+- v0.1 tag-eligible. user owns the tag.
+
 ### Wave cleanup-B-T011 — 2026-04-18 — Packet B T-011 (scene/consumer audit — clean)
 
 - grep (crates/scene/src/): `ark_core::engine|ark_core::orchestrator|use ark_core::(Engine\|Orchestrator)|EngineLaunch|engine_launch` = 0 hits.
