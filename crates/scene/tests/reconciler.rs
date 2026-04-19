@@ -244,3 +244,126 @@ fn public_api_smoke() {
     let _: PathBuf = PathBuf::from("/tmp/ark-test.kdl");
     let _ = ViewRegistry::with_primitives();
 }
+
+// ---------------------------------------------------------------------------
+// scene-2026-04-18 T-026 — Stack round-trip through the reconciler
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn reconcile_emits_stack_with_name_and_ark_handle_wrappers() {
+    // T-026: stack handles round-trip through the reconciler via the
+    // same `name="<handle>"` + child-level `env ARK_HANDLE=@<h>`
+    // pattern as panes. The stack container itself has no command (its
+    // children do), so its identity lives in the `pane name="<h>"
+    // stacked=true` attr. Declared child panes carry their own
+    // ARK_HANDLE wrapper via `apply_view`.
+    let src = r#"scene "dev" {
+        layout {
+            tab "@main" {
+                stack "@subs" {
+                    pane "@seed" { shell }
+                }
+            }
+        }
+    }"#;
+    let (mut r, _applier, _tmp) = make_reconciler(src);
+    let mut scope = rhai::Scope::new();
+    let outcome = r.reconcile(&mut scope).await.expect("reconcile ok");
+    let text = std::fs::read_to_string(&outcome.layout_path).unwrap();
+    // Stack identity survives the round-trip.
+    assert!(
+        text.contains("stacked=#true") || text.contains("stacked=true"),
+        "stack emission must carry stacked=true: {text}"
+    );
+    assert!(
+        text.contains("\"subs\"") || text.contains("name=\"subs\""),
+        "stack `@subs` must surface as pane name=\"subs\": {text}"
+    );
+    // Declared child carries its own ARK_HANDLE wrapper per R9 — the
+    // env wrapper is how the reconciler rematches children across
+    // override-layout passes.
+    assert!(
+        text.contains("ARK_HANDLE=@seed"),
+        "declared stack child must carry ARK_HANDLE env wrapper: {text}"
+    );
+}
+
+#[tokio::test]
+async fn reconcile_stack_excludes_dynamic_spawn_into_children() {
+    // T-026: dynamic children spawned at runtime via `spawn_into`
+    // live OUTSIDE the desired-state layout — they don't belong in
+    // override-layout emission. Pre-spawn and post-spawn, the
+    // reconciler's rendered KDL must be identical for a stack's
+    // static body: the only difference is whatever runtime state
+    // the mux happens to carry. Here we verify the declared seed is
+    // all that shows up.
+    let src = r#"scene "dev" {
+        layout {
+            tab "@main" {
+                stack "@subs" {
+                    pane "@seed" { shell }
+                }
+            }
+        }
+        on "FileEdited" {
+            spawn_into "@subs" { shell }
+        }
+    }"#;
+    let (r, _applier, _tmp) = make_reconciler(src);
+    let mut scope = rhai::Scope::new();
+    // render_desired_layout_kdl is the synchronous equivalent of
+    // reconcile's KDL step — no disk side-effects.
+    let doc = r.render_desired_layout_kdl(&mut scope).expect("render");
+    let text = doc.to_string();
+    // The declared seed child appears …
+    assert!(
+        text.contains("ARK_HANDLE=@seed"),
+        "seed child must appear in desired-state layout: {text}"
+    );
+    // … but no runtime-minted child (those use `<stack>-<ulid>`
+    // ids that are purely runtime). The spawn_into op body must
+    // never reach the rendered layout KDL.
+    assert!(
+        !text.contains("spawn_into"),
+        "spawn_into is a runtime op — must not appear in rendered layout: {text}"
+    );
+    assert!(
+        !text.contains("-01j") && !text.contains("-01k"),
+        "runtime ULID-suffixed children must not appear in rendered layout: {text}"
+    );
+}
+
+#[tokio::test]
+async fn reconcile_stack_with_false_when_elides_container() {
+    // T-026 + reconciler `filter_child` Stack arm: a stack with a
+    // false `when=` predicate is elided entirely from the rendered
+    // desired-state layout — including any declared children.
+    let src = r#"scene "dev" {
+        layout {
+            tab "@main" {
+                stack "@visible" when="true" {
+                    pane "@visible_child" { shell }
+                }
+                stack "@hidden" when="false" {
+                    pane "@hidden_child" { shell }
+                }
+            }
+        }
+    }"#;
+    let (r, _applier, _tmp) = make_reconciler(src);
+    let mut scope = rhai::Scope::new();
+    let doc = r.render_desired_layout_kdl(&mut scope).expect("render");
+    let text = doc.to_string();
+    assert!(
+        text.contains("ARK_HANDLE=@visible_child"),
+        "visible stack's child must be rendered: {text}"
+    );
+    assert!(
+        !text.contains("ARK_HANDLE=@hidden_child"),
+        "hidden stack's child must be elided: {text}"
+    );
+    assert!(
+        !text.contains("\"hidden\""),
+        "hidden stack container itself must be elided: {text}"
+    );
+}
