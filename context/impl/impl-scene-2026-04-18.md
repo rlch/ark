@@ -36,10 +36,10 @@ present; scene-local `HandleKind` still has `Command`/`Plugin` variants.
 | T-018 | 4 | DONE (Wave 5, `8b50cfe`) | New `crates/scene/src/validate/view_types.rs` — `validate_view_types(compiled, registry) -> Vec<SceneError>` walks raw KDL for `spawn_into` and emits `scene/view-type-mismatch`. Added `CompiledScene::view_of_internal` crate-private accessor. |
 | T-019 | 4 | DONE (Wave 5, `8b50cfe`) | `validate_op_refs` extended with raw-KDL `walk_stack_ops_raw`; new `ExpectedKind::Stack` arm enforces stack-only kind on `spawn_into` / `clear` handle arg. |
 | T-020 | 4 | DONE (Wave 5, `8b50cfe`) | `validate/mod.rs` gained `pub mod view_types;` + `pub use view_types::validate_view_types;`. |
-| T-021 | 5 | DONE (Wave 6) | `MuxHandle` gained `spawn_into_stack(&HandleId, Option<&str>) -> Result<HandleId, String>` and `clear_stack(&HandleId) -> Result<(), String>`. `ulid = { workspace = true }` dep added; `MockMux` updated with deterministic override + child-id recording. |
-| T-022 | 5 | DONE (Wave 6) | `SpawnIntoOp` in `ops/spawn.rs` — non-idempotent per R-7 — returns the ark-minted `<stack>-<ulid>` child id as `IntentValue::String`. |
-| T-023 | 5 | DONE (Wave 6) | `ClearOp` in new `ops/stack.rs` — idempotent per R-7 (absent stack = noop). |
-| T-024 | 5 | DONE (Wave 6) | `register_core_ops` registers both; `CORE_OP_NAMES` gains `"ark.core.spawn_into"` + `"ark.core.clear"`. |
+| T-021 | 5 | DONE (Wave 6, `ff628ea`) | `MuxHandle` gained `spawn_into_stack(&HandleId, Option<&str>) -> Result<HandleId, String>` and `clear_stack(&HandleId) -> Result<(), String>`. `ulid = { workspace = true }` dep added; `MockMux` updated with deterministic override + child-id recording. |
+| T-022 | 5 | DONE (Wave 6, `ff628ea`) | `SpawnIntoOp` in `ops/spawn.rs` — non-idempotent per R-7 — returns the ark-minted `<stack>-<ulid>` child id as `IntentValue::String`. |
+| T-023 | 5 | DONE (Wave 6, `ff628ea`) | `ClearOp` in new `ops/stack.rs` — idempotent per R-7 (absent stack = noop). |
+| T-024 | 5 | DONE (Wave 6, `ff628ea`) | `register_core_ops` registers both; `CORE_OP_NAMES` gains `"ark.core.spawn_into"` + `"ark.core.clear"`. |
 | T-025 | 6 | PENDING | compile/layout.rs emitter has no `StackNode` case. |
 | T-026 | 6 | PENDING | reconciler.rs no stack round-trip. |
 | T-027 | 7 | PENDING | Completion gate tests not written. |
@@ -51,7 +51,7 @@ DONE via phase-2. Prior audit was wrong.
 
 ### Wave 6 — Tier 5 (T-021, T-022, T-023, T-024)
 
-SHA: _pending backfill_.
+SHA: `ff628ea`.
 
 - **T-021 `MuxHandle::spawn_into_stack` + `clear_stack`**: extended the
   trait in `crates/scene/src/intent.rs` with two new methods. Signature
