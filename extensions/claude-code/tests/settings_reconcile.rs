@@ -229,12 +229,23 @@ fn install_hooks_verb_reconciles_to_override_path() {
 /// `CC_HOOK_BYTES` remains the T-008a placeholder. When that stub is
 /// replaced with real bytes, extending this test with an "installed"
 /// branch is a one-line swap.
+///
+/// v0.2-backlog #7: the default path now tries the cargo-install
+/// fallback before stubbing — this test opts out via
+/// `ARK_CLAUDE_CODE_NO_CARGO_FALLBACK=1` so it still exercises the
+/// "no bytes, no fallback" path deterministically.
 #[test]
 fn reinstall_hook_binary_verb_stub_empty_when_bytes_placeholder() {
     assert!(
         ark_ext_claude_code::CC_HOOK_BYTES.is_empty(),
         "stub invariant for this test"
     );
+    // SAFETY: tests in this file run with default cargo threading; we
+    // set + restore the env var to keep neighbours unaffected.
+    let prev = std::env::var_os("ARK_CLAUDE_CODE_NO_CARGO_FALLBACK");
+    unsafe {
+        std::env::set_var("ARK_CLAUDE_CODE_NO_CARGO_FALLBACK", "1");
+    }
 
     let td = TempDir::new().unwrap();
     let target = td.path().join("bin/cc-hook");
@@ -242,6 +253,13 @@ fn reinstall_hook_binary_verb_stub_empty_when_bytes_placeholder() {
     let outcome = ext.run_reinstall_hook_binary_verb(Some(&target));
     assert!(matches!(outcome, InstallOutcome::StubEmpty { .. }));
     assert!(!target.exists());
+
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var("ARK_CLAUDE_CODE_NO_CARGO_FALLBACK", v),
+            None => std::env::remove_var("ARK_CLAUDE_CODE_NO_CARGO_FALLBACK"),
+        }
+    }
 }
 
 /// T-022/T-023 advertisement: the `control_verbs` method surfaces both

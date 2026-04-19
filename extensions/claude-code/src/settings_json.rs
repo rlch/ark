@@ -511,9 +511,20 @@ pub enum InstallOutcome {
         /// [`crate::CC_HOOK_BYTES`]`.len()`).
         bytes: usize,
     },
-    /// [`crate::CC_HOOK_BYTES`] is the stub empty slice. Nothing was
-    /// written; caller should surface the "install manually via
-    /// `cargo build --release --bin cc-hook`" hint.
+    /// v0.2-backlog #7: `CC_HOOK_BYTES` was empty but `cargo` on PATH
+    /// built + installed the binary via
+    /// `cargo install --bin cc-hook --path extensions/claude-code
+    ///  --root <xdg_bin_home/..>`. `path` is the final installed
+    /// location (`$root/bin/cc-hook`) — cargo appends `bin/` itself
+    /// when `--root` is given.
+    InstalledViaCargo {
+        /// Resolved installed path.
+        path: PathBuf,
+    },
+    /// [`crate::CC_HOOK_BYTES`] is the stub empty slice AND the
+    /// cargo-install fallback was unavailable (no `cargo` on PATH)
+    /// or failed. Caller should surface the "install manually via
+    /// `cargo install --bin cc-hook --path <…>`" hint.
     StubEmpty {
         /// Path we would have written to.
         path: PathBuf,
@@ -530,17 +541,27 @@ pub enum InstallOutcome {
 /// Extract [`crate::CC_HOOK_BYTES`] to `path`, chmod `0755`. Creates
 /// the parent directory if missing. Safe to call repeatedly — atomic
 /// via tmp-file-rename like [`SettingsFile::save_atomic`].
+///
+/// # v0.2-backlog #7 fallback chain
+///
+/// When `CC_HOOK_BYTES` is the empty stub (the current default — see
+/// [`crate::CC_HOOK_BYTES`] docstring for the F-709 embedding
+/// deadlock), the install sequence falls through to:
+///
+/// 1. **Cargo install**: if `cargo` is on PATH, invoke
+///    `cargo install --bin cc-hook --path <extensions/claude-code>
+///    --root <install-root> --locked` and return
+///    [`InstallOutcome::InstalledViaCargo`] with the resolved path
+///    (`<root>/bin/cc-hook`). The source path is resolved from
+///    [`locate_claude_code_ext_path`]; when no source tree is
+///    discoverable (a distributed-binary scenario) the fallback is
+///    skipped.
+/// 2. **Stub empty**: neither embedded bytes nor a cargo-install path
+///    produced a binary. Returns [`InstallOutcome::StubEmpty`] — the
+///    caller surfaces the "install manually" hint.
 pub fn install_cc_hook_at(path: &Path) -> InstallOutcome {
     if crate::CC_HOOK_BYTES.is_empty() {
-        warn!(
-            path = %path.display(),
-            "cc-hook embedding is stub (empty bytes). Build via \
-             `cargo build --release -p ark-ext-claude-code --bin cc-hook` \
-             and install manually, or wire real embedding (see T-008a TODO)."
-        );
-        return InstallOutcome::StubEmpty {
-            path: path.to_path_buf(),
-        };
+        return install_cc_hook_via_cargo(path);
     }
 
     if let Some(parent) = path.parent() {
@@ -584,6 +605,175 @@ pub fn install_cc_hook_at(path: &Path) -> InstallOutcome {
         path: path.to_path_buf(),
         bytes: crate::CC_HOOK_BYTES.len(),
     }
+}
+
+/// v0.2-backlog #7: invoke `cargo install --bin cc-hook --path <…>
+/// --root <…> --locked` so a downstream user without the embedded
+/// bytes (the v0.1 stub state) can still land a working cc-hook.
+///
+/// The binary path parsed from the caller's `path` argument is used
+/// in two ways:
+///   * its grandparent (stripping the `/bin/` suffix) becomes cargo's
+///     `--root` — cargo writes to `<root>/bin/<bin-name>`, so
+///     matching this layout produces the exact on-disk path the
+///     caller asked for;
+///   * its basename is forwarded as the target `--bin` name (must be
+///     `cc-hook` in practice — mismatches return `StubEmpty` rather
+///     than invoking cargo against the wrong target).
+///
+/// Returns:
+/// * [`InstallOutcome::InstalledViaCargo`] on a successful
+///   `cargo install` exit.
+/// * [`InstallOutcome::StubEmpty`] when `cargo` is absent, the
+///   extension source path is not resolvable, the basename is wrong,
+///   or cargo reports a non-zero exit.
+fn install_cc_hook_via_cargo(path: &Path) -> InstallOutcome {
+    let stub = || InstallOutcome::StubEmpty {
+        path: path.to_path_buf(),
+    };
+
+    // Env opt-out — tests + constrained environments set this to bypass
+    // the cargo-install path entirely. Accepts `"1"`, `"true"`, `"yes"`.
+    if matches!(
+        std::env::var("ARK_CLAUDE_CODE_NO_CARGO_FALLBACK")
+            .ok()
+            .as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    ) {
+        debug!("cc-hook cargo-install fallback: ARK_CLAUDE_CODE_NO_CARGO_FALLBACK set; skip");
+        return stub();
+    }
+
+    // Validate the layout — we need `<root>/bin/<CC_HOOK_BIN_NAME>`.
+    let Some(basename) = path.file_name().and_then(|s| s.to_str()) else {
+        warn!(path = %path.display(), "cc-hook install path has no basename; cargo-install fallback skipped");
+        return stub();
+    };
+    if basename != CC_HOOK_BIN_NAME {
+        warn!(
+            basename,
+            expected = CC_HOOK_BIN_NAME,
+            "cc-hook install path basename is not `cc-hook`; cargo-install fallback skipped"
+        );
+        return stub();
+    }
+    let bin_dir = match path.parent() {
+        Some(p) => p,
+        None => {
+            warn!(path = %path.display(), "cc-hook install path has no parent; cargo-install fallback skipped");
+            return stub();
+        }
+    };
+    if bin_dir.file_name().and_then(|s| s.to_str()) != Some("bin") {
+        // Cargo always writes to `<root>/bin/<name>`. If the caller's
+        // parent isn't named `bin` we can't satisfy the layout without
+        // a post-install move — skip rather than silently drop the
+        // binary in a surprising location.
+        warn!(
+            bin_dir = %bin_dir.display(),
+            "cc-hook install path is not under a `bin/` dir; cargo-install fallback skipped (expected `<root>/bin/cc-hook`)"
+        );
+        return stub();
+    }
+    let Some(install_root) = bin_dir.parent() else {
+        warn!(path = %path.display(), "cc-hook bin dir has no parent; cargo-install fallback skipped");
+        return stub();
+    };
+
+    let Some(ext_path) = locate_claude_code_ext_path() else {
+        warn!(
+            "cc-hook cargo-install fallback: cannot locate extensions/claude-code source tree; \
+             skip — `cargo install --bin {CC_HOOK_BIN_NAME} --path <…>` must be run manually"
+        );
+        return stub();
+    };
+
+    // Optional override for tests — a shim script on PATH under the
+    // name ARK_CARGO_BIN takes precedence over the ambient `cargo`.
+    let cargo_bin = std::env::var_os("ARK_CARGO_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("cargo"));
+
+    debug!(
+        cargo = %cargo_bin.display(),
+        src = %ext_path.display(),
+        root = %install_root.display(),
+        "cc-hook cargo-install fallback invoking"
+    );
+
+    let output = match std::process::Command::new(&cargo_bin)
+        .arg("install")
+        .arg("--bin")
+        .arg(CC_HOOK_BIN_NAME)
+        .arg("--path")
+        .arg(&ext_path)
+        .arg("--root")
+        .arg(install_root)
+        .arg("--locked")
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) => {
+            warn!(
+                cargo = %cargo_bin.display(),
+                error = %e,
+                "cc-hook cargo-install fallback: spawning cargo failed; skip"
+            );
+            return stub();
+        }
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        warn!(
+            code = output.status.code().unwrap_or(-1),
+            stderr = %stderr.trim(),
+            "cc-hook cargo-install fallback: cargo exited non-zero; skip"
+        );
+        return stub();
+    }
+
+    InstallOutcome::InstalledViaCargo {
+        path: path.to_path_buf(),
+    }
+}
+
+/// v0.2-backlog #7 helper: locate the `extensions/claude-code` crate
+/// directory so `cargo install --path <…>` has a source tree to
+/// build from.
+///
+/// Resolution order:
+///   1. `$ARK_CLAUDE_CODE_EXT_DIR` env var (tests + power users).
+///   2. `CARGO_MANIFEST_DIR` evaluated at compile-time — the host
+///      crate's absolute path at build time. Works for a
+///      developer-local `cargo run` / `cargo build` path.
+///   3. `$CARGO_MANIFEST_DIR` env var at run-time (same key, just
+///      read dynamically so a distributed binary launched from a
+///      cargo wrapper still resolves).
+///
+/// Returns `None` if none of the candidates resolves to a real
+/// directory containing a `Cargo.toml`. A distributed binary that
+/// ships without the source tree falls through to the manual-install
+/// fallback message.
+fn locate_claude_code_ext_path() -> Option<PathBuf> {
+    let candidates = [
+        std::env::var_os("ARK_CLAUDE_CODE_EXT_DIR").map(PathBuf::from),
+        // Compile-time path to this crate's manifest dir — the
+        // `extensions/claude-code` source tree itself. Baked in by
+        // the compiler for every build, including distribution
+        // builds, so the resulting binary carries the developer's
+        // absolute path. That's correct for a developer workflow
+        // (the `cargo install` path is where cargo sees the source
+        // tree) and harmless for a distributed binary because the
+        // candidate is only attempted; a missing path falls through.
+        Some(PathBuf::from(env!("CARGO_MANIFEST_DIR"))),
+        std::env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from),
+    ];
+    for candidate in candidates.into_iter().flatten() {
+        if candidate.join("Cargo.toml").is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 /// Install `cc-hook` at [`cc_hook_install_path`].
@@ -878,13 +1068,223 @@ mod tests {
     #[test]
     fn install_cc_hook_stub_empty_surfaces_outcome() {
         // With the T-008a stub in effect, CC_HOOK_BYTES is empty —
-        // install_cc_hook_at MUST return StubEmpty + MUST NOT write.
+        // install_cc_hook_at MUST return StubEmpty + MUST NOT write
+        // when the cargo-install fallback is disabled via the env
+        // opt-out (test harness).
         assert!(crate::CC_HOOK_BYTES.is_empty(), "stub invariant");
+        let _env = env_lock();
+        let _guard = scoped_env_set("ARK_CLAUDE_CODE_NO_CARGO_FALLBACK", "1");
         let td = TempDir::new().unwrap();
         let p = td.path().join("sub/cc-hook");
         let outcome = install_cc_hook_at(&p);
         assert!(matches!(outcome, InstallOutcome::StubEmpty { .. }));
         assert!(!p.exists());
+    }
+
+    // ---- v0.2-backlog #7: cargo-install fallback --------------------
+
+    /// Env mutations cannot run in parallel — every `cargo_fallback_*`
+    /// test acquires this lock before mutating env vars. Mirrors
+    /// `cc_hook_install_path` tests that do the same dance.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Scoped env guard — sets `key` to `value` for the test body +
+    /// restores (or unsets) the previous value on drop. NOT thread-safe
+    /// — caller must hold [`env_lock`] for the duration of any test
+    /// that constructs one of these.
+    struct EnvGuard {
+        key: String,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.prev {
+                    Some(v) => std::env::set_var(&self.key, v),
+                    None => std::env::remove_var(&self.key),
+                }
+            }
+        }
+    }
+
+    fn scoped_env_set(key: &str, value: &str) -> EnvGuard {
+        let prev = std::env::var_os(key);
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        EnvGuard {
+            key: key.to_string(),
+            prev,
+        }
+    }
+
+    fn scoped_env_unset(key: &str) -> EnvGuard {
+        let prev = std::env::var_os(key);
+        unsafe {
+            std::env::remove_var(key);
+        }
+        EnvGuard {
+            key: key.to_string(),
+            prev,
+        }
+    }
+
+    /// Build a one-shot "cargo" shim that writes its argv to a temp
+    /// file for assertion, creates the expected `<root>/bin/<bin>`
+    /// file contents, and exits 0. Returns the path to the shim.
+    fn write_cargo_shim(dir: &Path, exit_code: i32) -> PathBuf {
+        let shim = dir.join("cargo-shim.sh");
+        // The shim inspects its args — when it sees `--root <R>` and
+        // `--bin <B>` it creates `<R>/bin/<B>`. Stdout is dropped.
+        let script = format!(
+            "#!/bin/sh\n\
+             set -e\n\
+             printf '%s\\n' \"$@\" > \"$CARGO_SHIM_LOG\"\n\
+             # Walk args looking for --root and --bin.\n\
+             root=''\n\
+             bin=''\n\
+             while [ $# -gt 0 ]; do\n\
+               case \"$1\" in\n\
+                 --root) root=\"$2\"; shift 2;;\n\
+                 --bin) bin=\"$2\"; shift 2;;\n\
+                 *) shift;;\n\
+               esac\n\
+             done\n\
+             if [ -n \"$root\" ] && [ -n \"$bin\" ]; then\n\
+               mkdir -p \"$root/bin\"\n\
+               printf 'shim' > \"$root/bin/$bin\"\n\
+               chmod 0755 \"$root/bin/$bin\"\n\
+             fi\n\
+             exit {exit_code}\n"
+        );
+        std::fs::write(&shim, script.as_bytes()).expect("write shim");
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod shim");
+        shim
+    }
+
+    #[test]
+    fn cargo_fallback_succeeds_via_shim_when_layout_matches() {
+        assert!(crate::CC_HOOK_BYTES.is_empty(), "stub invariant");
+        let _env = env_lock();
+        let td = TempDir::new().unwrap();
+        let log = td.path().join("cargo-args.log");
+        let shim = write_cargo_shim(td.path(), 0);
+        let target = td.path().join("root").join("bin").join("cc-hook");
+
+        // Point the install at our shim + log its args, and point
+        // ARK_CLAUDE_CODE_EXT_DIR at a stand-in crate dir carrying
+        // a Cargo.toml marker. `locate_claude_code_ext_path` requires
+        // the directory to have a Cargo.toml present.
+        let ext_dir = td.path().join("ext");
+        std::fs::create_dir_all(&ext_dir).unwrap();
+        std::fs::write(ext_dir.join("Cargo.toml"), b"# stub\n").unwrap();
+
+        let _g1 = scoped_env_unset("ARK_CLAUDE_CODE_NO_CARGO_FALLBACK");
+        let _g2 = scoped_env_set("ARK_CARGO_BIN", shim.to_str().unwrap());
+        let _g3 = scoped_env_set("ARK_CLAUDE_CODE_EXT_DIR", ext_dir.to_str().unwrap());
+        let _g4 = scoped_env_set("CARGO_SHIM_LOG", log.to_str().unwrap());
+
+        let outcome = install_cc_hook_at(&target);
+        assert!(
+            matches!(outcome, InstallOutcome::InstalledViaCargo { .. }),
+            "expected InstalledViaCargo, got {outcome:?}"
+        );
+        assert!(target.exists(), "shim should have created the target");
+
+        // Args contract: cargo install --bin cc-hook --path <ext_dir> --root <root> --locked
+        let args = std::fs::read_to_string(&log).expect("read log");
+        assert!(args.contains("install"), "args: {args}");
+        assert!(args.contains("--bin"), "args: {args}");
+        assert!(args.contains("cc-hook"), "args: {args}");
+        assert!(args.contains("--path"), "args: {args}");
+        assert!(args.contains(ext_dir.to_str().unwrap()), "args: {args}");
+        assert!(args.contains("--root"), "args: {args}");
+        assert!(args.contains("--locked"), "args: {args}");
+    }
+
+    #[test]
+    fn cargo_fallback_falls_through_to_stub_on_non_zero_exit() {
+        assert!(crate::CC_HOOK_BYTES.is_empty(), "stub invariant");
+        let _env = env_lock();
+        let td = TempDir::new().unwrap();
+        let log = td.path().join("cargo-args.log");
+        let shim = write_cargo_shim(td.path(), 101);
+        let target = td.path().join("root").join("bin").join("cc-hook");
+
+        let ext_dir = td.path().join("ext");
+        std::fs::create_dir_all(&ext_dir).unwrap();
+        std::fs::write(ext_dir.join("Cargo.toml"), b"# stub\n").unwrap();
+
+        let _g1 = scoped_env_unset("ARK_CLAUDE_CODE_NO_CARGO_FALLBACK");
+        let _g2 = scoped_env_set("ARK_CARGO_BIN", shim.to_str().unwrap());
+        let _g3 = scoped_env_set("ARK_CLAUDE_CODE_EXT_DIR", ext_dir.to_str().unwrap());
+        let _g4 = scoped_env_set("CARGO_SHIM_LOG", log.to_str().unwrap());
+
+        let outcome = install_cc_hook_at(&target);
+        assert!(
+            matches!(outcome, InstallOutcome::StubEmpty { .. }),
+            "non-zero cargo exit must stub, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn cargo_fallback_skips_when_basename_is_not_cc_hook() {
+        let _env = env_lock();
+        let _g = scoped_env_unset("ARK_CLAUDE_CODE_NO_CARGO_FALLBACK");
+        let td = TempDir::new().unwrap();
+        let target = td.path().join("bin").join("not-cc-hook");
+        let outcome = install_cc_hook_at(&target);
+        assert!(matches!(outcome, InstallOutcome::StubEmpty { .. }));
+    }
+
+    #[test]
+    fn cargo_fallback_skips_when_parent_not_named_bin() {
+        let _env = env_lock();
+        let _g = scoped_env_unset("ARK_CLAUDE_CODE_NO_CARGO_FALLBACK");
+        let td = TempDir::new().unwrap();
+        let target = td.path().join("random").join("cc-hook");
+        let outcome = install_cc_hook_at(&target);
+        assert!(matches!(outcome, InstallOutcome::StubEmpty { .. }));
+    }
+
+    #[test]
+    fn cargo_fallback_skips_when_cargo_missing_from_path() {
+        let _env = env_lock();
+        let _g1 = scoped_env_unset("ARK_CLAUDE_CODE_NO_CARGO_FALLBACK");
+        // Point at a path that does not exist.
+        let _g2 = scoped_env_set("ARK_CARGO_BIN", "/nope/definitely/not/cargo");
+        let td = TempDir::new().unwrap();
+        let target = td.path().join("root").join("bin").join("cc-hook");
+        let outcome = install_cc_hook_at(&target);
+        assert!(matches!(outcome, InstallOutcome::StubEmpty { .. }));
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn locate_claude_code_ext_path_returns_a_directory_with_cargo_toml() {
+        // Under test the compile-time MANIFEST_DIR is the real
+        // extensions/claude-code path — must carry a Cargo.toml.
+        let _env = env_lock();
+        let _g = scoped_env_unset("ARK_CLAUDE_CODE_EXT_DIR");
+        let p = locate_claude_code_ext_path().expect("compile-time manifest dir");
+        assert!(p.join("Cargo.toml").is_file(), "no Cargo.toml at {p:?}");
+    }
+
+    #[test]
+    fn locate_claude_code_ext_path_honors_env_override() {
+        let _env = env_lock();
+        let td = TempDir::new().unwrap();
+        std::fs::write(td.path().join("Cargo.toml"), b"# stub\n").unwrap();
+        let _g = scoped_env_set("ARK_CLAUDE_CODE_EXT_DIR", td.path().to_str().unwrap());
+        let got = locate_claude_code_ext_path().expect("override wins");
+        assert_eq!(got, td.path().to_path_buf());
     }
 
     #[test]
