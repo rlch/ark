@@ -64,6 +64,7 @@ use ark_ext_proto::{
 };
 use ark_types::{CoreEvent, EventSink};
 use async_trait::async_trait;
+use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 pub mod columns;
@@ -224,7 +225,7 @@ pub const CC_HOOK_BYTES: &[u8] = &[];
 /// (which lives in a later soul-phase task, not claude-code-ext) can
 /// keep the injection shape or swap to a trait-method surface without
 /// breaking the ExtEvent payload contract.
-#[derive(Debug, Default, Clone)]
+#[derive(Clone, Default)]
 pub struct ClaudeCodeExtension {
     /// Optional broadcast sink the socket accept loop forwards decoded
     /// [`ark_types::ExtEvent`]s to, wrapped in
@@ -256,6 +257,55 @@ pub struct ClaudeCodeExtension {
     /// tier (this tier stays in-process per the task brief's
     /// "supervisor out of scope" constraint).
     list_state: std::sync::Arc<std::sync::Mutex<CcListColumnState>>,
+
+    /// v0.2 backlog #3: per-extension [`SubagentRegistry`] the
+    /// `on_session_start` accept loop folds hook events into. Tracks
+    /// per-subagent `SubagentState` and emits `RenamePaneEmission`
+    /// values on status / tool transitions. See
+    /// [`Self::subagent_registry`] for the read-back accessor.
+    ///
+    /// Constructed fresh on every `ClaudeCodeExtension::new()` so
+    /// identical instances (unit tests) don't share state. Cloning the
+    /// extension shares the registry across every clone — the
+    /// `on_session_start` closure captures a clone, not the original.
+    subagent_registry: Arc<SubagentRegistry>,
+
+    /// v0.2 backlog #3: optional `pane/emit` emitter the accept loop
+    /// invokes on each [`RenamePaneEmission`] the registry produces.
+    ///
+    /// When `None` (unit tests, CLI dry-runs, any context with no host
+    /// to route emissions to) the registry still updates its cached
+    /// state — emissions are silently dropped. When `Some`, the host
+    /// supplies a callback that routes the emission's `{id, payload}`
+    /// into a `pane/emit` RPC against the appropriate stack-child
+    /// pane. The callback is `Fn` (not `FnMut`) so the accept loop
+    /// can call it from any frame without locking.
+    ///
+    /// The callback is stored `Arc<dyn Fn(...) + Send + Sync>` so
+    /// cloning the extension (Clone impl, bus task spawn) costs a
+    /// single refcount bump. Not `Debug` — trait objects of `Fn` don't
+    /// derive Debug automatically, and a manual impl would leak no
+    /// useful state; the struct-level Debug impl prints
+    /// `rename_pane_emitter: <fn>` for the `Some` case.
+    rename_pane_emitter: Option<Arc<RenamePaneEmitterFn>>,
+}
+
+/// Trait-object signature the host plugs into
+/// [`ClaudeCodeExtension::rename_pane_emitter`]. Takes ownership of the
+/// emission so the host can move the payload JSON through any
+/// serialisation layer without re-allocating.
+pub type RenamePaneEmitterFn = dyn Fn(RenamePaneEmission) + Send + Sync + 'static;
+
+impl std::fmt::Debug for ClaudeCodeExtension {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClaudeCodeExtension")
+            .field("event_sink", &self.event_sink.is_some())
+            .field("config", &self.config)
+            .field("list_state", &self.list_state)
+            .field("subagent_registry", &self.subagent_registry)
+            .field("rename_pane_emitter", &self.rename_pane_emitter.is_some())
+            .finish()
+    }
 }
 
 /// T-032 R5b shape of a `scene_compile_hook` env injection request. An
@@ -310,6 +360,8 @@ impl ClaudeCodeExtension {
             event_sink: None,
             config: std::sync::Arc::new(std::sync::Mutex::new(ClaudeCodeConfig::default())),
             list_state: std::sync::Arc::new(std::sync::Mutex::new(CcListColumnState::default())),
+            subagent_registry: Arc::new(SubagentRegistry::new()),
+            rename_pane_emitter: None,
         }
     }
 
@@ -325,7 +377,33 @@ impl ClaudeCodeExtension {
             event_sink: Some(sink),
             config: std::sync::Arc::new(std::sync::Mutex::new(ClaudeCodeConfig::default())),
             list_state: std::sync::Arc::new(std::sync::Mutex::new(CcListColumnState::default())),
+            subagent_registry: Arc::new(SubagentRegistry::new()),
+            rename_pane_emitter: None,
         }
+    }
+
+    /// v0.2 backlog #3: install a `pane/emit` emitter callback. The
+    /// accept loop invokes this on every [`RenamePaneEmission`] the
+    /// registry produces — the host uses the emission's
+    /// `{id, payload}` to drive the corresponding stack-child pane's
+    /// `pane/emit` RPC.
+    ///
+    /// Builder-style: returns `Self` so supervisor-side wiring can
+    /// chain the call inside a construction expression.
+    #[must_use]
+    pub fn with_rename_pane_emitter<F>(mut self, emitter: F) -> Self
+    where
+        F: Fn(RenamePaneEmission) + Send + Sync + 'static,
+    {
+        self.rename_pane_emitter = Some(Arc::new(emitter));
+        self
+    }
+
+    /// Borrow the per-extension [`SubagentRegistry`]. Primary use is
+    /// tests that assert subagent state updates flowed through after an
+    /// ExtEvent was handled by the accept loop.
+    pub fn subagent_registry(&self) -> &Arc<SubagentRegistry> {
+        &self.subagent_registry
     }
 
     /// Borrow the configured event sink, if any. Exposed primarily for
@@ -572,6 +650,14 @@ impl ArkExtension for ClaudeCodeExtension {
         // continue rather than crash the accept loop.
         let sink = self.event_sink.clone();
         let watcher_for_loop = dir_watcher.clone();
+        // v0.2 backlog #3: capture the per-extension SubagentRegistry
+        // + the optional pane-emit emitter so the accept loop can fold
+        // subagent hook events into cached state AND drive RenamePane
+        // emissions on status / tool transitions. Both are Arc-cloned
+        // here so the spawned task keeps its own refcounted view; the
+        // original `&self` is dropped as soon as this function returns.
+        let registry_for_loop = self.subagent_registry.clone();
+        let emitter_for_loop = self.rename_pane_emitter.clone();
         tokio::spawn(async move {
             sock.accept_loop(move |ev| match ev {
                 socket::SocketEvent::HookFired { event, ext_event } => {
@@ -603,6 +689,31 @@ impl ArkExtension for ClaudeCodeExtension {
                                 error = %e,
                                 "claude-code: transcript dir watcher mutex poisoned; skipping ensure_tracking"
                             ),
+                        }
+                    }
+                    // v0.2 backlog #3: fold the hook event through the
+                    // SubagentRegistry BEFORE forwarding to the bus.
+                    // Three reasons for ordering it first:
+                    //   (a) Bus receivers that consume `CoreEvent::Ext`
+                    //       and then read the registry (e.g. a rhai
+                    //       reaction) see a registry state that already
+                    //       reflects the event — no lost-update window.
+                    //   (b) Registry folding is pure CPU over a local
+                    //       HashMap; moving it ahead of the bus send
+                    //       adds microseconds at most.
+                    //   (c) The RenamePane emitter is fired
+                    //       synchronously here — pane-rename UI lands
+                    //       BEFORE any async reactive cascade kicks in
+                    //       off the bus.
+                    if let Some(emission) = registry_for_loop.on_ext_event(&ext_event) {
+                        debug!(
+                            agent_id = %emission.id,
+                            title = ?emission.payload.get("name").and_then(|v| v.as_str()),
+                            has_emitter = emitter_for_loop.is_some(),
+                            "claude-code: subagent registry emitted RenamePane"
+                        );
+                        if let Some(emitter) = emitter_for_loop.as_ref() {
+                            emitter(emission);
                         }
                     }
                     if let Some(bus) = sink.as_ref() {
@@ -1289,7 +1400,7 @@ pub fn reconcile_settings_for_session(
 
 use ark_types::ExtEvent;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 /// T-037 event-dispatch outcome. Emitted by [`SubagentRegistry::on_ext_event`]
 /// so callers can forward the resulting `RenamePane` payload through
@@ -2316,5 +2427,199 @@ mod tier8_reload_tests {
         // Other known fields take defaults.
         assert_eq!(snap.transcript_tail_lines, 200);
         assert!(snap.auto_install_hook_entries);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// v0.2 backlog #3 — SubagentRegistry auto-wire tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod v0_2_backlog_3_tests {
+    use super::*;
+    use ark_types::ExtEvent;
+    use std::sync::{Arc, Mutex};
+
+    /// Build an `ExtEvent` of kind `claude-code.<kind>` — matches the
+    /// shape the accept-loop receives from `payload_to_ext_event`.
+    fn ev(kind: &str, payload: serde_json::Value) -> ExtEvent {
+        ExtEvent {
+            ext: EXT_NAME.to_string(),
+            kind: kind.to_string(),
+            payload,
+        }
+    }
+
+    #[test]
+    fn default_ext_has_fresh_registry_with_no_subagents() {
+        let ext = ClaudeCodeExtension::new();
+        assert!(ext.subagent_registry().snapshot().is_empty());
+    }
+
+    #[test]
+    fn registry_is_shared_across_clones() {
+        // Cloning the extension must share the registry Arc so a
+        // clone captured inside the accept-loop task sees updates that
+        // tests / supervisor code applied via the original handle
+        // (and vice-versa). Pointer equality on the inner Arc is the
+        // precise proof.
+        let a = ClaudeCodeExtension::new();
+        let b = a.clone();
+        assert!(
+            Arc::ptr_eq(a.subagent_registry(), b.subagent_registry()),
+            "Clone must share the subagent registry Arc"
+        );
+    }
+
+    #[test]
+    fn registry_accepts_subagent_start_via_on_ext_event() {
+        // Exercises the same entry point the accept-loop calls.
+        let ext = ClaudeCodeExtension::new();
+        let e = ev(
+            "subagent.start",
+            serde_json::json!({
+                "agent_id": "sub-1",
+                "agent_type": "writer",
+            }),
+        );
+        let emission = ext
+            .subagent_registry()
+            .on_ext_event(&e)
+            .expect("subagent.start produces emission");
+        assert_eq!(emission.id, "sub-1");
+        assert_eq!(
+            emission.payload.get("kind").and_then(|v| v.as_str()),
+            Some("RenamePane")
+        );
+        assert!(ext.subagent_registry().get("sub-1").is_some());
+    }
+
+    #[test]
+    fn with_rename_pane_emitter_stores_callback() {
+        // Builder-style setter must round-trip — a subsequent snapshot
+        // of the extension has the emitter installed. Using
+        // `rename_pane_emitter`'s Option::is_some() via the Debug impl
+        // would be indirect; instead we invoke the emitter directly
+        // via the internal field (crate-private read).
+        let captured: Arc<Mutex<Vec<RenamePaneEmission>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_cb = captured.clone();
+        let ext = ClaudeCodeExtension::new().with_rename_pane_emitter(move |em| {
+            captured_for_cb.lock().unwrap().push(em);
+        });
+
+        // Drive an emission via the registry + invoke the emitter the
+        // accept-loop would.
+        let e = ev(
+            "subagent.start",
+            serde_json::json!({
+                "agent_id": "sub-cb",
+                "agent_type": "t",
+            }),
+        );
+        let emission = ext.subagent_registry().on_ext_event(&e).unwrap();
+        ext.rename_pane_emitter.as_ref().expect("emitter installed")(emission);
+
+        let recorded = captured.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].id, "sub-cb");
+    }
+
+    #[test]
+    fn registry_round_trips_start_tool_stop_sequence() {
+        // End-to-end: the three-event sequence a real subagent emits
+        // flows through the registry cleanly, and the final state
+        // reflects the full lifecycle. Simulates the accept loop's
+        // per-frame `on_ext_event` call without actually spinning one
+        // up (socket IO is orthogonal to registry folding).
+        let ext = ClaudeCodeExtension::new();
+        let reg = ext.subagent_registry();
+
+        reg.on_ext_event(&ev(
+            "subagent.start",
+            serde_json::json!({"agent_id": "end-to-end", "agent_type": "code-writer"}),
+        ))
+        .expect("start");
+        assert_eq!(
+            reg.get("end-to-end").unwrap().status,
+            SubagentStatus::Running
+        );
+
+        reg.on_ext_event(&ev(
+            "pre-tool-use",
+            serde_json::json!({"agent_id": "end-to-end", "tool_name": "Edit"}),
+        ))
+        .expect("tool");
+        assert_eq!(
+            reg.get("end-to-end").unwrap().last_tool.as_deref(),
+            Some("Edit")
+        );
+
+        reg.on_ext_event(&ev(
+            "subagent.stop",
+            serde_json::json!({"agent_id": "end-to-end", "success": true}),
+        ))
+        .expect("stop");
+        assert_eq!(reg.get("end-to-end").unwrap().status, SubagentStatus::Done);
+    }
+
+    #[test]
+    fn emitter_fires_for_every_lifecycle_transition() {
+        // The accept loop invokes the emitter on EVERY emission, not
+        // just the start event — pane title updates track
+        // (agent_type · status · last_tool) through the lifecycle.
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_cb = captured.clone();
+        let ext = ClaudeCodeExtension::new().with_rename_pane_emitter(move |em| {
+            if let Some(name) = em.payload.get("name").and_then(|v| v.as_str()) {
+                captured_for_cb.lock().unwrap().push(name.to_string());
+            }
+        });
+
+        for e in [
+            ev(
+                "subagent.start",
+                serde_json::json!({"agent_id": "a", "agent_type": "t"}),
+            ),
+            ev(
+                "pre-tool-use",
+                serde_json::json!({"agent_id": "a", "tool_name": "Bash"}),
+            ),
+            ev(
+                "subagent.stop",
+                serde_json::json!({"agent_id": "a", "success": false}),
+            ),
+        ] {
+            if let Some(em) = ext.subagent_registry().on_ext_event(&e) {
+                if let Some(emitter) = ext.rename_pane_emitter.as_ref() {
+                    emitter(em);
+                }
+            }
+        }
+
+        let titles = captured.lock().unwrap();
+        assert_eq!(titles.len(), 3, "one emission per lifecycle transition");
+        assert_eq!(titles[0], "t · running · -");
+        assert_eq!(titles[1], "t · running · Bash");
+        assert_eq!(titles[2], "t · failed · Bash");
+    }
+
+    #[test]
+    fn non_subagent_events_do_not_fire_emitter() {
+        // The registry filters to 3 kinds; any other kind is a no-op
+        // and the emitter MUST not fire.
+        let captured: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
+        let c = captured.clone();
+        let ext = ClaudeCodeExtension::new().with_rename_pane_emitter(move |_em| {
+            *c.lock().unwrap() += 1;
+        });
+        for kind in ["post-tool-use", "notification", "user-prompt-submit"] {
+            if let Some(em) = ext
+                .subagent_registry()
+                .on_ext_event(&ev(kind, serde_json::json!({"agent_id": "x"})))
+            {
+                ext.rename_pane_emitter.as_ref().unwrap()(em);
+            }
+        }
+        assert_eq!(*captured.lock().unwrap(), 0);
     }
 }
