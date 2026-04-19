@@ -51,7 +51,7 @@ DONE via phase-2. Prior audit was wrong.
 
 ### Wave 4 — Tier 3 (T-013, T-014, T-015, T-016)
 
-SHA: `<pending>`.
+SHA: `f819377`.
 
 - **T-013 ViewTable type**: new file `crates/scene/src/compile/view_table.rs`
   carries the scene-local `ViewTable = BTreeMap<HandleId, ViewDecl>` type
