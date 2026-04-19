@@ -859,8 +859,18 @@ pub struct PaneCloseResponse {}
 pub struct StackSpawnPaneRequest {
     /// Target stack handle.
     pub stack: ark_view::HandleId,
-    /// Attrs payload — v0.1 is intentionally opaque JSON. Later tiers
-    /// formalise PaneAttrs; keeping opaque here preserves MINOR room.
+    /// Attrs payload — v0.2 widened this to carry the contents of
+    /// [`ark_view::PaneAttrs::view_attrs`] (per-view JSON, opaque at
+    /// this layer). v0.1 peers populated `{}`; the
+    /// [`ark_view::PaneAttrs`] serde shape stays round-trip compatible
+    /// with both, so mixed-version frames on the wire continue to
+    /// decode (v0.1-empty `{}` → `view_attrs: null` after widening).
+    ///
+    /// The type stays [`OpaqueJson`] rather than `ark_view::PaneAttrs`
+    /// directly because the proto crate does NOT depend on
+    /// `ark-view`'s serde_json-parsed surface — downstream facet-based
+    /// bindings don't have `serde_json::Value` support yet. Consumers
+    /// decode with `serde_json::from_str::<ark_view::PaneAttrs>(&attrs)`.
     pub attrs: OpaqueJson,
 }
 

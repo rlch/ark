@@ -20,5 +20,8 @@ pub use lookup::{HandleRecord, SessionHandles};
 pub use suppression::{ParamsHash, SceneHandleName, SuppressionPolicy, hash_params};
 #[doc(hidden)]
 pub use typed::__trybuild_pane_ctor;
-pub use typed::{Pane, PaneAttrs, PaneLike, Stack, TabHandle};
+pub use typed::{
+    Pane, PaneAttrs, PaneLike, Stack, StackDispatcher, TabHandle, register_stack_dispatcher,
+    stack_dispatcher,
+};
 pub use view::{CommandView, View, ZellijView};

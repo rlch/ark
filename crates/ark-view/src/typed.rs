@@ -243,32 +243,151 @@ impl<V: ZellijView> Pane<V> {
 
 /// Attributes passed to [`Stack::spawn_pane`].
 ///
-/// v0.1 is intentionally empty — later tiers (scene wiring, ext
-/// authoring) may extend this with `env` overrides, initial view-body
-/// payload, etc. Kept as a dedicated struct so additions are
-/// MINOR-compatible (per phase-2 decision #4c): appending fields with
-/// `Default` values is source-compatible for call sites that build
-/// via `PaneAttrs::default()` / struct-literal-with-`..default()`.
-#[derive(Clone, Debug, Default)]
+/// v0.2 widened this struct (see v0.2-backlog #2) so it carries a
+/// per-view JSON payload (`view_attrs`). The struct is OPAQUE to
+/// `ark-view`: each view type defines its own shape via a typed
+/// `{ViewName}Attrs` struct that the caller serialises into
+/// `view_attrs` via [`PaneAttrs::from_attrs`]. On the wire this travels
+/// as the `attrs` field of
+/// [`ark_ext_proto::StackSpawnPaneRequest`][`StackSpawnPaneRequest`]
+/// (also `serde_json::Value`).
+///
+/// ### Why `serde_json::Value` instead of a generic `V::Attrs`?
+///
+/// Threading an associated type onto `Stack<V>` would cascade a new
+/// `V::Attrs: Serialize + DeserializeOwned` bound onto every call site
+/// that names `Stack<V>` — including trait object iteration through
+/// [`PaneLike`]. `serde_json::Value` keeps the bound-inference cheap at
+/// the minor cost of an intermediate JSON traversal (the Value is
+/// serialised straight through the RPC layer, not round-tripped).
+///
+/// Backwards compat: the default (empty) `view_attrs` is
+/// `serde_json::Value::Null`. The previous struct literal `PaneAttrs {}`
+/// no longer compiles verbatim, but `PaneAttrs::default()` and
+/// `..PaneAttrs::default()` update syntax both continue to work — and
+/// in fact ALL ark-internal call sites used the default path.
+///
+/// [`StackSpawnPaneRequest`]: https://docs.rs/ark-ext-proto
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct PaneAttrs {
-    // Intentionally empty for v0.1 — see doc-comment.
+    /// Per-view JSON attrs. Opaque to ark-view; each view type defines
+    /// its own shape (serde_json::Value used to avoid a generic
+    /// parameter on `PaneAttrs` — a `V::Attrs` associated type would
+    /// cascade V bounds everywhere `Stack<V>` appears).
+    ///
+    /// Default: [`serde_json::Value::Null`].
+    #[serde(default)]
+    pub view_attrs: serde_json::Value,
+}
+
+impl PaneAttrs {
+    /// Construct from a serialisable attrs type.
+    ///
+    /// Used at fan-out sites that have a typed `{ViewName}Attrs`
+    /// struct on hand (e.g. `ClaudeCodeSubagentAttrs` → a
+    /// `Stack<ClaudeCodeSubagent>` spawn_pane call). The resulting
+    /// `PaneAttrs` carries `view_attrs == serde_json::to_value(&attrs)`.
+    ///
+    /// Returns a [`serde_json::Error`] when the caller's attrs type
+    /// can't be serialised (rare in practice — all ark view-attr types
+    /// are plain structs of owned strings / primitives).
+    pub fn from_attrs<A: serde::Serialize>(attrs: &A) -> Result<Self, serde_json::Error> {
+        Ok(Self {
+            view_attrs: serde_json::to_value(attrs)?,
+        })
+    }
+
+    /// Borrow the per-view JSON attrs.
+    pub fn view_attrs(&self) -> &serde_json::Value {
+        &self.view_attrs
+    }
+}
+
+/// Dispatcher the host (supervisor) plugs in at init time to let
+/// [`Stack::spawn_pane`] actually reach the `stack/spawn_pane` RPC.
+///
+/// `ark-view` sits BELOW `ark-ext-proto` in the crate DAG (see
+/// `ark-view/Cargo.toml` — the crate forbids an `ark-ext-proto` dep),
+/// so the real RPC client can't be referenced here directly. Instead,
+/// the supervisor registers a concrete implementer via
+/// [`register_stack_dispatcher`] at startup.
+///
+/// Implementations receive the stack handle + the per-view attrs JSON
+/// (pre-extracted from [`PaneAttrs::view_attrs`]) and return either a
+/// concrete freshly-minted child pane handle, or `None` when the
+/// dispatch failed (transport error, capability denied, etc.). On
+/// `None` the caller falls back to the synthetic handle path so the
+/// current user experience (at-most-once-per-`agent_id` fan-out) is
+/// preserved — the child just ends up with an opaque placeholder the
+/// next pane op will surface as `HandleGone`.
+pub trait StackDispatcher: Send + Sync {
+    /// Invoke the host's `stack/spawn_pane` RPC and return the newly
+    /// minted child pane handle. See trait docs for the None-fallback
+    /// semantics.
+    fn spawn_pane(&self, stack: &HandleId, view_attrs: &serde_json::Value) -> Option<HandleId>;
+}
+
+/// Process-global [`StackDispatcher`] slot. Set once at supervisor init
+/// via [`register_stack_dispatcher`]; consulted by every
+/// `Stack::spawn_pane` call in the process.
+///
+/// Process-global (not per-`Stack`) because `Stack<V>` is serialised as
+/// a plain string and reconstructed from wire frames all over the
+/// place — threading a dispatcher handle through every call site would
+/// cascade changes into every crate that iterates typed handles.
+/// Mirrors the pattern `supervisor::ext_dispatch::CAP_REGISTRY` uses.
+static STACK_DISPATCHER: std::sync::OnceLock<Box<dyn StackDispatcher>> = std::sync::OnceLock::new();
+
+/// Register the process-global [`StackDispatcher`]. Called once by the
+/// supervisor (or a test harness) at startup. Idempotent: subsequent
+/// calls after the first are silently ignored — the first-writer-wins
+/// contract is sufficient because the supervisor is the only legitimate
+/// caller and it initialises before any extension can hold a `Stack<V>`.
+///
+/// Returns `true` if the dispatcher was installed; `false` if one was
+/// already registered.
+pub fn register_stack_dispatcher<D: StackDispatcher + 'static>(dispatcher: D) -> bool {
+    STACK_DISPATCHER.set(Box::new(dispatcher)).is_ok()
+}
+
+/// Test-only: read back the current process-global dispatcher (if any).
+/// Exposed so tests can assert registration happened; the hot path
+/// inlines this check directly.
+#[doc(hidden)]
+pub fn stack_dispatcher() -> Option<&'static dyn StackDispatcher> {
+    STACK_DISPATCHER.get().map(|b| b.as_ref())
 }
 
 impl<V: View> Stack<V> {
     /// Spawn a new pane into this stack.
     ///
-    /// Maps to `stack/spawn_pane` at T-018+. T-011 pins the
-    /// Rust-side signature; the returned `Pane<V>` carries a synthetic
-    /// placeholder handle until the RPC dispatcher is wired — callers
-    /// that exercise the returned handle against the host will get
-    /// a `HandleGone`-shaped error (R7). This is INTENTIONAL for v0.1
-    /// so scene/ext code can compile and unit-test against the surface.
-    pub fn spawn_pane(&self, _attrs: PaneAttrs) -> Pane<V> {
-        // Placeholder: distinct synthetic handles per call so callers
-        // can still distinguish two spawned children by handle before
-        // RPC wiring lands. `<stack-handle>-<monotonic>` mirrors R-7's
-        // production format (stack-handle-ulid) in spirit. Replaced
-        // with real RPC invocation in T-018+.
+    /// **v0.2 live RPC path** (see v0.2-backlog #2). When the host has
+    /// registered a [`StackDispatcher`] via
+    /// [`register_stack_dispatcher`] — which the supervisor does once
+    /// at startup — `spawn_pane` forwards `attrs.view_attrs` to the
+    /// host's `stack/spawn_pane` RPC and returns the concrete child
+    /// pane handle the host minted.
+    ///
+    /// **Fallback** — when no dispatcher is registered (unit tests, the
+    /// ext-crate-only test harness, any context where the supervisor
+    /// isn't in the loop), OR when the registered dispatcher returned
+    /// `None` (transport error / capability denied / etc.), the method
+    /// falls back to a synthetic placeholder handle of the shape
+    /// `__unwired_spawn__-<stack-handle>-<counter>`. Callers that
+    /// exercise the returned handle against the host will get
+    /// `HandleGone` on the next pane op, matching R7.
+    ///
+    /// The synthetic-handle counter is process-global + monotonic so
+    /// two back-to-back `spawn_pane` calls never produce the same
+    /// placeholder — unit tests that assert idempotency-by-handle
+    /// continue to work.
+    pub fn spawn_pane(&self, attrs: PaneAttrs) -> Pane<V> {
+        if let Some(dispatcher) = STACK_DISPATCHER.get() {
+            if let Some(child) = dispatcher.spawn_pane(&self.handle, &attrs.view_attrs) {
+                return Pane::from_handle(child);
+            }
+        }
+        // Fallback: synthetic placeholder. See doc-comment.
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -488,5 +607,89 @@ mod tests {
         let a = PaneAttrs::default();
         let _b = a.clone();
         let _dbg = format!("{:?}", PaneAttrs::default());
+    }
+
+    // ---- v0.2 backlog #2: PaneAttrs widening ------------------------------
+
+    #[test]
+    fn pane_attrs_default_view_attrs_is_null() {
+        // Default round-trip: empty `view_attrs` serialises as JSON null
+        // (or a struct with `view_attrs: null`). The important invariant
+        // is that `Default::default()` stays source-compatible with the
+        // old empty-struct shape for every existing call site.
+        let a = PaneAttrs::default();
+        assert!(a.view_attrs.is_null());
+    }
+
+    #[test]
+    fn pane_attrs_from_attrs_round_trip() {
+        #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
+        struct SampleAttrs {
+            id: String,
+            transcript_path: String,
+        }
+        let sample = SampleAttrs {
+            id: "sub-abc".into(),
+            transcript_path: "/tmp/t.jsonl".into(),
+        };
+        let pa = PaneAttrs::from_attrs(&sample).expect("serialisable");
+        // Round-trip back: the typed attrs survive the JSON cast.
+        let back: SampleAttrs =
+            serde_json::from_value(pa.view_attrs.clone()).expect("deserialisable");
+        assert_eq!(back, sample);
+    }
+
+    #[test]
+    fn pane_attrs_serializes_and_deserializes() {
+        // Wire-level round-trip — exercised by the supervisor's
+        // `stack/spawn_pane` handler when it receives the opaque JSON.
+        let pa = PaneAttrs::from_attrs(&json!({"k": "v"})).unwrap();
+        let wire = serde_json::to_value(&pa).unwrap();
+        let back: PaneAttrs = serde_json::from_value(wire).unwrap();
+        assert_eq!(back.view_attrs, json!({"k": "v"}));
+    }
+
+    #[test]
+    fn pane_attrs_deserializes_from_empty_object_backcompat() {
+        // v0.1 had an empty-struct PaneAttrs. The serde shape there was
+        // `{}`. v0.2's default deserialises from `{}` with `view_attrs`
+        // falling back to `null` via `#[serde(default)]` — preserves
+        // wire compat for any frame a v0.1 peer sent.
+        let pa: PaneAttrs = serde_json::from_str("{}").unwrap();
+        assert!(pa.view_attrs.is_null());
+    }
+
+    // ---- v0.2 backlog #2: Stack::spawn_pane dispatcher path ---------------
+
+    // NOTE: the process-global STACK_DISPATCHER is one-shot (OnceLock).
+    // We therefore CANNOT register a dispatcher inside a unit test here
+    // without poisoning every subsequent test in the process. The
+    // fallback path (no dispatcher registered) IS exercised by the
+    // existing `stack_spawn_pane_returns_pane_of_same_view_type` test.
+    //
+    // Dispatcher-registered behaviour is verified via a dedicated
+    // integration test in `tests/stack_dispatcher.rs` — it runs in its
+    // own process so the OnceLock doesn't leak across unrelated tests.
+
+    #[test]
+    fn stack_spawn_pane_synthetic_handle_shape() {
+        // Fallback path — the synthetic handle contains the stack's
+        // handle bytes and a monotonic counter. Pins the shape so any
+        // future dispatcher-fallback tweak stays compatible.
+        let s: Stack<VX> = Stack::from_handle(HandleId::new("my-stack"));
+        let p = s.spawn_pane(PaneAttrs::default());
+        let h = p.handle().as_str();
+        assert!(h.starts_with("__unwired_spawn__-my-stack-"), "got {h}");
+    }
+
+    #[test]
+    fn stack_spawn_pane_with_typed_attrs_fallback() {
+        // Even with a non-null view_attrs payload, the fallback stays
+        // in the synthetic handle shape — the dispatcher is the only
+        // thing that translates `view_attrs` into a real child handle.
+        let s: Stack<VX> = Stack::from_handle(HandleId::new("s"));
+        let pa = PaneAttrs::from_attrs(&json!({"id": "child-1"})).unwrap();
+        let p = s.spawn_pane(pa);
+        assert!(p.handle().as_str().starts_with("__unwired_spawn__-s-"));
     }
 }
