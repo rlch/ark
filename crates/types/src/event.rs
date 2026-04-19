@@ -13,14 +13,16 @@
 //! inside extensions (Phase 4+).
 
 use chrono::{DateTime, Utc};
+use facet::Facet;
 use serde::{Deserialize, Serialize};
 
 use crate::spec::SessionSpec;
 
 /// Core-level log level. Survives from the old event surface since
 /// `CoreEvent::Log` still carries a level.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Facet)]
 #[serde(rename_all = "snake_case")]
+#[repr(u8)]
 pub enum LogLevel {
     Trace,
     Debug,
@@ -37,9 +39,10 @@ pub enum LogLevel {
 /// carries its payload in a predictable `value` slot. The enum is
 /// `#[non_exhaustive]`: downstream matches must use a wildcard arm so
 /// future terminal reasons can land without breaking consumers.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Facet)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 #[non_exhaustive]
+#[repr(u8)]
 pub enum ExitReason {
     /// Session ended cleanly — methodology reported a normal terminal state.
     Normal,
@@ -58,17 +61,35 @@ pub enum ExitReason {
 /// `"claude-code"`), `kind` is the extension's own event discriminator
 /// (e.g. `"permission.asked"`, `"tool.use"`), and `payload` is free-form
 /// extension-owned JSON.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Facet)]
 pub struct ExtEvent {
     pub ext: String,
     pub kind: String,
+    /// Free-form extension-owned JSON. Marked `#[facet(opaque)]` because
+    /// `serde_json::Value` is a foreign enum with no Facet derive — and
+    /// downstream scene selectors treat `payload.*` access as lax per
+    /// the R4.2 hybrid-access pattern, so the validator never needs to
+    /// recurse into the payload.
+    #[facet(opaque)]
     pub payload: serde_json::Value,
 }
 
 /// The core event stream. Narrow by design — five variants only. Anything
 /// methodology- or extension-flavoured rides in `Ext(ExtEvent)`.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+///
+/// # Reflection (T-057, scene-v3 S-D)
+///
+/// `#[derive(Facet)]` exposes each variant's top-level field list to
+/// reflection so the scene crate's event-field validator can traverse
+/// `CoreEvent::SHAPE` instead of maintaining a hardcoded field table.
+/// Non-primitive fields — `spec: SessionSpec`, `terminated_at:
+/// DateTime<Utc>` — are marked `#[facet(opaque)]` so the derive does
+/// not cascade into foreign types that don't carry `Facet` impls; this
+/// is safe because the validator only inspects the field NAMES, not
+/// their inner types (per R4.2 hybrid-access lax-payload rules).
+#[derive(Serialize, Deserialize, Debug, Clone, Facet)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[repr(u8)]
 pub enum CoreEvent {
     /// Free-form log line emitted by core or (via `Ext`) an extension that
     /// prefers the core log channel.
@@ -80,11 +101,20 @@ pub enum CoreEvent {
     /// Core-level error.
     Error { error: String },
     /// Session lifecycle: spawn.
-    SessionStarted { spec: SessionSpec },
+    SessionStarted {
+        /// Opaque to facet: [`SessionSpec`] carries non-Facet fields
+        /// (`DateTime<Utc>`, `serde_json::Value`-holding `BTreeMap`)
+        /// and the T-057 validator only asserts on the top-level field
+        /// name `spec`, not its inner shape.
+        #[facet(opaque)]
+        spec: SessionSpec,
+    },
     /// Session lifecycle: termination. `exit` records the terminal state
     /// (see [`ExitReason`]); production sites emit `ExitReason::Normal`
     /// unless the methodology signals an error or a cancellation.
     SessionEnded {
+        /// Opaque: `chrono::DateTime<Utc>` has no Facet impl today.
+        #[facet(opaque)]
         terminated_at: DateTime<Utc>,
         exit: ExitReason,
     },

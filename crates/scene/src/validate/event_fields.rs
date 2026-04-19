@@ -5,12 +5,25 @@
 //! fields surface as [`SceneError::UnknownEventField`] with a Jaro-
 //! Winkler suggestion.
 //!
-//! # Why hardcoded
+//! # Reflection (T-057, scene-v3 S-D)
 //!
-//! `CoreEvent` does not derive `facet::Facet` today. Rather than wait
-//! for a facet migration of the types crate, this pass hardcodes the
-//! field set per variant against [`crate::reactions::EventKind`]. The
-//! list stays in sync with `CoreEvent` via a unit test.
+//! The canonical field list per variant is derived at runtime via
+//! `<CoreEvent as facet::Facet>::SHAPE`: we walk the enum's variants,
+//! match on variant name, and enumerate `variant.data.fields`. The
+//! scene crate used to carry a hardcoded `match kind { … }` table that
+//! drifted from `CoreEvent` whenever a new field landed; shape
+//! traversal eliminates that sync bug by making `CoreEvent` itself the
+//! single source of truth.
+//!
+//! # Projection-only fields
+//!
+//! [`FlatEvent::from(&CoreEvent::SessionEnded{..})`] splits `exit:
+//! ExitReason` into two flat payload keys — `exit` (discriminant) and
+//! `exit_message` (Error's payload). The `exit_message` name is therefore
+//! valid in selectors even though it isn't on the `SessionEnded` struct
+//! itself. [`flat_projection_extras`] lists these projection-only
+//! extras per variant; [`canonical_fields`] overlays them onto the
+//! shape-derived base list before the contains-check.
 //!
 //! # Ext special case
 //!
@@ -23,24 +36,98 @@
 //!
 //! We therefore skip field-existence checks for Ext selectors entirely.
 
+use std::sync::OnceLock;
+
 use crate::ast::selector::EventSelector;
 use crate::error::SceneError;
 use crate::reactions::EventKind;
+use ark_types::CoreEvent;
+use facet::{Facet, Type, UserType};
 use miette::{NamedSource, SourceSpan};
+
+/// Selectable fields that exist in [`ark_types::FlatEvent`]'s payload
+/// projection but NOT on the corresponding `CoreEvent` struct variant.
+///
+/// Today the only projection-only name is `SessionEnded.exit_message`:
+/// [`FlatEvent::from(&CoreEvent::SessionEnded{..})`] splits the
+/// `ExitReason::Error(msg)` payload into a top-level `exit_message`
+/// key. Scene selectors like `on SessionEnded exit_message="..."` are
+/// legal, so the validator adds these names after the shape-derived
+/// base list.
+fn flat_projection_extras(variant_name: &str) -> &'static [&'static str] {
+    match variant_name {
+        "SessionEnded" => &["exit_message"],
+        _ => &[],
+    }
+}
+
+/// Map an [`EventKind`] to the enum-variant identifier written in
+/// [`CoreEvent`]. The scene-side snake_case naming (`session_started`,
+/// `session_ended`, …) diverges from the Rust variant name
+/// (`SessionStarted`, `SessionEnded`) because [`CoreEvent`] carries
+/// `#[serde(rename_all = "snake_case")]` — but facet reflection uses
+/// the Rust name, so we translate here rather than layering snake_case
+/// logic onto the reflection walk.
+fn variant_rust_name(kind: EventKind) -> Option<&'static str> {
+    match kind {
+        EventKind::Log => Some("Log"),
+        EventKind::Error => Some("Error"),
+        EventKind::SessionStarted => Some("SessionStarted"),
+        EventKind::SessionEnded => Some("SessionEnded"),
+        EventKind::Ext => None,
+    }
+}
+
+/// Lazily-reflected field set for every non-Ext `CoreEvent` variant.
+///
+/// Built once on first call from `<CoreEvent as Facet>::SHAPE` +
+/// [`flat_projection_extras`]. Subsequent calls hit a `OnceLock` and
+/// cost one atomic load.
+fn fields_for_variant(variant_name: &str) -> Option<&'static [&'static str]> {
+    static CACHE: OnceLock<Vec<(&'static str, Vec<&'static str>)>> = OnceLock::new();
+    let table = CACHE.get_or_init(|| {
+        let mut out: Vec<(&'static str, Vec<&'static str>)> = Vec::new();
+        let shape = <CoreEvent as Facet>::SHAPE;
+        let en = match &shape.ty {
+            Type::User(UserType::Enum(e)) => e,
+            // A non-enum CoreEvent would be a grammar break — fall back
+            // to an empty table so the validator silently accepts every
+            // name; the roundtrip test below would catch the regression.
+            _ => return out,
+        };
+        for variant in en.variants {
+            let mut fields: Vec<&'static str> =
+                variant.data.fields.iter().map(|f| f.name).collect();
+            for extra in flat_projection_extras(variant.name) {
+                if !fields.contains(extra) {
+                    fields.push(*extra);
+                }
+            }
+            out.push((variant.name, fields));
+        }
+        out
+    });
+    table.iter().find_map(|(name, fields)| {
+        if *name == variant_name {
+            // Safe to return a slice of the cached Vec: the `OnceLock`
+            // owns the Vec for program lifetime, so the slice is
+            // effectively `'static`.
+            Some(fields.as_slice())
+        } else {
+            None
+        }
+    })
+}
 
 /// Canonical field list for a non-Ext `CoreEvent` variant.
 ///
-/// Returns `None` for `EventKind::Ext` — see module docs. When
-/// `Some(&[…])`, the slice enumerates every selectable field the
-/// variant carries (excluding the serde `type` tag).
+/// Returns `None` for `EventKind::Ext` (extension selectors accept
+/// arbitrary names — see module docs). Otherwise returns the union of
+/// the SHAPE-derived struct fields and [`flat_projection_extras`] for
+/// that variant.
 pub fn canonical_fields(kind: EventKind) -> Option<&'static [&'static str]> {
-    match kind {
-        EventKind::Log => Some(&["level", "message", "target"]),
-        EventKind::Error => Some(&["error"]),
-        EventKind::SessionStarted => Some(&["spec"]),
-        EventKind::SessionEnded => Some(&["terminated_at", "exit", "exit_message"]),
-        EventKind::Ext => None,
-    }
+    let name = variant_rust_name(kind)?;
+    fields_for_variant(name)
 }
 
 /// Validate every field name referenced by `selector` against the
@@ -181,6 +268,36 @@ mod tests {
             }
             other => panic!("expected UnknownEventField, got {other:?}"),
         }
+    }
+
+    // T-057: the canonical list is derived from `<CoreEvent as
+    // Facet>::SHAPE`, not from a hardcoded table. The next two tests
+    // lock in that contract so a `CoreEvent` field rename stays in
+    // sync with the validator automatically.
+
+    #[test]
+    fn canonical_fields_from_shape_contains_log_fields() {
+        let fields = canonical_fields(EventKind::Log).expect("Log has fields");
+        for expected in ["level", "message", "target"] {
+            assert!(
+                fields.contains(&expected),
+                "Log should expose `{expected}` via SHAPE reflection, got {fields:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_fields_session_ended_includes_flat_projection_extras() {
+        // `exit_message` lives only in the FlatEvent projection, not on
+        // the `SessionEnded` struct — the validator overlays it on top
+        // of the shape-derived base list via `flat_projection_extras`.
+        let fields = canonical_fields(EventKind::SessionEnded).expect("SessionEnded has fields");
+        assert!(fields.contains(&"terminated_at"), "{fields:?}");
+        assert!(fields.contains(&"exit"), "{fields:?}");
+        assert!(
+            fields.contains(&"exit_message"),
+            "projection extra missing: {fields:?}"
+        );
     }
 
     #[test]

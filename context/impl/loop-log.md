@@ -4,6 +4,12 @@ last_edited: "2026-04-18"
 ---
 # Loop Log
 
+### Wave scene-v3 S-D partial — 2026-04-18 — T-027 + T-057 (T-053 pending)
+
+- T-027 ViewMeta.config_schema = facet::Shape. DONE `df009e1` via agent.
+- T-057 CoreEvent field validation via SHAPE. DONE (agent hit rate-limit mid-packet; parent commits the finished work). `crates/types/src/event.rs` gets #[derive(Facet)] on 4 types with #[facet(opaque)] on non-Facet fields; validator replaces hardcoded match with shape traversal + OnceLock cache.
+- T-053 op KDL schema via SHAPE still pending — parent handles next.
+
 ### Wave scene-v3 S-E — 2026-04-18 — T-133 notify watcher + T-128 turn-inflight gate
 
 - packet close. T-133 file watcher go from pure-config surface to real `notify`-backed runtime loop. T-128 gate rewire from ACP (CUT) to per-ext ref-counted inflight map driven by hook-event lifecycle (claude-code `UserPromptSubmit` → `Stop`).

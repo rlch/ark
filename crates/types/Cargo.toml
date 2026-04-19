@@ -16,6 +16,10 @@ chrono = { workspace = true }
 nix = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
+# T-057 (scene-v3 S-D): reflection-capable derive on `CoreEvent` so the
+# scene crate's event-field validation pass can traverse variant SHAPEs
+# instead of maintaining a hardcoded field table.
+facet = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
