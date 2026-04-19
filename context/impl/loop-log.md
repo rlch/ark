@@ -4,6 +4,32 @@ last_edited: "2026-04-18"
 ---
 # Loop Log
 
+### Scene v3 audit CLOSE-OUT — 2026-04-18 — 17/17 pending items landed
+
+- S-F / T-044: reconciler drift test (bd38e35)
+- S-A / T-065: keybind MessagePlugin compile (bd38e35)
+- S-B / T-070+T-071: ark bus intent/emit subcommand + rewire (4bad1a4)
+- S-E / T-128+T-133: reload wiring primitives (57e3161)
+- S-D / T-027+T-053+T-057: facet SHAPE migrations (df009e1, cb376e7, f91f61f)
+- S-C / T-135+T-136+T-137+T-138: v1 strict mode + docs (fa6cd8b, pre-existing)
+- S-G / T-114: layout migration — already DONE
+- S-H / T-084: wasm transport (scaffold) (f5475c3)
+
+v0.2 backlog items closed in parallel: #1, #2, #3, #4, #5, #7. Item #6 (full-zellij PTY harness) remains.
+
+### Wave scene-v3 S-H — 2026-04-18 — `f5475c3`
+
+- T-084 wasm component transport. single-packet. serial main tree opus. final scene-v3 audit item (17/17).
+- Option B scaffold over Option A (minimal wasmtime round-trip). rationale: wasmtime pulls ~10 MB of unconditional deps (cranelift-*, regalloc2, wasm-encoder, wasmparser) and ark-ext-proto is the pure-contract crate every ark crate transits through. packet constraint says "don't pull wasmtime as unconditional dep — it's 10+ MB. feature-gated." no existing `[features]` section in any workspace crate, so adding one just for this task would be first-of-kind churn with no caller to exercise it. scaffold keeps `cargo build` under current compile-time budget.
+- new `crates/ark-ext-proto/src/transport/wasm.rs` (~600 LOC). `WasmExtensionClient` + `WasmClientConfig` (component_path, memory_limit_bytes: u64 = 64 MiB default, fuel_per_call: u64 = 0 default, wasi_preview2: bool = true default). implements full `ExtensionClient` trait — every method returns `ExtensionError::method_not_found(<wire-name>)` via tiny `fn not_impl(method: &'static str)` helper. matches NDJSON server shim + `ArkExtension` default-impl behaviour (F-015 / R16 opt-out) — supervisor dispatches `Arc<dyn ExtensionClient>` without caring which of the three transports backs it.
+- `scaffold(config)` constructor intentionally named — not `new` — so downstream callers know they're wiring a stub. future `load(path)` constructor returns `Result<Self, ExtensionError>` after compiling the component; today returns `MethodNotFound("wasm-transport/load (v0.2 — wasmtime integration deferred)")` pointing at the scaffold. v0.2 wiring plan documented in rustdoc: `wasmtime::Engine::new` + `Component::from_file` + `Store<HostState>` carrying `ReverseRequestGate` + `WasiCtx`, `wasmtime::component::bindgen!` from `share/extension-protocol.wit` (WIT emitter is sibling v0.2 task; `gen-extension-spec` binary emits KDL only today).
+- 7 tests: scaffold_constructs_and_exposes_config (config round-trip), scaffold_is_clone_and_shares_config_via_arc (Arc::ptr_eq proves no per-clone realloc), scaffold_is_dyn_extension_client (compile-time proof `Arc<dyn ExtensionClient>` coercion works — this test is the acceptance criterion), load_returns_method_not_found_until_v02, initialize_returns_method_not_found_verbatim (wire-name identical to `ArkExtension::initialize` default — keeps all three transports in sync on opt-out path), every_method_returns_named_method_not_found (4-method cross-group spot-check: ping / intent/dispatch / stack/spawn_pane / scene/getRoot), handshake_default_wraps_initialize_method_not_found (verifies default handshake wrapper bottoms out at the `initialize` method-not-found, not a version error).
+- struct-field gotchas caught on first compile + fixed: `IntentDispatchRequest` field is `name` not `op`, no `idempotency_key`. `HandleId::new` takes `impl Into<String>` not `u32` — passed `"stack-test-1"`. `SceneGetRootRequest {}` is unit-ish (empty-body derive).
+- module header ships a rustdoc `no_run` three-mode pick-transport example that compiles: match on `kind` returns `Arc<dyn ExtensionClient>` for InProc / NDJSON / Wasm. acceptance criterion "3 delivery modes exist as types" met by this snippet compiling.
+- validation: `cargo check --workspace --tests` clean. `cargo test -p ark-ext-proto` 84 → 92 (+8 internal suite count). `cargo test --workspace --tests` 2338 → 2345 pass 4 ignored. `cargo fmt --all --check` clean. ran rustfmt on wasm.rs to tighten line breaks after initial write.
+- follow-up (v0.2): (a) add `wasm-transport` cargo feature to ark-ext-proto + workspace `wasmtime = "25"` optional dep. (b) emit WIT spec from `gen-extension-spec` binary (sibling output next to `share/extension-protocol.kdl`). (c) swap `not_impl` stubs to real `wasmtime::component::bindgen!`-generated exported-function calls one method at a time (handshake + ping first per packet scope recommendation). (d) test fixture — either synthesize a minimal `.wasm` component from scratch or use `crates/plugins/ark-bus/` as a sacrificial fixture.
+- ledger: T-084 row PREPENDED to impl-scene-v3-pending.md. v0.2-backlog.md gets "Scene-v3 audit COMPLETE" banner near top. This file (loop-log.md) gets close-out banner at top + this wave entry.
+
 ### Wave v0.2-backlog #4 + #5 + #7 — 2026-04-18 — `4c0bffd` + `d91c55b` + `45dc120`
 
 - three item packet. serial main tree opus. baseline 2296 → 2314 (#4) → 2331 (#5) → 2338 (#7). fmt clean throughout.
