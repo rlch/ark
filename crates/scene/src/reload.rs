@@ -14,8 +14,15 @@
 //!
 //! ## Additional Tier-14 facilities
 //!
-//! - [`ReloadQueue`] (T-128): Turn-inflight gate — queues reloads while
-//!   an ACP turn is active, applies when the turn completes.
+//! - [`ReloadQueue`] (T-128, original): single-bit "reload pending" flag.
+//! - [`TurnInflightGate`] (T-128, repurposed post-ACP): per-extension
+//!   turn-inflight tracker. Blocks reloads while any registered extension
+//!   has a turn in flight (e.g. claude-code between `UserPromptSubmit`
+//!   and `Stop`). Post-2026-04-18 pivot: replaces the original ACP-turn
+//!   tracker — the ACP surface was CUT, but the claude-code extension's
+//!   hook-event lifecycle (SessionStart/UserPromptSubmit → Stop) gives
+//!   an equivalent mid-turn signal. If no extension registers, no gate —
+//!   reloads pass through immediately.
 //! - [`diff_reactions`] / [`ReactionDiff`] (T-130): Content-hash-based
 //!   reaction diff for detecting subscription-set changes.
 //! - [`diff_keybinds`] / [`KeybindDiff`] (T-131): Chord-keyed keybind
@@ -24,6 +31,9 @@
 //!   reconciler after a successful reload.
 //! - [`FileWatcherConfig`] / [`should_ignore_path`] (T-133): Opt-in
 //!   file watcher configuration with debounce and ignore suffixes.
+//! - [`SceneFileWatcher`] (T-133, runtime): `notify`-backed watcher
+//!   thread that re-hashes the scene file on disk changes and emits
+//!   debounced reload-request events on content changes.
 //! - [`reload_telemetry_payload`] (T-134): Converts a [`ReloadResult`]
 //!   into a structured event payload for telemetry.
 
@@ -320,6 +330,172 @@ impl ReloadQueue {
 impl Default for ReloadQueue {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// T-128 (repurposed post-ACP): TurnInflightGate
+// ---------------------------------------------------------------------------
+
+/// Tracks whether any registered extension is mid-turn, so scene-reload
+/// requests that arrive during a turn can be queued and flushed when the
+/// turn ends.
+///
+/// Original T-128 blocked reloads while an ACP turn was in flight; that
+/// surface was CUT in the 2026-04-18 pivot. The honest repurposing
+/// tracks per-extension turn inflight state driven by extension hook
+/// events — e.g. claude-code-ext marks inflight on
+/// `claude-code.user.prompt-submit` and clears it on `claude-code.stop`.
+///
+/// If no extension has ever registered an inflight turn, the gate is a
+/// no-op and [`try_gate_or_queue`] always returns [`GateDecision::Pass`]
+/// — keeping the fast path fast for scenes that don't load any
+/// turn-producing extensions.
+///
+/// Thread-safety: interior `std::sync::Mutex` around a `HashMap`. Lock
+/// is held only while mutating the map or consulting it — never across a
+/// reload call.
+pub struct TurnInflightGate {
+    /// Map of extension name → inflight-turn count. A count > 0 means
+    /// the extension has at least one open turn; pending reloads must
+    /// queue.
+    ///
+    /// The count (rather than a bool) guards against partially overlapping
+    /// start/stop pairs on the same extension — e.g. claude-code's
+    /// `UserPromptSubmit` then `Stop` while a `SessionStart` is still
+    /// bookkeeping-open.
+    inflight: std::sync::Mutex<HashMap<String, u32>>,
+    /// Set alongside the inflight map when a reload was queued during a
+    /// turn. Flushed by [`take_pending`].
+    pending: AtomicBool,
+}
+
+/// Decision returned by [`TurnInflightGate::try_gate_or_queue`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateDecision {
+    /// No turns in flight — caller should apply the reload immediately.
+    Pass,
+    /// At least one turn is in flight — caller queued the reload; it
+    /// will be flushed when every turn completes.
+    Queued,
+}
+
+impl TurnInflightGate {
+    /// Construct an empty gate. No registered extensions → all reloads
+    /// pass through.
+    pub fn new() -> Self {
+        Self {
+            inflight: std::sync::Mutex::new(HashMap::new()),
+            pending: AtomicBool::new(false),
+        }
+    }
+
+    /// Mark a new turn as in-flight for `ext`. Idempotency is by
+    /// reference count — pair every call with a matching
+    /// [`turn_ended`].
+    ///
+    /// Typical wiring: subscribe to `<ext>.user.prompt-submit` /
+    /// `<ext>.session.start` and call `turn_started(ext)`.
+    pub fn turn_started(&self, ext: &str) {
+        let mut map = match self.inflight.lock() {
+            Ok(m) => m,
+            Err(p) => p.into_inner(),
+        };
+        *map.entry(ext.to_string()).or_insert(0) += 1;
+    }
+
+    /// Mark a turn as finished for `ext`. If the reference count drops
+    /// to zero the extension is removed from the map. Calls beyond the
+    /// open-count are saturating (no underflow panic) — extensions that
+    /// emit spurious `Stop` events won't crash the supervisor.
+    ///
+    /// Returns `true` if after this call there are no more turns in
+    /// flight across any registered extension — the caller uses this to
+    /// decide whether to flush a queued reload via [`take_pending`].
+    pub fn turn_ended(&self, ext: &str) -> bool {
+        let mut map = match self.inflight.lock() {
+            Ok(m) => m,
+            Err(p) => p.into_inner(),
+        };
+        if let Some(count) = map.get_mut(ext) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                map.remove(ext);
+            }
+        } else {
+            tracing::debug!(
+                ext = %ext,
+                "TurnInflightGate::turn_ended with no matching turn_started (dropping)"
+            );
+        }
+        map.is_empty()
+    }
+
+    /// Clear every inflight turn for `ext` (e.g. on session end or
+    /// extension shutdown). Returns `true` if the gate is now fully
+    /// idle.
+    pub fn clear_ext(&self, ext: &str) -> bool {
+        let mut map = match self.inflight.lock() {
+            Ok(m) => m,
+            Err(p) => p.into_inner(),
+        };
+        map.remove(ext);
+        map.is_empty()
+    }
+
+    /// `true` when at least one registered extension has a turn in
+    /// flight.
+    pub fn any_inflight(&self) -> bool {
+        let map = match self.inflight.lock() {
+            Ok(m) => m,
+            Err(p) => p.into_inner(),
+        };
+        !map.is_empty()
+    }
+
+    /// Consult the gate for a reload request. When a turn is in flight
+    /// the caller flips the internal `pending` flag and returns
+    /// [`GateDecision::Queued`]; otherwise [`GateDecision::Pass`] —
+    /// the caller applies the reload immediately and leaves pending
+    /// untouched.
+    pub fn try_gate_or_queue(&self) -> GateDecision {
+        if self.any_inflight() {
+            self.pending.store(true, Ordering::SeqCst);
+            GateDecision::Queued
+        } else {
+            GateDecision::Pass
+        }
+    }
+
+    /// Atomically consume the pending flag. Returns `true` if a reload
+    /// was queued while turns were inflight and the caller should now
+    /// apply it.
+    pub fn take_pending(&self) -> bool {
+        self.pending.swap(false, Ordering::SeqCst)
+    }
+
+    /// Check the pending flag without consuming it.
+    pub fn is_pending(&self) -> bool {
+        self.pending.load(Ordering::SeqCst)
+    }
+}
+
+impl Default for TurnInflightGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for TurnInflightGate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let map_dbg = match self.inflight.lock() {
+            Ok(m) => format!("{:?}", *m),
+            Err(_) => "<poisoned>".to_string(),
+        };
+        f.debug_struct("TurnInflightGate")
+            .field("inflight", &map_dbg)
+            .field("pending", &self.is_pending())
+            .finish()
     }
 }
 
@@ -650,6 +826,288 @@ pub fn should_ignore_path(path: &Path, config: &FileWatcherConfig) -> bool {
             .ignore_prefixes
             .iter()
             .any(|prefix| name.starts_with(prefix.as_str()))
+}
+
+// ---------------------------------------------------------------------------
+// T-133 (runtime): SceneFileWatcher — notify-backed debounced watcher
+// ---------------------------------------------------------------------------
+
+/// Event emitted by [`SceneFileWatcher`] when the watched scene file's
+/// content has changed (debounced + content-hash-filtered).
+///
+/// Receivers re-read the scene from disk, feed it into [`reload_scene`],
+/// and drive the reconciler (T-132) on a successful reload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SceneFileEvent {
+    /// The watched scene file changed on disk and its content hash no
+    /// longer matches the previously-observed hash. The `path` is the
+    /// watched scene path as configured.
+    Changed(std::path::PathBuf),
+    /// The watched scene file was removed or became unreadable. The
+    /// caller should decide whether to abort the watcher or keep
+    /// retrying — this watcher does neither on its own.
+    Vanished(std::path::PathBuf),
+}
+
+/// Runtime primitive that owns a `notify::RecommendedWatcher` plus a
+/// debounce thread, and emits [`SceneFileEvent`]s on the receiver
+/// returned by [`SceneFileWatcher::start`].
+///
+/// Lifecycle:
+///
+/// 1. [`start`][Self::start] registers a recursive watch on the scene
+///    file's **parent directory** (watching the file itself fails on
+///    editor-save patterns that rename-in-place — atomic-save rewrites
+///    the file inode, which breaks a file-level watch).
+/// 2. A background thread reads notify events, filters by path
+///    equality to the configured scene path + the
+///    [`FileWatcherConfig`] ignore lists, and debounces with the
+///    configured window (default 200 ms, shared with the T-043
+///    reconciler debounce).
+/// 3. After the debounce window elapses, the thread re-reads the scene
+///    file, computes its blake3 hash via [`SceneId::from_file`], and
+///    compares to the last observed hash. On content change it emits
+///    `SceneFileEvent::Changed`; on first-read failure (e.g. mid-save)
+///    it logs a debug and retries on the next event.
+/// 4. Watcher errors log WARN and are dropped — the watcher keeps
+///    running so transient filesystem issues don't crash the session.
+///
+/// Dropping the returned `SceneFileWatcher` stops the watch cleanly.
+pub struct SceneFileWatcher {
+    /// Keeps the notify watcher alive. Dropping this stops watching.
+    _watcher: notify::RecommendedWatcher,
+    /// Shutdown signal for the debounce thread.
+    shutdown: std::sync::Arc<AtomicBool>,
+    /// Join handle for the debounce thread. Kept so `Drop` can join it.
+    debouncer: Option<std::thread::JoinHandle<()>>,
+    /// Watched scene path (absolute). Retained for diagnostics.
+    scene_path: std::path::PathBuf,
+}
+
+impl SceneFileWatcher {
+    /// Start watching `scene_path`'s parent directory for changes.
+    ///
+    /// Returns the watcher handle (keep it alive — dropping stops the
+    /// watch) and a `std::sync::mpsc::Receiver<SceneFileEvent>` the
+    /// caller drains on its own thread or tokio task.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `notify::Error` if:
+    /// - the scene path has no parent directory (e.g. bare file name
+    ///   like `"."`),
+    /// - notify cannot install a watch on the parent directory
+    ///   (e.g. missing directory, permission denied).
+    ///
+    /// Missing file at start-time is NOT an error — notify watches the
+    /// parent directory, so a later write creating the file will trigger
+    /// a `Changed` event.
+    pub fn start(
+        scene_path: impl Into<std::path::PathBuf>,
+        config: FileWatcherConfig,
+    ) -> notify::Result<(Self, std::sync::mpsc::Receiver<SceneFileEvent>)> {
+        use notify::{RecursiveMode, Watcher};
+
+        let scene_path: std::path::PathBuf = scene_path.into();
+        let parent = scene_path.parent().ok_or_else(|| {
+            notify::Error::generic(&format!(
+                "scene path {} has no parent directory",
+                scene_path.display()
+            ))
+        })?;
+        // Snapshot an immutable copy for the debouncer thread.
+        let watched_path = scene_path.clone();
+
+        // Internal channel: notify handler → debouncer thread.
+        let (raw_tx, raw_rx) = std::sync::mpsc::channel::<std::path::PathBuf>();
+        // External channel: debouncer thread → caller.
+        let (out_tx, out_rx) = std::sync::mpsc::channel::<SceneFileEvent>();
+
+        let ignore_cfg = config.clone();
+        let target_for_filter = watched_path.clone();
+        let mut watcher =
+            notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
+                Ok(event) => {
+                    for path in &event.paths {
+                        // Fast-reject paths that aren't the watched file
+                        // or are matched by the ignore lists. macOS
+                        // FSEvents reports `/private`-prefixed paths, so
+                        // compare by file-name as a fallback when the
+                        // full-path equality misses.
+                        if path != &target_for_filter
+                            && path.file_name() != target_for_filter.file_name()
+                        {
+                            continue;
+                        }
+                        if should_ignore_path(path, &ignore_cfg) {
+                            continue;
+                        }
+                        // Deliver the event to the debouncer. Receiver
+                        // dropped = watcher is being torn down.
+                        if raw_tx.send(path.clone()).is_err() {
+                            break;
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "SceneFileWatcher: notify error");
+                }
+            })?;
+
+        watcher.watch(parent, RecursiveMode::NonRecursive)?;
+
+        let shutdown = std::sync::Arc::new(AtomicBool::new(false));
+        let shutdown_for_thread = shutdown.clone();
+        let debounce = std::time::Duration::from_millis(config.debounce_ms);
+        let debouncer_path = watched_path.clone();
+
+        let handle = std::thread::Builder::new()
+            .name("ark-scene-file-watcher".into())
+            .spawn(move || {
+                debounce_loop(
+                    raw_rx,
+                    out_tx,
+                    debouncer_path,
+                    debounce,
+                    shutdown_for_thread,
+                )
+            })
+            .map_err(|e| notify::Error::generic(&format!("spawn debouncer: {e}")))?;
+
+        Ok((
+            Self {
+                _watcher: watcher,
+                shutdown,
+                debouncer: Some(handle),
+                scene_path: watched_path,
+            },
+            out_rx,
+        ))
+    }
+
+    /// Path the watcher is bound to.
+    pub fn scene_path(&self) -> &Path {
+        &self.scene_path
+    }
+}
+
+impl Drop for SceneFileWatcher {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.debouncer.take() {
+            // Best-effort join; drop path should not panic on poison.
+            let _ = handle.join();
+        }
+    }
+}
+
+impl std::fmt::Debug for SceneFileWatcher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SceneFileWatcher")
+            .field("scene_path", &self.scene_path)
+            .field("debouncer_alive", &self.debouncer.is_some())
+            .finish()
+    }
+}
+
+/// Debouncer event loop: collects raw notify paths, waits `debounce` ms
+/// for the dust to settle, then re-hashes the scene file. Only emits a
+/// `Changed` event when the content hash differs from the last observed
+/// hash — purely-metadata touches (`touch scene.kdl`) are silently
+/// dropped.
+fn debounce_loop(
+    raw_rx: std::sync::mpsc::Receiver<std::path::PathBuf>,
+    out_tx: std::sync::mpsc::Sender<SceneFileEvent>,
+    scene_path: std::path::PathBuf,
+    debounce: std::time::Duration,
+    shutdown: std::sync::Arc<AtomicBool>,
+) {
+    use std::sync::mpsc::RecvTimeoutError;
+
+    // Track the last observed content hash so we can suppress
+    // metadata-only touches. Initialize from disk so a watcher
+    // installed after the scene was compiled doesn't falsely report
+    // the first post-start write as "changed when it wasn't".
+    let mut last_hash = crate::id::SceneId::from_file(&scene_path)
+        .ok()
+        .map(|id| id.content_hash);
+
+    loop {
+        if shutdown.load(Ordering::SeqCst) {
+            return;
+        }
+
+        // Wait for the first event (bounded) so shutdown can propagate.
+        let first = match raw_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(p) => p,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => return,
+        };
+
+        // Drain any further events within the debounce window.
+        let deadline = std::time::Instant::now() + debounce;
+        let mut _last_path = first;
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match raw_rx.recv_timeout(remaining) {
+                Ok(p) => _last_path = p,
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Disconnected) => return,
+            }
+        }
+
+        if shutdown.load(Ordering::SeqCst) {
+            return;
+        }
+
+        // Re-hash the scene file; decide whether to emit.
+        match crate::id::SceneId::from_file(&scene_path) {
+            Ok(id) => {
+                let new_hash = id.content_hash;
+                let content_changed = match last_hash {
+                    Some(prev) => prev != new_hash,
+                    None => true, // first successful read after a vanish
+                };
+                if content_changed {
+                    last_hash = Some(new_hash);
+                    if out_tx
+                        .send(SceneFileEvent::Changed(scene_path.clone()))
+                        .is_err()
+                    {
+                        return;
+                    }
+                } else {
+                    tracing::debug!(
+                        path = %scene_path.display(),
+                        "SceneFileWatcher: content hash unchanged, suppressing reload"
+                    );
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // File vanished — emit once, then null the hash so the
+                // next successful read reports as a change.
+                if last_hash.is_some() {
+                    last_hash = None;
+                    if out_tx
+                        .send(SceneFileEvent::Vanished(scene_path.clone()))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!(
+                    path = %scene_path.display(),
+                    error = %e,
+                    "SceneFileWatcher: re-hash failed, keeping last hash"
+                );
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1112,5 +1570,301 @@ mod tests {
         let payload = reload_telemetry_payload(&result);
         assert!(payload.get("status").unwrap().starts_with("failed:"));
         assert!(payload.get("status").unwrap().contains("bad KDL"));
+    }
+
+    // ── T-128 (repurposed): TurnInflightGate ──────────────────────────
+
+    #[test]
+    fn turn_gate_idle_passes_reload() {
+        let gate = TurnInflightGate::new();
+        assert!(!gate.any_inflight());
+        assert_eq!(gate.try_gate_or_queue(), GateDecision::Pass);
+        assert!(!gate.is_pending());
+    }
+
+    #[test]
+    fn turn_gate_inflight_queues_reload() {
+        let gate = TurnInflightGate::new();
+        gate.turn_started("claude-code");
+        assert!(gate.any_inflight());
+        assert_eq!(gate.try_gate_or_queue(), GateDecision::Queued);
+        assert!(gate.is_pending());
+    }
+
+    #[test]
+    fn turn_gate_take_pending_flushes_once() {
+        let gate = TurnInflightGate::new();
+        gate.turn_started("claude-code");
+        assert_eq!(gate.try_gate_or_queue(), GateDecision::Queued);
+        assert!(gate.take_pending());
+        // Second take → false: flag is consumed.
+        assert!(!gate.take_pending());
+        assert!(!gate.is_pending());
+    }
+
+    #[test]
+    fn turn_gate_ref_counts_nested_turns() {
+        let gate = TurnInflightGate::new();
+        gate.turn_started("claude-code");
+        gate.turn_started("claude-code");
+        // One end still leaves a turn open.
+        let idle = gate.turn_ended("claude-code");
+        assert!(!idle);
+        assert!(gate.any_inflight());
+        // Second end drops the last turn → gate is idle.
+        let idle = gate.turn_ended("claude-code");
+        assert!(idle);
+        assert!(!gate.any_inflight());
+    }
+
+    #[test]
+    fn turn_gate_saturating_end_does_not_panic() {
+        let gate = TurnInflightGate::new();
+        // Spurious end with no start logs a debug but doesn't panic
+        // (claude-code sends bare `Stop` on crash recovery).
+        let idle = gate.turn_ended("claude-code");
+        assert!(idle);
+    }
+
+    #[test]
+    fn turn_gate_multiple_exts_both_block() {
+        let gate = TurnInflightGate::new();
+        gate.turn_started("claude-code");
+        gate.turn_started("codex");
+        assert!(gate.any_inflight());
+        // Ending one ext still leaves another inflight.
+        let idle = gate.turn_ended("claude-code");
+        assert!(!idle);
+        let idle = gate.turn_ended("codex");
+        assert!(idle);
+    }
+
+    #[test]
+    fn turn_gate_clear_ext() {
+        let gate = TurnInflightGate::new();
+        gate.turn_started("claude-code");
+        gate.turn_started("claude-code");
+        gate.turn_started("claude-code");
+        let idle = gate.clear_ext("claude-code");
+        assert!(idle);
+        assert!(!gate.any_inflight());
+    }
+
+    #[test]
+    fn turn_gate_clear_unknown_ext_is_no_op() {
+        let gate = TurnInflightGate::new();
+        gate.turn_started("claude-code");
+        let idle = gate.clear_ext("unknown");
+        assert!(!idle);
+        assert!(gate.any_inflight());
+    }
+
+    #[test]
+    fn turn_gate_queue_persists_across_partial_end() {
+        let gate = TurnInflightGate::new();
+        gate.turn_started("claude-code");
+        gate.turn_started("codex");
+        assert_eq!(gate.try_gate_or_queue(), GateDecision::Queued);
+        // Ending one extension doesn't flush the pending bit yet.
+        gate.turn_ended("claude-code");
+        assert!(gate.is_pending());
+        assert!(gate.any_inflight());
+        // Only after every ext is idle is it safe to flush.
+        gate.turn_ended("codex");
+        assert!(!gate.any_inflight());
+        assert!(gate.take_pending());
+    }
+
+    #[test]
+    fn turn_gate_debug_impl_does_not_panic() {
+        let gate = TurnInflightGate::new();
+        gate.turn_started("claude-code");
+        let _ = format!("{gate:?}");
+    }
+
+    // ── T-133 (runtime): SceneFileWatcher ────────────────────────────
+
+    use std::time::Duration;
+    use std::time::Instant;
+    use tempfile::TempDir;
+
+    /// Poll `rx` for up to `deadline_secs` seconds waiting for a
+    /// `SceneFileEvent::Changed(_)`. Intermediate events (e.g. vanish
+    /// due to rename-in-place save patterns) are ignored.
+    fn wait_for_change(
+        rx: &std::sync::mpsc::Receiver<SceneFileEvent>,
+        deadline_secs: u64,
+    ) -> Option<SceneFileEvent> {
+        let deadline = Instant::now() + Duration::from_secs(deadline_secs);
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(ev @ SceneFileEvent::Changed(_)) => return Some(ev),
+                Ok(_) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
+            }
+        }
+        None
+    }
+
+    fn minimal_scene(marker: &str) -> String {
+        format!(
+            r#"scene "t-{marker}" {{
+    tab {{
+        pane command="echo {marker}" !@p
+    }}
+}}
+"#
+        )
+    }
+
+    #[test]
+    fn watcher_emits_changed_on_content_write() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("scene.kdl");
+        std::fs::write(&path, minimal_scene("one")).unwrap();
+
+        let cfg = FileWatcherConfig {
+            enabled: true,
+            debounce_ms: 100,
+            ..FileWatcherConfig::default()
+        };
+        let (_w, rx) = SceneFileWatcher::start(&path, cfg).expect("watcher starts");
+
+        // Give notify a moment to register.
+        std::thread::sleep(Duration::from_millis(100));
+
+        // Rewrite with different content.
+        std::fs::write(&path, minimal_scene("two")).unwrap();
+
+        let ev = wait_for_change(&rx, 3).expect("Changed within 3s");
+        match ev {
+            SceneFileEvent::Changed(p) => {
+                assert_eq!(p.file_name(), path.file_name(), "event path mismatch");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn watcher_suppresses_metadata_only_touch() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("scene.kdl");
+        let src = minimal_scene("stable");
+        std::fs::write(&path, &src).unwrap();
+
+        let cfg = FileWatcherConfig {
+            enabled: true,
+            debounce_ms: 100,
+            ..FileWatcherConfig::default()
+        };
+        let (_w, rx) = SceneFileWatcher::start(&path, cfg).expect("watcher starts");
+        std::thread::sleep(Duration::from_millis(100));
+
+        // Rewrite with *identical* content — hash unchanged, should be
+        // suppressed. Use write() which triggers a notify event despite
+        // byte-identical content.
+        std::fs::write(&path, &src).unwrap();
+
+        // Poll for ~500 ms; no event should arrive.
+        let ev = rx.recv_timeout(Duration::from_millis(500));
+        assert!(
+            ev.is_err(),
+            "expected no Changed event for metadata-only touch, got {ev:?}"
+        );
+    }
+
+    #[test]
+    fn watcher_ignores_swap_files() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("scene.kdl");
+        std::fs::write(&path, minimal_scene("base")).unwrap();
+
+        let cfg = FileWatcherConfig {
+            enabled: true,
+            debounce_ms: 100,
+            ..FileWatcherConfig::default()
+        };
+        let (_w, rx) = SceneFileWatcher::start(&path, cfg).expect("watcher starts");
+        std::thread::sleep(Duration::from_millis(100));
+
+        // Write a swap file — should NOT trigger a scene event because
+        // the file name doesn't match, AND even if it did, it's
+        // ignore-suffix-matched.
+        std::fs::write(tmp.path().join("scene.kdl.swp"), "junk").unwrap();
+
+        let ev = rx.recv_timeout(Duration::from_millis(500));
+        assert!(
+            ev.is_err(),
+            "expected no event for swap-file write, got {ev:?}"
+        );
+    }
+
+    #[test]
+    fn watcher_debounces_rapid_writes_into_single_event() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("scene.kdl");
+        std::fs::write(&path, minimal_scene("v0")).unwrap();
+
+        let cfg = FileWatcherConfig {
+            enabled: true,
+            debounce_ms: 200,
+            ..FileWatcherConfig::default()
+        };
+        let (_w, rx) = SceneFileWatcher::start(&path, cfg).expect("watcher starts");
+        std::thread::sleep(Duration::from_millis(100));
+
+        // Three rapid writes within the debounce window — expect ONE
+        // `Changed` event carrying the final state.
+        std::fs::write(&path, minimal_scene("v1")).unwrap();
+        std::fs::write(&path, minimal_scene("v2")).unwrap();
+        std::fs::write(&path, minimal_scene("v3")).unwrap();
+
+        let first = wait_for_change(&rx, 3).expect("first Changed");
+        assert!(matches!(first, SceneFileEvent::Changed(_)));
+
+        // No *additional* Changed event in the next 400 ms (all writes
+        // were coalesced into the first).
+        let extra = rx.recv_timeout(Duration::from_millis(400));
+        assert!(
+            extra.is_err(),
+            "expected coalesced single event, got extra: {extra:?}"
+        );
+    }
+
+    #[test]
+    fn watcher_start_fails_on_missing_parent() {
+        // No parent dir → notify can't watch.
+        let cfg = FileWatcherConfig::default();
+        let result = SceneFileWatcher::start(std::path::PathBuf::from("/"), cfg);
+        assert!(result.is_err(), "root path has no parent");
+    }
+
+    #[test]
+    fn watcher_drop_stops_debouncer_thread() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("scene.kdl");
+        std::fs::write(&path, minimal_scene("drop")).unwrap();
+
+        let cfg = FileWatcherConfig {
+            enabled: true,
+            debounce_ms: 50,
+            ..FileWatcherConfig::default()
+        };
+        let (w, rx) = SceneFileWatcher::start(&path, cfg).expect("watcher starts");
+
+        // Drop the watcher — the debouncer thread should exit cleanly
+        // within a bounded window, and the receiver side should see its
+        // sender dropped.
+        drop(w);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(50)) {
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                _ => continue,
+            }
+        }
+        panic!("debouncer thread did not exit within 2s of Drop");
     }
 }

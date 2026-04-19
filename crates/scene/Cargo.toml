@@ -82,6 +82,10 @@ ark-scene-macros = { path = "../scene-macros" }
 # `SessionId::as_path_leaf()` `<name>-<ulid>` pattern used elsewhere in
 # the workspace.
 ulid = { workspace = true }
+# T-133 (Tier 14 hot-reload): notify-based file watcher for scene file
+# mutations. Library-level primitive — supervisor wires it to the
+# reconciler debounce in a later task.
+notify = { workspace = true }
 
 [[bin]]
 # T-140 (cavekit-scene R13 / Tier 15): scene schema emitter. Walks every

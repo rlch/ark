@@ -471,6 +471,7 @@ dependencies = [
  "insta",
  "kdl 6.5.0",
  "miette 7.6.0",
+ "notify 7.0.0",
  "regex",
  "rhai",
  "serde_json",
