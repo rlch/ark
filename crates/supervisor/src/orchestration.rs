@@ -20,7 +20,13 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use ark_core::consumers::{ReactionDispatcherCtx, reaction_dispatcher, state_writer};
 use ark_core::status_writer::write_session_status_atomic;
-use ark_core::{Config, Engine, Orchestrator, World};
+use ark_core::{Config, World};
+// cleanup-T-009: Engine + Orchestrator trait objects are gone from the
+// runtime boot path — `run_supervisor_with` no longer accepts them, so the
+// trait imports here were removed alongside the R3 step-6 diagnostic and
+// the step-10/15 observability + teardown branches. `World` stays because
+// the bare-session `world.cancel.cancelled().await` park still needs it;
+// T-010 retires `World` along with the traits.
 use ark_mux_zellij::ZellijMux;
 use ark_scene::context::SessionSnapshot;
 use ark_scene::hook_compat::HookEntry as SceneHookEntry;
@@ -61,8 +67,6 @@ pub async fn run_supervisor(
     external_cancel: Option<CancellationToken>,
 ) -> Result<()> {
     let state_layout = StateLayout::from_env().context("resolve state layout")?;
-    let engine: Option<Box<dyn Engine + Send + Sync>> = None;
-    let orchestrator: Option<Box<dyn Orchestrator + Send + Sync>> = None;
     // cleanup-T-008: `build_multiplexer` factory was deleted; v1 is locked
     // to a single mux (`MUX_V1 = ["zellij"]`), so instantiate directly.
     // Adding a second concrete mux becomes a local edit here, not a factory
@@ -73,27 +77,29 @@ pub async fn run_supervisor(
         mode,
         config,
         state_layout,
-        engine,
-        orchestrator,
         mux,
-        true,
         ready_writer,
         external_cancel,
     )
     .await
 }
 
-/// Variant of [`run_supervisor`] that accepts injected layout + factories.
+/// Variant of [`run_supervisor`] that accepts an injected `StateLayout`
+/// and `ZellijMux` for testability. Production callers reach this via
+/// [`run_supervisor`].
+///
+/// cleanup-T-009: the legacy `engine: Option<Box<dyn Engine>>` +
+/// `orchestrator: Option<Box<dyn Orchestrator>>` + `run_preflight: bool`
+/// parameters were removed. Every production caller passed
+/// `engine = None`, `orchestrator = None`, `run_preflight = true`, and
+/// `engine_stub::preflight` was a no-op.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_supervisor_with(
     spec: SessionSpec,
     mode: SupervisorMode,
     config: Config,
     state_layout: StateLayout,
-    engine: Option<Box<dyn Engine + Send + Sync>>,
-    orchestrator: Option<Box<dyn Orchestrator + Send + Sync>>,
     mux: Arc<ZellijMux>,
-    run_preflight: bool,
     ready_writer: Option<ReadyWriter>,
     external_cancel: Option<CancellationToken>,
 ) -> Result<()> {
@@ -173,13 +179,8 @@ pub async fn run_supervisor_with(
         .context("install signal handlers")?;
     debug!("F-087: SIGTERM/SIGINT handlers installed");
 
-    // ---- Step 6: factory ----
-    debug!(
-        engine = engine.as_ref().map(|e| e.name()).unwrap_or("<none>"),
-        orch = orchestrator.as_ref().map(|o| o.name()).unwrap_or("<none>"),
-        mux = mux.kind(),
-        "R3 step 6: factories resolved"
-    );
+    // ---- Step 6: factory (deleted per cleanup T-009; mux is the sole survivor) ----
+    debug!(mux = mux.kind(), "R3 step 6: mux resolved");
 
     // ---- Step 7b: ensure mux session ----
     let session_name = format!("ark-{}", spec.id.as_path_leaf());
@@ -187,10 +188,7 @@ pub async fn run_supervisor_with(
         .await
         .with_context(|| format!("mux.ensure_session({session_name})"))?;
 
-    // ---- Step 8: preflight ----
-    if run_preflight {
-        crate::engine_stub::preflight(&spec).context("engine preflight")?;
-    }
+    // ---- Step 8: preflight (engine_stub::preflight was a no-op; inlined to nothing per T-009) ----
 
     // ---- Step 9: spawn consumer tasks ----
     let mut consumers: JoinSet<Result<()>> = JoinSet::new();
@@ -245,18 +243,8 @@ pub async fn run_supervisor_with(
     }
     debug!("R3 step 9: consumer tasks spawned");
 
-    // ---- Step 10: install observability (only if an engine is wired) ----
-    let engine_handle = if let Some(eng) = engine.as_ref() {
-        let h = eng
-            .install_observability(&spec.id, &spec.cwd, events.clone())
-            .await
-            .context("engine install_observability")?;
-        debug!(engine = eng.name(), "R3 step 10: observability installed");
-        Some(h)
-    } else {
-        debug!("R3 step 10: no engine; skipping observability");
-        None
-    };
+    // ---- Step 10: install observability (engine deleted per cleanup T-010; unconditionally skipped) ----
+    debug!("R3 step 10: no engine; skipping observability");
 
     // ---- Step 10.5: mount always-on plugins ----
     let plugin_lifecycle = crate::plugin_lifecycle::PluginLifecycleManager::new();
@@ -292,15 +280,10 @@ pub async fn run_supervisor_with(
         config_arc.clone(),
     );
 
-    if let Some(orch) = orchestrator.as_ref() {
-        if let Err(err) = orch.run(&spec, world).await {
-            warn!(error = %err, "orchestrator.run returned Err");
-        }
-    } else {
-        debug!("R3 step 13: no orchestrator; parking on world.cancel.cancelled().await");
-        world.cancel.cancelled().await;
-        debug!("R3 step 13: cancel observed on bare-session path");
-    }
+    // Orchestrator trait deleted per cleanup T-010; bare-session is now the only path.
+    debug!("R3 step 13: no orchestrator; parking on world.cancel.cancelled().await");
+    world.cancel.cancelled().await;
+    debug!("R3 step 13: cancel observed on bare-session path");
 
     // Final SessionEnded event so consumers observe a terminal record.
     let _ = events.send(CoreEvent::SessionEnded {
@@ -315,13 +298,7 @@ pub async fn run_supervisor_with(
     drain_consumers(&mut consumers, std::time::Duration::from_secs(5)).await;
     debug!("R3 step 14: consumers drained");
 
-    // ---- Step 15: engine teardown ----
-    if let (Some(eng), Some(h)) = (engine.as_ref(), engine_handle) {
-        if let Err(err) = eng.teardown(h).await {
-            warn!(error = %err, "engine.teardown failed — continuing to finalize");
-        }
-        debug!("R3 step 15: engine torn down");
-    }
+    // ---- Step 15: engine teardown (engine deleted per cleanup T-010; skipped) ----
 
     // ---- Step 16: finalize state ----
     if let Err(err) = finalize_state(&state_layout, &spec.id, supervisor_pid) {
@@ -511,10 +488,7 @@ mod tests {
             SupervisorMode::Foreground,
             Config::placeholder(),
             layout.clone(),
-            None,
-            None,
             Arc::new(mux),
-            false,
             None,
             Some(cancel),
         )
