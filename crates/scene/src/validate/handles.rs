@@ -12,7 +12,7 @@
 
 use miette::{NamedSource, SourceSpan};
 
-use crate::ast::layout::{ColNode, Handle, LayoutChild, PaneNode, RowNode, TabNode};
+use crate::ast::layout::{ColNode, Handle, LayoutChild, PaneNode, RowNode, StackNode, TabNode};
 use crate::ast::{LayoutNode, ModeNode, SceneBodyNode};
 use crate::error::SceneError;
 use crate::parse::SceneIR;
@@ -141,6 +141,7 @@ fn collect_layout_child_handles(
         LayoutChild::Row(row) => collect_row_handles(row, context, entries),
         LayoutChild::Col(col) => collect_col_handles(col, context, entries),
         LayoutChild::Pane(pane) => collect_pane_handle(pane, context, entries),
+        LayoutChild::Stack(stack) => collect_stack_handle(stack, context, entries),
     }
 }
 
@@ -162,4 +163,20 @@ fn collect_pane_handle(pane: &PaneNode, context: &str, entries: &mut Vec<HandleE
         node_kind: "pane",
         _context: context.to_string(),
     });
+}
+
+/// scene-2026-04-18 T-011: stacks share the flat scene-scoped handle
+/// namespace with tabs + panes. Duplicate `@h` across any combination
+/// surfaces as `error[scene/handle-clash]` via the Phase-2 duplicate
+/// detector (Phase 2 below). Nested stack / pane children are walked
+/// recursively.
+fn collect_stack_handle(stack: &StackNode, context: &str, entries: &mut Vec<HandleEntry>) {
+    entries.push(HandleEntry {
+        raw: stack.handle.clone(),
+        node_kind: "stack",
+        _context: context.to_string(),
+    });
+    for child in &stack.body {
+        collect_layout_child_handles(child, context, entries);
+    }
 }

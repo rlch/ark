@@ -43,7 +43,7 @@
 
 use miette::{NamedSource, SourceSpan};
 
-use crate::ast::layout::{ColNode, LayoutChild, PaneNode, RowNode, TabNode};
+use crate::ast::layout::{ColNode, LayoutChild, PaneNode, RowNode, StackNode, TabNode};
 use crate::ast::{LayoutNode, ModeNode, SceneBodyNode, SceneNode};
 use crate::error::SceneError;
 use crate::parse::SceneIR;
@@ -126,20 +126,97 @@ fn validate_layout_child(
         LayoutChild::Row(row) => validate_row(row, parent, src, path, errors),
         LayoutChild::Col(col) => validate_col(col, parent, src, path, errors),
         LayoutChild::Pane(pane) => validate_pane(pane, parent, src, path, errors),
+        LayoutChild::Stack(stack) => validate_stack(stack, parent, src, path, errors),
     }
 }
 
-/// Walk `row { body }` — children should be `row`/`col`/`pane`.
+/// Walk `row { body }` — children should be `row`/`col`/`pane`/`stack`.
 fn validate_row(row: &RowNode, _parent: &str, src: &str, path: &str, errors: &mut Vec<SceneError>) {
     for child in &row.body {
         validate_layout_child(child, "row", src, path, errors);
     }
 }
 
-/// Walk `col { body }` — children should be `row`/`col`/`pane`.
+/// Walk `col { body }` — children should be `row`/`col`/`pane`/`stack`.
 fn validate_col(col: &ColNode, _parent: &str, src: &str, path: &str, errors: &mut Vec<SceneError>) {
     for child in &col.body {
         validate_layout_child(child, "col", src, path, errors);
+    }
+}
+
+/// Walk `stack { body }` (scene-2026-04-18 T-012 / R-9).
+///
+/// Stacks accept only `pane` and nested `stack` children in their body;
+/// `row` / `col` are rejected with `error[scene/misplaced-node]`.
+/// Child-level sizing attrs (`span` / `cells` / `min` / `max`) on any
+/// direct pane or nested-stack child = `error[scene/sizing-on-stack-child]`
+/// per R-9 — zellij owns expand/collapse sizing for stacked children;
+/// only the enclosing stack's own sizing attrs are tunable.
+fn validate_stack(
+    stack: &StackNode,
+    _parent: &str,
+    src: &str,
+    path: &str,
+    errors: &mut Vec<SceneError>,
+) {
+    for child in &stack.body {
+        match child {
+            LayoutChild::Row(_) => errors.push(misplaced("row", "stack", src, path)),
+            LayoutChild::Col(_) => errors.push(misplaced("col", "stack", src, path)),
+            LayoutChild::Pane(pane) => {
+                check_no_sizing_on_pane(pane, src, path, errors);
+                validate_pane(pane, "stack", src, path, errors);
+            }
+            LayoutChild::Stack(inner) => {
+                check_no_sizing_on_stack(inner, src, path, errors);
+                validate_stack(inner, "stack", src, path, errors);
+            }
+        }
+    }
+}
+
+/// R-9: reject any sizing attr on a pane that is a direct child of a
+/// `stack { … }` body.
+fn check_no_sizing_on_pane(pane: &PaneNode, src: &str, path: &str, errors: &mut Vec<SceneError>) {
+    for (present, name) in [
+        (pane.span.is_some(), "span"),
+        (pane.cells.is_some(), "cells"),
+        (pane.min.is_some(), "min"),
+        (pane.max.is_some(), "max"),
+    ] {
+        if present {
+            errors.push(sizing_on_stack_child(name, &pane.handle, src, path));
+        }
+    }
+}
+
+/// R-9: reject any sizing attr on a nested stack that is a direct child
+/// of another `stack { … }` body.
+fn check_no_sizing_on_stack(
+    inner: &StackNode,
+    src: &str,
+    path: &str,
+    errors: &mut Vec<SceneError>,
+) {
+    for (present, name) in [
+        (inner.span.is_some(), "span"),
+        (inner.cells.is_some(), "cells"),
+        (inner.min.is_some(), "min"),
+        (inner.max.is_some(), "max"),
+    ] {
+        if present {
+            errors.push(sizing_on_stack_child(name, &inner.handle, src, path));
+        }
+    }
+}
+
+/// Construct a [`SceneError::SizingOnStackChild`] for R-9 violations.
+fn sizing_on_stack_child(attr: &str, child_handle: &str, src: &str, path: &str) -> SceneError {
+    SceneError::SizingOnStackChild {
+        attr: attr.to_string(),
+        child_handle: child_handle.to_string(),
+        src: NamedSource::new(path.to_string(), src.to_string()),
+        span: SourceSpan::new(0.into(), 0),
     }
 }
 

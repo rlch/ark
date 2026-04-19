@@ -26,7 +26,7 @@
 //! fan out to a collect-all pass at a higher level; the library itself
 //! short-circuits on the first failure.
 
-use crate::ast::layout::{ColNode, LayoutChild, PaneNode, RowNode, TabNode};
+use crate::ast::layout::{ColNode, LayoutChild, PaneNode, RowNode, StackNode, TabNode};
 use crate::ast::ops::OpNode;
 use crate::ast::{BindNode, ModeNode, OnNode, SceneBodyNode};
 use crate::error::SceneError;
@@ -222,7 +222,19 @@ impl<'a> CompileCtx<'a> {
             LayoutChild::Row(row) => self.walk_row(row, path),
             LayoutChild::Col(col) => self.walk_col(col, path),
             LayoutChild::Pane(pane) => self.walk_pane(pane, path),
+            LayoutChild::Stack(stack) => self.walk_stack(stack, path),
         }
+    }
+
+    /// Walk a `stack @h { … }` node (scene-2026-04-18 T-006). Stack
+    /// carries a `when=` predicate that compiles in the spawn scope,
+    /// plus a homogeneous body whose children are walked recursively.
+    fn walk_stack(&mut self, stack: &StackNode, path: &str) -> Result<(), SceneError> {
+        self.compile_when(&stack.when, RhaiScope::Spawn, &format!("{path}.when"))?;
+        for (i, child) in stack.body.iter().enumerate() {
+            self.walk_layout_child(child, &format!("{path}.body[{i}]"))?;
+        }
+        Ok(())
     }
 
     fn walk_row(&mut self, row: &RowNode, path: &str) -> Result<(), SceneError> {

@@ -746,6 +746,88 @@ pub enum SceneError {
         /// Human-readable parse failure.
         reason: String,
     },
+
+    // -----------------------------------------------------------------------
+    // scene-2026-04-18 revision variants
+    // -----------------------------------------------------------------------
+    /// Scene-2026-04-18 T-007: the deferred union-syntax form
+    /// `pane @h { A | B }` / `stack @h { A | B }` was written. Union
+    /// syntax is deferred to v0.2 per R-8; today every pane/stack
+    /// declares a single view alias.
+    #[error("`|` in view-alias position — union syntax is deferred to v0.2")]
+    #[diagnostic(
+        code = "scene/union-syntax-deferred",
+        severity(Error),
+        help(
+            "Union syntax deferred to v0.2; declare a single view alias or wrap mode-switching in a `ViewMode` enum inside one view impl."
+        )
+    )]
+    UnionSyntaxDeferred {
+        /// File containing the forbidden `|` token.
+        #[source_code]
+        src: NamedSource<String>,
+        /// Span of the `|` token.
+        #[label("union syntax deferred to v0.2")]
+        span: SourceSpan,
+    },
+
+    /// Scene-2026-04-18 T-012 / R-9: a direct child of a `stack { … }`
+    /// body carried a sizing attr (`span=`, `cells=`, `min=`, `max=`)
+    /// which zellij owns for stack children — the enclosing stack's
+    /// sizing is the only tunable.
+    #[error("sizing attr `{attr}` not allowed on stack child")]
+    #[diagnostic(
+        code = "scene/sizing-on-stack-child",
+        severity(Error),
+        help(
+            "stack children cannot declare sizing; zellij owns expand/collapse stacking. Move sizing attrs to the enclosing stack or its parent row/col."
+        )
+    )]
+    SizingOnStackChild {
+        /// Offending attr name (e.g. `"span"`).
+        attr: String,
+        /// Handle of the stack child carrying the attr (for diagnostic
+        /// attribution).
+        child_handle: String,
+        /// File containing the mistake.
+        #[source_code]
+        src: NamedSource<String>,
+        /// Span of the offending attr token.
+        #[label("sizing not allowed on stack children")]
+        span: SourceSpan,
+    },
+
+    /// Scene-2026-04-18 T-017: a typed handle reference in an op arg
+    /// or view attr resolved to a pane/stack whose view type does not
+    /// match the expected view. Emitted by the view-type validator
+    /// (T-018) when the declared expected view diverges from the
+    /// `ViewDecl` stored in the compile-time `ViewTable`.
+    #[error(
+        "view-type mismatch on `{op}` arg `{attr}`: expected view `{expected_view}`, got `{actual_view}`"
+    )]
+    #[diagnostic(
+        code = "scene/view-type-mismatch",
+        severity(Error),
+        help(
+            "Exact-match only per R-8 (union/OneOf deferred). Either change the scene to reference a handle of the expected view, or change the op/view attr's declared type."
+        )
+    )]
+    ViewTypeMismatch {
+        /// Op or view name carrying the typed handle ref.
+        op: String,
+        /// Attribute carrying the typed handle ref (e.g. `"target"`).
+        attr: String,
+        /// View the op/attr declared as expected (from its facet SHAPE).
+        expected_view: String,
+        /// View the scene's `ViewTable` actually resolves to.
+        actual_view: String,
+        /// File containing the mismatch.
+        #[source_code]
+        src: NamedSource<String>,
+        /// Span of the offending `@handle` token.
+        #[label("expected view does not match declared handle type")]
+        span: SourceSpan,
+    },
 }
 
 #[cfg(test)]

@@ -167,7 +167,12 @@ pub struct TabNode {
 // ---------------------------------------------------------------------------
 
 /// Children admissible inside a `tab { … }` body or nested inside a
-/// `row { … }` / `col { … }` container (R3 — `row` / `col` / `pane`).
+/// `row { … }` / `col { … }` / `stack { … }` container
+/// (R3 — `row` / `col` / `pane` / `stack`).
+///
+/// `Stack` was added by scene-2026-04-18 T-006 to carry the new
+/// `stack @h { … }` layout primitive. Scope validation (T-012) rejects
+/// `row` / `col` inside a stack body and bare `stack` at layout root.
 #[derive(Facet, Debug, Clone)]
 #[repr(u8)]
 pub enum LayoutChild {
@@ -180,6 +185,10 @@ pub enum LayoutChild {
     /// Leaf pane running a view.
     #[facet(rename = "pane")]
     Pane(PaneNode),
+    /// Dynamic container of same-view-type panes (zellij pane stack).
+    /// Scene-2026-04-18 T-006.
+    #[facet(rename = "stack")]
+    Stack(StackNode),
 }
 
 // ---------------------------------------------------------------------------
@@ -250,6 +259,68 @@ pub struct ColNode {
     pub min: Option<u32>,
 
     /// Upper bound in cells (R3 `max=N`).
+    #[facet(kdl::property, default)]
+    pub max: Option<u32>,
+}
+
+// ---------------------------------------------------------------------------
+// Stack (scene-2026-04-18 T-005 — dynamic homogeneous pane container)
+// ---------------------------------------------------------------------------
+
+/// `stack @handle [view-alias-or-body] { pane|stack … }` —
+/// dynamic container of same-view-type panes (zellij pane stack).
+///
+/// Sizing attrs (`span` / `cells` / `min` / `max`) govern the stack
+/// container's share of the enclosing `row` / `col` parent, identical
+/// to [`RowNode`] / [`ColNode`] semantics. Child-level sizing attrs on
+/// direct children of a stack body = `error[scene/sizing-on-stack-child]`
+/// (R-9). Empty stack bodies (`stack @h { }`) are legal and compile to
+/// a zellij pane stack with no children; the view type is resolved at
+/// first `spawn_into` call (T-008 / R-8 dynamic-only population).
+///
+/// Heterogeneous `Stack<dyn View>` semantics deferred to v0.2 with the
+/// rest of the union-syntax work (R-8). For v0.1 the validator
+/// (T-012/T-018) enforces homogeneous view type across every child.
+#[derive(Facet, Debug, Clone)]
+pub struct StackNode {
+    /// Identity key for reconciler match + op targeting (R3 + R2 —
+    /// `@handle` required on every stack). Stored as a raw string
+    /// (e.g. `"@claude-stack"`) because facet-kdl cannot auto-construct
+    /// [`Handle`]; post-parse validation via `Handle::new` happens in
+    /// validate/handles.rs.
+    #[facet(kdl::argument)]
+    pub handle: String,
+
+    /// Nested pane / stack children in source order. Semantically
+    /// homogeneous per R-8: every child MUST resolve to the same view
+    /// type as the stack's declared `ViewMeta` (T-012 + T-018 enforce).
+    ///
+    /// Row / col children inside a stack body are rejected by
+    /// [`crate::validate::scope`] with `error[scene/misplaced-node]`
+    /// (T-012).
+    #[facet(kdl::children, default)]
+    pub body: Vec<LayoutChild>,
+
+    /// Optional `when=` predicate for conditional inclusion. Raw Rhai
+    /// source; compiled in the walker. Mirrors the row / col behavior.
+    #[facet(kdl::property, default)]
+    pub when: Option<String>,
+
+    /// Relative weight within the enclosing `row` / `col` parent
+    /// (R3 `span=N` on the stack container itself; R-9 forbids these
+    /// attrs on stack children).
+    #[facet(kdl::property, default)]
+    pub span: Option<u32>,
+
+    /// Fixed size in cells (R3 `cells=N` on the stack container).
+    #[facet(kdl::property, default)]
+    pub cells: Option<u32>,
+
+    /// Lower bound in cells (R3 `min=N` on the stack container).
+    #[facet(kdl::property, default)]
+    pub min: Option<u32>,
+
+    /// Upper bound in cells (R3 `max=N` on the stack container).
     #[facet(kdl::property, default)]
     pub max: Option<u32>,
 }

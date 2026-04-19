@@ -55,7 +55,7 @@ use kdl::KdlDocument;
 use rhai::Scope as RhaiScope;
 use tokio::sync::Mutex;
 
-use crate::ast::layout::{ColNode, LayoutChild, PaneNode, RowNode, TabNode};
+use crate::ast::layout::{ColNode, LayoutChild, PaneNode, RowNode, StackNode, TabNode};
 use crate::ast::{LayoutNode, SceneBodyNode, SceneNode};
 use crate::compile::CompiledScene;
 use crate::compile::layout::{compile_layout_kdl, write_layout_artifact, write_layout_artifact_in};
@@ -644,6 +644,33 @@ impl Reconciler {
                     when: None,
                     overlay: pane.overlay.clone(),
                     view: pane.view.clone(),
+                }))
+            }
+            // scene-2026-04-18 T-026: stack handles round-trip through
+            // the reconciler identically to panes. Only static children
+            // (declared in scene source) pass through filter_child;
+            // dynamically spawned children (via `spawn_into`) live
+            // outside the desired-state layout entirely.
+            LayoutChild::Stack(stack) => {
+                let include = self.eval_when(&stack.when, &format!("{path}.when"), scope, truth)?;
+                if !include {
+                    return Ok(None);
+                }
+                let mut body = Vec::new();
+                for (i, c) in stack.body.iter().enumerate() {
+                    let p = format!("{path}.body[{i}]");
+                    if let Some(c) = self.filter_child(c, &p, scope, truth)? {
+                        body.push(c);
+                    }
+                }
+                Some(LayoutChild::Stack(StackNode {
+                    handle: stack.handle.clone(),
+                    body,
+                    when: None,
+                    span: stack.span,
+                    cells: stack.cells,
+                    min: stack.min,
+                    max: stack.max,
                 }))
             }
         })

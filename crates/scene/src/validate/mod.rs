@@ -14,3 +14,9 @@ pub mod handles;
 pub mod op_refs;
 pub mod pane_views;
 pub mod scope;
+
+// scene-2026-04-18 re-exports so integration tests can write
+// `use ark_scene::validate::{validate_scope, validate_handles}` without
+// naming the submodule paths directly.
+pub use handles::validate_handles;
+pub use scope::validate_scope;

@@ -23,7 +23,7 @@ use std::collections::HashMap;
 
 use miette::{NamedSource, SourceSpan};
 
-use crate::ast::layout::{ColNode, LayoutChild, PaneNode, RowNode, TabNode};
+use crate::ast::layout::{ColNode, LayoutChild, PaneNode, RowNode, StackNode, TabNode};
 use crate::ast::ops::OpNode;
 use crate::ast::{BindNode, LayoutNode, ModeNode, OnNode, SceneBodyNode};
 use crate::error::SceneError;
@@ -35,6 +35,12 @@ use crate::suggest::{format_suggestions, suggest};
 enum DeclKind {
     Tab,
     Pane,
+    /// scene-2026-04-18 T-011: stack handles share the flat namespace
+    /// with tab + pane for handle-clash detection and join the
+    /// `@handle` resolver so ops that accept polymorphic targets
+    /// (focus/close + future stack-specific ops) can route via
+    /// [`HandleKind`].
+    Stack,
 }
 
 impl DeclKind {
@@ -42,6 +48,7 @@ impl DeclKind {
         match self {
             DeclKind::Tab => "tab",
             DeclKind::Pane => "pane",
+            DeclKind::Stack => "stack",
         }
     }
 }
@@ -111,6 +118,7 @@ fn collect_layout_child(child: &LayoutChild, decls: &mut HashMap<String, DeclKin
         LayoutChild::Row(row) => collect_row(row, decls),
         LayoutChild::Col(col) => collect_col(col, decls),
         LayoutChild::Pane(pane) => collect_pane(pane, decls),
+        LayoutChild::Stack(stack) => collect_stack(stack, decls),
     }
 }
 
@@ -129,6 +137,15 @@ fn collect_col(col: &ColNode, decls: &mut HashMap<String, DeclKind>) {
 fn collect_pane(pane: &PaneNode, decls: &mut HashMap<String, DeclKind>) {
     if !pane.handle.is_empty() {
         decls.insert(pane.handle.clone(), DeclKind::Pane);
+    }
+}
+
+fn collect_stack(stack: &StackNode, decls: &mut HashMap<String, DeclKind>) {
+    if !stack.handle.is_empty() {
+        decls.insert(stack.handle.clone(), DeclKind::Stack);
+    }
+    for child in &stack.body {
+        collect_layout_child(child, decls);
     }
 }
 

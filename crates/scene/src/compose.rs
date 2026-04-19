@@ -190,6 +190,14 @@ fn collect_child_handles(child: &LayoutChild, out: &mut Vec<String>) {
                 out.push(p.handle.clone());
             }
         }
+        LayoutChild::Stack(s) => {
+            if !s.handle.is_empty() {
+                out.push(s.handle.clone());
+            }
+            for ch in &s.body {
+                collect_child_handles(ch, out);
+            }
+        }
     }
 }
 

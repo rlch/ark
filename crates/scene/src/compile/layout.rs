@@ -50,7 +50,9 @@ use kdl::{KdlDocument, KdlEntry, KdlEntryFormat, KdlNode, KdlValue};
 use miette::{NamedSource, SourceSpan};
 
 use crate::ast::LayoutNode;
-use crate::ast::layout::{ColNode, Handle, LayoutChild, PaneNode, RowNode, TabNode, ViewRef};
+use crate::ast::layout::{
+    ColNode, Handle, LayoutChild, PaneNode, RowNode, StackNode, TabNode, ViewRef,
+};
 use crate::context::build_spawn_scope;
 use crate::error::SceneError;
 use crate::id::SceneId;
@@ -388,6 +390,7 @@ impl<'a> LayoutCompileCtx<'a> {
             LayoutChild::Row(row) => self.emit_split("horizontal", row, own_span, total_span, out),
             LayoutChild::Col(col) => self.emit_split_col(col, own_span, total_span, out),
             LayoutChild::Pane(pane) => self.emit_pane(pane, own_span, total_span, out),
+            LayoutChild::Stack(stack) => self.emit_stack(stack, own_span, total_span, out),
         }
     }
 
@@ -472,6 +475,57 @@ impl<'a> LayoutCompileCtx<'a> {
             },
         );
         self.apply_view(&handle, &pane.view, &mut node)?;
+        out.nodes_mut().push(node);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------
+    // Stack emission (scene-2026-04-18 T-025)
+    // -----------------------------------------------------------------
+
+    /// Emit a `stack @h { … }` as a zellij pane with `stacked=true`.
+    ///
+    /// Sizing attrs on the stack container propagate identically to
+    /// `row` / `col` via [`push_sizing`]. Per R-9 child-level sizing is
+    /// rejected by the validator before this emission runs, so the
+    /// emitter can emit children verbatim without renormalising.
+    ///
+    /// Empty stack bodies emit `pane stacked=true` with no children —
+    /// zellij accepts that as a stack whose population is deferred to
+    /// runtime `spawn_into` (T-022).
+    fn emit_stack(
+        &self,
+        stack: &StackNode,
+        own_span: Option<u32>,
+        total_span: u32,
+        out: &mut KdlDocument,
+    ) -> Result<(), SceneError> {
+        let handle = Handle::new(&stack.handle).map_err(|e| SceneError::MisplacedNode {
+            node: format!("@{}", stack.handle),
+            parent: format!("handle: {e}"),
+            src: NamedSource::new("<layout>", String::new()),
+            span: SourceSpan::new(0.into(), 1),
+        })?;
+        let mut node = KdlNode::new("pane");
+        node.push(str_prop("name", handle.name()));
+        // Zellij 0.44 renders stacked panes via a `stacked=true` flag on
+        // the parent `pane` node; children are tiled linearly but shown
+        // as a vertical stack that expand-collapses on focus.
+        node.push(KdlEntry::new_prop("stacked", true));
+        push_sizing(
+            &mut node,
+            SizingInput {
+                span: stack.span.or(own_span),
+                cells: stack.cells,
+                min: stack.min,
+                max: stack.max,
+                total_span,
+            },
+        );
+        let mut body = KdlDocument::new();
+        let inner: Vec<&LayoutChild> = stack.body.iter().collect();
+        self.emit_children(&inner, &mut body)?;
+        node.set_children(body);
         out.nodes_mut().push(node);
         Ok(())
     }
@@ -667,6 +721,7 @@ fn child_span(child: &LayoutChild) -> Option<u32> {
         LayoutChild::Row(r) => r.span,
         LayoutChild::Col(c) => c.span,
         LayoutChild::Pane(p) => p.span,
+        LayoutChild::Stack(s) => s.span,
     }
 }
 
