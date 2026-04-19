@@ -1,6 +1,6 @@
 ---
 created: "2026-04-15"
-last_edited: "2026-04-15"
+last_edited: "2026-04-18"
 domain: mux-tight-coupling
 ---
 
@@ -10,6 +10,49 @@ domain: mux-tight-coupling
 
 **Complete** (Wave A kit edits + Wave B code alignment). Build site
 `context/plans/build-site-mux-tight-coupling.md` lands M-1 through M-13.
+
+## 2026-04-18 audit close-out
+
+Re-executed the build site post-cleanup (Packet A — `claude-code-first`
+pivot deleted `crates/orchestrators/*`, `World`, `Engine`/`Orchestrator`
+traits). Audit findings:
+
+| Task | State at 2026-04-18 | Notes |
+|------|--------------------|-------|
+| M-1 | AUTO — target file `cavekit-architecture.md` no longer exists (superseded by `cavekit-soul.md`; `cavekit-mux-zellij.md` R-section now holds the contract). | — |
+| M-2 | AUTO — same as M-1. `cavekit-mux-zellij.md` scope/title already rewritten to "Spec: Zellij Integration" with "No mux trait abstraction: `ZellijMux` is the type consumers hold directly". | — |
+| M-3 | AUTO — `cavekit-overview.md:104` already reads "Zellij integration: `ZellijMux` (concrete type, no mux trait)". | — |
+| M-4 | AUTO — `cavekit-mux-zellij.md` already rewritten (verified lines 6–9, 83–89, 98–103). | — |
+| M-5 | DONE this pass — `cavekit-testing.md:21` reworded to drop `Multiplexer` from the single-impl-trait list and note the deletion. | See commit. |
+| M-6 | AUTO — `cavekit-overview.md` has zero `TmuxMux` matches; v1 scope line already rewritten. | — |
+| M-7 | AUTO — `crates/core/src/multiplexer.rs` + `mux_contract.rs` gone; `crates/core/src/lib.rs` has no `Multiplexer` / `MuxHarness` / `RecordedCall` / `mux_contract_suite` re-exports. | — |
+| M-8 | AUTO — `crates/mux/zellij/src/mux.rs` has inherent-impl bodies only (no `impl Multiplexer for ZellijMux`). `crates/mux/zellij/tests/contract.rs` gone. | — |
+| M-8b | AUTO — `ZellijMux::for_test` + `for_test_in_zellij` live at `mux.rs:547` / `:562` behind `#[cfg(any(test, feature = "test-support"))]`. | — |
+| M-9 | AUTO — `crates/supervisor/src/consumers/status_pipe.rs` in place; `crates/core/src/consumers/status_pipe.rs` absent. | — |
+| M-10 | AUTO — supervisor `Arc<ZellijMux>` throughout (`kill.rs:110`, `orchestration.rs:74,102`, `auto_close.rs:50,106,124`, `consumers/status_pipe.rs:29`). Orchestrator crates deleted per pivot so no work needed there. `World` itself deleted in cleanup T-010, so the `World.mux` edit is moot. | — |
+| M-11 | AUTO — grep for `MockMux|StubMux|NoopMux` across `crates/core/`, `crates/supervisor/`, `crates/cli/` returns zero hits. The remaining `MockMux` hits are in `crates/scene/src/` — a SCENE-LOCAL crate-private helper implementing `scene::MuxHandle` (a scene-internal trait, not the deleted core `Multiplexer`). Out of build-site scope. | — |
+| M-12 | DONE this pass — `cargo check --workspace` green; `cargo test --workspace --tests` passes with one pre-existing flake (`ark-scene::compile::modes::tests::write_mode_artifacts_writes_one_file_per_mode` — races on a tempdir when run in parallel with sibling tests; passes in isolation). `cargo fmt --all --check` clean. Flake is unrelated to this build site. | — |
+| M-13 | DONE (this file) — original 2026-04-15 body preserved; this close-out section added on ledger-append contract. | — |
+
+### Out-of-scope items flagged (kept, not touched)
+
+- **`crates/cli/src/commands/launch/traits.rs::Multiplexer`** — a
+  LAUNCH-CRATE-INTERNAL test seam, not the core `Multiplexer` trait the
+  build site targets. The module doc-comment explicitly scopes it:
+  "These traits are deliberately launch-crate-internal. They exist
+  purely to hang tests on; there is no plan to add a second prod
+  multiplexer". Leaving as-is per build-site spec (name collision, not
+  the same trait).
+- **`crates/scene/src/intent.rs::MockMux`** (+ scene/src/ops/* test
+  uses) — implements the scene crate's `MuxHandle` trait (scene-internal
+  DSL op dispatch), not core `Multiplexer`. Crate-private
+  (`pub(crate)`). Out of scope.
+
+### Files touched this pass
+
+- `context/kits/cavekit-testing.md` (M-5 rewording).
+- `context/plans/plan-overview.md` (status flip to DONE).
+- `context/impl/impl-mux-tight-coupling.md` (this close-out section).
 
 ## Decision rationale
 

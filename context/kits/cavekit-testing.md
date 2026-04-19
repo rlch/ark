@@ -18,7 +18,7 @@ Test layers for ark. Covers: trait contract tests (every Engine / Orchestrator i
 **Acceptance Criteria:**
 - [ ] Engine contract suite lives in `ark-core/engine_contract.rs` with a factory closure `impl Fn() -> Box<dyn Engine>`; fires fake hook payloads; asserts emitted event timelines
 - [ ] Orchestrator contract suite lives in `ark-core/orchestrator_contract.rs` with a factory closure; runs against a fixture cwd + `StubExecutor`-backed `ZellijMux`; asserts orchestrator-level events + recorded zellij CLI argv
-- [ ] No `Multiplexer`, `TabOps`, `PluginPipe`, or other single-impl mux-facing trait exists in the workspace. Grep rule: `rg 'trait (Mux|TabOps|TabGraph|PluginPipe|StatusChannel|PipeSender)'` returns no matches
+- [ ] No `TabOps`, `PluginPipe`, or other single-impl mux-facing trait exists in the workspace. Grep rule: `rg 'trait (Mux|TabOps|TabGraph|PluginPipe|StatusChannel|PipeSender)'` returns no matches. (The core `Multiplexer` trait was deleted in the 2026-04-18 mux tight-coupling pass; `ZellijMux` is now the concrete type consumers hold.)
 - [ ] Every new trait impl of Engine or Orchestrator passes the relevant suite before merge
 - [ ] Suites run in CI as part of `cargo test --workspace`
 **Dependencies:** cavekit-soul (supersedes cavekit-architecture; Phase 5 deletes Engine/Orchestrator traits — R1's contract suites retarget to per-extension tests), cavekit-overview (principle 9)
