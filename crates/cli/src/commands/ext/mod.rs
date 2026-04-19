@@ -30,17 +30,19 @@ pub mod list;
 pub mod remove;
 pub mod trust;
 pub mod update;
+pub mod verb;
 
 /// Top-level `ark ext` flags + subcommand dispatch.
 #[derive(Debug, Args)]
 #[command(
-    about = "Inspect and list installed ark extensions",
+    about = "Inspect, list, and invoke control-verbs on ark extensions",
     long_about = "Inspect and manage installed ark extensions.\n\
                   \n\
                   Examples:\n  \
                   ark ext list\n  \
                   ark ext info picker\n  \
-                  ark ext inspect ./path/to/plugin.wasm"
+                  ark ext inspect ./path/to/plugin.wasm\n  \
+                  ark ext invoke claude-code install-hooks"
 )]
 pub struct ExtArgs {
     /// Which `ext` subcommand to run.
@@ -63,6 +65,9 @@ pub enum ExtCommand {
     Remove(remove::RemoveArgs),
     /// Re-fetch an extension from its install source.
     Update(update::UpdateArgs),
+    /// Invoke a control-verb on a running extension
+    /// (v0.2-backlog #4). `ark ext invoke <name> <verb> [args...]`.
+    Invoke(verb::VerbArgs),
 }
 
 /// Dispatch an `ext` subcommand through its handler module.
@@ -74,5 +79,6 @@ pub fn run(args: ExtArgs, ctx: &Ctx) -> Result<(), CliError> {
         ExtCommand::Add(a) => add::run(a, ctx),
         ExtCommand::Remove(a) => remove::run(a, ctx),
         ExtCommand::Update(a) => update::run(a, ctx),
+        ExtCommand::Invoke(a) => verb::run(a, ctx),
     }
 }

@@ -124,6 +124,15 @@ pub use ext_dispatch::{
     warn_advertised_but_unimplemented,
 };
 
+// v0.2-backlog #4: control-verb dispatcher. Process-global OnceLock
+// consulted by the supervisor's `ControlVerbInvoke` command handler
+// to route `ark ext <name> <verb>` invocations to the owning extension.
+pub mod ext_verb_dispatch;
+pub use ext_verb_dispatch::{
+    ControlVerbDispatcher, ControlVerbFuture, ControlVerbResult, control_verb_dispatcher,
+    register_control_verb_dispatcher,
+};
+
 // T-029 / cavekit-soul-phase-2-host-dispatch R7: host-declared Phase-2
 // capability slate. Deterministic, sorted, constant at supervisor
 // startup; consumed by the extension load sequence (T-030) when it

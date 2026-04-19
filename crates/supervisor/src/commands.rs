@@ -215,6 +215,14 @@ impl SupervisorCommandHandler {
                 };
                 handle_permit(&self.ctx, args)
             }
+            // ---- v0.2-backlog #4: `ark ext <name> <verb>` dispatcher ----
+            "ControlVerbInvoke" => {
+                let args: ControlVerbInvokeArgs = match req.args_as() {
+                    Ok(a) => a,
+                    Err(e) => return Response::err(format!("ControlVerbInvoke args: {e}")),
+                };
+                handle_control_verb_invoke(args).await
+            }
             other => Response::err(format!("unknown command: {other}")),
         }
     }
@@ -342,6 +350,28 @@ struct PermitArgs {
     /// Optional `option_id` for ACP requests that present a list.
     #[serde(default)]
     option_id: Option<String>,
+}
+
+/// Args for the v0.2-backlog #4 `ControlVerbInvoke { ext, verb, args }`
+/// command.
+///
+/// Sent by `ark ext <name> <verb> [args...]` after the CLI resolves the
+/// target session. The supervisor consults the process-global
+/// [`crate::ext_verb_dispatch::ControlVerbDispatcher`] to route the
+/// call; an unregistered dispatcher surfaces a `"no control-verb
+/// dispatcher registered"` error so the wiring gap is visible rather
+/// than silently swallowed.
+#[derive(Debug, Deserialize, Serialize)]
+struct ControlVerbInvokeArgs {
+    /// Extension name (from the manifest; e.g. `"claude-code"`).
+    ext: String,
+    /// Verb name (from the extension's `control_verbs` response; e.g.
+    /// `"install-hooks"`).
+    verb: String,
+    /// Positional string args forwarded verbatim to the verb handler.
+    /// Shape is verb-defined. `default()` = empty list.
+    #[serde(default)]
+    args: Vec<String>,
 }
 
 // ------- command implementations -----------------------------------------
@@ -520,6 +550,50 @@ fn handle_permit(ctx: &SupervisorCommandCtx, args: PermitArgs) -> Response<JsonV
         "request_id": args.request_id,
         "outcome": args.outcome,
     }))
+}
+
+/// Dispatch an `ark ext <name> <verb>` invocation through the
+/// process-global control-verb dispatcher (v0.2-backlog #4).
+///
+/// Returns:
+/// * `Ok({ "ext", "verb", "data" })` on success — `data` is whatever the
+///   dispatcher's `invoke()` returned.
+/// * `Err("no control-verb dispatcher registered")` when the supervisor
+///   boot sequence never installed a dispatcher (the wiring gap case —
+///   surfaces to the user as a clear `ark ext` error rather than a
+///   silent no-op).
+/// * `Err("<dispatcher error>")` for dispatcher-reported failures
+///   (unknown ext, unknown verb, handler panic-to-Err, etc.).
+async fn handle_control_verb_invoke(args: ControlVerbInvokeArgs) -> Response<JsonValue> {
+    let dispatcher = match crate::ext_verb_dispatch::control_verb_dispatcher() {
+        Some(d) => d,
+        None => {
+            return Response::err(
+                "no control-verb dispatcher registered (supervisor boot did not wire \
+                 `register_control_verb_dispatcher`)",
+            );
+        }
+    };
+    debug!(
+        ext = args.ext.as_str(),
+        verb = args.verb.as_str(),
+        args_len = args.args.len(),
+        "ControlVerbInvoke dispatch"
+    );
+    match dispatcher
+        .invoke(&args.ext, &args.verb, args.args.clone())
+        .await
+    {
+        Ok(data) => Response::ok(serde_json::json!({
+            "ext": args.ext,
+            "verb": args.verb,
+            "data": data,
+        })),
+        Err(msg) => Response::err(format!(
+            "control-verb `{}::{}` failed: {msg}",
+            args.ext, args.verb
+        )),
+    }
 }
 
 /// Choose the synthesized KDL node name for an op.
