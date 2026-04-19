@@ -88,11 +88,12 @@ pub enum HandleKind {
     /// Pane handle (accepted by `focus`, `close`, `resize`, `move`,
     /// `pin`, `unpin`).
     Pane,
-    /// [`crate::handle_types::CommandPane`] — pane hosting a
-    /// `CommandView`-rendered subprocess.
+    /// `CommandView`-rendered pane — retired as a handle-kind variant
+    /// per soul Phase 2 R3/R4; view-type info now lives on
+    /// `ark_view::Pane<V>`. Kept here only as a compat stub until T-009.
     Command,
-    /// [`crate::handle_types::PluginPane`] — pane hosting a
-    /// `ZellijView`-rendered plugin.
+    /// `ZellijView`-rendered pane — retired per R3/R4. Compat stub
+    /// until T-009.
     Plugin,
 }
 

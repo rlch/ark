@@ -21,6 +21,15 @@ use crate::reactions::EventKind;
 /// reserved for host-owned ops and events.
 const RESERVED_PREFIX: &str = "ark.core.";
 
+/// Reserved layout-child keywords (scene-2026-04-18 T-003).
+///
+/// Surfaced by `suggest.rs`-driven diagnostics so `error[scene/unknown-node]`
+/// inside a `tab { … }` / `row { … }` / `col { … }` / nested `stack { … }`
+/// body can offer these as suggestions. Mirrors the variants of
+/// [`crate::ast::layout::LayoutChild`] (T-006 adds `stack` alongside the
+/// existing `row|col|pane` arms).
+pub const LAYOUT_CHILD_KEYWORDS: &[&str] = &["row", "col", "pane", "stack"];
+
 /// Determines how unprefixed names are rewritten.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NamespaceContext {

@@ -33,6 +33,18 @@ pub mod cache;
 pub mod suggest;
 pub mod validate;
 
+// ---------------------------------------------------------------------------
+// scene-2026-04-18 T-001: re-export typed handle + view surface from
+// `ark-view` so downstream crates write `use ark_scene::{Pane, Stack,
+// TabHandle, HandleKind, View, CommandView, ZellijView}` without
+// reaching into `ark-view` directly. Scene itself also routes internal
+// wiring through `ark_view::HandleKind` (narrowed to `{Tab,Pane,Stack}`
+// per soul Phase 2 R3/R4) instead of the retired scene-local variants.
+// ---------------------------------------------------------------------------
+pub use ark_view::{
+    CommandView, HandleId, HandleKind, Pane, PaneLike, Stack, TabHandle, View, ZellijView,
+};
+
 // T-019 + T-020 + T-021: Rhai expression-only engine wrapper, two-scope
 // system, and ark-owned stdlib helpers (`glob`, `matches`, `basename`,
 // `dirname`).
@@ -49,10 +61,6 @@ pub mod compose;
 pub mod context;
 // T-026 + T-027 + T-028..T-031: view registry + primitives.
 pub mod view;
-// T-033: typed pane handle wrappers (`CommandPane`, `PluginPane`,
-// `TabHandle`) — compile-time inference from `ViewMeta::render_mode`
-// lands in T-090's derive macro.
-pub mod handle_types;
 // T-078: namespace enforcement — `<owner>.<name>` for intents/events.
 pub mod namespace;
 // T-079: load-order enforcement (reaction additive, bind last-wins,

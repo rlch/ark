@@ -35,6 +35,16 @@ pub fn suggest(input: &str, candidates: &[&str], threshold: f64, max: usize) -> 
         .collect()
 }
 
+/// Suggest a layout-child keyword for an unknown node inside a `tab`,
+/// `row`, `col`, or `stack` body (scene-2026-04-18 T-003).
+///
+/// Delegates to [`suggest`] against [`crate::namespace::LAYOUT_CHILD_KEYWORDS`]
+/// so diagnostics surface `stack` alongside `row|col|pane` in the
+/// "did you mean?" help text.
+pub fn suggest_layout_child(input: &str) -> Vec<String> {
+    suggest(input, crate::namespace::LAYOUT_CHILD_KEYWORDS, 0.75, 3)
+}
+
 /// Formats suggestions as `; did you mean: \`a\`, \`b\`, \`c\`?` for appending
 /// to error help text. Returns an empty string when `suggestions` is empty.
 pub fn format_suggestions(suggestions: &[String]) -> String {
@@ -94,5 +104,27 @@ mod tests {
             format_suggestions(&suggestions),
             "; did you mean: `focus`, `close`?"
         );
+    }
+
+    // scene-2026-04-18 T-003: layout-child suggestions include `stack`.
+    #[test]
+    fn layout_child_suggests_stack_for_typo() {
+        let result = suggest_layout_child("stac");
+        assert!(
+            result.contains(&"stack".to_owned()),
+            "expected `stack` in suggestions for `stac`, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn layout_child_suggests_existing_keywords() {
+        // Every R3 layout-child keyword is discoverable.
+        for (typo, want) in [("ro", "row"), ("colm", "col"), ("pame", "pane")] {
+            let result = suggest_layout_child(typo);
+            assert!(
+                result.contains(&want.to_owned()),
+                "expected `{want}` in suggestions for `{typo}`, got {result:?}"
+            );
+        }
     }
 }
