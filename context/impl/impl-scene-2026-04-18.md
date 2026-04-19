@@ -49,6 +49,87 @@ DONE via phase-2. Prior audit was wrong.
 
 ## Implementation waves
 
+### Wave 4 — Tier 3 (T-013, T-014, T-015, T-016)
+
+SHA: `<pending>`.
+
+- **T-013 ViewTable type**: new file `crates/scene/src/compile/view_table.rs`
+  carries the scene-local `ViewTable = BTreeMap<HandleId, ViewDecl>` type
+  alias (`pub(crate)` per R-10) plus the `ViewDecl { kind: HandleKind,
+  view_meta: ViewMeta }` struct (promoted to `pub` so `view_of` can
+  return `Option<&ViewDecl>` across the crate boundary — but NOT exposed
+  via `CompiledScene`'s public surface, preserving R-10). File placement
+  avoids name collision with the phase-2 manifest-level
+  `compile/view_types.rs`.
+- **T-013 HandleId Ord**: added `Ord + PartialOrd` derives to
+  `ark_view::HandleId` so it can key a BTreeMap. Non-breaking additive
+  change; byte-lexicographic on the inner string.
+- **T-014 populate view_table during compile_scene**: new
+  `compile_scene_with_registry(engine, ir, &registry)` entry point +
+  `compile_scene(engine, ir)` wraps it with `ViewRegistry::with_primitives()`.
+  `build_view_table` walks `SceneIR::scene` tabs + mode tabs, recursing
+  rows/cols, resolving each pane/stack alias via the registry. Tabs do
+  not receive entries. Stacks resolve to the first pane child's alias
+  per R-8 homogeneous-only. Empty stacks + unknown aliases get skipped
+  silently (dedicated diagnostic pass owns user-facing errors). Since
+  `pane.view.alias` is currently always empty after parse (T-026+ view
+  resolution pending), `build_view_table` falls back to extracting
+  aliases from `ir.kdl_doc` via `collect_handle_aliases_from_kdl` —
+  walks every `pane "@h" { <alias> }` node to build a
+  `@handle -> alias` map. `CompiledScene` gains `pub(crate) view_table:
+  ViewTable` field + `pub(crate) fn view_table(&self) -> &ViewTable`
+  accessor.
+- **T-015 IntentContext::view_of**: added `Option<Arc<ViewTable>>`
+  field `view_table` on `IntentContext`, plus `pub(crate) with_view_table`
+  builder. `pub fn view_of(&self, handle: &HandleId) -> Option<&ViewDecl>`
+  is the SOLE public accessor. NO `CompiledScene::resolve_typed_pane` /
+  `resolve_typed_stack` public methods were added per R-10.
+- **T-016 handle_type_hint rewire**: added
+  `pub fn with_handle_hint_from_table(self, &HandleId) -> Self` on
+  `IntentContext` — auto-fills `handle_type_hint` from the attached
+  `ViewTable`. This is the REPLACEMENT path for the old ad-hoc
+  `with_handle_type_hint` call site. The old builder is retained (still
+  `pub`) for extension / test dispatch paths that bypass the compile
+  pipeline; its doc-comment now points to `view_of` as the preferred
+  source. No compile/layout.rs or reactions.rs had ad-hoc hint
+  attachment code — `handle_type_hint` was only set via
+  `with_handle_type_hint` in tests. The runtime reactions dispatcher
+  (not yet built) will use `with_handle_hint_from_table` per the
+  replacement pathway.
+
+Tests delta:
+- `crates/scene/src/compile/view_table.rs` 3 unit tests
+  (store+retrieve, deterministic iteration, stack kind).
+- `crates/scene/src/compile/mod.rs::tests` 4 new integration tests
+  (panes+primitives, tabs skipped, stack->child view, unknown alias skipped).
+- `crates/scene/src/intent.rs::tests` 7 new tests for view_of + auto-hint
+  (decl for declared handle, None for absent, None without table,
+  pane/stack distinction, pane hint, stack hint, absent = no hint).
+
+Scene tests: 623 pass (up from 609 — +14 new).
+Workspace tests: 2167 pass (up from 2153).
+
+### Wave 3 — Tier 2 (T-009, T-010)
+
+SHA: `8e8a735`.
+
+- **T-009 retire scene-local HandleKind**: deleted the 4-variant enum
+  (`Tab | Pane | Command | Plugin`) from `crates/scene/src/intent.rs`;
+  replaced with `pub use ark_view::HandleKind` (3-variant `Tab | Pane |
+  Stack`). View-type info (CommandView vs ZellijView) moved to
+  `ark_view::Pane<V>` per soul Phase 2 R3/R4.
+- **T-010 HandleKind::Stack routing**: added explicit `Stack` match arm
+  to `FocusOp` + `CloseOp` in `ops/panes.rs`. Stack focus routes to
+  `focus_pane` (zellij expands at currently focused child); stack close
+  routes to `close_pane` (cascades to all members). `#[non_exhaustive]`
+  on the re-exported `HandleKind` requires a `_` fallback arm; wired as
+  a pane-route default.
+- Tests: 2 new stack-routing tests (focus + close of `@claude_stack`
+  with `HandleKind::Stack` hint dispatch the expected pane calls).
+- grep verify: `HandleKind::(Command|Plugin)` in `crates/scene/` = 0.
+
+Scene tests: 609 pass. Workspace tests: 2153 pass.
+
 ### Wave 2 — Tier 1 (T-005, T-006, T-008, T-011, T-012, partial T-007)
 
 SHA: `366e2f6`.

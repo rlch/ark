@@ -47,8 +47,10 @@ use async_trait::async_trait;
 use kdl::KdlNode;
 
 use crate::ast::layout::Handle;
+use crate::compile::ViewDecl;
 use crate::error::SceneError;
 use crate::id::SceneId;
+use ark_view::HandleId;
 
 // scene-2026-04-18 T-009: retire scene-local `HandleKind` enum — every
 // reference now points at the re-exported `ark_view::HandleKind` which
@@ -207,8 +209,14 @@ pub struct IntentContext {
     pub origin: String,
 
     /// Optional hint about the declared type of the handle the op is
-    /// acting on, set by the compile pipeline when it resolves the
-    /// `@handle` reference. `None` when the op carries no handle.
+    /// acting on.
+    ///
+    /// **scene-2026-04-18 T-016:** the reactions dispatcher now sources
+    /// this from the scene's private [`ViewTable`] via
+    /// [`IntentContext::view_of`], not from an ad-hoc per-handle
+    /// attachment at compile time. [`IntentContext::with_handle_type_hint`]
+    /// is retained for extensions / tests that dispatch ops outside the
+    /// compile pipeline. `None` when the op carries no handle.
     pub handle_type_hint: Option<HandleKind>,
 
     /// Mux handle. `None` in tests / scene-less agents; ops that need
@@ -219,6 +227,14 @@ pub struct IntentContext {
     /// Event bus handle. `None` in tests; `emit` + `set_status` are
     /// noops with a `tracing::warn!` when absent.
     pub bus: Option<Arc<dyn EventBus>>,
+
+    /// Scene-local view table (scene-2026-04-18 T-015). `None` when no
+    /// compiled scene is attached (tests, extension-only dispatch
+    /// paths). Populated by the reactions dispatcher from
+    /// [`crate::compile::CompiledScene::view_table`] before each
+    /// dispatch. Type is `Arc` so cloning the context across concurrent
+    /// dispatches stays cheap.
+    pub(crate) view_table: Option<Arc<crate::compile::ViewTable>>,
 }
 
 impl IntentContext {
@@ -231,6 +247,7 @@ impl IntentContext {
             handle_type_hint: None,
             mux: None,
             bus: None,
+            view_table: None,
         }
     }
 
@@ -247,9 +264,66 @@ impl IntentContext {
     }
 
     /// Builder: attach a handle-type hint.
+    ///
+    /// Retained for extensions / tests that dispatch ops outside the
+    /// compile pipeline. The reactions dispatcher itself sources the
+    /// hint from [`Self::view_of`] + the attached view table per T-016
+    /// rather than calling this builder.
     pub fn with_handle_type_hint(mut self, hint: HandleKind) -> Self {
         self.handle_type_hint = Some(hint);
         self
+    }
+
+    /// Builder: attach the scene-local view table (scene-2026-04-18
+    /// T-015). Called by the reactions dispatcher once per scene
+    /// compile; subsequent dispatches clone the arc cheaply.
+    ///
+    /// `#[allow(dead_code)]` because the runtime consumer (reactions
+    /// dispatcher wiring) lands in a later tier; the builder is
+    /// exercised today by the intent tests via `view_of` coverage.
+    #[allow(dead_code)]
+    pub(crate) fn with_view_table(mut self, table: Arc<crate::compile::ViewTable>) -> Self {
+        self.view_table = Some(table);
+        self
+    }
+
+    /// Builder: auto-fill [`Self::handle_type_hint`] from the attached
+    /// view table for the supplied opaque [`HandleId`]
+    /// (scene-2026-04-18 T-016).
+    ///
+    /// This REPLACES the old ad-hoc per-handle hint attachment in
+    /// `compile/layout.rs` + the reactions dispatcher. Callers pass in
+    /// the same [`HandleId`] the op carries; the hint falls back to
+    /// `None` when the handle isn't declared in the scene (extension
+    /// reactions introducing new handles via `spawn` / `new_tab`). Tabs
+    /// are not in the view table, so a tab handle falls through to
+    /// `None` and the op treats it as its default branch — the
+    /// [`crate::validate::op_refs`] pass has already rejected
+    /// tab-targeting ops that disagree with R7.
+    pub fn with_handle_hint_from_table(mut self, handle: &HandleId) -> Self {
+        if let Some(decl) = self.view_of(handle) {
+            self.handle_type_hint = Some(decl.kind);
+        }
+        self
+    }
+
+    /// Re-materialise the [`ViewDecl`] for the handle identified by
+    /// `handle` (scene-2026-04-18 T-015 — SOLE public accessor per
+    /// R-10).
+    ///
+    /// The reactions dispatcher calls this to rebuild a typed
+    /// `Pane<V>` / `Stack<V>` from the opaque wire [`HandleId`] carried
+    /// in an event payload. Returns `None` when no view table is
+    /// attached (tests, extension-only dispatch paths) or when the
+    /// handle is absent / references a tab (tabs carry no view).
+    ///
+    /// This is the ONLY public accessor into the scene-local view
+    /// table — `CompiledScene::view_table` is `pub(crate)` per R-10.
+    /// Compile-pipeline passes (T-018, T-019) that need pre-runtime
+    /// access go through [`crate::compile::CompiledScene::view_table`]
+    /// directly, NOT through this accessor.
+    pub fn view_of(&self, handle: &HandleId) -> Option<&ViewDecl> {
+        self.view_table.as_ref().and_then(|t| t.get(handle))
     }
 }
 
@@ -716,5 +790,118 @@ pub(crate) mod tests {
         let err = strict_map("test.spawn", Err("handle not found".into()))
             .expect_err("strict must surface even absent errors");
         assert!(matches!(err, SceneError::OpFailed { .. }));
+    }
+
+    // ---- scene-2026-04-18 T-015 / T-016 — view_of + handle hint auto-fill
+
+    /// Build a ViewTable fixture with one pane + one stack entry for
+    /// view_of accessor tests. Module-private helper keeps the
+    /// integration surface ergonomic without touching the `compile`
+    /// module's `pub(crate)` types across test crates.
+    fn fixture_view_table() -> Arc<crate::compile::ViewTable> {
+        use crate::compile::ViewDecl;
+        use crate::view::{RenderMode, ViewMeta, ViewSource};
+        use std::collections::BTreeMap;
+        let mut table: crate::compile::ViewTable = BTreeMap::new();
+        table.insert(
+            ark_view::HandleId::new("@editor"),
+            ViewDecl {
+                kind: HandleKind::Pane,
+                view_meta: ViewMeta {
+                    name: "command".to_string(),
+                    source: ViewSource::Primitive,
+                    render_mode: RenderMode::CommandView,
+                    config_schema: None,
+                },
+            },
+        );
+        table.insert(
+            ark_view::HandleId::new("@claude_stack"),
+            ViewDecl {
+                kind: HandleKind::Stack,
+                view_meta: ViewMeta {
+                    name: "command".to_string(),
+                    source: ViewSource::Primitive,
+                    render_mode: RenderMode::CommandView,
+                    config_schema: None,
+                },
+            },
+        );
+        Arc::new(table)
+    }
+
+    #[test]
+    fn view_of_returns_decl_for_declared_handle() {
+        let ctx = IntentContext::new(test_scene_id(), "scene")
+            .with_view_table(fixture_view_table());
+        let decl = ctx
+            .view_of(&ark_view::HandleId::new("@editor"))
+            .expect("declared handle");
+        assert_eq!(decl.kind, HandleKind::Pane);
+        assert_eq!(decl.view_meta.name, "command");
+    }
+
+    #[test]
+    fn view_of_returns_none_for_absent_handle() {
+        let ctx = IntentContext::new(test_scene_id(), "scene")
+            .with_view_table(fixture_view_table());
+        assert!(
+            ctx.view_of(&ark_view::HandleId::new("@ghost")).is_none(),
+            "undeclared handle -> None"
+        );
+    }
+
+    #[test]
+    fn view_of_returns_none_without_view_table() {
+        let ctx = IntentContext::new(test_scene_id(), "scene");
+        assert!(
+            ctx.view_of(&ark_view::HandleId::new("@editor")).is_none(),
+            "no view-table attached -> None"
+        );
+    }
+
+    #[test]
+    fn view_of_distinguishes_pane_and_stack() {
+        let ctx = IntentContext::new(test_scene_id(), "scene")
+            .with_view_table(fixture_view_table());
+        assert_eq!(
+            ctx.view_of(&ark_view::HandleId::new("@editor"))
+                .expect("pane")
+                .kind,
+            HandleKind::Pane
+        );
+        assert_eq!(
+            ctx.view_of(&ark_view::HandleId::new("@claude_stack"))
+                .expect("stack")
+                .kind,
+            HandleKind::Stack
+        );
+    }
+
+    #[test]
+    fn with_handle_hint_from_table_pane_yields_pane_hint() {
+        let ctx = IntentContext::new(test_scene_id(), "scene")
+            .with_view_table(fixture_view_table())
+            .with_handle_hint_from_table(&ark_view::HandleId::new("@editor"));
+        assert_eq!(ctx.handle_type_hint, Some(HandleKind::Pane));
+    }
+
+    #[test]
+    fn with_handle_hint_from_table_stack_yields_stack_hint() {
+        let ctx = IntentContext::new(test_scene_id(), "scene")
+            .with_view_table(fixture_view_table())
+            .with_handle_hint_from_table(&ark_view::HandleId::new("@claude_stack"));
+        assert_eq!(ctx.handle_type_hint, Some(HandleKind::Stack));
+    }
+
+    #[test]
+    fn with_handle_hint_from_table_absent_keeps_none() {
+        let ctx = IntentContext::new(test_scene_id(), "scene")
+            .with_view_table(fixture_view_table())
+            .with_handle_hint_from_table(&ark_view::HandleId::new("@ghost"));
+        assert_eq!(
+            ctx.handle_type_hint, None,
+            "undeclared handle -> no hint"
+        );
     }
 }

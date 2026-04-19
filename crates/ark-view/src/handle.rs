@@ -35,7 +35,24 @@ pub enum HandleKind {
 /// The `V` type parameter on typed wrappers is compile-time-only; the
 /// wire format carries only this id (see R5). Consumers MUST treat the
 /// id as opaque — no splitting, pattern-matching, or prefix-sniffing.
-#[derive(Clone, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize, facet::Facet)]
+///
+/// `Ord + PartialOrd` are derived (scene-2026-04-18 T-013) so the scene
+/// compile pipeline can key a `BTreeMap<HandleId, ViewDecl>` on
+/// [`HandleId`] for deterministic iteration order. The comparison is
+/// byte-lexicographic on the inner string — no semantic meaning beyond
+/// "stable across runs for the same input".
+#[derive(
+    Clone,
+    Debug,
+    Eq,
+    Hash,
+    Ord,
+    PartialEq,
+    PartialOrd,
+    serde::Serialize,
+    serde::Deserialize,
+    facet::Facet,
+)]
 #[serde(transparent)]
 pub struct HandleId(String);
 

@@ -33,7 +33,16 @@ use crate::error::SceneError;
 use crate::interp::{InterpSegment, parse_interp};
 use crate::parse::SceneIR;
 use crate::rhai::{Engine, Program, RhaiScope, compile_in_scope};
+use crate::view::ViewRegistry;
+use ark_view::{HandleId, HandleKind};
 use miette::{NamedSource, SourceSpan};
+use std::collections::BTreeMap;
+
+// `ViewDecl` is `pub` so `IntentContext::view_of` can return
+// `Option<&ViewDecl>` across the crate boundary; `ViewTable` itself
+// stays `pub(crate)` per R-10 (no public surface on `CompiledScene`).
+pub use view_table::ViewDecl;
+pub(crate) use view_table::ViewTable;
 
 // Tier 4 — layout lowering to zellij KDL (T-034..T-040) and mode
 // pre-rendering (T-045). Re-exported so downstream callers can write
@@ -44,6 +53,10 @@ pub mod modes;
 // hash (T-034). Scene validation queries the table to reject unknown
 // `pane @h { view "..." }` references + stack/pane kind mismatches.
 pub mod view_types;
+// scene-2026-04-18 Tier 3 (T-013..T-016) — scene-local per-compiled
+// view table keyed on `HandleId`. Distinct from the manifest-level
+// `view_types::ViewTypeTable`; see that module's docs.
+pub(crate) mod view_table;
 
 pub use layout::{
     compile_layout_kdl, compile_layout_kdl_with_terminal, write_layout_artifact,
@@ -74,11 +87,62 @@ pub struct CompiledScene {
     /// with zero holes are elided (literal-only strings don't need a
     /// render pass at runtime).
     pub interps: Vec<(String, Vec<InterpSegment>)>,
+
+    /// Scene-local `HandleId -> ViewDecl` table (scene-2026-04-18 T-013
+    /// / T-014). PRIVATE per R-10 — the only public runtime accessor is
+    /// [`crate::intent::IntentContext::view_of`]; internal compile-pipeline
+    /// lookups go through [`CompiledScene::view_table`] (a `pub(crate)`
+    /// accessor). Entries exist for every pane + stack handle in the
+    /// scene's layout + modes; tabs have no entry (they carry no view).
+    ///
+    /// `#[allow(dead_code)]` because the runtime consumer (reactions
+    /// dispatcher wiring) lands in a later tier; the field is populated
+    /// today + read by the scene test suite through the accessor below.
+    #[allow(dead_code)]
+    pub(crate) view_table: ViewTable,
+}
+
+impl CompiledScene {
+    /// Crate-private access to the scene-local [`ViewTable`] for
+    /// compile-pipeline passes (T-018 view-type validator, T-019
+    /// `spawn_into` inner-view check). NOT a public accessor per R-10;
+    /// runtime consumers go through
+    /// [`crate::intent::IntentContext::view_of`].
+    #[allow(dead_code)]
+    pub(crate) fn view_table(&self) -> &ViewTable {
+        &self.view_table
+    }
 }
 
 /// Compile all Rhai surfaces in `ir` and bundle the result.
+///
+/// Wraps [`compile_scene_with_registry`] with a primitives-only
+/// [`ViewRegistry`] — sufficient for any scene that references only the
+/// three kernel primitives (`command`, `shell`, `edit`). Callers that
+/// need extension-tier view resolution (the CLI + supervisor) should
+/// call [`compile_scene_with_registry`] directly with a registry
+/// pre-populated by [`crate::ext`] / the extension loader.
 #[allow(clippy::result_large_err)]
 pub fn compile_scene(engine: &Engine, ir: SceneIR) -> Result<CompiledScene, SceneError> {
+    let registry = ViewRegistry::with_primitives();
+    compile_scene_with_registry(engine, ir, &registry)
+}
+
+/// Compile all Rhai surfaces in `ir` + build the scene-local
+/// [`ViewTable`] by resolving each pane / stack's `view "<alias>"`
+/// reference through `registry` (scene-2026-04-18 T-014).
+///
+/// Unknown view aliases do NOT fail compilation here — the dedicated
+/// "unknown view" pass (T-031) owns that diagnostic. Missing entries
+/// simply don't appear in the table; downstream lookups return `None`
+/// and callers that depend on the entry surface their own diagnostic
+/// (T-018 view-type validator, T-019 `spawn_into` inner-view check).
+#[allow(clippy::result_large_err)]
+pub fn compile_scene_with_registry(
+    engine: &Engine,
+    ir: SceneIR,
+    registry: &ViewRegistry,
+) -> Result<CompiledScene, SceneError> {
     let mut ctx = CompileCtx {
         engine,
         predicates: Vec::new(),
@@ -114,11 +178,169 @@ pub fn compile_scene(engine: &Engine, ir: SceneIR) -> Result<CompiledScene, Scen
             | SceneBodyNode::DisableExtension(_) => {}
         }
     }
+    // T-014: walk the scene body once more (cheap — linear in handle
+    // count) and build the per-scene view table. This runs AFTER the
+    // Rhai compile pass so the table only populates for scenes that
+    // already passed Rhai validation.
+    let view_table = build_view_table(&ir, registry);
     Ok(CompiledScene {
         ir,
         predicates: ctx.predicates,
         interps: ctx.interps,
+        view_table,
     })
+}
+
+/// Walk the scene body + mode bodies and build the per-scene
+/// [`ViewTable`] (scene-2026-04-18 T-014). Each pane / stack `@handle`
+/// gets one entry; tabs get no entry; rows / cols are containers only.
+///
+/// View alias resolution goes through the supplied [`ViewRegistry`] —
+/// unknown aliases are SILENTLY skipped. The dedicated
+/// "scene/unknown-view" diagnostic pass (T-031) owns user-facing
+/// error surfacing; this function is diagnostic-free on purpose so
+/// callers can build the table even when some entries fail to resolve.
+///
+/// The typed AST's [`crate::ast::layout::ViewRef::alias`] is populated
+/// by a later parse-time pass (T-026+ is still pending), so this
+/// builder falls through to the raw [`crate::parse::SceneIR::kdl_doc`]
+/// to extract each pane's `view "<alias>"` child when the typed alias
+/// is empty. When no raw doc is available (synthetic test IRs), the
+/// typed alias is used directly.
+fn build_view_table(ir: &SceneIR, registry: &ViewRegistry) -> ViewTable {
+    let mut table: ViewTable = BTreeMap::new();
+    let handle_aliases = collect_handle_aliases_from_kdl(ir);
+    for node in &ir.scene.body {
+        match node {
+            SceneBodyNode::Layout(layout) => {
+                for tab in &layout.tabs {
+                    for child in &tab.body {
+                        collect_view_entries(child, registry, &handle_aliases, &mut table);
+                    }
+                }
+            }
+            SceneBodyNode::Mode(mode) => {
+                for tab in &mode.tabs {
+                    for child in &tab.body {
+                        collect_view_entries(child, registry, &handle_aliases, &mut table);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    table
+}
+
+/// Walk the raw KDL document (if any) and build a `@handle -> alias`
+/// map for every `pane "@h" { <alias> … }` node encountered. The alias
+/// is the name of the pane's first child KDL node (per R3 "exactly one
+/// view child"). Returns an empty map when `ir.kdl_doc` is `None`.
+fn collect_handle_aliases_from_kdl(ir: &SceneIR) -> BTreeMap<String, String> {
+    let mut map = BTreeMap::new();
+    let Some(doc) = ir.kdl_doc.as_ref() else {
+        return map;
+    };
+    walk_kdl_for_pane_aliases(doc, &mut map);
+    map
+}
+
+fn walk_kdl_for_pane_aliases(doc: &kdl::KdlDocument, map: &mut BTreeMap<String, String>) {
+    for node in doc.nodes() {
+        if node.name().value() == "pane" {
+            if let (Some(handle), Some(alias)) = (
+                node.entries()
+                    .iter()
+                    .find(|e| e.name().is_none())
+                    .and_then(|e| e.value().as_string()),
+                node.children()
+                    .and_then(|d| d.nodes().first())
+                    .map(|n| n.name().value()),
+            ) {
+                map.insert(handle.to_string(), alias.to_string());
+            }
+        }
+        if let Some(children) = node.children() {
+            walk_kdl_for_pane_aliases(children, map);
+        }
+    }
+}
+
+fn pane_alias<'a>(
+    pane: &'a PaneNode,
+    handle_aliases: &'a BTreeMap<String, String>,
+) -> Option<&'a str> {
+    if !pane.view.alias.is_empty() {
+        return Some(pane.view.alias.as_str());
+    }
+    handle_aliases.get(&pane.handle).map(|s| s.as_str())
+}
+
+fn collect_view_entries(
+    child: &LayoutChild,
+    registry: &ViewRegistry,
+    handle_aliases: &BTreeMap<String, String>,
+    table: &mut ViewTable,
+) {
+    match child {
+        LayoutChild::Row(row) => {
+            for c in &row.body {
+                collect_view_entries(c, registry, handle_aliases, table);
+            }
+        }
+        LayoutChild::Col(col) => {
+            for c in &col.body {
+                collect_view_entries(c, registry, handle_aliases, table);
+            }
+        }
+        LayoutChild::Pane(pane) => {
+            if pane.handle.is_empty() {
+                return;
+            }
+            let Some(alias) = pane_alias(pane, handle_aliases) else {
+                return;
+            };
+            if let Some(meta) = registry.resolve(alias) {
+                table.insert(
+                    HandleId::new(pane.handle.clone()),
+                    ViewDecl {
+                        kind: HandleKind::Pane,
+                        view_meta: meta.clone(),
+                    },
+                );
+            }
+        }
+        LayoutChild::Stack(stack) => {
+            // R-8: stacks are homogeneous. Resolve the child view type
+            // from the first pane body member; empty-body stacks get no
+            // entry (resolution deferred to first `spawn_into`).
+            if stack.handle.is_empty() {
+                return;
+            }
+            let child_alias: Option<&str> = stack.body.iter().find_map(|c| match c {
+                LayoutChild::Pane(p) => pane_alias(p, handle_aliases),
+                // Nested stacks inside a stack are rejected by
+                // validate/scope.rs (T-012); the compile pass doesn't
+                // try to resolve a stack-in-stack view.
+                _ => None,
+            });
+            if let Some(alias) = child_alias {
+                if let Some(meta) = registry.resolve(alias) {
+                    table.insert(
+                        HandleId::new(stack.handle.clone()),
+                        ViewDecl {
+                            kind: HandleKind::Stack,
+                            view_meta: meta.clone(),
+                        },
+                    );
+                }
+            }
+            // Recurse into body so any nested pane also gets an entry.
+            for c in &stack.body {
+                collect_view_entries(c, registry, handle_aliases, table);
+            }
+        }
+    }
 }
 
 /// Carrier for the walker's accumulated output + static source context.
@@ -569,6 +791,107 @@ scene "s" {
         assert!(
             cs.interps.is_empty(),
             "literal-only config values should not produce interps"
+        );
+    }
+
+    // scene-2026-04-18 T-014 — per-scene view table is populated during
+    // compile_scene by walking layout + mode tabs and resolving each
+    // pane / stack view alias against the supplied ViewRegistry.
+    #[test]
+    fn view_table_populates_panes_with_primitive_views() {
+        let src = r#"
+scene "s" {
+    layout {
+        tab "@main" {
+            pane "@editor" {
+                command
+            }
+            pane "@shell_pane" {
+                shell
+            }
+        }
+    }
+}
+"#;
+        let cs = compile(src).expect("scene with pane views should compile");
+        let table = cs.view_table();
+        assert_eq!(table.len(), 2, "two panes -> two view-table entries");
+        let editor = table
+            .get(&HandleId::new("@editor"))
+            .expect("@editor in table");
+        assert_eq!(editor.kind, HandleKind::Pane);
+        assert_eq!(editor.view_meta.name, "command");
+        let sh = table
+            .get(&HandleId::new("@shell_pane"))
+            .expect("@shell_pane in table");
+        assert_eq!(sh.kind, HandleKind::Pane);
+        assert_eq!(sh.view_meta.name, "shell");
+    }
+
+    // scene-2026-04-18 T-014 — tabs do not receive view-table entries.
+    #[test]
+    fn view_table_skips_tabs() {
+        let src = r#"
+scene "s" {
+    layout {
+        tab "@main" { }
+    }
+}
+"#;
+        let cs = compile(src).expect("bare-tab scene should compile");
+        assert!(
+            cs.view_table().is_empty(),
+            "tabs must not appear in the view table"
+        );
+    }
+
+    // scene-2026-04-18 T-014 — stacks get a single ViewDecl carrying
+    // the first child's view type per R-8 (homogeneous-only).
+    #[test]
+    fn view_table_stack_kind_uses_child_view() {
+        let src = r#"
+scene "s" {
+    layout {
+        tab "@main" {
+            stack "@claude_stack" {
+                pane "@first" {
+                    command
+                }
+            }
+        }
+    }
+}
+"#;
+        let cs = compile(src).expect("scene with stack should compile");
+        let entry = cs
+            .view_table()
+            .get(&HandleId::new("@claude_stack"))
+            .expect("@claude_stack in table");
+        assert_eq!(entry.kind, HandleKind::Stack);
+        assert_eq!(entry.view_meta.name, "command");
+    }
+
+    // scene-2026-04-18 T-014 — unknown view alias yields no table entry
+    // (diagnostic pass owns user-facing error surfacing).
+    #[test]
+    fn view_table_skips_unknown_aliases() {
+        let src = r#"
+scene "s" {
+    layout {
+        tab "@main" {
+            pane "@ghost" {
+                definitely_not_a_primitive
+            }
+        }
+    }
+}
+"#;
+        // compile_scene still succeeds (the view-registry unknown-alias
+        // diagnostic is a separate pass); table just skips the entry.
+        let cs = compile(src).expect("unknown alias doesn't break compile");
+        assert!(
+            cs.view_table().get(&HandleId::new("@ghost")).is_none(),
+            "unknown alias -> no table entry"
         );
     }
 }
