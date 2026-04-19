@@ -115,12 +115,13 @@ pub mod loaders {
     }
 }
 
-/// Bundle of fixture directories consumed by the engine contract suite
-/// ([`ark_core::engine::contract`] in downstream crates).
+/// Bundle of fixture directories that used to back the engine contract
+/// suite (deleted in cleanup-T-010 along with `ark_core::engine`).
 ///
-/// Holding the paths in a struct lets the contract suite accept a single
-/// argument that future engines (hypothetical `gpt-engine`, etc.) can reuse
-/// verbatim, and keeps fixture discovery in one place.
+/// Kept around because the JSONL transcripts + hook payload fixtures on
+/// disk are still useful scaffolding for extensions that want to parse
+/// Claude Code output; the struct itself no longer has an in-tree
+/// consumer.
 #[derive(Debug, Clone)]
 pub struct EngineFixtures {
     /// Directory of committed Claude JSONL transcripts (T-112).

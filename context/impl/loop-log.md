@@ -4,6 +4,15 @@ last_edited: "2026-04-19"
 ---
 # Loop Log
 
+### Wave cleanup-B-T010 — 2026-04-18 — Packet B T-010 (Engine/Orchestrator trait surface DELETED)
+
+- DEL 5 files whole. `crates/supervisor/src/engine_stub.rs` (188 LOC, AcpEngineStub+preflight) + `crates/core/src/engine.rs` (205 LOC, Engine trait + ApprovalPolicy + EngineHandle + mock tests) + `crates/core/src/engine_contract.rs` (410 LOC, conformance suite) + `crates/core/src/orchestrator.rs` (163 LOC, Orchestrator trait + World bag + mock tests) + `crates/core/src/orchestrator_contract.rs` (260 LOC, conformance suite). total 1226 LOC gone.
+- lib.rs CUT. supervisor: `mod engine_stub;` + `pub use engine_stub::{AcpEngineStub, preflight as engine_preflight};` → gone. core: `pub mod engine; pub mod engine_contract; pub mod orchestrator; pub mod orchestrator_contract;` + `pub use engine::{ApprovalPolicy, Engine, EngineHandle};` + `pub use orchestrator::{Orchestrator, World};` → gone. mod doc rewritten.
+- orchestration.rs INLINE. `use ark_core::{Config, World};` → `use ark_core::Config;`. `let world = World::new(mux, events, cancel, hooks_dir, state, config); world.cancel.cancelled().await;` → `cancel.cancelled().await;` — `cancel` already local, `World` construction was pure boilerplate after trait removal. `let _ = (&state_arc, &config_arc);` placeholder keeps dead-code lint quiet (both clones land in reaction_dispatcher + state_writer ctx upstream).
+- test-fixtures doc rewrite. `crates/test-fixtures/src/lib.rs:119` `[ark_core::engine::contract]` reference replaced with "deleted in cleanup-T-010" note. `EngineFixtures` struct kept — still defines on-disk fixture paths, out-of-scope to reap.
+- grep gate (crates/): `ark_core::engine|ark_core::orchestrator|ApprovalPolicy|EngineHandle|pub trait Engine|pub trait Orchestrator` = 1 hit (the new test-fixtures doc-comment describing the deletion). live-code hits = 0.
+- `cargo check --workspace --tests` = 0 err, 5 crates build, 9 wasm-build warnings (pre-existing, unrelated). next: T-011 scene/consumer audit (expected zero residuals).
+
 ### Wave cleanup-B-T008 — 2026-04-18 — Packet B T-008 (factory.rs gone, mux inlined)
 
 - DEL `crates/supervisor/src/factory.rs` whole (219 LOC). `build_engine`/`build_orchestrator`/`SupervisorError` dead → all rode file into grave.

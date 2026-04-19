@@ -20,13 +20,13 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use ark_core::consumers::{ReactionDispatcherCtx, reaction_dispatcher, state_writer};
 use ark_core::status_writer::write_session_status_atomic;
-use ark_core::{Config, World};
-// cleanup-T-009: Engine + Orchestrator trait objects are gone from the
-// runtime boot path — `run_supervisor_with` no longer accepts them, so the
-// trait imports here were removed alongside the R3 step-6 diagnostic and
-// the step-10/15 observability + teardown branches. `World` stays because
-// the bare-session `world.cancel.cancelled().await` park still needs it;
-// T-010 retires `World` along with the traits.
+use ark_core::Config;
+// cleanup-T-009/T-010: Engine + Orchestrator trait objects and the
+// `World` capability bag are gone from the runtime boot path. The
+// R3 step-6 diagnostic, the step-10/15 observability + teardown
+// branches, and the step-13 `World::new(...)` construction (used only
+// to reach `world.cancel.cancelled().await` on the bare-session path)
+// were all deleted; the cancel local is parked directly.
 use ark_mux_zellij::ZellijMux;
 use ark_scene::context::SessionSnapshot;
 use ark_scene::hook_compat::HookEntry as SceneHookEntry;
@@ -269,20 +269,13 @@ pub async fn run_supervisor_with(
     }
     info!(session = %spec.id.as_str(), "supervisor ready");
 
-    // ---- Step 13: orchestrator.run (long-running) — or park on cancel ----
-    let hooks_dir = state_layout.session_hooks_dir(&spec.id);
-    let world = World::new(
-        mux.clone(),
-        events.clone(),
-        cancel.clone(),
-        hooks_dir,
-        state_arc.clone(),
-        config_arc.clone(),
-    );
-
-    // Orchestrator trait deleted per cleanup T-010; bare-session is now the only path.
-    debug!("R3 step 13: no orchestrator; parking on world.cancel.cancelled().await");
-    world.cancel.cancelled().await;
+    // ---- Step 13: park on cancel (bare-session path is the only path) ----
+    // cleanup-T-010: `World` capability bag deleted alongside the
+    // `Orchestrator` trait. The bare-session path only ever used
+    // `world.cancel.cancelled().await`, and `cancel` is already in scope.
+    let _ = (&state_arc, &config_arc); // retained locals (status_pipe/ reactions own clones already)
+    debug!("R3 step 13: no orchestrator; parking on cancel.cancelled().await");
+    cancel.cancelled().await;
     debug!("R3 step 13: cancel observed on bare-session path");
 
     // Final SessionEnded event so consumers observe a terminal record.

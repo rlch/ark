@@ -61,10 +61,10 @@ pub use audit_log::AuditLogger;
 // the file.
 pub mod orchestration;
 
-// T-ACP.7: minimal ACP-engine Engine-trait stub that replaces the
-// retired `ark-engines-claude-code` crate.
-pub mod engine_stub;
-pub use engine_stub::{AcpEngineStub, preflight as engine_preflight};
+// cleanup-T-010: `engine_stub` module deleted along with the
+// `ark_core::Engine` trait family. Runtime boot no longer carries an
+// Engine trait object; per-engine observability/preflight re-homed into
+// extensions.
 pub use orchestration::{SupervisorMode, finalize_state, run_supervisor, run_supervisor_with};
 
 // W-1: supervisor_main bootstrap helper (cavekit-supervisor R1 + R3 step 12).
