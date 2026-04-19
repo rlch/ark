@@ -16,7 +16,7 @@ last_edited: "2026-04-18"
 
 DRAFT-site initiatives #8..#11 (supervisor-wiring / mux-tight-coupling / scene-v3 full build-out / pi extension family) remain as future v0.2 scope — sized in their own build sites.
 
-### Wave v0.2-backlog #6 — 2026-04-18 — `TBD`
+### Wave v0.2-backlog #6 — 2026-04-18 — `2c43879`
 
 - v0.2 item #6 full-zellij PTY harness. single-packet. serial main tree opus. FINAL v0.2 backlog item.
 - scope: MVP scaffold over full subagent-burst+grid assertion suite. packet said "prefer #[ignore] + TODO over unreliable test; if full zellij-launch infeasible within MVP scope, deliver crate scaffold + helper API + skip integration test body". took that path: ships the API + a self-smoke-test that does the full launch round-trip (`wait_for_ready` + `shutdown`) but deferred view-grid assertions + subagent-burst fixture-driven scenarios to v1.0.
