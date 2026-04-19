@@ -12,10 +12,15 @@ last_edited: "2026-04-18"
 - claude-code-ext: DONE 48/48
 - Cleanup (Phase 4+5 merged): DONE 12/12
 - Scene 2026-04-18 revision: DONE 26/26
+- Supervisor wiring (Phase 7): DONE 6/6
+- Mux tight-coupling revision: DONE 13/13
+- Scene v3 full audit: DONE 17/17 pending items landed (148-task site resolves 121 DONE / 4 SUPERSEDED / 9 CUT / 14 landed this session)
 
-Final workspace: 2203 tests pass / 4 ignored / 0 fail. cargo fmt clean. PTY smoke green.
+Final workspace: 2358 tests pass / 4 ignored / 0 fail. cargo fmt clean. PTY smoke green.
 
-v0.2 carry-forward backlog captured in `context/impl/impl-claude-code-ext.md` ledger.
+## v0.2 STATUS — backlog CLOSE-OUT as of 2026-04-18
+
+7 backlog items from `context/plans/v0.2-backlog.md` closed: #1 ark-bus bridge, #2 PaneAttrs+spawn_pane RPC, #3 SubagentRegistry auto-wire, #4 `ark ext <name> <verb>` CLI, #5 ext_state persistence, #6 PTY harness (MVP scaffold), #7 cc-hook cargo-install fallback. Remaining v0.2 scope: DRAFT-site initiatives #8-#11 (all are new-scope kits, not carry-forward).
 
 ## Build Sites
 | Site | File | Tasks | Done | Status |
@@ -25,6 +30,6 @@ v0.2 carry-forward backlog captured in `context/impl/impl-claude-code-ext.md` le
 | cleanup (Phase 4+5) | build-site-cleanup.md | 12 | 12 | DONE 2026-04-18 |
 | scene 2026-04-18 | build-site-scene-2026-04-18.md | 26 | 26 | DONE 2026-04-18 (T-004 CUT per R-8) |
 | ark v1 | build-site.md | 135 | 0 | DRAFT |
-| supervisor wiring (Phase 7) | build-site-supervisor-wiring.md | 6 | 0 | DRAFT — pipe-inheritance ready signal; in-process daemon model |
+| supervisor wiring (Phase 7) | build-site-supervisor-wiring.md | 6 | 6 | DONE pre-2026-04-18 — pipe-inheritance ready signal, in-process daemon model all shipped. Tracking doc: `context/impl/impl-supervisor-wiring.md` (Phase 7 COMPLETE — all 8 shipped tasks landed including W-1 supervisor_main, W-2 ReadyWriter, W-3 launch.rs daemonize fork, W-4 --no-detach variant, W-8 e2e tests, W-9 impl tracking). plan-overview row flipped 2026-04-18 after state audit confirmed. |
 | mux tight-coupling revision | build-site-mux-tight-coupling.md | 13 | 13 | DONE 2026-04-18 — Multiplexer trait + mux_contract suite + status_pipe relocation + MockMux/StubMux/NoopMux helpers + TmuxMux roadmap entries all landed (12/13 pre-auto-resolved by cleanup Packet A + scene-v3 work pre-2026-04-18; M-5 kit line reworded in this audit pass). ZellijMux concrete, `for_test` constructor live (test-support feature). Audit confirmed grep-clean outside scene-local MuxHandle test seam (out of scope) and cli launch-local test seam (out of scope, documented as launch-crate-internal in `crates/cli/src/commands/launch/traits.rs`). |
-| Scene + Extensions (v3 full) | build-site-scene.md | 140 | 0 | DRAFT — partially superseded by scene-2026-04-18. 16 tiers across 5 milestones: v0.1 Scene DSL + reconciler (73 tasks), v0.2 extensions (32), v0.3 ACP + composition (17), v0.4 hot reload + CLI polish (16), v1.0 freeze (5). Ark-native layout DSL, views replace plugins, Rhai expression-only mode (non-TC; CEL + minijinja both removed 2026-04-16), reconciler via override-layout + env ARK_HANDLE wrapper, extensions unified (3 delivery modes), agent-as-extension-capability, include-only composition, code-generated manifest via Rust derives. |
+| Scene + Extensions (v3 full) | build-site-scene.md | 140 (actually 148 incl. peer-review fixes T-141..T-148) | 148 | DONE 2026-04-18 — scene-v3 audit close-out (`context/impl/impl-scene-v3-audit.md`) resolved 148 task rows: 121 DONE (via phase-2 soul + scene-2026-04-18 + prior scene work), 4 SUPERSEDED (phase-2 ark-view replaced scene-local types), 9 CUT (all Tier 11 ACP per 2026-04-18 pivot), 0 PARTIAL, 0 PENDING after audit's 17 packets S-A..S-H landed (reconciler drift test, keybind MessagePlugin compile, ark-bus intent/emit rewire, reload wiring primitives, facet SHAPE migrations, v1 strict mode, layout migration, wasm transport scaffold). Ark-native layout DSL, Rhai expression-only (CEL+minijinja removed), reconciler via override-layout + env ARK_HANDLE wrapper, extensions unified 3 delivery modes, agent-as-extension-capability, include-only composition, code-generated manifest via Rust derives — all functional. |
