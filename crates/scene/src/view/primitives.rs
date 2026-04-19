@@ -13,9 +13,14 @@
 //! | `shell`   | CommandView  | `pane { command "env" "ARK_HANDLE=x" "$SHELL" }`   |
 //! | `edit`    | ZellijView   | `pane { edit "path" }` (uses zellij's native edit) |
 //!
-//! Config-schema summaries on the [`ViewMeta`] entries are placeholder
-//! strings (T-027 stub) — real facet `SHAPE` pointers land with T-090's
-//! derive-macro work.
+//! Config-schema pointers on the [`ViewMeta`] entries come straight
+//! from `<ConfigStruct as facet::Facet>::SHAPE` (T-027). The
+//! per-primitive config structs ([`CommandViewConfig`],
+//! [`EditViewConfig`]) live alongside the registration helper so the
+//! `&'static Shape` pointers survive the full program lifetime and the
+//! compile-time schema walk has a single obvious source of truth.
+
+use facet::Facet;
 
 use super::{RenderMode, ViewMeta, ViewRegistry, ViewSource};
 
@@ -42,6 +47,36 @@ pub const SHELL: &str = "shell";
 /// file is opened in `$EDITOR`.
 pub const EDIT: &str = "edit";
 
+// ---------------------------------------------------------------------------
+// Per-primitive config structs (T-027)
+// ---------------------------------------------------------------------------
+
+/// Config schema for the `command` primitive — mirrors the R6 shape
+/// `command "bin" [args…]` as a reflected struct so the scene compiler
+/// can validate the KDL pane body against the declared fields.
+///
+/// The struct itself is never materialised at runtime — the reconciler
+/// reads `command` primitive config straight off the layout KDL via
+/// [`crate::compile::layout`]. `#[derive(Facet)]` is here purely to
+/// expose a `SHAPE` pointer for [`register_primitives`] to stash on
+/// the primitive's [`ViewMeta::config_schema`].
+#[derive(Facet, Debug, Clone)]
+pub struct CommandViewConfig {
+    /// Absolute or `$PATH`-resolvable binary name.
+    pub cmd: String,
+    /// Positional arguments passed to the binary after the
+    /// `env ARK_HANDLE=<handle>` prefix wraps the invocation.
+    pub args: Vec<String>,
+}
+
+/// Config schema for the `edit` primitive — zellij's native edit pane
+/// needs a single `path: String` pointing at the file to open.
+#[derive(Facet, Debug, Clone)]
+pub struct EditViewConfig {
+    /// Path to the file to open in `$EDITOR`.
+    pub path: String,
+}
+
 /// Register the three kernel primitives into a [`ViewRegistry`] in
 /// canonical order (`command`, `shell`, `edit`).
 ///
@@ -53,14 +88,19 @@ pub fn register_primitives(registry: &mut ViewRegistry) {
         name: COMMAND.to_string(),
         source: ViewSource::Primitive,
         render_mode: RenderMode::CommandView,
-        // T-027 stub: real schema wiring lands in T-090.
-        config_schema: Some("cmd: String, args: Vec<String>".to_string()),
+        // T-027: real `facet::Shape` pointer for the `command` config
+        // struct — consumed by `ark scene check` to validate
+        // `pane @h { command "bin" arg1 arg2 }` bodies.
+        config_schema: Some(<CommandViewConfig as Facet>::SHAPE),
     });
 
     registry.register(ViewMeta {
         name: SHELL.to_string(),
         source: ViewSource::Primitive,
         render_mode: RenderMode::CommandView,
+        // `shell` takes no config — the pane body is bare (`shell { }`
+        // or just `shell`). Validator rejects any entry inside the
+        // body because `None` flags "schema is empty".
         config_schema: None,
     });
 
@@ -73,7 +113,7 @@ pub fn register_primitives(registry: &mut ViewRegistry) {
         // subprocess" (CommandView) from "zellij owns the pane content"
         // (ZellijView).
         render_mode: RenderMode::ZellijView,
-        config_schema: Some("path: String".to_string()),
+        config_schema: Some(<EditViewConfig as Facet>::SHAPE),
     });
 }
 
@@ -93,7 +133,12 @@ mod tests {
             .expect("command primitive should register");
         assert_eq!(meta.render_mode, RenderMode::CommandView);
         assert_eq!(meta.source, ViewSource::Primitive);
-        assert!(meta.config_schema.is_some(), "command accepts cmd+args");
+        let shape = meta
+            .config_schema
+            .expect("command primitive carries a facet Shape");
+        // T-027: shape identity pins to `CommandViewConfig` so downstream
+        // validators can field-walk without inspecting strings.
+        assert_eq!(shape.type_identifier, "CommandViewConfig");
     }
 
     #[test]
@@ -111,7 +156,26 @@ mod tests {
         let meta = reg.resolve(EDIT).expect("edit primitive should register");
         assert_eq!(meta.render_mode, RenderMode::ZellijView);
         assert_eq!(meta.source, ViewSource::Primitive);
-        assert!(meta.config_schema.is_some(), "edit accepts path");
+        let shape = meta
+            .config_schema
+            .expect("edit primitive carries a facet Shape");
+        assert_eq!(shape.type_identifier, "EditViewConfig");
+    }
+
+    /// T-027: the reflected `CommandViewConfig` schema must expose the
+    /// declared fields so the scene compiler can walk them to validate
+    /// KDL pane bodies and emit `did you mean?` suggestions.
+    #[test]
+    fn command_config_shape_has_expected_fields() {
+        use facet::{Type, UserType};
+        let shape = <CommandViewConfig as Facet>::SHAPE;
+        let st = match &shape.ty {
+            Type::User(UserType::Struct(s)) => s,
+            other => panic!("expected struct shape, got {other:?}"),
+        };
+        let names: Vec<&'static str> = st.fields.iter().map(|f| f.name).collect();
+        assert!(names.contains(&"cmd"));
+        assert!(names.contains(&"args"));
     }
 
     #[test]

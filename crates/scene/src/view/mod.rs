@@ -15,17 +15,19 @@
 //! with the same name. Callers that need a different precedence control it
 //! by reordering the registration calls.
 //!
-//! # Responsibilities split from real view plumbing
+//! # Config schema reflection (T-027)
 //!
-//! `ViewMeta::config_schema` in this module is a `String` summary (T-027
-//! stub) rather than a real `facet::Shape` handle: facet 0.x doesn't
-//! derive `Debug` cleanly on `&Shape`, and wiring a real schema pointer
-//! is T-090's derive-macro work. The `String` field is load-bearing only
-//! as a display placeholder today — downstream config validation will
-//! swap it for the real shape reference once the derive lands.
+//! [`ViewMeta::config_schema`] carries an optional `&'static facet::Shape`
+//! pointer so downstream passes can reflect a view's config struct at
+//! compile time — e.g. `ark scene check` walks the schema to validate
+//! the KDL pane body against the declared field set, and the LSP
+//! surfaces per-field doc-comments on hover. A `None` means the view
+//! takes no config (the `shell` primitive today). Shapes are `&'static`
+//! because facet derives them into const pointers, so no lazy init is
+//! required — call sites just write `<ConfigStruct as Facet>::SHAPE`.
 
 use crate::suggest::suggest;
-use facet::Facet;
+use facet::{Facet, Shape};
 
 pub mod primitives;
 
@@ -103,12 +105,26 @@ pub struct ViewMeta {
     /// `PluginPane`).
     pub render_mode: RenderMode,
 
-    /// Human-readable summary of the view's config schema (T-027 stub).
-    /// `None` = view takes no config. The real schema pointer lands in
-    /// T-090's derive-macro work; today this is a display-only string so
-    /// `ark ext info` has something useful to render and
-    /// `ark scene check` can surface field-level help text.
-    pub config_schema: Option<String>,
+    /// Facet `SHAPE` pointer for the view's config struct, or `None`
+    /// when the view takes no config (T-027).
+    ///
+    /// Populated via `<ConfigStruct as facet::Facet>::SHAPE` at register
+    /// time. Consumers:
+    ///
+    /// * The scene compiler walks the shape's fields to validate the
+    ///   KDL pane body against the declared field set and emit
+    ///   `error[ext/bad-config]` with field-level `did you mean?`
+    ///   suggestions on typos.
+    /// * `ark ext info` renders the field list + Rust doc-comments.
+    /// * The LSP reports per-field hover docs.
+    ///
+    /// The field is `#[facet(opaque)]` because `&'static Shape` is not
+    /// itself a `Facet` type — the derive's opaque marker tells the
+    /// scene-schema generator ([`crate::bin::gen_scene_schema`]) to
+    /// ignore this slot rather than recurse into facet's internal
+    /// reflection types.
+    #[facet(opaque, default)]
+    pub config_schema: Option<&'static Shape>,
 }
 
 // ---------------------------------------------------------------------------
