@@ -114,6 +114,26 @@ impl StateLayout {
         self.session_dir(id).join("artifacts")
     }
 
+    /// `$base/sessions/{id}/ext-state/` — directory holding one JSON
+    /// file per extension that writes its `SessionStatus.ext_state`
+    /// contribution out-of-band (v0.2-backlog #5).
+    ///
+    /// Files are named `<ext>.json` where `<ext>` is the extension's
+    /// manifest name (e.g. `claude-code.json`). The supervisor reads
+    /// this directory when it assembles `SessionStatus.ext_state` for
+    /// persisted `status.json` writes, and `ark list` reads it
+    /// directly to populate extension-contributed columns.
+    pub fn session_ext_state_dir(&self, id: &SessionId) -> PathBuf {
+        self.session_dir(id).join("ext-state")
+    }
+
+    /// `$base/sessions/{id}/ext-state/{ext}.json` — canonical location
+    /// for a single extension's persisted state. See
+    /// [`StateLayout::session_ext_state_dir`].
+    pub fn session_ext_state_path(&self, id: &SessionId, ext: &str) -> PathBuf {
+        self.session_ext_state_dir(id).join(format!("{ext}.json"))
+    }
+
     /// `$base/archive/{YYYY-MM-DD}/{id}/`
     pub fn archive_dir(&self, date: chrono::NaiveDate, id: &SessionId) -> PathBuf {
         self.base

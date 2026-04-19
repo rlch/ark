@@ -258,6 +258,24 @@ pub struct ClaudeCodeExtension {
     /// "supervisor out of scope" constraint).
     list_state: std::sync::Arc<std::sync::Mutex<CcListColumnState>>,
 
+    /// v0.2 backlog #5: optional absolute path the ext-state sentinel
+    /// (`$STATE/sessions/<sid>/ext-state/claude-code.json`) is written to
+    /// every time [`fold_transcript_line`] / [`fold_transcript_blob`]
+    /// updates the per-session rolling column state.
+    ///
+    /// Populated on `on_session_start` (see
+    /// [`Self::configure_ext_state_path`]) once the extension knows the
+    /// session id and can resolve the path via
+    /// [`ark_types::StateLayout::session_ext_state_path`]. When `None`
+    /// the fold helpers are a pure in-memory update — matches the
+    /// pre-#5 behavior so unit tests + CLI dry-runs don't touch disk.
+    ///
+    /// Wrapped in `Arc<Mutex<Option<PathBuf>>>` so the Clone impl shares
+    /// the configuration across every clone (the supervisor holds one
+    /// "logical" extension instance but clones it across spawn sites);
+    /// a single `configure_ext_state_path` call wires all of them.
+    ext_state_path: std::sync::Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
+
     /// v0.2 backlog #3: per-extension [`SubagentRegistry`] the
     /// `on_session_start` accept loop folds hook events into. Tracks
     /// per-subagent `SubagentState` and emits `RenamePaneEmission`
@@ -302,6 +320,10 @@ impl std::fmt::Debug for ClaudeCodeExtension {
             .field("event_sink", &self.event_sink.is_some())
             .field("config", &self.config)
             .field("list_state", &self.list_state)
+            .field(
+                "ext_state_path",
+                &self.ext_state_path.lock().ok().as_deref().cloned(),
+            )
             .field("subagent_registry", &self.subagent_registry)
             .field("rename_pane_emitter", &self.rename_pane_emitter.is_some())
             .finish()
@@ -360,6 +382,7 @@ impl ClaudeCodeExtension {
             event_sink: None,
             config: std::sync::Arc::new(std::sync::Mutex::new(ClaudeCodeConfig::default())),
             list_state: std::sync::Arc::new(std::sync::Mutex::new(CcListColumnState::default())),
+            ext_state_path: std::sync::Arc::new(std::sync::Mutex::new(None)),
             subagent_registry: Arc::new(SubagentRegistry::new()),
             rename_pane_emitter: None,
         }
@@ -377,6 +400,7 @@ impl ClaudeCodeExtension {
             event_sink: Some(sink),
             config: std::sync::Arc::new(std::sync::Mutex::new(ClaudeCodeConfig::default())),
             list_state: std::sync::Arc::new(std::sync::Mutex::new(CcListColumnState::default())),
+            ext_state_path: std::sync::Arc::new(std::sync::Mutex::new(None)),
             subagent_registry: Arc::new(SubagentRegistry::new()),
             rename_pane_emitter: None,
         }
@@ -506,9 +530,14 @@ impl ClaudeCodeExtension {
     /// transcript watcher plumbing. A poisoned mutex silently drops the
     /// fold — doctor can later surface the poison via a follow-up
     /// check, but we never fail the caller.
+    ///
+    /// v0.2 backlog #5: when [`configure_ext_state_path`] has been
+    /// called, the updated state is written out atomically after the
+    /// fold so `ark list` reads it on the next invocation.
     pub fn fold_transcript_line(&self, line: &str) {
         if let Ok(mut g) = self.list_state.lock() {
             g.fold_line(line);
+            self.persist_list_state(&g);
         }
     }
 
@@ -516,9 +545,58 @@ impl ClaudeCodeExtension {
     /// `list_columns` as a populate-on-demand path when no live fold
     /// loop has observed the session yet (e.g. `ark list` invoked
     /// after-the-fact against a persisted transcript).
+    ///
+    /// v0.2 backlog #5: persists after the fold when a path is
+    /// configured (see [`fold_transcript_line`]).
     pub fn fold_transcript_blob(&self, blob: &str) {
         if let Ok(mut g) = self.list_state.lock() {
             g.fold_blob(blob);
+            self.persist_list_state(&g);
+        }
+    }
+
+    /// v0.2 backlog #5: install the absolute path
+    /// [`fold_transcript_line`] / [`fold_transcript_blob`] writes the
+    /// ext-state sentinel to after every update. Called by
+    /// `on_session_start` once the session id is known and the path
+    /// resolves via
+    /// [`ark_types::StateLayout::session_ext_state_path`].
+    ///
+    /// Calling with `None` clears the path (used by tests that want to
+    /// reset between cases). Calling again with a different path
+    /// replaces the prior value — the extension is single-session by
+    /// contract so there is no accumulation.
+    pub fn configure_ext_state_path(&self, path: Option<std::path::PathBuf>) {
+        if let Ok(mut g) = self.ext_state_path.lock() {
+            *g = path;
+        }
+    }
+
+    /// Snapshot of the configured ext-state path (v0.2 backlog #5).
+    /// `None` means no persistence path was installed — the fold helpers
+    /// stay pure in-memory. Exposed for tests + the supervisor boot
+    /// sequence assertion that `on_session_start` wired the path.
+    pub fn ext_state_path(&self) -> Option<std::path::PathBuf> {
+        self.ext_state_path
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().cloned())
+    }
+
+    /// Write the in-memory `CcListColumnState` to the configured
+    /// ext-state sentinel path, if any. IO errors are logged at
+    /// `warn!` level + dropped — list columns are observability, not
+    /// correctness, so a full disk must not break the session.
+    fn persist_list_state(&self, state: &CcListColumnState) {
+        let Some(path) = self.ext_state_path() else {
+            return;
+        };
+        if let Err(e) = state.write_to_file(&path) {
+            warn!(
+                path = %path.display(),
+                error = %e,
+                "claude-code: ext-state write failed; list columns may stale between sessions"
+            );
         }
     }
 }
@@ -561,6 +639,15 @@ impl ArkExtension for ClaudeCodeExtension {
         };
 
         let sid = spec.id.clone();
+
+        // v0.2-backlog #5: install the per-session ext-state sentinel
+        // path so every subsequent `fold_transcript_*` update writes
+        // to `$STATE/sessions/<sid>/ext-state/claude-code.json` —
+        // `ark list` reads it back on the next invocation, so column
+        // values survive a supervisor restart.
+        self.configure_ext_state_path(Some(
+            layout.session_ext_state_path(&sid, columns::EXT_STATE_FILE_STEM),
+        ));
 
         // T-020 / T-024 scene-use detection. Absence of a dedicated
         // "declared uses" field on SessionSpec forces a proxy: the
@@ -2621,5 +2708,121 @@ mod v0_2_backlog_3_tests {
             }
         }
         assert_eq!(*captured.lock().unwrap(), 0);
+    }
+}
+
+#[cfg(test)]
+mod v0_2_backlog_5_tests {
+    //! v0.2-backlog #5 — ext-state persistence for list columns.
+    //!
+    //! When `configure_ext_state_path` sets an absolute path, every
+    //! `fold_transcript_*` call writes the updated `CcListColumnState`
+    //! out atomically. When no path is configured, the fold helpers
+    //! stay in-memory (the pre-#5 behavior).
+
+    use super::*;
+
+    #[test]
+    fn default_ext_has_no_ext_state_path_configured() {
+        let ext = ClaudeCodeExtension::new();
+        assert_eq!(ext.ext_state_path(), None);
+    }
+
+    #[test]
+    fn configure_ext_state_path_sets_and_clears() {
+        let ext = ClaudeCodeExtension::new();
+        let p = std::path::PathBuf::from("/tmp/foo/bar.json");
+        ext.configure_ext_state_path(Some(p.clone()));
+        assert_eq!(ext.ext_state_path(), Some(p));
+        ext.configure_ext_state_path(None);
+        assert_eq!(ext.ext_state_path(), None);
+    }
+
+    #[test]
+    fn fold_without_path_does_not_touch_disk() {
+        let ext = ClaudeCodeExtension::new();
+        // No configure_ext_state_path — fold should not error.
+        ext.fold_transcript_line(
+            r#"{"type":"message","role":"assistant","model":"m","usage":{"input_tokens":1,"output_tokens":1}}"#,
+        );
+        let snap = ext.list_state_snapshot();
+        assert_eq!(snap.tokens, 2);
+        assert_eq!(snap.model, "m");
+    }
+
+    #[test]
+    fn fold_with_path_writes_state_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("ext-state").join("claude-code.json");
+        let ext = ClaudeCodeExtension::new();
+        ext.configure_ext_state_path(Some(path.clone()));
+        ext.fold_transcript_line(
+            r#"{"type":"message","role":"assistant","model":"foo","usage":{"input_tokens":5,"output_tokens":7},"cost_usd":0.10}"#,
+        );
+        assert!(path.exists(), "ext-state file must exist after fold");
+        let back = CcListColumnState::read_from_file(&path).expect("readback");
+        assert_eq!(back.model, "foo");
+        assert_eq!(back.tokens, 12);
+        assert_eq!(back.cost_usd, Some(0.10));
+    }
+
+    #[test]
+    fn fold_updates_persist_cumulatively() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("cc.json");
+        let ext = ClaudeCodeExtension::new();
+        ext.configure_ext_state_path(Some(path.clone()));
+        ext.fold_transcript_line(
+            r#"{"type":"message","role":"assistant","model":"a","usage":{"input_tokens":1,"output_tokens":2}}"#,
+        );
+        ext.fold_transcript_line(
+            r#"{"type":"message","role":"assistant","model":"b","usage":{"input_tokens":3,"output_tokens":4}}"#,
+        );
+        let back = CcListColumnState::read_from_file(&path).expect("readback");
+        assert_eq!(back.model, "b"); // latest
+        assert_eq!(back.tokens, 10);
+    }
+
+    #[test]
+    fn fold_blob_persists_accumulated_state() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("cc.json");
+        let ext = ClaudeCodeExtension::new();
+        ext.configure_ext_state_path(Some(path.clone()));
+        let blob = "\
+{\"type\":\"message\",\"role\":\"assistant\",\"model\":\"m1\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5}}
+{\"type\":\"message\",\"role\":\"assistant\",\"model\":\"m2\",\"usage\":{\"input_tokens\":2,\"output_tokens\":8}}
+";
+        ext.fold_transcript_blob(blob);
+        let back = CcListColumnState::read_from_file(&path).expect("readback");
+        assert_eq!(back.model, "m2");
+        assert_eq!(back.tokens, 25);
+    }
+
+    #[test]
+    fn clone_shares_ext_state_path_across_clones() {
+        let a = ClaudeCodeExtension::new();
+        let p = std::path::PathBuf::from("/tmp/cc-share.json");
+        a.configure_ext_state_path(Some(p.clone()));
+        let b = a.clone();
+        assert_eq!(b.ext_state_path(), Some(p));
+        // Mutating via one is visible on the other (Arc share).
+        b.configure_ext_state_path(None);
+        assert_eq!(a.ext_state_path(), None);
+    }
+
+    #[test]
+    fn write_failure_is_non_fatal() {
+        // Path points at a non-writable directory; fold must not panic
+        // and the in-memory state must still be correct.
+        let ext = ClaudeCodeExtension::new();
+        let bad = std::path::PathBuf::from("/this/path/does/not/exist/and/has/no/perms/cc.json");
+        ext.configure_ext_state_path(Some(bad));
+        ext.fold_transcript_line(
+            r#"{"type":"message","role":"assistant","model":"ok","usage":{"input_tokens":1,"output_tokens":1}}"#,
+        );
+        let snap = ext.list_state_snapshot();
+        assert_eq!(snap.model, "ok");
+        assert_eq!(snap.tokens, 2);
     }
 }

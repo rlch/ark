@@ -36,6 +36,12 @@
 //! * `cc cost` → `""`
 
 use serde::{Deserialize, Serialize};
+use std::path::Path;
+
+/// Manifest name of the claude-code extension. Canonical key under
+/// `SessionStatus.ext_state` + filename basename of the v0.2-backlog #5
+/// ext-state sentinel (`$STATE/sessions/<sid>/ext-state/claude-code.json`).
+pub const EXT_STATE_FILE_STEM: &str = "claude-code";
 
 /// Stable column name for the model field. Pinned as a `&'static str` so
 /// the list-command side can match without string-allocating.
@@ -184,6 +190,41 @@ impl CcListColumnState {
         }
         state
     }
+
+    /// Read a persisted [`CcListColumnState`] from an ext-state sentinel
+    /// path (v0.2-backlog #5). Missing / unreadable / malformed file →
+    /// `None` so the caller can decide whether to fall back to a zero
+    /// state or skip the row entirely.
+    pub fn read_from_file(path: &Path) -> Option<Self> {
+        let bytes = std::fs::read(path).ok()?;
+        serde_json::from_slice::<Self>(&bytes).ok()
+    }
+
+    /// Atomically write this state to an ext-state sentinel file (v0.2-
+    /// backlog #5). Creates the parent directory if missing; writes to
+    /// a tmp file in the same directory then renames into place so
+    /// concurrent `ark list` reads never observe a partial write.
+    ///
+    /// Errors collapse to `std::io::Error` — caller decides whether to
+    /// log + continue (the `list_columns` RPC path does) or surface
+    /// upstream (the doctor fix path does).
+    pub fn write_to_file(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let bytes = serde_json::to_vec_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let mut tmp = path.to_path_buf();
+        let mut name = tmp
+            .file_name()
+            .map(|s| s.to_os_string())
+            .unwrap_or_else(|| std::ffi::OsString::from("ext-state.json"));
+        name.push(".tmp");
+        tmp.set_file_name(name);
+        std::fs::write(&tmp, &bytes)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -298,6 +339,64 @@ mod tests {
         let missing = tmp.path().join("nope.jsonl");
         let s = CcListColumnState::from_transcript_path(&missing);
         assert_eq!(s, CcListColumnState::default());
+    }
+
+    // -- v0.2-backlog #5: ext-state file round-trip --------------------------
+
+    #[test]
+    fn write_then_read_file_round_trips_state() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("ext-state").join("claude-code.json");
+        let state = CcListColumnState {
+            model: "claude-4-7-opus".into(),
+            tokens: 9999,
+            cost_usd: Some(1.23),
+        };
+        state.write_to_file(&path).expect("write");
+        assert!(path.exists(), "file must exist after write");
+        let back = CcListColumnState::read_from_file(&path).expect("read");
+        assert_eq!(back, state);
+    }
+
+    #[test]
+    fn read_missing_file_yields_none() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("nope.json");
+        assert_eq!(CcListColumnState::read_from_file(&path), None);
+    }
+
+    #[test]
+    fn read_malformed_file_yields_none() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("bad.json");
+        std::fs::write(&path, b"{not json").unwrap();
+        assert_eq!(CcListColumnState::read_from_file(&path), None);
+    }
+
+    #[test]
+    fn write_creates_parent_dir_when_missing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Nested parent that does not yet exist.
+        let path = tmp
+            .path()
+            .join("a")
+            .join("b")
+            .join("c")
+            .join("claude-code.json");
+        let state = CcListColumnState::zero();
+        state.write_to_file(&path).expect("write creates parents");
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn write_is_atomic_no_tmp_file_left_behind() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("claude-code.json");
+        let state = CcListColumnState::default();
+        state.write_to_file(&path).expect("write");
+        // No .tmp sibling should remain.
+        let tmp_path = tmp.path().join("claude-code.json.tmp");
+        assert!(!tmp_path.exists(), "tmp file should be renamed into place");
     }
 
     #[test]

@@ -314,6 +314,47 @@ fn read_persisted_status(layout: &StateLayout, id: &SessionId) -> Option<Session
     serde_json::from_slice::<SessionStatus>(&bytes).ok()
 }
 
+/// v0.2-backlog #5: read every `$STATE/sessions/<sid>/ext-state/<ext>.json`
+/// sentinel and return a map keyed by extension name. Extensions write
+/// here on every state change (see `ark_ext_claude_code::CcListColumnState
+/// ::write_to_file`); `ark list` pulls the result back into the
+/// rendered [`SessionStatus.ext_state`] bucket so extension-contributed
+/// columns survive a supervisor restart.
+///
+/// Missing dir / unreadable entries are silently skipped — each file is
+/// optional and owned by its extension.
+fn read_persisted_ext_state(
+    layout: &StateLayout,
+    id: &SessionId,
+) -> std::collections::BTreeMap<String, Value> {
+    let mut out = std::collections::BTreeMap::new();
+    let dir = layout.session_ext_state_dir(id);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        // Ignore tmp-renamed partials.
+        if stem.ends_with(".tmp") {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+            continue;
+        };
+        out.insert(stem.to_string(), value);
+    }
+    out
+}
+
 /// Query one supervisor's status over its control socket.
 /// Returns `Ok(None)` for any connect/IO error → caller
 /// classifies as "orphan" rather than hard-failing.
@@ -519,10 +560,26 @@ fn gather_rows(layout: &StateLayout, only: Option<&SessionId>) -> Result<Vec<Row
         .into_iter()
         .map(|id| {
             let sock = layout.session_socket_path(&id);
+            // v0.2-backlog #5: overlay on-disk ext-state sentinels onto
+            // whatever `ext_state` the supervisor (or the persisted
+            // status.json) shipped. Extension-writer is authoritative
+            // for its own bucket, so later overwrites win — supervisor-
+            // side snapshots stay out of the way.
+            let persisted_ext = read_persisted_ext_state(layout, &id);
             match query_status(&sock) {
-                Some(status) => Row::Live(id, status),
+                Some(mut status) => {
+                    for (k, v) in persisted_ext {
+                        status.ext_state.insert(k, v);
+                    }
+                    Row::Live(id, status)
+                }
                 None => match read_persisted_status(layout, &id) {
-                    Some(status) => Row::Archived(id, status),
+                    Some(mut status) => {
+                        for (k, v) in persisted_ext {
+                            status.ext_state.insert(k, v);
+                        }
+                        Row::Archived(id, status)
+                    }
                     None => Row::Orphan(id),
                 },
             }
@@ -1122,6 +1179,119 @@ mod tests {
             }),
         };
         assert_eq!((col.resolver)(&cx), "s1-up");
+    }
+
+    // ---------- v0.2-backlog #5: ext-state persistence --------------
+
+    #[test]
+    fn read_persisted_ext_state_empty_dir_returns_empty_map() {
+        let tmp = tempdir().expect("tempdir");
+        let layout = StateLayout::new(
+            tmp.path().to_path_buf(),
+            tmp.path().join("rt"),
+            tmp.path().join("cfg"),
+        );
+        let id = SessionId::new("nosession");
+        // No ext-state dir exists.
+        let out = read_persisted_ext_state(&layout, &id);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn read_persisted_ext_state_picks_up_extension_sentinels() {
+        let tmp = tempdir().expect("tempdir");
+        let layout = StateLayout::new(
+            tmp.path().to_path_buf(),
+            tmp.path().join("rt"),
+            tmp.path().join("cfg"),
+        );
+        let id = SessionId::new("s");
+        let dir = layout.session_ext_state_dir(&id);
+        fs::create_dir_all(&dir).unwrap();
+        // Two fake extensions.
+        fs::write(
+            dir.join("claude-code.json"),
+            br#"{"model":"claude-4-7","tokens":123,"cost_usd":0.45}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("acp-client.json"),
+            br#"{"connected":true,"sessions":3}"#,
+        )
+        .unwrap();
+        // Non-json file must be ignored.
+        fs::write(dir.join("README.txt"), b"ignore me").unwrap();
+
+        let out = read_persisted_ext_state(&layout, &id);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out["claude-code"]["model"], "claude-4-7");
+        assert_eq!(out["claude-code"]["tokens"], 123);
+        assert_eq!(out["acp-client"]["connected"], true);
+    }
+
+    #[test]
+    fn read_persisted_ext_state_skips_malformed_entries() {
+        let tmp = tempdir().expect("tempdir");
+        let layout = StateLayout::new(
+            tmp.path().to_path_buf(),
+            tmp.path().join("rt"),
+            tmp.path().join("cfg"),
+        );
+        let id = SessionId::new("s");
+        let dir = layout.session_ext_state_dir(&id);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("broken.json"), b"{not json").unwrap();
+        fs::write(dir.join("good.json"), b"{\"ok\":true}").unwrap();
+        let out = read_persisted_ext_state(&layout, &id);
+        assert!(out.contains_key("good"));
+        assert!(!out.contains_key("broken"));
+    }
+
+    #[test]
+    fn gather_rows_overlays_persisted_ext_state_onto_live_status() {
+        // End-to-end: a session has a `Row::Archived` (status.json
+        // on disk, no socket). An ext-state sentinel exists under
+        // `ext-state/claude-code.json`. After gather_rows the status
+        // shipped in the Row must carry that bucket under
+        // `ext_state["claude-code"]`.
+        let tmp = tempfile::Builder::new()
+            .prefix("arkextstate")
+            .tempdir_in("/tmp")
+            .expect("tmp");
+        let layout = StateLayout::new(
+            tmp.path().to_path_buf(),
+            tmp.path().join("rt"),
+            tmp.path().join("cfg"),
+        );
+        let id = SessionId::new("s");
+        let session_dir = layout.session_dir(&id);
+        fs::create_dir_all(&session_dir).unwrap();
+        // Persist an initial status.json with an empty ext_state.
+        let status = mk_status(&id);
+        fs::write(
+            layout.session_status_path(&id),
+            serde_json::to_vec(&status).unwrap(),
+        )
+        .unwrap();
+        // Drop an ext-state sentinel.
+        let state_dir = layout.session_ext_state_dir(&id);
+        fs::create_dir_all(&state_dir).unwrap();
+        fs::write(
+            state_dir.join("claude-code.json"),
+            br#"{"model":"m","tokens":99,"cost_usd":0.01}"#,
+        )
+        .unwrap();
+
+        let rows = gather_rows(&layout, None).expect("gather");
+        assert_eq!(rows.len(), 1);
+        match &rows[0] {
+            Row::Archived(_, s) => {
+                let entry = s.ext_state.get("claude-code").expect("overlay present");
+                assert_eq!(entry["model"], "m");
+                assert_eq!(entry["tokens"], 99);
+            }
+            other => panic!("expected Archived (supervisor dead), got {other:?}"),
+        }
     }
 
     #[test]
