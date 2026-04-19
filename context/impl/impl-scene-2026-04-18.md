@@ -51,7 +51,7 @@ DONE via phase-2. Prior audit was wrong.
 
 ### Wave 2 — Tier 1 (T-005, T-006, T-008, T-011, T-012, partial T-007)
 
-SHA: pending commit after Wave 1 above.
+SHA: `366e2f6`.
 
 - **T-005 StackNode AST**: added `StackNode` to `crates/scene/src/ast/layout.rs`
   mirroring Row/Col sizing attrs + `@handle` first-arg + `when=` + `Vec<LayoutChild>` body.

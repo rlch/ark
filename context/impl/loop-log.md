@@ -1,8 +1,16 @@
 ---
 created: "2026-04-14"
-last_edited: "2026-04-19"
+last_edited: "2026-04-18"
 ---
 # Loop Log
+
+### Wave scene-2026-04-18-Tier0+1 — 2026-04-18 — stack primitive groundwork
+
+- caveman speak: build site audit first. parent say T-001 T-002 T-009 done. parent WRONG. handle_types.rs still big 175 lines. scene-local HandleKind still carry Command Plugin variants. only T-001 dep-line partial — re-exports not wired. audit honest now in impl-scene-2026-04-18.md.
+- Tier 0 land clean: T-001 re-export Pane/Stack/TabHandle/HandleKind/View/CommandView/ZellijView through ark_scene::{...}. T-002 delete handle_types.rs (175 lines gone, 4 tests retired). T-003 add LAYOUT_CHILD_KEYWORDS + suggest_layout_child helper (2 new tests). commit 2616aa1.
+- Tier 1 bigger: StackNode struct added to ast/layout.rs mirror Row/Col sizing + @handle + when= + Vec<LayoutChild> body. LayoutChild::Stack variant (facet rename="stack"). every exhaustive match updated — compile/mod.rs walker, compile/layout.rs emitter (new emit_stack → `pane stacked=true`), compose.rs handle collector, reconciler.rs filter_child, validate/handles.rs + validate/op_refs.rs + validate/scope.rs. R-9 sizing-on-stack-child validator ready. 3 new SceneError variants: UnionSyntaxDeferred, SizingOnStackChild, ViewTypeMismatch. 12 new stack.rs integration tests. commit 366e2f6.
+- STOP at clean Tier 1 boundary. Tier 2-7 still pending: 19 tasks remain (T-009 retire scene-local HandleKind Command/Plugin + ops/panes.rs rewrite; T-010 stack routing; T-013..T-016 scene-local ViewTable + CompiledScene field + IntentContext::view_of; T-017..T-020 view-type validator pass; T-021..T-024 MuxHandle spawn_into_stack + SpawnIntoOp + ClearOp + registration; T-025/T-026 reconciler override-layout integration; T-027 completion gate). Parent re-dispatch needed.
+- workspace test: 2151 pass (baseline 2141 + 12 new - 2 retired). scene: 607 pass. scene fmt clean. no regressions.
 
 ### v0.1 CLOSE-OUT — 2026-04-18 — tag-eligible
 
