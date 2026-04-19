@@ -47,6 +47,8 @@ pub(crate) use view_table::ViewTable;
 // Tier 4 — layout lowering to zellij KDL (T-034..T-040) and mode
 // pre-rendering (T-045). Re-exported so downstream callers can write
 // `use ark_scene::compile::{compile_layout_kdl, compile_modes}`.
+pub mod auto_mount;
+pub mod keybinds;
 pub mod layout;
 pub mod modes;
 // Tier 6 (soul phase 2) — view-type symbol table + manifest-set blake3

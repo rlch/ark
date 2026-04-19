@@ -4,6 +4,15 @@ last_edited: "2026-04-18"
 ---
 # Loop Log
 
+### Wave scene-v3 S-F+S-A — 2026-04-18 — T-044 drift tests + T-065 keybind compile
+
+- T-044 drift: rock move. 4 test add to `crates/scene/tests/reconciler.rs`. (1) full pass use `retain_existing_{terminal,plugin}_panes=true` on every override-layout — user-close pane stay close, zellij no bring back. (2) `predicates_changed=false` on quiet second pass — gate know skip force-converge. (3) flip predicate false→true, `predicates_changed=true` — force-converge. (4) mode-switch also carry retain flags (not only cross-tab full-reconcile).
+- T-065 keybind: new file `crates/scene/src/compile/keybinds.rs` (~400 LOC). `compile_keybinds_node(ir) -> Option<KdlNode>` emit `keybinds { shared { bind "Ctrl s" { MessagePlugin "ark-bus" { name "ark-intent"; payload "<JSON>" } } } }`. No `clear-defaults=true` — additive merge with user zellij binds. `inject_keybinds_if_needed(doc, ir)` mirror `inject_ark_bus_if_needed` contract (prepend before `layout { }`, noop when no binds or keybinds-node already present).
+- payload JSON shape: single-op → `{"name":"ark.core.<verb>","args":{…}}`; multi-op → `{"name":"ark.core.batch","ops":[…]}`; empty → `{"name":"ark.core.noop","ops":[]}`. Every payload reparseable as JSON so ark-bus `validate_intent_payload` accept at runtime. chord round-trip through `parse_chord` for canonical casing.
+- side-effect: `crates/scene/src/compile/mod.rs` was NOT registering `auto_mount` mod (compiled-dead despite presence since T-073 commit). My `pub mod keybinds;` edit also add `pub mod auto_mount;`. Previously-dead 14 `auto_mount` unit tests now actually run. All pass.
+- test count: scene tests 659→688 (+29 = +14 newly-live auto_mount + +15 keybinds + no net reconciler suite change because I only add tests in integration file which count separate). integration reconciler: 13→17 (+4 T-044). workspace 2203→2232 (+29). cargo fmt clean. cargo build --workspace clean (9 warnings, all pre-existing).
+- WATCH: T-070 ark-bus intent dispatch still broken (shells to deleted ark-hook per audit). T-065 compile-side is correct per spec; runtime dispatch fix is Packet S-B's job. I did NOT touch ark-bus or ark-view.
+
 ### Wave housekeeping — 2026-04-18
 
 - plan-overview.md sync: 4 sites DONE flagged + v0.1 banner at top.

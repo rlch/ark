@@ -333,6 +333,186 @@ async fn reconcile_stack_excludes_dynamic_spawn_into_children() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// T-044 — Reconciler drift tolerance (R9.10)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn reconcile_full_pass_uses_retain_flags_so_user_closed_panes_stay_closed() {
+    // R9.10 acceptance criterion: user-initiated pane closes survive
+    // subsequent reconciliations. The guarantee is delivered by the
+    // `--retain-existing-terminal-panes` + `--retain-existing-plugin-
+    // panes` flags zellij takes on every `override-layout` invocation.
+    // Test pins that those flags are always set on a full-reconcile
+    // pass so the contract can't silently regress.
+    let src = r#"scene "dev" {
+        layout {
+            tab "@main" {
+                pane "@a" { shell }
+                pane "@b" { shell }
+            }
+        }
+    }"#;
+    let (mut r, applier, _tmp) = make_reconciler(src);
+
+    let mut scope = rhai::Scope::new();
+    // Initial reconcile — materialises both panes.
+    r.reconcile(&mut scope).await.expect("first pass");
+
+    // Simulated user-initiated close via `zellij action close-pane`
+    // happens *outside* the reconciler loop; we can't mock zellij
+    // runtime here, so we pin the contract indirectly: every
+    // subsequent reconcile pass uses the retain flags.
+    let outcome = r.reconcile(&mut scope).await.expect("second pass");
+    assert!(
+        !outcome.predicates_changed,
+        "no predicate flipped between passes"
+    );
+
+    let calls = applier.snapshot().await;
+    assert_eq!(
+        calls.len(),
+        2,
+        "two override-layout calls across two passes"
+    );
+    for (i, (_, flags)) in calls.iter().enumerate() {
+        assert!(
+            flags.retain_existing_terminal_panes,
+            "pass {i}: terminal-pane retention must be on so user-closed panes stay closed"
+        );
+        assert!(
+            flags.retain_existing_plugin_panes,
+            "pass {i}: plugin-pane retention must be on"
+        );
+        assert!(
+            !flags.apply_only_to_active_tab,
+            "pass {i}: full-reconcile is cross-tab"
+        );
+    }
+}
+
+#[tokio::test]
+async fn reconcile_quiet_pass_reports_predicates_unchanged() {
+    // Caller contract: external event loop gates new reconciles on
+    // predicate-truth changes + mode switches. This test proves the
+    // signal that gate depends on — `ReconcileOutcome::predicates_changed`
+    // — reports `false` on a quiescent pass, so a drift-tolerance-aware
+    // scheduler knows "nothing to force-converge here; let the user's
+    // manual pane-close stay closed."
+    let src = r#"scene "dev" {
+        layout {
+            tab "@main" {
+                pane "@a" when="true"
+                pane "@b" when="true"
+            }
+        }
+    }"#;
+    let (mut r, _applier, _tmp) = make_reconciler(src);
+
+    let mut scope = rhai::Scope::new();
+    // First pass establishes the baseline truth snapshot.
+    let first = r.reconcile(&mut scope).await.expect("first pass");
+    assert!(
+        first.predicates_changed,
+        "first pass always 'changes' because we compare against an \
+         empty snapshot; drift gate triggers initial convergence"
+    );
+
+    // Second identical pass — no predicate flipped.
+    let quiet = r.reconcile(&mut scope).await.expect("second pass");
+    assert!(
+        !quiet.predicates_changed,
+        "identical pass reports predicates_changed=false; caller should \
+         skip force-convergence so manual pane closures persist"
+    );
+
+    // Third pass — still quiet.
+    let still_quiet = r.reconcile(&mut scope).await.expect("third pass");
+    assert!(
+        !still_quiet.predicates_changed,
+        "quiescent passes stay quiet"
+    );
+}
+
+#[tokio::test]
+async fn reconcile_predicate_flip_forces_convergence() {
+    // R9.10 drift tolerance says the reconciler only forces convergence
+    // on predicate transitions. This test proves a flip reverses the
+    // quiet signal. The event-loop gate then *does* fire a reconcile
+    // (which, because of the retain flags from the test above, still
+    // preserves user-opened panes outside the scene layout).
+    let src = r#"scene "dev" {
+        layout {
+            tab "@main" {
+                pane "@always" when="true"
+                pane "@toggle" when="show"
+            }
+        }
+    }"#;
+    let (mut r, _applier, _tmp) = make_reconciler(src);
+
+    // Pass 1 — scope lacks `show`, so the predicate coerces to false
+    // via the tolerant Rhai eval_bool (undefined → false).
+    let mut scope = rhai::Scope::new();
+    scope.push("show", false);
+    r.reconcile(&mut scope).await.expect("first pass");
+
+    // Pass 2 — same scope, no change. Quiet.
+    let quiet = r.reconcile(&mut scope).await.expect("second pass");
+    assert!(!quiet.predicates_changed, "same scope ⇒ quiet");
+
+    // Pass 3 — flip `show` to true. Predicate transitions false→true,
+    // which forces convergence per R9.10.
+    scope.set_value("show", true);
+    let flipped = r.reconcile(&mut scope).await.expect("flip pass");
+    assert!(
+        flipped.predicates_changed,
+        "predicate transition must be reported so gate fires convergence"
+    );
+
+    // Pass 4 — same scope. Back to quiet now that the new truth is
+    // snapshotted.
+    let quiet_again = r.reconcile(&mut scope).await.expect("post-flip pass");
+    assert!(
+        !quiet_again.predicates_changed,
+        "post-flip settled state is quiet again"
+    );
+}
+
+#[tokio::test]
+async fn mode_switch_preserves_retain_flags_for_drift_tolerance() {
+    // Mode switches are the second of the two R9.10 force-converge
+    // triggers. They MUST still retain existing panes so the swap
+    // doesn't destroy user-opened children that live outside the
+    // mode's declared layout. The flag set differs (`--apply-only-to-
+    // active-tab` replaces cross-tab convergence) but retention stays.
+    let src = r#"scene "dev" {
+        layout {
+            tab "@main" { pane "@p" }
+        }
+        mode "review" {
+            tab "@main" { pane "@p" }
+        }
+    }"#;
+    let (mut r, applier, _tmp) = make_reconciler(src);
+
+    let mut scope = rhai::Scope::new();
+    r.reconcile_mode("review", &mut scope)
+        .await
+        .expect("mode switch");
+
+    let calls = applier.snapshot().await;
+    assert_eq!(calls.len(), 1);
+    let flags = &calls[0].1;
+    assert!(
+        flags.retain_existing_terminal_panes,
+        "mode switch must retain — or it would destroy user panes on \
+         tab entry"
+    );
+    assert!(flags.retain_existing_plugin_panes);
+    assert!(flags.apply_only_to_active_tab);
+}
+
 #[tokio::test]
 async fn reconcile_stack_with_false_when_elides_container() {
     // T-026 + reconciler `filter_child` Stack arm: a stack with a
