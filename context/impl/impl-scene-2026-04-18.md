@@ -32,14 +32,14 @@ present; scene-local `HandleKind` still has `Command`/`Plugin` variants.
 | T-014 | 3 | PENDING | No `view_table` field on `CompiledScene`. |
 | T-015 | 3 | PENDING | No `IntentContext::view_of` accessor. |
 | T-016 | 3 | PENDING | `handle_type_hint: Option<HandleKind>` still ad-hoc attached via `with_handle_type_hint`. |
-| T-017 | 4 | PENDING | No `ViewTypeMismatch` variant in `SceneError`. |
-| T-018 | 4 | PENDING | No `validate/view_types.rs` scene-local validator (the Phase-2 `view_types.rs` in `compile/` is manifest-level and different). |
-| T-019 | 4 | PENDING | validate/op_refs.rs has no `spawn_into` stack inner-view check. |
-| T-020 | 4 | PENDING | `validate_view_types` not registered. |
-| T-021 | 5 | PENDING | `MuxHandle` trait has no `spawn_into_stack` / `clear_stack`. |
-| T-022 | 5 | PENDING | No `SpawnIntoOp` in ops/spawn.rs. |
-| T-023 | 5 | PENDING | No `ClearOp`. |
-| T-024 | 5 | PENDING | spawn_into/clear not registered. |
+| T-017 | 4 | DONE (Wave 5, `8b50cfe`) | `SceneError::ViewTypeMismatch` variant present in `error.rs:815` (verified in place from earlier ledger-prep). |
+| T-018 | 4 | DONE (Wave 5, `8b50cfe`) | New `crates/scene/src/validate/view_types.rs` — `validate_view_types(compiled, registry) -> Vec<SceneError>` walks raw KDL for `spawn_into` and emits `scene/view-type-mismatch`. Added `CompiledScene::view_of_internal` crate-private accessor. |
+| T-019 | 4 | DONE (Wave 5, `8b50cfe`) | `validate_op_refs` extended with raw-KDL `walk_stack_ops_raw`; new `ExpectedKind::Stack` arm enforces stack-only kind on `spawn_into` / `clear` handle arg. |
+| T-020 | 4 | DONE (Wave 5, `8b50cfe`) | `validate/mod.rs` gained `pub mod view_types;` + `pub use view_types::validate_view_types;`. |
+| T-021 | 5 | DONE (Wave 6) | `MuxHandle` gained `spawn_into_stack(&HandleId, Option<&str>) -> Result<HandleId, String>` and `clear_stack(&HandleId) -> Result<(), String>`. `ulid = { workspace = true }` dep added; `MockMux` updated with deterministic override + child-id recording. |
+| T-022 | 5 | DONE (Wave 6) | `SpawnIntoOp` in `ops/spawn.rs` — non-idempotent per R-7 — returns the ark-minted `<stack>-<ulid>` child id as `IntentValue::String`. |
+| T-023 | 5 | DONE (Wave 6) | `ClearOp` in new `ops/stack.rs` — idempotent per R-7 (absent stack = noop). |
+| T-024 | 5 | DONE (Wave 6) | `register_core_ops` registers both; `CORE_OP_NAMES` gains `"ark.core.spawn_into"` + `"ark.core.clear"`. |
 | T-025 | 6 | PENDING | compile/layout.rs emitter has no `StackNode` case. |
 | T-026 | 6 | PENDING | reconciler.rs no stack round-trip. |
 | T-027 | 7 | PENDING | Completion gate tests not written. |
@@ -48,6 +48,117 @@ present; scene-local `HandleKind` still has `Command`/`Plugin` variants.
 DONE via phase-2. Prior audit was wrong.
 
 ## Implementation waves
+
+### Wave 6 — Tier 5 (T-021, T-022, T-023, T-024)
+
+SHA: _pending backfill_.
+
+- **T-021 `MuxHandle::spawn_into_stack` + `clear_stack`**: extended the
+  trait in `crates/scene/src/intent.rs` with two new methods. Signature
+  per the kit: `fn spawn_into_stack(&self, stack: &HandleId, view_body:
+  Option<&str>) -> Result<HandleId, String>` — returns the ark-minted
+  child handle — and `fn clear_stack(&self, stack: &HandleId) ->
+  Result<(), String>`. Added `ulid = { workspace = true }` dep to
+  `crates/scene/Cargo.toml` so `MockMux::spawn_into_stack` can mint
+  real ULIDs for the default path. `MockMux` gained `child_ulid_override:
+  Mutex<Option<String>>` (deterministic injection for tests) and
+  `last_child_ids: Mutex<Vec<String>>` (recording). R-7 child-id format
+  is `<stack>-<ulid>` with the ULID rendered 26-byte lowercase via
+  `Ulid::new().to_string().to_lowercase()` — mirrors
+  `SessionId::as_path_leaf` in `crates/types/src/id.rs`.
+- **T-022 `SpawnIntoOp`**: new op in `crates/scene/src/ops/spawn.rs`.
+  Parses `@stack` as the first positional arg off the raw `KdlNode`;
+  uses `view_body` (same helper used by `SpawnOp`) to serialise the
+  inner-view body; dispatches through `MuxHandle::spawn_into_stack`;
+  strict-maps errors per R-7 non-idempotent contract (absent-handle
+  errors DO surface — re-spawning on a cleared stack is meaningful
+  work). Return value is `IntentValue::String(<minted-child-id>)` so
+  downstream ops / tracing can chase the child. Name: `ark.core.spawn_into`.
+- **T-023 `ClearOp`**: new file `crates/scene/src/ops/stack.rs` housing
+  stack-specific ops. Parses `@stack` as the first positional arg;
+  dispatches through `MuxHandle::clear_stack`; idempotent-maps errors
+  per R-7 (clearing an empty / absent stack is a noop). Name:
+  `ark.core.clear`.
+- **T-024 registration**: updated `crates/scene/src/ops/mod.rs` —
+  `pub mod stack;`, added `"ark.core.spawn_into"` + `"ark.core.clear"`
+  to `CORE_OP_NAMES`, registered both ops in `register_core_ops`.
+  Updated the module docstring's idempotency matrix to include the new
+  rows. `namespace.rs` carries only `ark.core.*` as the reserved prefix
+  (no per-op enumeration) — no change needed. `suggest.rs` has no
+  ark.core op-name list today (only layout-child keywords) — no change
+  needed; the kit's mention was speculative.
+
+Tests delta:
+- `crates/scene/src/ops/spawn.rs::tests` — 5 new SpawnIntoOp tests:
+  dispatch returns child id with pinned ULID, missing handle errors,
+  strict error surfacing (even absent), double-call is non-idempotent
+  (both reach mux), default child id is 26-char lowercase ULID.
+- `crates/scene/src/ops/stack.rs::tests` — 5 new ClearOp tests:
+  dispatch to mux, idempotent on absent stack, surfaces non-noop
+  errors, missing handle errors, double-call noop-safe.
+
+Scene tests: 648 pass (up from 638 — +10). Workspace tests: 2192 pass
+(up from 2182). Fmt clean. `CORE_OP_NAMES` matrix test still passes
+with the new `ark.core.spawn_into` + `ark.core.clear` entries.
+
+### Wave 5 — Tier 4 (T-017, T-018, T-019, T-020)
+
+SHA: `8b50cfe`.
+
+- **T-017 `ViewTypeMismatch` variant**: VERIFIED in place from Wave 2
+  ledger-prep work — `SceneError::ViewTypeMismatch` at
+  `crates/scene/src/error.rs:815` with all required fields `{op, attr,
+  expected_view, actual_view, src, span}` + `#[diagnostic(code =
+  "scene/view-type-mismatch")]` + caret label
+  `"expected view does not match declared handle type"`. No edits
+  needed.
+- **T-018 view-type validator**: new file
+  `crates/scene/src/validate/view_types.rs`. `pub fn
+  validate_view_types(compiled: &CompiledScene, registry:
+  &ViewRegistry) -> Vec<SceneError>` walks the scene's raw KDL doc for
+  `spawn_into @stack { <view> }` nodes. For each: looks up `@stack`
+  in the scene-local view table via the NEW crate-private accessor
+  `CompiledScene::view_of_internal(&HandleId)` (added to
+  `compile/mod.rs`); resolves the inner view's alias through the
+  supplied `ViewRegistry`; emits `scene/view-type-mismatch` when the
+  stack's declared view meta name differs from the inner view's
+  resolved meta name (exact-match semantics per R-8 homogeneous-only).
+  Unknown handles + unknown inner views are silently skipped to avoid
+  double-emitting with `op_refs.rs` / T-031. Deterministic textual
+  (KDL doc) ordering.
+- **T-019 `spawn_into` / `clear` handle-kind check in `op_refs.rs`**:
+  extended `validate_op_refs` with a raw-KDL walker
+  `walk_stack_ops_raw` since `spawn_into` + `clear` aren't in the
+  facet-derived `OpNode` enum yet (AST-tier task pending — they land
+  as `OpNode::Unknown` whose opaque `args` carries only the body, not
+  the positional handle arg). Added `ExpectedKind::Stack` variant to
+  enforce stack-only kind on the `@stack` arg; mismatches surface as
+  existing `scene/op-handle-type-mismatch`, unknown handles as
+  existing `scene/op-unresolved-ref` (no new diagnostic family
+  needed).
+- **T-020 validator wiring**: `validate/mod.rs` gained `pub mod
+  view_types;` + `pub use view_types::validate_view_types;`. Also
+  re-exported `validate_op_refs` so integration tests can import from
+  `ark_scene::validate::` directly. The view-types pass is NOT called
+  from `compile_scene` today — all existing validation passes are
+  stand-alone functions the CLI (`ark scene check`) drives. This
+  matches the current architecture; wiring into `compile_scene` would
+  be a separate concern.
+
+Tests delta:
+- `crates/scene/src/validate/view_types.rs::tests` — 7 new tests:
+  matching view passes, wrong view emits mismatch, unknown stack
+  handle silent (op_refs territory), unknown inner view silent (T-031
+  territory), pane-kind handle silent (op_refs territory), no
+  `spawn_into` no diagnostics, bind-body walk reaches nested ops,
+  diagnostic code is `scene/view-type-mismatch`.
+- `crates/scene/src/validate/op_refs.rs::tests` — 7 new tests for
+  `spawn_into` / `clear`: stack passes, pane/tab are kind mismatch,
+  unknown handle is unresolved, clear-on-stack passes, clear-on-pane
+  mismatch, stack ops in bind body are checked.
+
+Scene tests: 638 pass (up from 623 — +15). Workspace tests: 2182 pass
+(up from 2167). Fmt clean.
 
 ### Wave 4 — Tier 3 (T-013, T-014, T-015, T-016)
 

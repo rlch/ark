@@ -1,11 +1,13 @@
 //! Core op vocabulary — R7 implementations of the canonical intents
-//! (T-048..T-051).
+//! (T-048..T-051) + scene-2026-04-18 Tier 5 stack ops (T-022..T-024).
 //!
 //! One module per subject grouping:
 //!
 //! * [`panes`]     — `focus`, `close`, `rename`, `resize`, `move`,
 //!                   `pin`, `unpin`
-//! * [`spawn`]     — `spawn` (tiled + overlay), `new_tab`
+//! * [`spawn`]     — `spawn` (tiled + overlay), `new_tab`,
+//!                   `spawn_into` (scene-2026-04-18 T-022)
+//! * [`stack`]     — `clear` (scene-2026-04-18 T-023)
 //! * [`messaging`] — `pipe`, `emit`, `set_status`
 //! * [`control`]   — `exec`, `reload_scene`
 //!
@@ -13,7 +15,7 @@
 //! they're registered into an [`crate::intent::IntentRegistry`] via
 //! [`register_core_ops`].
 //!
-//! # Idempotency matrix (T-055)
+//! # Idempotency matrix (T-055 + scene-2026-04-18 R-7)
 //!
 //! | Op            | Policy                               |
 //! |---------------|--------------------------------------|
@@ -25,6 +27,8 @@
 //! | `pin`/`unpin` | noop on absent handle                |
 //! | `spawn`       | check-then-create-else-focus         |
 //! | `new_tab`     | check-then-create-else-focus         |
+//! | `spawn_into`  | non-idempotent: every call pushes    |
+//! | `clear`       | idempotent: absent stack is a noop   |
 //! | `pipe`        | always side-effect                   |
 //! | `emit`        | always side-effect                   |
 //! | `set_status`  | always side-effect                   |
@@ -35,6 +39,7 @@ pub mod control;
 pub mod messaging;
 pub mod panes;
 pub mod spawn;
+pub mod stack;
 
 use std::sync::Arc;
 
@@ -58,6 +63,9 @@ pub const CORE_OP_NAMES: &[&str] = &[
     // Spawn
     "ark.core.spawn",
     "ark.core.new_tab",
+    // scene-2026-04-18 Tier 5: stack ops (T-022/T-023/T-024)
+    "ark.core.spawn_into",
+    "ark.core.clear",
     // Messaging
     "ark.core.pipe",
     "ark.core.emit",
@@ -81,9 +89,13 @@ pub fn register_core_ops(registry: &mut IntentRegistry) {
     registry.register("ark.core.pin", Arc::new(panes::PinOp));
     registry.register("ark.core.unpin", Arc::new(panes::UnpinOp));
 
-    // Spawn (T-049)
+    // Spawn (T-049 + scene-2026-04-18 T-022)
     registry.register("ark.core.spawn", Arc::new(spawn::SpawnOp));
     registry.register("ark.core.new_tab", Arc::new(spawn::NewTabOp));
+    registry.register("ark.core.spawn_into", Arc::new(spawn::SpawnIntoOp));
+
+    // Stack (scene-2026-04-18 T-023)
+    registry.register("ark.core.clear", Arc::new(stack::ClearOp));
 
     // Messaging (T-050)
     registry.register("ark.core.pipe", Arc::new(messaging::PipeOp));

@@ -149,6 +149,33 @@ pub trait MuxHandle: Send + Sync + std::fmt::Debug {
     /// Send `payload` from one pane to another. Both source and target
     /// must exist.
     fn pipe(&self, from: &Handle, to: &Handle, payload: &str) -> Result<(), String>;
+
+    /// Spawn a new child pane inside the stack identified by `stack`
+    /// (scene-2026-04-18 T-021). The returned [`HandleId`] is the
+    /// ark-generated child identity following R-7's
+    /// `<stack-handle>-<ulid>` convention — 26-byte lowercase
+    /// timestamp-random ULID. Extensions do NOT name stack children;
+    /// the mux mints the id and hands it back.
+    ///
+    /// `view_body` mirrors [`Self::spawn_pane`]: `Some` serialised KDL
+    /// children when the caller wrote `spawn_into @stack { <view> }`,
+    /// `None` when the stack accepts the default child view type
+    /// declared in its scene layout.
+    ///
+    /// Non-idempotent per R-7: re-spawning on a cleared stack is
+    /// meaningful work. Callers strict-map the result via
+    /// [`strict_map`].
+    fn spawn_into_stack(
+        &self,
+        stack: &HandleId,
+        view_body: Option<&str>,
+    ) -> Result<HandleId, String>;
+
+    /// Close every child pane currently in the stack identified by
+    /// `stack` (scene-2026-04-18 T-021). Idempotent per R-7: clearing
+    /// an already-empty stack is a no-op. Callers idempotent-map the
+    /// result via [`idempotent_map`].
+    fn clear_stack(&self, stack: &HandleId) -> Result<(), String>;
 }
 
 /// Event-bus trait surface used by `emit` + `set_status`.
@@ -565,6 +592,15 @@ pub(crate) mod tests {
         pub calls: Mutex<Vec<String>>,
         pub fail_with: Mutex<Option<String>>,
         pub existing: Mutex<Vec<String>>,
+        /// scene-2026-04-18 T-021: deterministic override for child
+        /// handle IDs minted by `spawn_into_stack`. When `Some`, the
+        /// mock returns the value verbatim (prefixed by the stack
+        /// handle + `"-"`) so tests can assert on the full id. When
+        /// `None`, a fresh lowercase 26-byte ULID is generated per
+        /// R-7's `<stack>-<ulid>` convention. This field also records
+        /// every minted child id for assertions.
+        pub child_ulid_override: Mutex<Option<String>>,
+        pub last_child_ids: Mutex<Vec<String>>,
     }
 
     impl MockMux {
@@ -590,6 +626,17 @@ pub(crate) mod tests {
                 .lock()
                 .expect("poisoned")
                 .push(raw.to_string());
+        }
+        /// Pin the next `spawn_into_stack` child ULID to a fixed value
+        /// so tests can assert on the full returned handle id without
+        /// racing the real ULID generator.
+        pub(crate) fn set_child_ulid(&self, ulid: impl Into<String>) {
+            *self.child_ulid_override.lock().expect("poisoned") = Some(ulid.into());
+        }
+        /// Drain + return the list of child handle ids minted by
+        /// `spawn_into_stack` in call order.
+        pub(crate) fn take_child_ids(&self) -> Vec<String> {
+            std::mem::take(&mut *self.last_child_ids.lock().expect("poisoned"))
         }
     }
 
@@ -650,6 +697,34 @@ pub(crate) mod tests {
         }
         fn pipe(&self, f: &Handle, t: &Handle, payload: &str) -> Result<(), String> {
             self.check(format!("pipe({},{},{payload})", f.raw(), t.raw()))
+        }
+        fn spawn_into_stack(
+            &self,
+            stack: &HandleId,
+            view_body: Option<&str>,
+        ) -> Result<HandleId, String> {
+            self.record(format!(
+                "spawn_into_stack({},view={:?})",
+                stack.as_str(),
+                view_body
+            ));
+            if let Some(msg) = self.fail_with.lock().expect("poisoned").clone() {
+                return Err(msg);
+            }
+            // Child id generation per R-7: `<stack>-<ulid>` lowercase.
+            let ulid = match self.child_ulid_override.lock().expect("poisoned").clone() {
+                Some(u) => u,
+                None => ulid::Ulid::new().to_string().to_lowercase(),
+            };
+            let child = format!("{}-{ulid}", stack.as_str());
+            self.last_child_ids
+                .lock()
+                .expect("poisoned")
+                .push(child.clone());
+            Ok(HandleId::new(child))
+        }
+        fn clear_stack(&self, stack: &HandleId) -> Result<(), String> {
+            self.check(format!("clear_stack({})", stack.as_str()))
         }
     }
 

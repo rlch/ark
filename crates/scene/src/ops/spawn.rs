@@ -1,14 +1,23 @@
 //! Spawn ops — T-049, R7.
 //!
-//! * [`SpawnOp`]  — `spawn @handle { <view> }` (tiled) or
-//!                  `spawn @handle overlay pos=… size=… { <view> }`
-//!                  (overlay).
-//! * [`NewTabOp`] — `new_tab @handle [name=…] [cwd=…]`.
+//! * [`SpawnOp`]      — `spawn @handle { <view> }` (tiled) or
+//!                       `spawn @handle overlay pos=… size=… { <view> }`
+//!                       (overlay).
+//! * [`NewTabOp`]     — `new_tab @handle [name=…] [cwd=…]`.
+//! * [`SpawnIntoOp`]  — scene-2026-04-18 T-022 — `spawn_into @stack
+//!                       { <view> }` mints a fresh child pane under
+//!                       `@stack` with an ark-generated
+//!                       `<stack>-<ulid>` identity (R-7).
 //!
-//! Both ops follow the T-055 "check-then-create-else-focus" policy:
-//! when the handle already exists the op focuses the existing target
-//! rather than failing or re-creating.
+//! `spawn` / `new_tab` follow the T-055 "check-then-create-else-focus"
+//! policy: when the handle already exists the op focuses the existing
+//! target rather than failing or re-creating.
+//!
+//! `spawn_into` is NON-idempotent per R-7: every call on a stack
+//! meaningfully pushes another child, so re-dispatch must not be
+//! elided. The strict-map surfaces mux errors verbatim.
 
+use ark_view::HandleId;
 use async_trait::async_trait;
 use kdl::KdlNode;
 
@@ -172,6 +181,79 @@ impl Intent for NewTabOp {
 }
 
 // ---------------------------------------------------------------------------
+// spawn_into — scene-2026-04-18 T-022
+// ---------------------------------------------------------------------------
+
+/// `spawn_into @stack { <view> }` — mint a new child pane inside the
+/// stack identified by `@stack`.
+///
+/// Semantics per R-7:
+/// * First positional arg is the `@stack` handle.
+/// * Optional body block carries the pane's view content (same shape
+///   as `spawn`'s view child).
+/// * Non-idempotent: every dispatch meaningfully pushes another child,
+///   so no "check-then-focus" branch. Errors from the mux surface via
+///   [`strict_map`].
+/// * The returned [`HandleId`] (from [`MuxHandle::spawn_into_stack`])
+///   is the ark-minted `<stack>-<ulid>` child id. That id is NOT
+///   recorded in the compile-time `ViewTable` — the table is scene
+///   source + layout ground-truth, which doesn't know about runtime
+///   children. The dispatcher logs it through tracing so `ark scene
+///   explain` can chase it.
+#[derive(Debug, Default)]
+pub struct SpawnIntoOp;
+
+const SPAWN_INTO_NAME: &str = "ark.core.spawn_into";
+
+#[async_trait]
+impl Intent for SpawnIntoOp {
+    async fn dispatch(
+        &self,
+        args: &KdlNode,
+        ctx: &IntentContext,
+    ) -> Result<IntentValue, SceneError> {
+        require_mux(ctx, SPAWN_INTO_NAME)?;
+        // Pull the first positional argument — the `@stack` handle ref.
+        let raw = first_argument(args).ok_or_else(|| SceneError::OpFailed {
+            op: SPAWN_INTO_NAME.to_string(),
+            message: "missing `@stack` argument".to_string(),
+        })?;
+        if raw.is_empty() {
+            return Err(SceneError::OpFailed {
+                op: SPAWN_INTO_NAME.to_string(),
+                message: "empty `@stack` argument".to_string(),
+            });
+        }
+        let mux = ctx.mux.as_ref().expect("checked by require_mux");
+        let stack = HandleId::new(raw.clone());
+        let body = view_body(args);
+        tracing::info!(
+            target: "scene::ops",
+            op = SPAWN_INTO_NAME,
+            stack = %raw,
+            origin = %ctx.origin,
+            "spawn_into"
+        );
+        match mux.spawn_into_stack(&stack, body.as_deref()) {
+            Ok(child) => {
+                tracing::info!(
+                    target: "scene::ops",
+                    op = SPAWN_INTO_NAME,
+                    stack = %raw,
+                    child = %child.as_str(),
+                    "spawn_into minted child"
+                );
+                Ok(IntentValue::String(child.as_str().to_string()))
+            }
+            Err(msg) => Err(SceneError::OpFailed {
+                op: SPAWN_INTO_NAME.to_string(),
+                message: msg,
+            }),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -268,5 +350,110 @@ mod tests {
         let node = node_from(r#"spawn"#);
         let err = SpawnOp.dispatch(&node, &ctx).await.expect_err("must error");
         assert!(matches!(err, SceneError::OpFailed { .. }));
+    }
+
+    // -----------------------------------------------------------------
+    // scene-2026-04-18 T-022 — SpawnIntoOp
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn spawn_into_dispatches_to_mux_and_returns_child_id() {
+        let mux = Arc::new(MockMux::default());
+        // Pin the ULID portion so the child id is fully deterministic.
+        mux.set_child_ulid("01jabcdefghijklmnopqrstuv");
+        let ctx = ctx_with(mux.clone());
+        let node = node_from(r#"spawn_into "@subs" { command }"#);
+        let v = SpawnIntoOp.dispatch(&node, &ctx).await.expect("ok");
+        // Returned value is the minted child id.
+        match v {
+            IntentValue::String(s) => {
+                assert_eq!(s, "@subs-01jabcdefghijklmnopqrstuv");
+            }
+            other => panic!("expected IntentValue::String, got {other:?}"),
+        }
+        // Mux recorded the call with the body preserved.
+        let calls = mux.take_calls();
+        assert_eq!(calls.len(), 1);
+        assert!(
+            calls[0].starts_with("spawn_into_stack(@subs,view="),
+            "unexpected call: {calls:?}"
+        );
+        // Child id list tracks the mint.
+        assert_eq!(
+            mux.take_child_ids(),
+            vec!["@subs-01jabcdefghijklmnopqrstuv".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_into_missing_handle_errors() {
+        let mux = Arc::new(MockMux::default());
+        let ctx = ctx_with(mux.clone());
+        let node = node_from(r#"spawn_into"#);
+        let err = SpawnIntoOp
+            .dispatch(&node, &ctx)
+            .await
+            .expect_err("must error");
+        assert!(matches!(err, SceneError::OpFailed { .. }));
+    }
+
+    #[tokio::test]
+    async fn spawn_into_surfaces_mux_error_strictly() {
+        // R-7 non-idempotent — even an "absent" error must surface.
+        let mux = Arc::new(MockMux::default());
+        mux.set_fail("handle not found");
+        let ctx = ctx_with(mux.clone());
+        let node = node_from(r#"spawn_into "@subs" { command }"#);
+        let err = SpawnIntoOp
+            .dispatch(&node, &ctx)
+            .await
+            .expect_err("must surface");
+        assert!(matches!(
+            err,
+            SceneError::OpFailed { op, .. } if op == "ark.core.spawn_into"
+        ));
+    }
+
+    #[tokio::test]
+    async fn spawn_into_non_idempotent_double_call() {
+        // Two back-to-back dispatches must both reach the mux — this
+        // is the R-7 non-idempotent contract in action.
+        let mux = Arc::new(MockMux::default());
+        let ctx = ctx_with(mux.clone());
+        let node = node_from(r#"spawn_into "@subs" { command }"#);
+        SpawnIntoOp.dispatch(&node, &ctx).await.expect("ok");
+        SpawnIntoOp.dispatch(&node, &ctx).await.expect("ok");
+        let calls = mux.take_calls();
+        assert_eq!(calls.len(), 2, "both calls must reach the mux: {calls:?}");
+        assert_eq!(mux.take_child_ids().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn spawn_into_child_id_default_is_lowercase_ulid() {
+        // Without the override, the generated ulid must be 26 chars
+        // long and entirely lowercase (R-7 formatting).
+        let mux = Arc::new(MockMux::default());
+        let ctx = ctx_with(mux.clone());
+        let node = node_from(r#"spawn_into "@subs" { command }"#);
+        let v = SpawnIntoOp.dispatch(&node, &ctx).await.expect("ok");
+        let s = match v {
+            IntentValue::String(s) => s,
+            other => panic!("expected string, got {other:?}"),
+        };
+        // Expected format: `@subs-<26 chars of lowercase base32>`.
+        let prefix = "@subs-";
+        assert!(s.starts_with(prefix), "unexpected child id: {s}");
+        let ulid_part = &s[prefix.len()..];
+        assert_eq!(
+            ulid_part.len(),
+            26,
+            "ulid part must be 26 chars: got {ulid_part:?}"
+        );
+        for ch in ulid_part.chars() {
+            assert!(
+                ch.is_ascii_digit() || (ch.is_ascii_alphabetic() && ch.is_ascii_lowercase()),
+                "ulid must be lowercase ascii alnum, got {ch:?} in {ulid_part:?}"
+            );
+        }
     }
 }

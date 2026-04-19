@@ -4,6 +4,23 @@ last_edited: "2026-04-18"
 ---
 # Loop Log
 
+### Wave scene-2026-04-18-Tier4+5 — 2026-04-18 — view-type validator + MuxHandle stack ops
+
+- Tier 4: T-017 variant already landed (earlier ledger-prep). T-018 new file validate/view_types.rs. pub fn validate_view_types(compiled, registry) → Vec<SceneError>. walks raw kdl_doc for `spawn_into @stack { <view> }` nodes (NOT the typed AST — spawn_into falls into OpNode::Unknown today; AST task still pending). look up @stack via NEW `CompiledScene::view_of_internal(&HandleId) -> Option<&ViewDecl>` crate-private accessor (mirrors runtime view_of name but pipeline-scoped; R-10 — never widen visibility). resolve inner alias via ViewRegistry. string-eq meta names per R-8 exact-match. emit scene/view-type-mismatch with caret on @stack entry span. unknown handles + unknown inner views = silent skip (op_refs + T-031 own those). 7 tests.
+- T-019 op_refs.rs: added ExpectedKind::Stack arm. since spawn_into/clear land as OpNode::Unknown (AST-tier work pending), typed walker can't reach their handle args (Unknown.args is body-only). solution: raw-KDL post-pass `walk_stack_ops_raw` recursively walks kdl_doc, matches name=="spawn_into"|"clear", pulls first unnamed positional entry, dispatches through existing validate_handle_ref. unknown handle = op-unresolved-ref, wrong kind = op-handle-type-mismatch. 7 tests.
+- T-020 validate/mod.rs: `pub mod view_types;` + `pub use view_types::validate_view_types;`. also re-exported validate_op_refs for integration-test ergonomics.
+- commit 8b50cfe. scene tests: 638 pass (+15). workspace: 2182 (+15).
+- Tier 5: T-021 MuxHandle trait gains `spawn_into_stack(&self, &HandleId, Option<&str>) -> Result<HandleId, String>` + `clear_stack(&self, &HandleId) -> Result<(), String>`. added `ulid = { workspace = true }` to crates/scene/Cargo.toml. MockMux impl generates R-7 child id `<stack>-<ulid>` via `Ulid::new().to_string().to_lowercase()` — mirrors types/id.rs SessionId::as_path_leaf. added child_ulid_override + last_child_ids for deterministic tests.
+- T-022 SpawnIntoOp in ops/spawn.rs. uses existing view_body helper for body serialisation + first_argument for @stack. strict_map semantics per R-7 non-idempotent. return value = IntentValue::String(<minted-child-id>) so downstream ops / tracing can chase the child. name = ark.core.spawn_into.
+- T-023 ClearOp in NEW ops/stack.rs. idempotent_map per R-7 (absent stack = noop). name = ark.core.clear.
+- T-024 ops/mod.rs: `pub mod stack;`. added ark.core.spawn_into + ark.core.clear to CORE_OP_NAMES (both registered). existing register_core_ops_populates_matrix test still passes (reg.len() == CORE_OP_NAMES.len()). namespace.rs uses ark.core.* reserved prefix — no per-op enumeration to update. suggest.rs has NO ark.core list today (only layout-child keywords) — kit's mention of "op-name suggestion list in suggest.rs" was speculative; no change needed.
+- scene tests: 648 pass (+10 — 5 SpawnIntoOp + 5 ClearOp). workspace: 2192 pass (+10).
+- commit 2 pending.
+
+ULID crate: used `ulid = { workspace = true }` (workspace-pinned to "1" with serde feature). hand-rolled fallback NOT needed. default path in MockMux calls `ulid::Ulid::new().to_string().to_lowercase()` — 26-byte Crockford base32, timestamp-random, monotonic within ms per spec.
+
+Visibility discipline R-10 preserved: view_of_internal is pub(crate) (never pub); CompiledScene::view_table field stays pub(crate); public runtime accessor view_of in IntentContext is the SOLE public entry point for extensions. T-018 validator uses view_of_internal exclusively.
+
 ### Wave scene-2026-04-18-Tier2+3 — 2026-04-18 — retire scene-local HandleKind + ViewTable + view_of accessor
 
 - Tier 2 tight: T-009 delete scene-local 4-variant HandleKind enum (Tab|Pane|Command|Plugin) from intent.rs. replace with `pub use ark_view::HandleKind` — 3-variant Tab|Pane|Stack. Command/Plugin variants GONE. view-type info (CommandView|ZellijView) live on ark_view::Pane<V> not as HandleKind variant. T-010 add explicit HandleKind::Stack match arm to FocusOp+CloseOp. stack focus → focus_pane (zellij expand at current child), stack close → close_pane (cascades). `#[non_exhaustive]` on ark_view::HandleKind needs `_` fallback arm wired as pane-route default. 2 new stack routing tests. commit 8e8a735.

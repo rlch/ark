@@ -75,6 +75,13 @@ ark-view = { path = "../ark-view" }
 # backing the trybuild goldens under `tests/ui/`. Re-exported at
 # `ark_scene::validate_scene` so fixtures can `use ark_scene::validate_scene`.
 ark-scene-macros = { path = "../scene-macros" }
+# scene-2026-04-18 T-021 (Tier 5): `MuxHandle::spawn_into_stack` mints a
+# child handle whose identity follows the R-7 `<stack-handle>-<ulid>`
+# convention — 26-byte lowercase ULID, timestamp-random — so child IDs
+# are collision-free under async races, sortable, and mirror the
+# `SessionId::as_path_leaf()` `<name>-<ulid>` pattern used elsewhere in
+# the workspace.
+ulid = { workspace = true }
 
 [[bin]]
 # T-140 (cavekit-scene R13 / Tier 15): scene schema emitter. Walks every
