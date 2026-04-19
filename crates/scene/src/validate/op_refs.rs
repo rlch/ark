@@ -72,6 +72,17 @@ pub fn validate_op_refs(ir: &SceneIR) -> Vec<SceneError> {
             _ => {}
         }
     }
+
+    // scene-2026-04-18 T-019: walk the raw KDL doc once more to pick
+    // up `spawn_into @stack` / `clear @stack` ops, which land in the
+    // typed AST as `OpNode::Unknown` and are therefore skipped by the
+    // `op_metadata`-driven pass above. Pulling them off the raw KDL
+    // gives us both the positional handle arg AND a span for the
+    // caret that the opaque `OpNode::Unknown.args` doesn't carry.
+    if let Some(doc) = ir.kdl_doc.as_ref() {
+        walk_stack_ops_raw(doc, &decls, src, &path, &mut errors);
+    }
+
     errors
 }
 
@@ -184,6 +195,8 @@ enum ExpectedKind {
     Tab,
     /// Pane-only (e.g. `resize`, `move`, `pin`, `unpin`).
     Pane,
+    /// Stack-only (scene-2026-04-18 T-019 — `spawn_into`, `clear`).
+    Stack,
     /// Polymorphic (either tab or pane accepted: `focus`, `close`).
     Any,
     /// Op carries no handle reference — skip the validation entirely.
@@ -217,6 +230,14 @@ fn op_metadata(op: &OpNode) -> (&'static str, Option<&str>, ExpectedKind) {
         OpNode::SetStatus(_) => ("set_status", None, ExpectedKind::None),
         OpNode::Exec(_) => ("exec", None, ExpectedKind::None),
         OpNode::ReloadScene(_) => ("reload_scene", None, ExpectedKind::None),
+        // scene-2026-04-18 T-019: `spawn_into` / `clear` aren't in the
+        // facet-derived `OpNode` enum yet (AST tier task pending) — they
+        // reach `validate_op_refs` through the `Unknown` catch-all and
+        // are handled specially via [`walk_stack_ops_raw`] which
+        // re-parses them off the raw KDL doc for both positional-arg
+        // access and span-accurate diagnostics. The typed path here
+        // treats them as "no handle ref to validate" to avoid a
+        // double-emit when the raw pass also fires.
         OpNode::Unknown { .. } => ("unknown", None, ExpectedKind::None),
     }
 }
@@ -232,7 +253,7 @@ fn validate_op(
     if let (Some(raw_handle), expected_kind) = (handle, expected) {
         match expected_kind {
             ExpectedKind::None | ExpectedKind::Introduce => {}
-            ExpectedKind::Tab | ExpectedKind::Pane | ExpectedKind::Any => {
+            ExpectedKind::Tab | ExpectedKind::Pane | ExpectedKind::Stack | ExpectedKind::Any => {
                 validate_handle_ref(name, raw_handle, expected_kind, decls, src, path, errors);
             }
         }
@@ -292,12 +313,14 @@ fn validate_handle_ref(
             let expected_str = match expected {
                 ExpectedKind::Tab => Some("tab"),
                 ExpectedKind::Pane => Some("pane"),
+                ExpectedKind::Stack => Some("stack"),
                 _ => None,
             };
             if let Some(expected_static) = expected_str {
                 let matches = match (expected, actual_kind) {
                     (ExpectedKind::Tab, DeclKind::Tab) => true,
                     (ExpectedKind::Pane, DeclKind::Pane) => true,
+                    (ExpectedKind::Stack, DeclKind::Stack) => true,
                     _ => false,
                 };
                 if !matches {
@@ -312,6 +335,58 @@ fn validate_handle_ref(
                     });
                 }
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Raw-KDL walker for stack ops (scene-2026-04-18 T-019)
+// ---------------------------------------------------------------------------
+
+/// Walk the raw KDL document picking up `spawn_into` and `clear` op
+/// nodes wherever they appear (inside `on { … }` / `bind { … }` / nested
+/// in `mode { … }`). For each, pull the first positional argument (the
+/// `@stack` handle ref) and validate it via [`validate_handle_ref`]
+/// with [`ExpectedKind::Stack`].
+///
+/// The raw walker is necessary because these verbs aren't in the
+/// facet-derived `OpNode` enum yet — they land as `OpNode::Unknown`,
+/// and `OpNode::Unknown.args` stores only the BODY of the op, not the
+/// op's positional arguments. Walking the raw doc sidesteps the
+/// typed-AST gap cleanly and also gives us real spans for the
+/// `@stack` token.
+fn walk_stack_ops_raw(
+    doc: &::kdl::KdlDocument,
+    decls: &HashMap<String, DeclKind>,
+    src: &str,
+    path: &str,
+    errors: &mut Vec<SceneError>,
+) {
+    for node in doc.nodes() {
+        let name = node.name().value();
+        if name == "spawn_into" || name == "clear" {
+            // Static verb string so the op-name field stays `'static`.
+            let op_name: &'static str = if name == "spawn_into" {
+                "spawn_into"
+            } else {
+                "clear"
+            };
+            if let Some(entry) = node.entries().iter().find(|e| e.name().is_none()) {
+                if let Some(raw) = entry.value().as_string() {
+                    validate_handle_ref(
+                        op_name,
+                        raw,
+                        ExpectedKind::Stack,
+                        decls,
+                        src,
+                        path,
+                        errors,
+                    );
+                }
+            }
+        }
+        if let Some(children) = node.children() {
+            walk_stack_ops_raw(children, decls, src, path, errors);
         }
     }
 }
@@ -507,6 +582,185 @@ scene "s" {
         set_status text="hi"
         exec script="true"
         reload_scene
+    }
+}
+"#;
+        let errors = validate(src);
+        assert!(errors.is_empty(), "unexpected: {errors:?}");
+    }
+
+    // -----------------------------------------------------------------
+    // scene-2026-04-18 T-019 — `spawn_into` / `clear` stack-kind checks
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn spawn_into_on_stack_passes() {
+        let src = r#"
+scene "s" {
+    layout {
+        tab "@main" {
+            stack "@subs" {
+                pane "@seed" { command }
+            }
+        }
+    }
+    on "FileEdited" {
+        spawn_into "@subs" { command }
+    }
+}
+"#;
+        let errors = validate(src);
+        assert!(errors.is_empty(), "unexpected: {errors:?}");
+    }
+
+    #[test]
+    fn spawn_into_on_pane_is_type_mismatch() {
+        let src = r#"
+scene "s" {
+    layout {
+        tab "@main" {
+            pane "@editor" { command }
+        }
+    }
+    on "FileEdited" {
+        spawn_into "@editor" { command }
+    }
+}
+"#;
+        let errors = validate(src);
+        assert_eq!(errors.len(), 1);
+        match &errors[0] {
+            SceneError::OpHandleTypeMismatch {
+                op,
+                expected,
+                actual,
+                ..
+            } => {
+                assert_eq!(op, "spawn_into");
+                assert_eq!(*expected, "stack");
+                assert_eq!(*actual, "pane");
+            }
+            other => panic!("expected OpHandleTypeMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn spawn_into_on_tab_is_type_mismatch() {
+        let src = r#"
+scene "s" {
+    layout {
+        tab "@main" {
+            pane "@editor" { command }
+        }
+    }
+    on "FileEdited" {
+        spawn_into "@main" { command }
+    }
+}
+"#;
+        let errors = validate(src);
+        assert_eq!(errors.len(), 1);
+        match &errors[0] {
+            SceneError::OpHandleTypeMismatch {
+                op,
+                expected,
+                actual,
+                ..
+            } => {
+                assert_eq!(op, "spawn_into");
+                assert_eq!(*expected, "stack");
+                assert_eq!(*actual, "tab");
+            }
+            other => panic!("expected OpHandleTypeMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn spawn_into_unknown_handle_is_unresolved() {
+        let src = r#"
+scene "s" {
+    layout {
+        tab "@main" { pane "@editor" { command } }
+    }
+    on "FileEdited" {
+        spawn_into "@ghost" { command }
+    }
+}
+"#;
+        let errors = validate(src);
+        assert_eq!(errors.len(), 1);
+        match &errors[0] {
+            SceneError::OpUnresolvedRef { op, name, .. } => {
+                assert_eq!(op, "spawn_into");
+                assert_eq!(name, "@ghost");
+            }
+            other => panic!("expected OpUnresolvedRef, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clear_on_stack_passes() {
+        let src = r#"
+scene "s" {
+    layout {
+        tab "@main" {
+            stack "@subs" {
+                pane "@seed" { command }
+            }
+        }
+    }
+    on "FileEdited" {
+        clear "@subs"
+    }
+}
+"#;
+        let errors = validate(src);
+        assert!(errors.is_empty(), "unexpected: {errors:?}");
+    }
+
+    #[test]
+    fn clear_on_pane_is_type_mismatch() {
+        let src = r#"
+scene "s" {
+    layout {
+        tab "@main" { pane "@editor" { command } }
+    }
+    on "FileEdited" {
+        clear "@editor"
+    }
+}
+"#;
+        let errors = validate(src);
+        assert_eq!(errors.len(), 1);
+        match &errors[0] {
+            SceneError::OpHandleTypeMismatch {
+                op,
+                expected,
+                actual,
+                ..
+            } => {
+                assert_eq!(op, "clear");
+                assert_eq!(*expected, "stack");
+                assert_eq!(*actual, "pane");
+            }
+            other => panic!("expected OpHandleTypeMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stack_ops_in_bind_body_are_checked() {
+        let src = r#"
+scene "s" {
+    layout {
+        tab "@main" {
+            stack "@subs" {
+                pane "@seed" { command }
+            }
+        }
+    }
+    bind "Alt q" {
+        spawn_into "@subs" { command }
+        clear "@subs"
     }
 }
 "#;

@@ -832,8 +832,8 @@ pub(crate) mod tests {
 
     #[test]
     fn view_of_returns_decl_for_declared_handle() {
-        let ctx = IntentContext::new(test_scene_id(), "scene")
-            .with_view_table(fixture_view_table());
+        let ctx =
+            IntentContext::new(test_scene_id(), "scene").with_view_table(fixture_view_table());
         let decl = ctx
             .view_of(&ark_view::HandleId::new("@editor"))
             .expect("declared handle");
@@ -843,8 +843,8 @@ pub(crate) mod tests {
 
     #[test]
     fn view_of_returns_none_for_absent_handle() {
-        let ctx = IntentContext::new(test_scene_id(), "scene")
-            .with_view_table(fixture_view_table());
+        let ctx =
+            IntentContext::new(test_scene_id(), "scene").with_view_table(fixture_view_table());
         assert!(
             ctx.view_of(&ark_view::HandleId::new("@ghost")).is_none(),
             "undeclared handle -> None"
@@ -862,8 +862,8 @@ pub(crate) mod tests {
 
     #[test]
     fn view_of_distinguishes_pane_and_stack() {
-        let ctx = IntentContext::new(test_scene_id(), "scene")
-            .with_view_table(fixture_view_table());
+        let ctx =
+            IntentContext::new(test_scene_id(), "scene").with_view_table(fixture_view_table());
         assert_eq!(
             ctx.view_of(&ark_view::HandleId::new("@editor"))
                 .expect("pane")
@@ -899,9 +899,6 @@ pub(crate) mod tests {
         let ctx = IntentContext::new(test_scene_id(), "scene")
             .with_view_table(fixture_view_table())
             .with_handle_hint_from_table(&ark_view::HandleId::new("@ghost"));
-        assert_eq!(
-            ctx.handle_type_hint, None,
-            "undeclared handle -> no hint"
-        );
+        assert_eq!(ctx.handle_type_hint, None, "undeclared handle -> no hint");
     }
 }

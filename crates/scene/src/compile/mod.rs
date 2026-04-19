@@ -112,6 +112,22 @@ impl CompiledScene {
     pub(crate) fn view_table(&self) -> &ViewTable {
         &self.view_table
     }
+
+    /// Crate-private single-handle lookup against [`Self::view_table`]
+    /// (scene-2026-04-18 T-018).
+    ///
+    /// Wraps the `BTreeMap::get` to give the view-type validator a
+    /// pipeline-local accessor whose name mirrors the public
+    /// runtime-only [`crate::intent::IntentContext::view_of`]. The two
+    /// accessors are NOT interchangeable: `view_of` is runtime-scoped
+    /// (requires `IntentContext`); `view_of_internal` runs inside the
+    /// compile pipeline where no `IntentContext` exists yet. R-10
+    /// requires this accessor stays `pub(crate)` — never widen its
+    /// visibility.
+    #[allow(dead_code)]
+    pub(crate) fn view_of_internal(&self, handle: &HandleId) -> Option<&ViewDecl> {
+        self.view_table.get(handle)
+    }
 }
 
 /// Compile all Rhai surfaces in `ir` and bundle the result.

@@ -18,9 +18,9 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use ark_core::Config;
 use ark_core::consumers::{ReactionDispatcherCtx, reaction_dispatcher, state_writer};
 use ark_core::status_writer::write_session_status_atomic;
-use ark_core::Config;
 // cleanup-T-009/T-010: Engine + Orchestrator trait objects and the
 // `World` capability bag are gone from the runtime boot path. The
 // R3 step-6 diagnostic, the step-10/15 observability + teardown
