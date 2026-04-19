@@ -1,0 +1,62 @@
+[package]
+name = "ark-test-harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# v0.2 backlog #6 (claude-code-ext R13 PTY harness MVP).
+#
+# Reusable test-only helper crate that spawns `ark run` under a pty
+# against a real `zellij` installation so integration tests can assert
+# on ark-under-zellij launch + view rendering end-to-end.
+#
+# Consumers (downstream integration tests):
+#   * Resolve their own `ark` binary path via
+#     `env!("CARGO_BIN_EXE_ark")` (only populated when the test lives
+#     in the same package as the `[[bin]]` target) or any other
+#     mechanism, and hand the path to `ArkHarness::try_new`.
+#   * Optionally stage a `claude` shim pointing at
+#     `mock-claude-cc` (from `ark-test-fixtures-claude-code`) via
+#     `HarnessBuilder::with_claude_mock`.
+#
+# Scope (v0.2 #6):
+#   * PTY spawner over `portable-pty` (already a workspace dep under
+#     ark-mux-zellij + ark-cli; reuse rather than add a new one).
+#   * `claude` symlink provisioning in an isolated tempdir.
+#   * Wait-for-ready via `zellij list-sessions` polling (same pattern
+#     as `crates/cli/tests/launch_pty.rs`).
+#   * `dump_screen` via `zellij action dump-screen` → tempfile → read
+#     back. Falls back to the captured pty output buffer if the
+#     zellij CLI path fails.
+#   * SKIP branch on hosts without zellij or inside a running zellij
+#     session (nesting would pollute the caller's session).
+#
+# This crate is test-only — it's NOT a dev-dependency of any
+# production crate. Downstream integration-test crates add it under
+# `[dev-dependencies]`.
+#
+# Dep budget:
+#   * `portable-pty` — PTY master/slave + `spawn_command`. Already
+#     pinned to 0.8 elsewhere in the workspace.
+#   * `tempfile` — isolated tempdirs for claude-shim staging, state,
+#     config, runtime, and screen-dump scratch files.
+#   * `anyhow` — error plumbing. Tests want an ergonomic `Result` at
+#     the top level; `thiserror` overhead isn't worth it for a
+#     test-only API.
+#   * `tracing` — optional log plumbing so callers can enable trace
+#     output if a harness test flakes.
+
+[dependencies]
+portable-pty = "0.8"
+tempfile = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# Smoke test resolves the ark binary via the cli crate's path
+# (`CARGO_BIN_EXE_*` is package-scoped — we can't reach into the cli
+# crate from here, so the smoke test discovers the binary under
+# `target/debug/ark` instead). No extra dev-dep beyond this.

@@ -4,6 +4,37 @@ last_edited: "2026-04-18"
 ---
 # Loop Log
 
+### v0.2 BACKLOG CLOSE-OUT — 2026-04-18 — 7/7 items landed
+
+- #1 ark-bus intent dispatch bridge DONE (`4bad1a4`)
+- #2 Stack::spawn_pane live RPC wiring DONE (`7947e4c`)
+- #3 SubagentRegistry auto-wire DONE (`8804b9f`)
+- #4 `ark ext invoke <verb>` dispatcher DONE (`4c0bffd`)
+- #5 ext_state persistence for list columns DONE (`d91c55b`)
+- #6 full-zellij PTY harness PARTIAL (MVP scaffold, this wave)
+- #7 cc-hook cargo-install fallback DONE (`45dc120`)
+
+DRAFT-site initiatives #8..#11 (supervisor-wiring / mux-tight-coupling / scene-v3 full build-out / pi extension family) remain as future v0.2 scope — sized in their own build sites.
+
+### Wave v0.2-backlog #6 — 2026-04-18 — `TBD`
+
+- v0.2 item #6 full-zellij PTY harness. single-packet. serial main tree opus. FINAL v0.2 backlog item.
+- scope: MVP scaffold over full subagent-burst+grid assertion suite. packet said "prefer #[ignore] + TODO over unreliable test; if full zellij-launch infeasible within MVP scope, deliver crate scaffold + helper API + skip integration test body". took that path: ships the API + a self-smoke-test that does the full launch round-trip (`wait_for_ready` + `shutdown`) but deferred view-grid assertions + subagent-burst fixture-driven scenarios to v1.0.
+- new crate `crates/ark-test-harness/` library-only. dev-dep on nothing production. deps: portable-pty 0.8 (already pinned elsewhere in workspace — ark-mux-zellij + ark-cli) + tempfile + anyhow + tracing (all workspace). ZERO new workspace deps. fulfills packet constraint "add dev-deps minimally. if `portable-pty` / `vt100` aren't already workspace deps, add them as regular dev-deps on the new crate (not workspace-wide) unless absolutely needed".
+- crate layout: `src/lib.rs` (public API + ArkHarness + HarnessBuilder), `src/pty.rs` (PtyProcess wrapper over portable-pty — interior-mutable writer via Mutex so `send_input(&self)` works, reader thread with 256 KiB ring cap), `src/zellij.rs` (`zellij_on_path` / `inside_zellij` / `locate_zellij` / `run_zellij` / `wait_for_session` / `kill_session` / `dump_screen`), `src/fixtures.rs` (`stage_claude_shim` unix-symlink / non-unix-copy + `MINIMAL_SCENE_KDL` + `write_minimal_scene`). `tests/smoke.rs` covers (a) `harness_can_run` primitive, (b) `Ok(None)` SKIP branch on unsuitable env, (c) full ark-under-zellij launch + wait-for-ready + shutdown round-trip gated on `harness_can_run()` + `discover_workspace_binary("ark")`.
+- public API shape: `ArkHarness::try_new(ark_bin, scene_kdl) -> Result<Option<Self>>` (SKIP = Ok(None)), `HarnessBuilder::{new, session_name, with_claude_mock, extra_env, pty_size, build}`, handle methods `wait_for_ready / send_input / dump_screen / wait_for_text / shutdown / pty / pty_buffer / session_name`. free helpers: `harness_can_run`, `discover_workspace_binary` (walks parents to `Cargo.lock` then tries `target/{debug,release}/<bin>`), plus re-exports of zellij + fixtures primitives.
+- key design decisions:
+  - caller supplies ark binary path. `CARGO_BIN_EXE_*` is package-scoped so a separate harness crate can't reach into ark-cli's env. downstream integration tests resolve via their own package's env var or via `discover_workspace_binary`. the smoke test here uses the discovery helper + SKIPs if the binary isn't built.
+  - SKIP branch = `Ok(None)` (not error). Mirrors the contract in `extensions/claude-code/tests/claude_code_smoke.rs` where missing zellij is a best-effort advisory. Callers pattern-match and print SKIP; no panic.
+  - `PtyProcess` takes `&self` for `send_input` via a `Mutex<Box<dyn Write + Send>>` (not `&mut self`) — this keeps `ArkHarness` ergonomic since the harness holds the pty behind a field and users call `harness.send_input(...)` without taking a mut borrow on the whole struct.
+  - screen-dump path shells out to `zellij action dump-screen <tmpfile>` + reads back, with pty-buffer fallback when that exits non-zero or writes empty. simpler than a vt100 grid parser + leaves the cell-level surface available to downstream callers via the raw `pty_buffer`.
+  - shim staging uses unix symlinks preferentially; falls back to copy on non-unix so `cargo check` stays green on windows build bots. claude-code-ext is unix-only today but the fallback keeps the crate portable as a library.
+  - session name format: `ark-harness-<pid>-<nanos>`. unique per test + process. avoids collisions with real user sessions named `ark` or the launch_pty test's `ark-pty-test-<pid>`.
+  - reader-thread buffer ring-capped at 256 KiB. runaway child that spews to stdout won't OOM a host — oldest bytes get evicted.
+- initial pty.rs draft had a broken `send_input(&self)` that returned a sentinel error because I started with `Box<dyn Write + Send>` directly and only realized after the file was written that `&self` can't call `write_all` on a plain `Box`. Fixed by wrapping in `Mutex`. caught on first `cargo build -p ark-test-harness`.
+- validation: `cargo build -p ark-test-harness` clean. `cargo test -p ark-test-harness` 13 pass (10 unit + 3 integration; zellij-gated smoke test hits SKIP branch on this host — I'm running inside zellij so `inside_zellij() == true`). `cargo build --workspace` clean. `cargo test --workspace --tests` 2345 → 2358 passing (+13 new), 4 ignored. `cargo fmt --all --check` clean after one rustfmt auto-pass.
+- ledger: #6 row PREPENDED to impl-v0.2-backlog.md. v0.2-backlog.md #6 status → PARTIAL (MVP scaffold) + CLOSE-OUT banner added near top summarising 7/7. loop-log.md (this file) gets close-out banner + this wave entry.
+
 ### Scene v3 audit CLOSE-OUT — 2026-04-18 — 17/17 pending items landed
 
 - S-F / T-044: reconciler drift test (bd38e35)

@@ -549,6 +549,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ark-test-harness"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "portable-pty",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "ark-types"
 version = "0.1.0"
 dependencies = [

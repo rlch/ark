@@ -49,6 +49,15 @@ members = [
     # `ark-ext-proto` and `ark-scene`. Sits below both in the DAG; dep
     # budget is `facet` + `serde` + `serde_json` + `thiserror` only.
     "crates/ark-view",
+    # v0.2 backlog #6 (claude-code-ext R13 PTY harness MVP): reusable
+    # test-only harness crate that spawns `ark run` under a pty against
+    # a real zellij install. Library-only; no production crate has it
+    # as a regular dependency. Downstream integration-test crates add
+    # it under `[dev-dependencies]` to share the pty + tempdir +
+    # session-polling boilerplate that previously lived inline in
+    # `crates/cli/tests/launch_pty.rs`. See
+    # `context/impl/impl-v0.2-backlog.md` for the full write-up.
+    "crates/ark-test-harness",
     # T-ACP.7: `crates/engines/*` is gone — the legacy
     # `ark-engines-claude-code` crate was retired and replaced by
     # `ark-supervisor::engine_stub` + `acp-client` (ACP wire
