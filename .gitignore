@@ -8,3 +8,6 @@
 website/node_modules
 website/dist
 website/.astro
+
+# Editor / agent tooling
+.claude/

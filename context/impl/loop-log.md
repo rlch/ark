@@ -4,6 +4,14 @@ last_edited: "2026-04-18"
 ---
 # Loop Log
 
+### Wave housekeeping — 2026-04-18
+
+- plan-overview.md sync: 4 sites DONE flagged + v0.1 banner at top.
+- CLAUDE.md added: extensions/claude-code, crates/scene-macros, crates/ark-view, crates/ark-ext-test-support, crates/test-fixtures/claude-code.
+- .gitignore: .claude/ added (editor/agent tooling dir).
+- cargo fmt --all --check clean verified.
+- Prior commit 8e8a735 accidentally included .claude/ — left as-is (no history rewrite); gitignore now prevents re-inclusion.
+
 ### Scene 2026-04-18 CLOSE-OUT — 2026-04-18 — 26/26 tasks done (T-004 CUT)
 
 - Tier 0-7: all tasks landed.
