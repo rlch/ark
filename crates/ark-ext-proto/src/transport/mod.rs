@@ -52,9 +52,11 @@ use crate::{
 
 pub mod in_proc;
 pub mod ndjson;
+pub mod wasm;
 
 pub use in_proc::InProcClient;
 pub use ndjson::{NdjsonClient, NdjsonServer, Notification, Request, Response, ResponseError};
+pub use wasm::{WasmClientConfig, WasmExtensionClient};
 
 /// Channel-end the host hands back to subscribers on
 /// [`ExtensionClient::subscribe_progress`]. Each `$/progress` notification
