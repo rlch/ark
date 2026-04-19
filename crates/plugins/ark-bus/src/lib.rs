@@ -16,19 +16,22 @@
 //!
 //! `zellij-tile`'s wasi sandbox does not expose a unix-socket API
 //! (`std::os::unix::net` is unavailable in `wasm32-wasip1`). The plugin
-//! instead spawns a hidden command pane running `ark-hook intent --json
-//! '<payload>'` (T-6.2). The hook binary is on the host filesystem, has
+//! instead spawns a hidden command pane running `ark bus intent --json
+//! '<payload>'` (T-070). The `ark` binary is on the host filesystem, has
 //! socket access, and reaches the supervisor in <50ms — well inside the
 //! keybind UX budget.
 //!
-//! See `cavekit-hook-ipc.md` R1 for the `ark-hook` subcommand surface and
-//! R5 for the supervisor's matching `Intent` / `Emit` / `Permit`
-//! commands.
+//! The v0.1 "bare ark" cleanup (T-005) deleted the standalone
+//! `ark-hook` binary; the bridge now runs inside the main `ark`
+//! executable as a `bus` subcommand (scene-v3 S-B). See
+//! `crates/cli/src/commands/bus.rs` for the subcommand surface and
+//! `cavekit-hook-ipc.md` R5 for the matching supervisor control
+//! commands (`Intent` / `Emit` / `Permit`).
 //!
 //! # Pipe endpoints
 //!
-//! - `ark-intent` (T-6.2): payload is the verbatim JSON document to pass
-//!   to `ark-hook intent --json`. Schema: `{"name": "<op>", "args": {…}}`.
+//! - `ark-intent` (T-070): payload is the verbatim JSON document to pass
+//!   to `ark bus intent --json`. Schema: `{"name": "<op>", "args": {…}}`.
 //! - `ark-rebind` (T-6.4 — pending): payload describes a `rebind_keys`
 //!   plan applied via the `zellij_tile::shim::rebind_keys` host call.
 //!
@@ -86,13 +89,13 @@ pub const PIPE_REBIND: &str = "ark-rebind";
 ///
 /// State today is intentionally empty — the plugin neither caches
 /// pending intents nor pre-resolves the supervisor socket path (the
-/// `ark-hook` binary handles socket resolution per R4 path scheme).
+/// `ark bus` subcommand handles socket resolution per R4 path scheme).
 /// Future bookkeeping (e.g. per-intent telemetry, batching) goes here.
 #[derive(Debug, Default)]
 pub struct ArkBus;
 
 /// Validate a payload destined for the `ark-intent` endpoint and emit a
-/// canonical wire form for `ark-hook intent --json <…>`.
+/// canonical wire form for `ark bus intent --json <…>`.
 ///
 /// The plugin keeps validation **loose**: anything that parses as a
 /// JSON object with a `name` string is accepted; further validation
@@ -113,7 +116,7 @@ pub fn validate_intent_payload(payload: &str) -> Result<String, IntentPayloadErr
         .get("name")
         .and_then(|v| v.as_str())
         .ok_or(IntentPayloadError::MissingName)?;
-    // Re-serialize to a single-line form so the spawned `ark-hook` sees
+    // Re-serialize to a single-line form so the spawned `ark bus` sees
     // a deterministic shape (helps with stderr log-line attribution).
     Ok(value.to_string())
 }
@@ -253,8 +256,8 @@ impl std::fmt::Display for RebindPayloadError {
     }
 }
 
-/// Build the `--json` payload that `ark-hook emit` consumes when
-/// forwarding a zellij-side event onto the ark event bus (T-6.3).
+/// Build the `--json` payload that `ark bus emit` consumes when
+/// forwarding a zellij-side event onto the ark event bus (T-071).
 ///
 /// Schema: `{"event": "<name>", "payload": <map>, "source": "ext:ark-bus"}`.
 /// `event` carries the canonical `ark.zellij.<kind>` name; `payload`
@@ -413,8 +416,10 @@ mod wasm_plugin {
         fn render(&mut self, _rows: usize, _cols: usize) {}
     }
 
-    /// Spawn `ark-hook intent --json '<payload>'` in a hidden command
-    /// pane, returning `false` (no plugin re-render needed).
+    /// Spawn `ark bus intent --json '<payload>'` in a hidden command
+    /// pane, returning `false` (no plugin re-render needed). The `ark`
+    /// binary is expected on PATH — scene-v3 S-B rewired this off the
+    /// deleted `ark-hook` crate (see crate-level docs).
     fn dispatch_intent(msg: &PipeMessage) -> bool {
         let payload = match msg.payload.as_deref() {
             Some(p) => p,
@@ -436,8 +441,13 @@ mod wasm_plugin {
         };
 
         let cmd = CommandToRun {
-            path: PathBuf::from("ark-hook"),
-            args: vec!["intent".to_string(), "--json".to_string(), canonical],
+            path: PathBuf::from("ark"),
+            args: vec![
+                "bus".to_string(),
+                "intent".to_string(),
+                "--json".to_string(),
+                canonical,
+            ],
             cwd: None,
         };
         // Run as a hidden background command pane — operator never
@@ -447,17 +457,24 @@ mod wasm_plugin {
         false
     }
 
-    /// Spawn `ark-hook emit --json '<envelope>'` in a hidden command
+    /// Spawn `ark bus emit --json '<envelope>'` in a hidden command
     /// pane to broadcast a forwarded zellij event onto the ark event
-    /// bus (T-6.3). The `kind` is appended to
+    /// bus (T-071). The `kind` is appended to
     /// `super::FORWARDED_EVENT_PREFIX` to form the canonical user-event
     /// name; `payload` is the kind-specific JSON object that scene
-    /// reactions can read via the CEL `payload` binding.
+    /// reactions can read via the Rhai `payload` binding. Scene-v3
+    /// S-B rewired this off the deleted `ark-hook` crate onto the
+    /// main `ark` binary's `bus` subcommand.
     fn spawn_emit(kind: &str, payload: serde_json::Value) {
         let envelope = build_emit_payload(kind, payload);
         let cmd = CommandToRun {
-            path: PathBuf::from("ark-hook"),
-            args: vec!["emit".to_string(), "--json".to_string(), envelope],
+            path: PathBuf::from("ark"),
+            args: vec![
+                "bus".to_string(),
+                "emit".to_string(),
+                "--json".to_string(),
+                envelope,
+            ],
             cwd: None,
         };
         let _ = open_command_pane_background(cmd, BTreeMap::new());

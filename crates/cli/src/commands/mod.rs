@@ -15,6 +15,7 @@
 //!
 //! See cavekit-cli.md R2-R7 for the per-subcommand flag specs.
 
+pub mod bus;
 pub mod config;
 pub mod doctor;
 pub mod ext;
@@ -44,6 +45,13 @@ pub enum Commands {
     Ext(ext::ExtArgs),
     /// Manage and inspect scene files.
     Scene(scene::SceneArgs),
+    /// ark-bus bridge verbs (hidden command-pane dispatch).
+    ///
+    /// The zellij-side `ark-bus` wasm plugin cannot open unix sockets
+    /// directly (wasi sandbox), so it spawns a hidden command pane
+    /// running `ark bus intent` / `ark bus emit` which bridges to the
+    /// supervisor control socket.
+    Bus(bus::BusArgs),
 }
 
 impl Commands {
@@ -57,6 +65,7 @@ impl Commands {
             Commands::Pane(args) => pane::run(args, ctx),
             Commands::Ext(args) => ext::run(args, ctx),
             Commands::Scene(args) => scene::run(args, ctx),
+            Commands::Bus(args) => bus::run(args, ctx),
         }
     }
 }
