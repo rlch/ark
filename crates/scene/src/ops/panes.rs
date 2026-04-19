@@ -15,13 +15,25 @@
 //! `"not found"` maps to `Ok(IntentValue::None)`. Any other error
 //! surfaces as [`SceneError::OpFailed`].
 //!
-//! Handle-type resolution (tab vs pane) for the polymorphic `focus` /
-//! `close` ops is driven by [`IntentContext::handle_type_hint`] — the
-//! compile pipeline attaches the hint when it resolves the `@handle`
-//! reference against the layout's declaration. When the hint is absent
-//! (extension-registered reactions that bypass the compile pass), the
-//! ops default to the pane branch because panes vastly outnumber tabs
-//! in practice.
+//! Handle-type resolution (tab / pane / stack) for the polymorphic
+//! `focus` / `close` ops is driven by [`IntentContext::handle_type_hint`]
+//! — the compile pipeline attaches the hint when it resolves the
+//! `@handle` reference against the layout's declaration (scene-2026-04-18
+//! T-016 sources it from the scene's private `ViewTable`). When the hint
+//! is absent (extension-registered reactions that bypass the compile
+//! pass), the ops default to the pane branch because panes vastly
+//! outnumber tabs in practice.
+//!
+//! ## Stack routing (scene-2026-04-18 T-010)
+//!
+//! * `focus @stack-handle` routes to [`MuxHandle::focus_pane`] — zellij
+//!   treats the stack container as the current focused child pane, so
+//!   re-focusing expands the stack at the currently focused member. No
+//!   dedicated mux call is needed; the zellij-side side-effect matches
+//!   pane focus semantics.
+//! * `close @stack-handle` routes to [`MuxHandle::close_pane`] — closing
+//!   a stack handle closes the whole container (zellij closes the
+//!   enclosing stacked pane, which cascades to every member).
 
 use async_trait::async_trait;
 use kdl::KdlNode;
@@ -94,10 +106,21 @@ impl Intent for FocusOp {
         // extensions grow parameterized-handle syntax.
         let result = match ctx.handle_type_hint {
             Some(HandleKind::Tab) => mux.focus_tab(&handle),
-            // Pane / Command / Plugin — all pane-shaped from the mux
-            // perspective. The typed distinction is a Tier-10 compile
-            // concern.
-            _ => mux.focus_pane(&handle),
+            // Stack handles: scene-2026-04-18 T-010. Focusing a stack
+            // handle re-expands the stack at its currently focused
+            // child — zellij exposes no stack-specific focus call, so
+            // we route through `focus_pane` (the stack container is a
+            // pane to zellij).
+            Some(HandleKind::Stack) => mux.focus_pane(&handle),
+            // Pane (or absent hint — default). The typed view
+            // distinction (CommandView vs ZellijView) is carried on
+            // `ark_view::Pane<V>` and is a compile-time concern, not a
+            // runtime branch here.
+            Some(HandleKind::Pane) | None => mux.focus_pane(&handle),
+            // `HandleKind` is `#[non_exhaustive]` — any future
+            // pane-shaped variant routes through `focus_pane` as a safe
+            // default until a dedicated arm is added.
+            Some(_) => mux.focus_pane(&handle),
         };
         tracing::info!(
             target: "scene::ops",
@@ -132,7 +155,15 @@ impl Intent for CloseOp {
         let mux = ctx.mux.as_ref().expect("checked by require_mux");
         let result = match ctx.handle_type_hint {
             Some(HandleKind::Tab) => mux.close_tab(&handle),
-            _ => mux.close_pane(&handle),
+            // Stack handles: scene-2026-04-18 T-010. Closing a stack
+            // handle closes the whole container — zellij cascades the
+            // close down the stacked pane group.
+            Some(HandleKind::Stack) => mux.close_pane(&handle),
+            Some(HandleKind::Pane) | None => mux.close_pane(&handle),
+            // `HandleKind` is `#[non_exhaustive]` — any future
+            // pane-shaped variant routes through `close_pane` as a safe
+            // default.
+            Some(_) => mux.close_pane(&handle),
         };
         tracing::info!(
             target: "scene::ops",
@@ -405,6 +436,36 @@ mod tests {
         let node = node_from(r#"close "@main""#);
         CloseOp.dispatch(&node, &ctx).await.expect("ok");
         assert_eq!(mux.take_calls(), vec!["close_tab(@main)".to_string()]);
+    }
+
+    // scene-2026-04-18 T-010 — focus `@stack` routes through focus_pane
+    // (zellij treats the stack container as a focus-able pane; focusing
+    // re-expands the stack at its currently focused child).
+    #[tokio::test]
+    async fn focus_routes_stack_to_pane() {
+        let mux = Arc::new(MockMux::default());
+        let ctx = ctx_with_mux(mux.clone(), Some(HandleKind::Stack));
+        let node = node_from(r#"focus "@claude_stack""#);
+        FocusOp.dispatch(&node, &ctx).await.expect("ok");
+        assert_eq!(
+            mux.take_calls(),
+            vec!["focus_pane(@claude_stack)".to_string()]
+        );
+    }
+
+    // scene-2026-04-18 T-010 — close `@stack` routes through close_pane
+    // (closing the stack handle closes the whole container; zellij
+    // cascades to every member).
+    #[tokio::test]
+    async fn close_routes_stack_to_pane() {
+        let mux = Arc::new(MockMux::default());
+        let ctx = ctx_with_mux(mux.clone(), Some(HandleKind::Stack));
+        let node = node_from(r#"close "@claude_stack""#);
+        CloseOp.dispatch(&node, &ctx).await.expect("ok");
+        assert_eq!(
+            mux.take_calls(),
+            vec!["close_pane(@claude_stack)".to_string()]
+        );
     }
 
     #[tokio::test]

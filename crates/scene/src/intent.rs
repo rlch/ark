@@ -50,6 +50,14 @@ use crate::ast::layout::Handle;
 use crate::error::SceneError;
 use crate::id::SceneId;
 
+// scene-2026-04-18 T-009: retire scene-local `HandleKind` enum — every
+// reference now points at the re-exported `ark_view::HandleKind` which
+// carries only the three runtime-significant variants `{Tab, Pane,
+// Stack}`. The retired `Command` / `Plugin` variants (view-type info)
+// moved to `ark_view::Pane<V>` / `ark_view::Stack<V>` per soul Phase 2
+// R3/R4.
+pub use ark_view::HandleKind;
+
 // ---------------------------------------------------------------------------
 // Return value
 // ---------------------------------------------------------------------------
@@ -70,31 +78,6 @@ pub enum IntentValue {
     Integer(i64),
     /// A boolean flag.
     Boolean(bool),
-}
-
-// ---------------------------------------------------------------------------
-// Handle-kind hints (R7 — op handle type resolution)
-// ---------------------------------------------------------------------------
-
-/// Coarse classification for a handle's declared type.
-///
-/// Used by [`IntentContext::handle_type_hint`] so ops that accept
-/// polymorphic targets (`focus`, `close`) can log which branch they
-/// took without re-inspecting the scene AST.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HandleKind {
-    /// Tab handle (accepted by `focus`, `close`, `rename`, `new_tab`).
-    Tab,
-    /// Pane handle (accepted by `focus`, `close`, `resize`, `move`,
-    /// `pin`, `unpin`).
-    Pane,
-    /// `CommandView`-rendered pane — retired as a handle-kind variant
-    /// per soul Phase 2 R3/R4; view-type info now lives on
-    /// `ark_view::Pane<V>`. Kept here only as a compat stub until T-009.
-    Command,
-    /// `ZellijView`-rendered pane — retired per R3/R4. Compat stub
-    /// until T-009.
-    Plugin,
 }
 
 // ---------------------------------------------------------------------------
