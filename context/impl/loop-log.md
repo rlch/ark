@@ -4,6 +4,14 @@ last_edited: "2026-04-19"
 ---
 # Loop Log
 
+### Wave cleanup-B-T011 — 2026-04-18 — Packet B T-011 (scene/consumer audit — clean)
+
+- grep (crates/scene/src/): `ark_core::engine|ark_core::orchestrator|use ark_core::(Engine\|Orchestrator)|EngineLaunch|engine_launch` = 0 hits.
+- grep (crates/core/src/consumers/): same patterns = 0 hits.
+- Phase 1 T-005/T-020/T-026 held. T-010 did not regress.
+- `cargo check -p ark-scene --tests` = 0 err (6 crates, 12.36s).
+- ledger-only commit. next: T-012 close-out green gate.
+
 ### Wave cleanup-B-T010 — 2026-04-18 — Packet B T-010 (Engine/Orchestrator trait surface DELETED)
 
 - DEL 5 files whole. `crates/supervisor/src/engine_stub.rs` (188 LOC, AcpEngineStub+preflight) + `crates/core/src/engine.rs` (205 LOC, Engine trait + ApprovalPolicy + EngineHandle + mock tests) + `crates/core/src/engine_contract.rs` (410 LOC, conformance suite) + `crates/core/src/orchestrator.rs` (163 LOC, Orchestrator trait + World bag + mock tests) + `crates/core/src/orchestrator_contract.rs` (260 LOC, conformance suite). total 1226 LOC gone.
