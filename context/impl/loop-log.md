@@ -4,6 +4,17 @@ last_edited: "2026-04-18"
 ---
 # Loop Log
 
+### Wave scene-v3 S-C + S-G — 2026-04-18 — T-114 + T-135 + T-136 + T-137 + T-138
+
+- caveman find: four of five task already DONE. audit stale. only T-135 need code.
+- T-114 check `crates/mux/zellij/{scenes,layouts}/` — both exist. `scenes/` hold 6 scene-wrapped file (`builder`, `classic`, `focused`, `log`, `review`, `triple-column`) per R15. legacy `layouts/` keep per "old shape stay N versions" rule. no migration commit. mark DONE.
+- T-136/T-137/T-138 check `context/refs/` — `intent-api-v1.md` 369 LOC, `wasm-metadata-v1.md` 385 LOC, `extension-protocol-v1.md` 197 LOC. all three `status: frozen -- v1.0`. audit "PARTIAL" stale. mark DONE.
+- T-135 real work. `--v1-strict` flag was wire at line 44 but body empty (TODO). build phase-6 pass. three structural rule: `scene/strict/empty-layout` (no tab at all), `scene/strict/empty-tab` (tab with zero child), `scene/strict/empty-container` (row/col with zero child; stack exempt because empty-source-stack pattern T-022 legit). also wire in `validate_view_types` — that validator exist but nobody call it from CLI, strict mode become the first caller so stack `spawn_into @stack { <view> }` inner-view vs stack-declared-type check surface (`scene/view-type-mismatch`, R-8).
+- design choice: keep scene crate untouch per constraint. strict diagnostic live in CLI as `StrictDiag` enum with two variant: `Structural { code, message }` for AST-shape check (no span available, emit `error[<code>]: <msg>`), `ViewTypes(SceneError)` for miette-routed re-use of existing validator diagnostic. `SceneError` not `Clone` so render pipeline rewrite to take `&SceneError` directly instead of cloning into owned vec.
+- strict compile path take `compile_scene_with_registry` so phase-6 can read back `CompiledScene.view_table`; non-strict keep light `compile_scene` wrapper (identical primitives-only registry — behavior match). trade a few µs of registry build for making view-type validator runnable.
+- 6 new unit test in `check.rs::tests`: default-scene-green, no-layout-block reject, empty-`layout{}` reject, empty-tab reject (check message contain `@main`), empty-row reject (code `empty-container`), empty-source-stack pass (must-not-reject guard for T-022 pattern).
+- workspace test: 2282 pass (baseline 2274 + 6 new + 2 other already green). fmt clean. `cargo test -p ark-scene` 709 pass. `cargo test -p ark-cli` 412 pass + 2 ignored.
+
 ### Wave scene-v3 S-D partial — 2026-04-18 — T-027 + T-057 (T-053 pending)
 
 - T-027 ViewMeta.config_schema = facet::Shape. DONE `df009e1` via agent.
