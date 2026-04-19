@@ -79,11 +79,121 @@ pub fn validate_op_refs(ir: &SceneIR) -> Vec<SceneError> {
     // `op_metadata`-driven pass above. Pulling them off the raw KDL
     // gives us both the positional handle arg AND a span for the
     // caret that the opaque `OpNode::Unknown.args` doesn't carry.
+    //
+    // T-053 (scene-v3 S-D): the same raw walker also emits
+    // `scene/unknown-op` diagnostics for ANY op verb outside the known
+    // vocabulary — this catches typos like `fokus` or removed verbs
+    // that facet-kdl routes into `OpNode::Unknown` without a diagnostic.
+    // `OpNode::Unknown` carries no span (foreign KdlDocument is
+    // `#[facet(opaque)]`), so the raw pass is the only path with
+    // caret-accurate error labels.
     if let Some(doc) = ir.kdl_doc.as_ref() {
         walk_stack_ops_raw(doc, &decls, src, &path, &mut errors);
+        walk_unknown_ops_raw(doc, src, &path, &mut errors);
     }
 
     errors
+}
+
+/// Set of op verbs (unqualified, no `ark.core.` prefix) that the typed
+/// [`OpNode`] enum understands. Any verb outside this set — plus the
+/// stack ops handled by [`walk_stack_ops_raw`] — surfaces as
+/// `scene/unknown-op` via [`walk_unknown_ops_raw`].
+///
+/// Kept sorted by source location of the matching `OpNode` arm so that
+/// adding a verb mechanically updates the set.
+const KNOWN_OP_VERBS: &[&str] = &[
+    "focus",
+    "close",
+    "rename",
+    "resize",
+    "move",
+    "pin",
+    "unpin",
+    "spawn",
+    "new_tab",
+    "use_mode",
+    "pipe",
+    "emit",
+    "set_status",
+    "exec",
+    "reload_scene",
+    // scene-2026-04-18 stack ops — handled via walk_stack_ops_raw for
+    // handle-ref validation, but still KNOWN for unknown-op diagnosis.
+    "spawn_into",
+    "clear",
+];
+
+/// Walk every op node inside `on`/`bind` blocks and emit
+/// `scene/unknown-op` for any verb not in [`KNOWN_OP_VERBS`]. The
+/// walker descends through `on`/`bind` containers (whose own names
+/// aren't ops) but treats anything inside their bodies as an op
+/// position. Siblings of ops (e.g. `when="…"` attrs) are KDL
+/// properties, not child nodes, so they never trigger this path.
+fn walk_unknown_ops_raw(
+    doc: &::kdl::KdlDocument,
+    src: &str,
+    path: &str,
+    errors: &mut Vec<SceneError>,
+) {
+    for node in doc.nodes() {
+        let name = node.name().value();
+        // Recurse into `on`/`bind` bodies — their children ARE op
+        // positions. Everything else at the top level of the walk is
+        // layout/mode/reactions scaffolding that this pass does not
+        // inspect.
+        if name == "on" || name == "bind" {
+            if let Some(body) = node.children() {
+                check_ops_in_body(body, src, path, errors);
+            }
+        }
+        // Also recurse via the top-level walker so nested `on`/`bind`
+        // under `mode { }` blocks reach the op-position check.
+        if let Some(children) = node.children() {
+            if name != "on" && name != "bind" {
+                walk_unknown_ops_raw(children, src, path, errors);
+            }
+        }
+    }
+}
+
+/// Check each child node of an `on`/`bind` body: if its verb is not in
+/// [`KNOWN_OP_VERBS`], emit `scene/unknown-op` with a "did you mean …?"
+/// suggestion rendered via [`crate::suggest::suggest`] + the full
+/// `KNOWN_OP_VERBS` list for discoverability.
+fn check_ops_in_body(
+    body: &::kdl::KdlDocument,
+    src: &str,
+    path: &str,
+    errors: &mut Vec<SceneError>,
+) {
+    for op in body.nodes() {
+        let verb = op.name().value();
+        if KNOWN_OP_VERBS.contains(&verb) {
+            // Known op. Nested `on`/`bind` aren't legal inside an op
+            // body per grammar (caught by scope.rs), so no recursion
+            // needed here.
+            continue;
+        }
+        // Unknown verb — synthesize a diagnostic. `suggest` surfaces
+        // the closest match via Jaro-Winkler (T-015); fall back to
+        // listing the full vocabulary if no suggestion clears the
+        // threshold.
+        let suggestion = suggest(verb, KNOWN_OP_VERBS, 0.75, 3);
+        let hints = format_suggestions(&suggestion);
+        let help = if hints.is_empty() {
+            format!("available ops: {}", KNOWN_OP_VERBS.join(", "))
+        } else {
+            format!("{hints}. available ops: {}", KNOWN_OP_VERBS.join(", "))
+        };
+        let span: SourceSpan = op.name().span().into();
+        errors.push(SceneError::UnknownOp {
+            op: verb.to_string(),
+            help,
+            src: NamedSource::new(path.to_string(), src.to_string()),
+            span,
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -766,5 +876,70 @@ scene "s" {
 "#;
         let errors = validate(src);
         assert!(errors.is_empty(), "unexpected: {errors:?}");
+    }
+
+    #[test]
+    fn unknown_op_verb_emits_diagnostic() {
+        // T-053 (scene-v3 S-D): typo `fokus` is routed into
+        // `OpNode::Unknown` by facet-kdl. The raw walker catches it
+        // and emits `scene/unknown-op` with a "did you mean `focus`?"
+        // hint rendered via suggest().
+        let src = r#"
+scene "s" {
+    layout {
+        tab "@main" { pane "@p" { command } }
+    }
+    bind "Alt x" {
+        fokus "@p"
+    }
+}
+"#;
+        let errors = validate(src);
+        let unknown = errors
+            .iter()
+            .find(|e| matches!(e, SceneError::UnknownOp { op, .. } if op == "fokus"))
+            .expect("expected UnknownOp for `fokus`");
+        match unknown {
+            SceneError::UnknownOp { help, .. } => {
+                assert!(
+                    help.contains("focus"),
+                    "expected `focus` suggestion in help: {help}"
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn known_op_verb_does_not_emit_unknown_op() {
+        // T-053 regression: every verb in KNOWN_OP_VERBS must NOT
+        // trigger the diagnostic, even when typed-OpNode parsing
+        // produces `Unknown` for some of them (spawn_into/clear).
+        let src = r#"
+scene "s" {
+    layout {
+        tab "@main" {
+            stack "@subs" {
+                pane "@seed" { command }
+            }
+        }
+    }
+    on "ark.core.pane_closed" {
+        focus "@seed"
+        close "@seed"
+        spawn_into "@subs" { command }
+        clear "@subs"
+    }
+}
+"#;
+        let errors = validate(src);
+        let unknown_ops: Vec<_> = errors
+            .iter()
+            .filter(|e| matches!(e, SceneError::UnknownOp { .. }))
+            .collect();
+        assert!(
+            unknown_ops.is_empty(),
+            "known verbs triggered UnknownOp: {unknown_ops:?}"
+        );
     }
 }
