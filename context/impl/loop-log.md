@@ -4,6 +4,29 @@ last_edited: "2026-04-18"
 ---
 # Loop Log
 
+### Scene 2026-04-18 CLOSE-OUT — 2026-04-18 — 26/26 tasks done (T-004 CUT)
+
+- Tier 0-7: all tasks landed.
+- Final workspace: 2203 tests pass, 4 ignored, 0 fail.
+- Added: stack keyword, StackNode AST, ViewTable + view_of, view-type validator, MuxHandle spawn_into/clear, zellij-KDL stack emitter, reconciler stack round-trip, 5 miette goldens.
+- v0.2 carry-forward: none.
+
+### Wave scene-2026-04-18-Tier7 — 2026-04-18 — T-027 completion gate (FINAL)
+
+- T-027 completion gate: new tests/stack_dispatch.rs (3 tests). (a) parse→compile→layout-KDL round-trip end-to-end via compile_layout_kdl + compile_scene. (b) spawn_into dispatch — inline TestMux impl of MuxHandle since crate MockMux is pub(crate); asserts `@subs-01jarkdemo000000000000000a` R-7 child id format + serialised view body passthrough. (c) clear dispatch — asserts exactly one clear_stack(@subs) call + IntentValue::None.
+- 5 miette goldens appended to tests/errors.rs via existing snap() insta pattern: 3x scene/view-type-mismatch (spawn_into inner-view, op handle-ref, view-attr handle-ref), scene/union-syntax-deferred, scene/sizing-on-stack-child. Regeneration: `INSTA_UPDATE=always cargo test -p ark-scene --test errors`.
+- MockMux is pub(crate) — can't reach from tests/. Solution: inline `TestMux` in stack_dispatch.rs implementing MuxHandle (trait is pub). 15-method boilerplate but keeps integration surface clean + pinpoints what's actually needed for Tier-5 ops (just spawn_into_stack + clear_stack machinery).
+- Golden (d) scope: all 3 variants render SceneError::ViewTypeMismatch — only op + attr + expected_view + actual_view differ. "op handle-ref" and "view-attr handle-ref" are forward-looking shapes (future v0.2 ext ops like subagent.send target=@h; ext views like review_split peer=@h) — the variant carries them today even though no validator emits them yet.
+- grep verify: HandleKind::{Command,Plugin} / CommandPane / PluginPane totally absent from crate code (only doc-comments in view/mod.rs survive as R17 history).
+- scene tests: 656→659 (+3 goldens landing late since 3 stack_dispatch + 5 errors goldens = +8 this wave; Wave 7 added +3 reconciler stack tests). workspace: 2195→2203 (+8).
+
+### Wave scene-2026-04-18-Tier6 — 2026-04-18 — T-025+T-026 emitter + reconciler stack round-trip
+
+- T-025 (emit_stack) + T-026 (filter_child Stack arm) already landed in Wave 2 (SHA 366e2f6) — surveyed via `rg stacked=true crates/scene/src/compile/layout.rs` (line 511 doc + line 514 `node.push(KdlEntry::new_prop("stacked", true))`) + `rg LayoutChild::Stack crates/scene/src/reconciler.rs` (line 654). No emitter or reconciler edits needed — the implementations are already sound.
+- Wave 7 = 3 new reconciler integration tests pinning the round-trip: (1) `reconcile_emits_stack_with_name_and_ark_handle_wrappers` asserts post-reconcile layout file contains stacked=true + name="subs" + ARK_HANDLE=@seed; (2) `reconcile_stack_excludes_dynamic_spawn_into_children` proves spawn_into runtime children + the `spawn_into` op body itself never reach the rendered override-layout KDL (they live purely in runtime state); (3) `reconcile_stack_with_false_when_elides_container` pins that false `when=` on a stack elides the whole container + its children.
+- ARK_HANDLE env wrapper at stack-level: NOT applied. Stacks are container panes with no command — the wrapper lives in child pane `apply_view` emissions (emit_shell/emit_command push `command "env" args "ARK_HANDLE=@h" "$SHELL"`). Stack identity for reconciler matching is just `name="<handle>"` on the `pane stacked=true` node, same pattern as any other pane.
+- commit 5b17cd9. scene tests: 648→648 (pre-existing suite). reconciler integration: 10→13. workspace: 2192→2195.
+
 ### Wave scene-2026-04-18-Tier4+5 — 2026-04-18 — view-type validator + MuxHandle stack ops
 
 - Tier 4: T-017 variant already landed (earlier ledger-prep). T-018 new file validate/view_types.rs. pub fn validate_view_types(compiled, registry) → Vec<SceneError>. walks raw kdl_doc for `spawn_into @stack { <view> }` nodes (NOT the typed AST — spawn_into falls into OpNode::Unknown today; AST task still pending). look up @stack via NEW `CompiledScene::view_of_internal(&HandleId) -> Option<&ViewDecl>` crate-private accessor (mirrors runtime view_of name but pipeline-scoped; R-10 — never widen visibility). resolve inner alias via ViewRegistry. string-eq meta names per R-8 exact-match. emit scene/view-type-mismatch with caret on @stack entry span. unknown handles + unknown inner views = silent skip (op_refs + T-031 own those). 7 tests.

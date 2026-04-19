@@ -40,14 +40,83 @@ present; scene-local `HandleKind` still has `Command`/`Plugin` variants.
 | T-022 | 5 | DONE (Wave 6, `ff628ea`) | `SpawnIntoOp` in `ops/spawn.rs` — non-idempotent per R-7 — returns the ark-minted `<stack>-<ulid>` child id as `IntentValue::String`. |
 | T-023 | 5 | DONE (Wave 6, `ff628ea`) | `ClearOp` in new `ops/stack.rs` — idempotent per R-7 (absent stack = noop). |
 | T-024 | 5 | DONE (Wave 6, `ff628ea`) | `register_core_ops` registers both; `CORE_OP_NAMES` gains `"ark.core.spawn_into"` + `"ark.core.clear"`. |
-| T-025 | 6 | PENDING | compile/layout.rs emitter has no `StackNode` case. |
-| T-026 | 6 | PENDING | reconciler.rs no stack round-trip. |
-| T-027 | 7 | PENDING | Completion gate tests not written. |
+| T-025 | 6 | DONE (Wave 7, `5b17cd9`) | `emit_stack` landed Wave 2; Wave 7 verified + added reconciler round-trip tests. |
+| T-026 | 6 | DONE (Wave 7, `5b17cd9`) | `filter_child` Stack arm landed Wave 2; Wave 7 pinned round-trip semantics via 3 integration tests. |
+| T-027 | 7 | DONE (Wave 8) | `tests/stack_dispatch.rs` — (a) round-trip, (b) spawn_into dispatch, (c) clear dispatch. `tests/errors.rs` — 5 goldens (3x view-type-mismatch + union-syntax-deferred + sizing-on-stack-child). |
 
 **Audit summary:** 1 PARTIAL (T-001), 25 PENDING. ZERO tasks genuinely
 DONE via phase-2. Prior audit was wrong.
 
+**Post-implementation status (2026-04-18):** 26/26 tasks DONE (T-004 CUT
+per R-8 union deferral). Scene 2026-04-18 build site CLOSED.
+
 ## Implementation waves
+
+### Wave 8 — Tier 7 (T-027) — CLOSE-OUT
+
+SHA: pending (commit 2 of this wave).
+
+- **T-027 completion gate**: new `crates/scene/tests/stack_dispatch.rs`
+  integration suite + 5 goldens appended to `crates/scene/tests/errors.rs`.
+  - **(a) stack_round_trip_parse_compile_layout**: parse → compile →
+    layout-KDL emission — asserts `stacked=true`, `name="subs"`,
+    `ARK_HANDLE=@seed`; also runs full `compile_scene` to ensure
+    happy-path through the whole pipeline.
+  - **(b) spawn_into_dispatches_to_mux_and_mints_child_ulid**:
+    in-file inline `TestMux` impl of `MuxHandle` (since crate's
+    `MockMux` is `pub(crate)`); dispatches `SpawnIntoOp`; asserts
+    child id `@subs-01jarkdemo000000000000000a` per R-7 `<stack>-<ulid>`
+    format + serialised view body passed through to mux.
+  - **(c) clear_dispatches_to_mux**: dispatches `ClearOp`; asserts
+    exactly one `clear_stack(@subs)` mux call + `IntentValue::None` return.
+  - **(d) 3x `scene/view-type-mismatch` goldens** — miette
+    `GraphicalReportHandler` snapshots for:
+    - `spawn_into` inner-view mismatch (op=`spawn_into`, attr=`stack`,
+      expected=`command`, actual=`shell`)
+    - op handle-ref mismatch (op=`subagent.send`, attr=`target`,
+      expected=`claude_session`, actual=`shell`) — future v0.2 ext-op shape
+    - view-attr handle-ref mismatch (op=`review_split`, attr=`peer`,
+      expected=`review`, actual=`command`)
+  - **(e) `scene/union-syntax-deferred` golden** — R-8 deferred `|` syntax.
+  - **(f) `scene/sizing-on-stack-child` golden** — R-9 child-level sizing.
+  - All 5 goldens land under `crates/scene/tests/snapshots/` via `insta`;
+    regeneration command: `INSTA_UPDATE=always cargo test -p ark-scene --test errors`.
+
+Scene tests: 648 → 659 (+11: 3 reconciler + 3 stack_dispatch + 5 goldens).
+Workspace tests: 2195 → 2203. Fmt clean. All old `HandleKind::{Command,Plugin}`
+/ `CommandPane` / `PluginPane` references absent (grep verified — only
+doc-comment mentions in `view/mod.rs:102-103` survive as R17 historical
+notes).
+
+### Wave 7 — Tier 6 (T-025, T-026)
+
+SHA: `5b17cd9`.
+
+- **T-025 zellij-KDL emitter for StackNode**: VERIFIED in place from
+  Wave 2. `compile/layout.rs::emit_stack` (lines 496–531) renders a
+  stack as `pane stacked=true name="<handle>" { <children> }`. Sizing
+  attrs (`span`/`cells`/`min`/`max`) propagate through `push_sizing`
+  identical to `row`/`col`. Empty stack bodies emit `pane stacked=true`
+  with no children (exercised by `empty_stack_compiles_to_zellij_kdl`
+  in `tests/stack.rs`). No emitter edits needed.
+- **T-026 reconciler override-layout diff for stack handles**: VERIFIED
+  in place from Wave 2. `reconciler.rs::filter_child` Stack arm
+  (lines 654–675) descends into stack bodies, evaluates `when=`
+  predicates, and rebuilds a fresh `StackNode` carrying only the
+  predicate-passing static children. Dynamic children via
+  `spawn_into` are NEVER in the AST — they're runtime-only — so the
+  reconciler's desired-state layout naturally excludes them (tested
+  by `reconcile_stack_excludes_dynamic_spawn_into_children`).
+  Stack round-trip via `name="<handle>"` on the emitted `pane
+  stacked=true`; declared child panes carry their own `ARK_HANDLE=@c`
+  wrappers via `apply_view` (R9 contract).
+- 3 new integration tests in `tests/reconciler.rs` pin the round-trip:
+  `reconcile_emits_stack_with_name_and_ark_handle_wrappers`,
+  `reconcile_stack_excludes_dynamic_spawn_into_children`,
+  `reconcile_stack_with_false_when_elides_container`.
+
+Scene tests: 648 → 648 (pre-existing). Reconciler integration suite:
+10 → 13. Workspace tests: 2192 → 2195. Fmt clean.
 
 ### Wave 6 — Tier 5 (T-021, T-022, T-023, T-024)
 

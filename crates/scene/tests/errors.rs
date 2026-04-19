@@ -349,3 +349,93 @@ fn op_handle_type_mismatch() {
         },
     );
 }
+
+// ---------------------------------------------------------------------------
+// scene-2026-04-18 T-027 goldens — view-type / union-syntax /
+// sizing-on-stack-child miette renders
+// ---------------------------------------------------------------------------
+
+#[test]
+fn scene_view_type_mismatch_spawn_into() {
+    // T-027 (d) case #1: `spawn_into @stack { inner-view }` where the
+    // inner view's resolved meta name differs from the stack's
+    // declared child view meta name (R-8 exact-match semantics).
+    snap(
+        "scene_view-type-mismatch_spawn-into",
+        &SceneError::ViewTypeMismatch {
+            op: "spawn_into".into(),
+            attr: "stack".into(),
+            expected_view: "command".into(),
+            actual_view: "shell".into(),
+            src: src(),
+            span: (BAD_OFFSET, BAD_LEN).into(),
+        },
+    );
+}
+
+#[test]
+fn scene_view_type_mismatch_op_handle_ref() {
+    // T-027 (d) case #2: an op carrying a typed handle ref
+    // (extension-side ops like `subagent.send` declare a typed
+    // target — future v0.2 surface). Golden is the same variant,
+    // distinguished by op + attr.
+    snap(
+        "scene_view-type-mismatch_op-handle-ref",
+        &SceneError::ViewTypeMismatch {
+            op: "subagent.send".into(),
+            attr: "target".into(),
+            expected_view: "claude_session".into(),
+            actual_view: "shell".into(),
+            src: src(),
+            span: (BAD_OFFSET, BAD_LEN).into(),
+        },
+    );
+}
+
+#[test]
+fn scene_view_type_mismatch_view_attr_handle_ref() {
+    // T-027 (d) case #3: a view-attr (e.g. extension view declares
+    // `peer: Pane<ReviewView>`) receives a handle whose resolved
+    // view differs.
+    snap(
+        "scene_view-type-mismatch_view-attr-handle-ref",
+        &SceneError::ViewTypeMismatch {
+            op: "review_split".into(),
+            attr: "peer".into(),
+            expected_view: "review".into(),
+            actual_view: "command".into(),
+            src: src(),
+            span: (BAD_OFFSET, BAD_LEN).into(),
+        },
+    );
+}
+
+#[test]
+fn scene_union_syntax_deferred() {
+    // T-027 (e): `pane @h { foo | bar }` is deferred to v0.2 per R-8.
+    // The parser / validator surfaces `scene/union-syntax-deferred`
+    // with the caret on the `|` token.
+    snap(
+        "scene_union-syntax-deferred",
+        &SceneError::UnionSyntaxDeferred {
+            src: src(),
+            span: (BAD_OFFSET, BAD_LEN).into(),
+        },
+    );
+}
+
+#[test]
+fn scene_sizing_on_stack_child() {
+    // T-027 (f): `stack @s { pane @c span=2 { … } }` — stack children
+    // cannot declare sizing attrs; zellij owns stacked-pane
+    // expand/collapse geometry.
+    snap(
+        "scene_sizing-on-stack-child",
+        &SceneError::SizingOnStackChild {
+            attr: "span".into(),
+            child_handle: "@p".into(),
+            src: src(),
+            span: (BAD_OFFSET, BAD_LEN).into(),
+        },
+    );
+}

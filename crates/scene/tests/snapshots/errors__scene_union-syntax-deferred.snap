@@ -1,0 +1,13 @@
+---
+source: crates/scene/tests/errors.rs
+expression: render(err)
+---
+scene/union-syntax-deferred
+
+  × `|` in view-alias position — union syntax is deferred to v0.2
+   ╭─[scene.kdl:1:13]
+ 1 │ scene "x" { bad }
+   ·             ─┬─
+   ·              ╰── union syntax deferred to v0.2
+   ╰────
+  help: Union syntax deferred to v0.2; declare a single view alias or wrap mode-switching in a `ViewMode` enum inside one view impl.

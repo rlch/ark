@@ -1,0 +1,13 @@
+---
+source: crates/scene/tests/errors.rs
+expression: render(err)
+---
+scene/view-type-mismatch
+
+  × view-type mismatch on `spawn_into` arg `stack`: expected view `command`, got `shell`
+   ╭─[scene.kdl:1:13]
+ 1 │ scene "x" { bad }
+   ·             ─┬─
+   ·              ╰── expected view does not match declared handle type
+   ╰────
+  help: Exact-match only per R-8 (union/OneOf deferred). Either change the scene to reference a handle of the expected view, or change the op/view attr's declared type.

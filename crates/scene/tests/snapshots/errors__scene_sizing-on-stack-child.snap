@@ -1,0 +1,13 @@
+---
+source: crates/scene/tests/errors.rs
+expression: render(err)
+---
+scene/sizing-on-stack-child
+
+  × sizing attr `span` not allowed on stack child
+   ╭─[scene.kdl:1:13]
+ 1 │ scene "x" { bad }
+   ·             ─┬─
+   ·              ╰── sizing not allowed on stack children
+   ╰────
+  help: stack children cannot declare sizing; zellij owns expand/collapse stacking. Move sizing attrs to the enclosing stack or its parent row/col.
