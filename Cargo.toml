@@ -74,6 +74,22 @@ members = [
     # workspace crates even though they still share the cargo
     # workspace. See cavekit-claude-code.md + build-site-claude-code-ext.md.
     "extensions/claude-code",
+    # T-PP-001 (cavekit-plugin-protocol R2, R6): the host-side protocol
+    # crate — shared surface between `ark-host` (runtime substrate) and
+    # `ark-plugin-sdk` (guest-side derive).
+    "crates/ark-plugin-protocol",
+    # T-PP-002 (cavekit-plugin-protocol R3, R9): the SINGLE proc-macro
+    # crate plugin authors depend on. Emits `ark-caps:v1` + `ark-meta:v1`
+    # custom-section statics via `#[derive(Plugin)]` (logic in Tier 2).
+    "crates/ark-plugin-sdk",
+    # T-PP-004 (cavekit-plugin-protocol R1): the wasmtime-based runtime
+    # substrate. Owns the process-global `Engine`, the per-plugin
+    # `Store<PluginCtx>`, the closed `LinkerSet` of cap-profile linker
+    # variants, the 3-phase loader, and the `InstancePre` cache.
+    "crates/ark-host",
+    # T-PP-005 (cavekit-plugin-protocol R10): terminal materializer —
+    # `TerminalWidgetTree` → byte buffer. Plugins emit data, not pixels.
+    "crates/ark-render-terminal",
 ]
 
 [workspace.package]
@@ -185,6 +201,31 @@ wat = "1"
 # the ACP conformance suite before bumping. Not yet added to any
 # crate's `[dependencies]`; wiring happens in T-ACP.2.
 agent-client-protocol = "=0.10.4"
+
+# T-PP-007 (cavekit-plugin-protocol R1, R3, R12, R13): wasm component-model
+# runtime substrate. `wasmtime` is pinned to 43 (the latest MAJOR whose
+# `component-model` + `async` + `epoch_interruption` features are stable
+# as of 2026-04-20). Fuel is NOT enabled — the plugin host uses epoch
+# interruption to bound runtime, not fuel metering. `wasmtime-wasi` is
+# pinned to the MATCHING wasmtime major so the WASI p2 ctx types wire
+# into the same `wasmtime::Engine`. Not yet wired into any crate's
+# `[dependencies]` — scaffolding only, wiring happens in Tier 3.
+wasmtime = { version = "43", features = ["component-model", "async"], default-features = false }
+wasmtime-wasi = { version = "43", default-features = false }
+# `wasmparser` is used both by the plugin host's custom-section reader
+# (T-PP-038) and by the existing scene wasm-meta reader (T-10.2). The
+# plugin-protocol tasks only require the custom-section feature set,
+# which is a superset of what scene uses. Keep the version pinned at
+# the plugin-host line (0.247) — scene's pin at 0.246 will be bumped
+# when its next touch happens; both pins coexist in the workspace
+# because `wasmparser` is a re-exported dep per crate, not a shared
+# singleton.
+wasmparser-plugin-host = { package = "wasmparser", version = "0.247" }
+# `postcard` is the on-disk format for `ark-caps:v1` + `ark-meta:v1`
+# custom sections (T-PP-016, T-PP-017). `use-std` is required so the
+# host side can use `Vec<u8>` + `String` freely; the proc-macro that
+# emits the section on the guest side uses no-std postcard.
+postcard = { version = "1", features = ["use-std"] }
 
 # T-131: wasm release-profile + size-reduction stack (cavekit-distribution
 # R3). Aggressive size-optimization settings applied to the shared

@@ -1,0 +1,20 @@
+[package]
+name = "ark-plugin-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# T-PP-001 (cavekit-plugin-protocol R2, R6): shared protocol surface
+# between `ark-host` (runtime substrate) and `ark-plugin-sdk` (guest-side
+# derive). Kept dep-minimal — must NOT pull `arborium-sysroot` /
+# `facet-kdl` / `facet-format` into the wasm guest dep graph. See the
+# "DEAD ENDS TO AVOID" section of build-site-plugin-protocol.md Tier 0.
+[dependencies]
+ark-types = { path = "../types" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]

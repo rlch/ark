@@ -57,12 +57,14 @@ use serde::{Serialize, de::DeserializeOwned};
 
 pub mod ext_sections;
 pub mod hooks;
+pub mod plugins_kdl;
 pub mod schema;
 
 pub use ext_sections::{
     ExtConfigError, extract_section, section_key, validate_all_extensions, validate_ext_sections,
 };
 pub use hooks::{HookContext, HookEntry};
+pub use plugins_kdl::{PluginEntry, PluginsBlock, PluginsKdlError, parse_plugins_block};
 pub use schema::{
     Config, DefaultsSection, DiffSection, EngineClaudeCodeSection, EngineLaunchSpec, EngineSection,
     MuxSection, MuxZellijSection, OrchestratorCavekitSection, OrchestratorClaudeCodeSection,

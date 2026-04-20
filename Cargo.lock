@@ -264,6 +264,7 @@ dependencies = [
  "ark-ext-metadata-types",
  "ark-types",
  "figment",
+ "kdl 6.5.0",
  "serde",
  "serde_json",
  "shlex",
@@ -393,6 +394,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ark-host"
+version = "0.1.0"
+dependencies = [
+ "ark-plugin-protocol",
+ "ark-types",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ark-mux-zellij"
 version = "0.1.0"
 dependencies = [
@@ -444,6 +454,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ark-plugin-protocol"
+version = "0.1.0"
+dependencies = [
+ "ark-types",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ark-plugin-sdk"
+version = "0.1.0"
+
+[[package]]
 name = "ark-plugin-status"
 version = "0.1.0"
 dependencies = [
@@ -451,6 +474,13 @@ dependencies = [
  "serde",
  "serde_json",
  "zellij-tile",
+]
+
+[[package]]
+name = "ark-render-terminal"
+version = "0.1.0"
+dependencies = [
+ "ark-plugin-protocol",
 ]
 
 [[package]]

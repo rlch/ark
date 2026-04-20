@@ -1,0 +1,20 @@
+[package]
+name = "ark-plugin-sdk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# T-PP-002 (cavekit-plugin-protocol R3, R9): single proc-macro crate
+# plugin authors depend on. Tier 0 is skeleton-only — the real
+# `#[derive(Plugin)]` body (section emission for `ark-caps:v1` +
+# `ark-meta:v1`) lands in Tier 2 (T-PP-019, T-PP-020, T-PP-021).
+
+[lib]
+proc-macro = true
+
+[dependencies]
+# Proc-macro crates typically need syn/quote/proc-macro2, but at Tier 0
+# we have no logic to emit, so we add these only in T-PP-019.

@@ -1,0 +1,18 @@
+[package]
+name = "ark-render-terminal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# T-PP-005 (cavekit-plugin-protocol R10): terminal materializer —
+# consumes a `TerminalWidgetTree` + viewport size, emits a byte buffer
+# ready to paint. Plugins emit data, not pixels (Cluster 1 §1 Zed
+# verdict). Tier 0 is signature-placeholder-only; real materializer
+# body lands in T-PP-047 after the widget-tree WIT type is authored
+# in T-PP-014.
+
+[dependencies]
+ark-plugin-protocol = { path = "../ark-plugin-protocol" }

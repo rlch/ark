@@ -1,3 +1,4 @@
+pub mod abi;
 pub mod env_paths;
 pub mod event;
 pub mod event_bus;
@@ -11,6 +12,7 @@ pub mod spec;
 pub mod state_dir;
 pub mod status;
 
+pub use abi::{ARK_ABI_VERSION, AbiError, SUPPORTED_PLUGIN_ABIS};
 pub use env_paths::{EnvPaths, EnvPathsError};
 pub use event::{CoreEvent, ExitReason, ExtEvent, FlatEvent, LogLevel};
 pub use event_bus::{DEFAULT_CAPACITY, EventReceiver, EventSink, channel, default_channel};

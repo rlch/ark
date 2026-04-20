@@ -1,0 +1,25 @@
+# T-PP-011 (cavekit-plugin-protocol R2): reference echo plugin. Fully
+# populated in T-PP-018 (Tier 1) once the WIT world lands. Intentionally
+# NOT a workspace member — built standalone against `wasm32-wasip2`
+# (rustc's native p2 target; no wasi-sdk).
+#
+# Build (once Tier 1 lands):
+#   cargo build -p echo --target wasm32-wasip2 --release
+#
+# Dep policy: the echo example must NOT transitively pull in
+# `arborium-sysroot`, `facet-kdl`, or `facet-format` (R12 regression).
+
+[package]
+name = "echo"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Deliberately empty at Tier 0 — `ark-plugin-sdk` + bindgen deps wire
+# in at T-PP-018. Leaving this empty keeps the crate from compiling
+# against a wrong target in Tier 0 validation gates.

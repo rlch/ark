@@ -1,0 +1,30 @@
+[package]
+name = "ark-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# T-PP-004 (cavekit-plugin-protocol R1): wasmtime-based runtime
+# substrate. Tier 0 is module-skeleton-only — real implementations
+# land across Tier 3 (T-PP-025 onwards):
+#   - engine.rs    process-global `Engine` singleton
+#   - store.rs     per-plugin `Store<PluginCtx>` + `PluginCtx`
+#   - linker_set.rs closed set of per-cap-profile linker variants
+#   - loader.rs    3-phase Inspect → Compile → Instantiate loader
+#   - lifecycle.rs 5-hook dispatcher (on-install/load/update/render/pipe)
+#   - cache.rs     `InstancePre<PluginCtx>` cache keyed by (hash, caps)
+#
+# The wasmtime deps live in the workspace Cargo.toml (T-PP-007 pins)
+# but are NOT yet listed here — Tier 0 skeletons don't import them so
+# keeping deps empty avoids dragging the whole wasmtime graph into
+# Tier 0 validation builds.
+
+[dependencies]
+ark-plugin-protocol = { path = "../ark-plugin-protocol" }
+ark-types = { path = "../types" }
+thiserror = { workspace = true }
+
+[dev-dependencies]

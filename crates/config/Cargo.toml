@@ -15,6 +15,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 shlex = { workspace = true }
+# T-PP-003 (cavekit-plugin-protocol R5): structural parser for the
+# `plugins { }` block in `ark.kdl`. Thin node-walker on top of the
+# upstream `kdl` crate — no reflection/facet-kdl needed for grammar
+# only (semantic validation lives in T-PP-037).
+kdl = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
