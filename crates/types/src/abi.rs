@@ -37,7 +37,9 @@ pub enum AbiError {
     /// Plugin declares an ABI newer than any the host supports.
     ///
     /// `error[abi/host-too-old]` — user must upgrade ark.
-    #[error("error[abi/host-too-old]: plugin {plugin} declares ABI v{plugin_abi}, host supports {host_abi}")]
+    #[error(
+        "error[abi/host-too-old]: plugin {plugin} declares ABI v{plugin_abi}, host supports {host_abi}"
+    )]
     HostTooOld {
         plugin: String,
         plugin_abi: u32,
@@ -48,7 +50,9 @@ pub enum AbiError {
     ///
     /// `error[abi/plugin-too-old]` — plugin author must rebuild against
     /// current `ark-plugin-sdk`.
-    #[error("error[abi/plugin-too-old]: plugin {plugin} declares ABI v{plugin_abi}, host supports {host_abi}")]
+    #[error(
+        "error[abi/plugin-too-old]: plugin {plugin} declares ABI v{plugin_abi}, host supports {host_abi}"
+    )]
     PluginTooOld {
         plugin: String,
         plugin_abi: u32,

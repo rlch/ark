@@ -66,8 +66,7 @@ fn network_cap_builds_without_preopen() {
     // not need `plugin_dir` to exist. Use a non-existent path to
     // double-confirm.
     let dir = std::path::PathBuf::from("/definitely-not-a-real-dir-ark-host-test");
-    let _ctx =
-        wasi_ctx_for_caps(&dir, &key(&["network"])).expect("wasi_ctx_for_caps({network})");
+    let _ctx = wasi_ctx_for_caps(&dir, &key(&["network"])).expect("wasi_ctx_for_caps({network})");
 }
 
 #[test]

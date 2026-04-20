@@ -19,8 +19,7 @@ fn crate_root() -> PathBuf {
 
 fn read_plugin_wit() -> String {
     let p = crate_root().join("wit").join("plugin.wit");
-    fs::read_to_string(&p)
-        .unwrap_or_else(|e| panic!("failed to read {}: {e}", p.display()))
+    fs::read_to_string(&p).unwrap_or_else(|e| panic!("failed to read {}: {e}", p.display()))
 }
 
 /// Slice the raw WIT text down to the doc-comment block immediately
@@ -85,8 +84,8 @@ fn no_deactivate_style_hooks_in_wit() {
         if path.extension().and_then(|s| s.to_str()) != Some("wit") {
             continue;
         }
-        let text = fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let text =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         for forbidden in ["deactivate", "on-unload", "pre-shutdown"] {
             if text.contains(forbidden) {
                 offenders.push((path.display().to_string(), forbidden.into()));

@@ -50,7 +50,10 @@ fn plugin_ctx_wasi_view_trait_impls_are_consistent() {
     let view2 = ctx.ctx();
     let wasi_ptr2: *const _ = &*view2.ctx;
     let table_ptr2: *const _ = &*view2.table;
-    assert_eq!(wasi_ptr, wasi_ptr2, "WasiView::ctx must re-borrow the same WasiCtx");
+    assert_eq!(
+        wasi_ptr, wasi_ptr2,
+        "WasiView::ctx must re-borrow the same WasiCtx"
+    );
     assert_eq!(
         table_ptr, table_ptr2,
         "WasiView::ctx must re-borrow the same ResourceTable"

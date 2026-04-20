@@ -89,7 +89,8 @@ impl CapsManifest {
     /// that need non-panic encoding can reach `postcard::to_allocvec`
     /// directly.
     pub fn encode(&self) -> Vec<u8> {
-        postcard::to_allocvec(self).expect("CapsManifest encode: postcard cannot fail for a bounded schema")
+        postcard::to_allocvec(self)
+            .expect("CapsManifest encode: postcard cannot fail for a bounded schema")
     }
 
     /// Deserialise from postcard bytes. The host calls this on the raw
@@ -142,7 +143,8 @@ impl MetaManifest {
     /// `ark-meta:v1` custom section. See [`CapsManifest::encode`] for
     /// the panic policy.
     pub fn encode(&self) -> Vec<u8> {
-        postcard::to_allocvec(self).expect("MetaManifest encode: postcard cannot fail for a bounded schema")
+        postcard::to_allocvec(self)
+            .expect("MetaManifest encode: postcard cannot fail for a bounded schema")
     }
 
     /// Deserialise from postcard bytes.
@@ -415,7 +417,13 @@ mod tests {
 
     #[test]
     fn meta_manifest_accepts_semver_with_prerelease_and_build() {
-        for good in ["0.1.0", "1.2.3", "1.2.3-alpha", "1.2.3+build", "1.2.3-rc.1+build.7"] {
+        for good in [
+            "0.1.0",
+            "1.2.3",
+            "1.2.3-alpha",
+            "1.2.3+build",
+            "1.2.3-rc.1+build.7",
+        ] {
             let m = MetaManifest {
                 name: "plugin".into(),
                 version: good.into(),

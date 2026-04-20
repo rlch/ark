@@ -214,7 +214,9 @@ pub fn wasi_ctx_for_caps(
     let mut b = WasiCtxBuilder::new();
     // Baseline: mirror `default_deny_wasi` exactly. We cannot reuse
     // that helper because the builder consumes itself on `.build()`.
-    b.allow_tcp(false).allow_udp(false).allow_ip_name_lookup(false);
+    b.allow_tcp(false)
+        .allow_udp(false)
+        .allow_ip_name_lookup(false);
 
     let has_fs_read = granted.contains("fs-read");
     let has_fs_write = granted.contains("fs-write");

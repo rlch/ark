@@ -1,22 +1,29 @@
 //! T-PP-022: full `#[derive(Plugin)]` wire-up.
 //!
 //! Reference "echo" plugin — the minimum viable implementation of the
-//! `ark:plugin@0.1.0` world. Purpose: exercise the WIT contract end-
-//! to-end (guest-side `wit_bindgen::generate!` through to the host's
-//! coarse cap gate). No business logic; `render` returns a single
-//! `text("echo")` widget.
+//! `ark:plugin@1.0.0` world surface. Purpose: exercise the WIT
+//! contract end-to-end (guest-side `wit_bindgen::generate!` through
+//! to the host's coarse cap gate). No business logic; `render`
+//! returns a single `text("echo")` widget.
 //!
 //! The `#[derive(Plugin)]` invocation below emits the `ark-caps:v1` +
 //! `ark-meta:v1` custom sections into the compiled `.wasm` via
 //! `#[link_section]`. See `crates/ark-plugin-sdk` for the attribute
 //! surface.
 //!
-//! NOTE on the `name = "plugin"` attribute: the shared WIT world in
-//! `crates/ark-plugin-protocol/wit/plugin.wit` is itself named `plugin`.
-//! Per R9 "the WIT world name must equal the plugin name", the echo
-//! example adopts `"plugin"` as its plugin name. If/when echo needs its
-//! own identity, a dedicated `wit/echo.wit` world named `echo` can be
-//! introduced and `name = "echo"` used in its place.
+//! # Canonical per-plugin world pattern
+//!
+//! Echo defines its OWN world (`world echo` in `wit/echo.wit`) that
+//! `include`s the shared `ark:plugin/plugin-base` world and manually
+//! `import`s only the `ark:cap/*` interfaces it actually needs. This
+//! is the pattern every plugin author follows — the shared
+//! `plugin-base` world (in `crates/ark-plugin-protocol/wit/plugin.wit`)
+//! does NOT force-import every cap, so a plugin that doesn't need
+//! `network` simply doesn't import it.
+//!
+//! The shared `ark:plugin` package is made visible to `wit-bindgen` via
+//! the canonical `wit/deps/ark-plugin/` layout — the package files are
+//! copied under the crate's own `wit/deps/` directory.
 //!
 //! This crate is intentionally NOT a workspace member — `cargo check
 //! --workspace` does not touch it. It builds standalone against
@@ -34,23 +41,28 @@
 
 use ark_plugin_sdk::Plugin;
 
-// Generate the guest bindings against the repo's canonical WIT.
+// Generate the guest bindings against echo's OWN world.
+//
+// `wit/echo.wit` defines `world echo` which `include`s
+// `ark:plugin/plugin-base@1.0.0` and imports only `ark:cap/fs-read`.
+// The shared ark:plugin package is resolved via `wit/deps/ark-plugin/`
+// (the canonical wit-bindgen multi-package layout).
 //
 // The generated code lives in this module; it drives:
 //   - the `Guest` trait that `EchoPlugin` implements below;
 //   - the `export!` macro wiring `EchoPlugin` to the five lifecycle
-//     exports declared in `wit/plugin.wit`;
+//     exports inherited from `plugin-base`;
 //   - the host-import shims we reach below (`ark:host/log`,
 //     `ark:cap/fs-read`).
 wit_bindgen::generate!({
-    path: "../../wit",
-    world: "plugin",
-    // `generate_all` would pull *every* cap interface — but this
-    // plugin intentionally only imports `ark:host/log` + `ark:cap/fs-read`.
-    // `wit-bindgen` still generates trait stubs for the full world
-    // since the world declares every interface; the linker-side
-    // cap gate ensures uncalled cap interfaces don't actually wire
-    // at instantiation time.
+    path: "wit",
+    world: "echo",
+    // `generate_all` tells wit-bindgen to emit bindings for every
+    // interface referenced by the world (including the transitively
+    // `use`d `ark:plugin/types` + `ark:plugin/widget-tree-types` and
+    // the `ark:plugin/fs-read` import) without requiring an explicit
+    // per-interface `with: { ... }` mapping.
+    generate_all,
 });
 
 /// Identity + cap-declaration target for the `#[derive(Plugin)]` macro.
@@ -60,12 +72,12 @@ wit_bindgen::generate!({
 /// the guest trait is implemented on `EchoPlugin` below.
 #[derive(Plugin)]
 #[plugin(
-    // See the crate-level note on why `name = "plugin"` — tracks the
-    // shared WIT world's name. The `wit = "..."` path is relative to
+    // Plugin name matches the WIT world name (`world echo` in
+    // wit/echo.wit) per R9. The `wit = "..."` path is relative to
     // this Cargo.toml (`examples/echo/Cargo.toml`).
-    name = "plugin",
+    name = "echo",
     version = "0.1.0",
-    wit = "../../wit/plugin.wit",
+    wit = "wit/echo.wit",
     capabilities(
         fs_read(display = "Read files", reason = "echo example reads demo file"),
     ),
@@ -91,7 +103,10 @@ impl Guest for EchoPlugin {
 
     fn render(_view_id: String, _width: u32, _height: u32) -> WidgetTree {
         // Single `text("echo")` node wrapped in the terminal arm of
-        // `widget-tree` per R10.
+        // `widget-tree` per R10. The `widget-tree-types` helper
+        // interface carries `TerminalWidgetTree` + `TextNode`; the
+        // `WidgetTree` type is `use`d into the world surface.
+        use crate::ark::plugin::widget_tree_types::{TerminalWidgetTree, TextNode};
         WidgetTree::Terminal(TerminalWidgetTree::Text(TextNode {
             content: "echo".to_string(),
             style: None,

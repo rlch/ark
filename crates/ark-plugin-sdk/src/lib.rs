@@ -53,11 +53,11 @@
 use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
-use syn::{parse_macro_input, DeriveInput, Error, Expr, ExprLit, Lit, Meta, Token};
 use syn::punctuated::Punctuated;
+use syn::{DeriveInput, Error, Expr, ExprLit, Lit, Meta, Token, parse_macro_input};
 
 use ark_plugin_protocol::{
-    CapDecl, CapsManifest, MetaManifest, CAPS_SECTION_NAME, META_SECTION_NAME,
+    CAPS_SECTION_NAME, CapDecl, CapsManifest, META_SECTION_NAME, MetaManifest,
 };
 use ark_types::ARK_ABI_VERSION;
 
@@ -207,8 +207,7 @@ fn parse_plugin_attr(input: &DeriveInput) -> syn::Result<PluginArgs> {
     let mut wit_path: Option<(String, Span)> = None;
     let mut caps: Vec<ParsedCap> = Vec::new();
 
-    let nested: Punctuated<Meta, Token![,]> =
-        attr.parse_args_with(Punctuated::parse_terminated)?;
+    let nested: Punctuated<Meta, Token![,]> = attr.parse_args_with(Punctuated::parse_terminated)?;
 
     for item in nested {
         match item {
@@ -246,7 +245,10 @@ fn parse_plugin_attr(input: &DeriveInput) -> syn::Result<PluginArgs> {
     }
 
     let name = name.ok_or_else(|| {
-        Error::new(attr_span, "`#[plugin(...)]` is missing required `name = \"...\"`")
+        Error::new(
+            attr_span,
+            "`#[plugin(...)]` is missing required `name = \"...\"`",
+        )
     })?;
     let version = version.ok_or_else(|| {
         Error::new(
@@ -319,16 +321,10 @@ fn parse_cap(meta: &Meta) -> syn::Result<ParsedCap> {
 
     let id = id.unwrap_or(auto_id);
     let display_name = display.ok_or_else(|| {
-        Error::new_spanned(
-            list,
-            "cap entry is missing required `display = \"...\"`",
-        )
+        Error::new_spanned(list, "cap entry is missing required `display = \"...\"`")
     })?;
     let reason = reason.ok_or_else(|| {
-        Error::new_spanned(
-            list,
-            "cap entry is missing required `reason = \"...\"`",
-        )
+        Error::new_spanned(list, "cap entry is missing required `reason = \"...\"`")
     })?;
 
     Ok(ParsedCap {

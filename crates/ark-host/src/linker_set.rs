@@ -48,7 +48,10 @@ use std::collections::{BTreeSet, HashMap};
 use wasmtime::component::{HasSelf, Linker};
 
 use crate::PluginCtx;
-use crate::bindings::Plugin;
+use crate::bindings::ark::plugin::{
+    bus_receive, bus_send, clock, fs_read, fs_write, log, network, plugin_id, spawn_process, types,
+    widget_tree_types,
+};
 use crate::engine::engine;
 
 /// Ordered set of cap ids. Used as the HashMap key for linker variants
@@ -74,18 +77,22 @@ impl LinkerSet {
     /// * WASI p2 (`wasmtime_wasi::p2::add_to_linker_async`) — resolves
     ///   any `wasi:*` imports the plugin has, subject to the plugin's
     ///   `WasiCtx` (built separately by `store::wasi_ctx_for_caps`).
-    /// * The full `Plugin::add_to_linker` surface — every `ark:host/*`
-    ///   and `ark:cap/*` interface. The cap fine-gate inside each
-    ///   cap-fn body (`cap_fns.rs`) returns
-    ///   `PluginLoadError::CapNotGranted` for interfaces the plugin
-    ///   did not declare.
+    /// * The three unconditional `ark:host/*` interfaces (`log`,
+    ///   `clock`, `plugin-id`) — always registered.
+    /// * The helper `types` / `widget-tree-types` interfaces —
+    ///   registered because `widget-tree-types` carries the
+    ///   `terminal-node` resource used in `widget-tree` payloads that
+    ///   every plugin returns from `render`.
+    /// * Each `ark:cap/*` interface IFF the variant's `CapsKey`
+    ///   contains that cap id. A plugin whose WIT imports
+    ///   `ark:cap/fs-read` but runs against a linker that was built
+    ///   without fs-read fails at `instantiate_pre` time — this is the
+    ///   R4 "coarse gate" (Approach B proper).
     ///
-    /// Note on coarse-gate granularity: even though `add_to_linker`
-    /// registers every interface, the plugin's own WIT imports are
-    /// the enforced surface — if the plugin does not import
-    /// `ark:cap/network`, it cannot call `network.ok()` regardless of
-    /// what the linker has registered. Coarse gating at the
-    /// cap-profile level falls out of the plugin's own import set.
+    /// The cap fine-gate inside each cap-fn body (`cap_fns.rs`) is a
+    /// defense-in-depth check that also returns
+    /// `PluginLoadError::CapNotGranted` if somehow a mis-wired linker
+    /// still exposes the fn at call time.
     pub fn build(all_declared_caps: Vec<CapsKey>) -> wasmtime::Result<Self> {
         let mut variants: HashMap<CapsKey, Linker<PluginCtx>> = HashMap::new();
         // Always include the `empty` variant (deny-all caps).
@@ -98,7 +105,7 @@ impl LinkerSet {
             if variants.contains_key(&key) {
                 continue;
             }
-            let linker = build_one_variant()?;
+            let linker = build_one_variant(&key)?;
             variants.insert(key, linker);
         }
 
@@ -122,19 +129,59 @@ impl LinkerSet {
     }
 }
 
-/// Build one `Linker<PluginCtx>` with WASI p2 + every `ark:host/*` /
-/// `ark:cap/*` interface registered.
-fn build_one_variant() -> wasmtime::Result<Linker<PluginCtx>> {
+/// Build one `Linker<PluginCtx>` with WASI p2 + the unconditional
+/// `ark:host/*` trio + the helper type interfaces + only those
+/// `ark:cap/*` interfaces named in `caps`.
+///
+/// The per-interface `add_to_linker` functions come from the
+/// `plugin-host` bindgen world (see `crates/ark-host/src/bindings.rs`
+/// and the WIT contract in `crates/ark-plugin-protocol/wit/plugin.wit`).
+/// The `HasSelf<PluginCtx>` marker is wasmtime 43's convenience
+/// `HasData` impl that makes `D::Data<'_> = &'_ mut PluginCtx`, so
+/// every generated host-fn glue (e.g. `Host::log(host, …)`) gets a
+/// `&mut PluginCtx`.
+fn build_one_variant(caps: &CapsKey) -> wasmtime::Result<Linker<PluginCtx>> {
     let mut linker: Linker<PluginCtx> = Linker::new(engine());
     // WASI p2 — resolves `wasi:clocks` / `wasi:io` / `wasi:filesystem` /
     // `wasi:sockets` imports against the per-plugin `WasiCtx` carried
     // on `PluginCtx`.
     wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
-    // ark:host/* + ark:cap/* — the project's own plugin world. The
-    // `HasSelf<PluginCtx>` marker is wasmtime 43's convenience
-    // `HasData` impl that makes `D::Data<'_> = &'_ mut PluginCtx`, so
-    // every generated host-fn glue `Host::log(host, …)` gets a
-    // `&mut PluginCtx`.
-    Plugin::add_to_linker::<_, HasSelf<PluginCtx>>(&mut linker, |ctx| ctx)?;
+
+    // Unconditional `ark:host/*` services — every plugin imports these.
+    log::add_to_linker::<_, HasSelf<PluginCtx>>(&mut linker, |ctx| ctx)?;
+    clock::add_to_linker::<_, HasSelf<PluginCtx>>(&mut linker, |ctx| ctx)?;
+    plugin_id::add_to_linker::<_, HasSelf<PluginCtx>>(&mut linker, |ctx| ctx)?;
+
+    // Helper type interfaces. `widget-tree-types` carries the
+    // `terminal-node` resource used inside every `widget-tree` the
+    // guest returns from `render`; `types` is a no-op instance
+    // registration (no fns/resources) that bindgen still emits
+    // because the interface declares shared data types.
+    types::add_to_linker::<_, HasSelf<PluginCtx>>(&mut linker, |ctx| ctx)?;
+    widget_tree_types::add_to_linker::<_, HasSelf<PluginCtx>>(&mut linker, |ctx| ctx)?;
+
+    // Capability-gated interfaces — registered IFF the variant's
+    // CapsKey contains the matching cap id. A plugin that imports an
+    // interface NOT registered here fails at `instantiate_pre` with
+    // a link-time error — the R4 coarse gate (Approach B proper).
+    if caps.contains("fs-read") {
+        fs_read::add_to_linker::<_, HasSelf<PluginCtx>>(&mut linker, |ctx| ctx)?;
+    }
+    if caps.contains("fs-write") {
+        fs_write::add_to_linker::<_, HasSelf<PluginCtx>>(&mut linker, |ctx| ctx)?;
+    }
+    if caps.contains("network") {
+        network::add_to_linker::<_, HasSelf<PluginCtx>>(&mut linker, |ctx| ctx)?;
+    }
+    if caps.contains("spawn-process") {
+        spawn_process::add_to_linker::<_, HasSelf<PluginCtx>>(&mut linker, |ctx| ctx)?;
+    }
+    if caps.contains("bus-send") {
+        bus_send::add_to_linker::<_, HasSelf<PluginCtx>>(&mut linker, |ctx| ctx)?;
+    }
+    if caps.contains("bus-receive") {
+        bus_receive::add_to_linker::<_, HasSelf<PluginCtx>>(&mut linker, |ctx| ctx)?;
+    }
+
     Ok(linker)
 }

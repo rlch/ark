@@ -37,7 +37,9 @@
 use ark_plugin_protocol::PluginLoadError;
 use wasmtime::Error;
 
-use crate::bindings::ark::plugin::{bus_receive, bus_send, fs_read, fs_write, network, spawn_process};
+use crate::bindings::ark::plugin::{
+    bus_receive, bus_send, fs_read, fs_write, network, spawn_process,
+};
 use crate::store::PluginCtx;
 
 /// Ensures the plugin was granted the named cap; otherwise returns a

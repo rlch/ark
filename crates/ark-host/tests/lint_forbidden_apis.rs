@@ -96,9 +96,7 @@ fn no_forbidden_core_wasmtime_apis_in_src() {
                     if line_has_bare_occurrence(line, needle) {
                         violations.push(format!(
                             "forbidden API in {}:{}: {:?} — {}",
-                            file.strip_prefix(manifest_dir)
-                                .unwrap_or(&file)
-                                .display(),
+                            file.strip_prefix(manifest_dir).unwrap_or(&file).display(),
                             line_no + 1,
                             needle,
                             remediation

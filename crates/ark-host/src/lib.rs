@@ -26,6 +26,12 @@ pub use store::{
 };
 
 // Tier 3B public surface (T-PP-031..T-PP-036).
-pub use bindings::Plugin;
+//
+// `PluginHost` is the bindgen-generated struct for the `plugin-host`
+// world (see `bindings.rs`) — the host-side union world that holds
+// pre-instantiation indices for plugin exports. Plugins themselves
+// target `plugin-base` or their own world; the host uses the union
+// to bind against any variant.
+pub use bindings::PluginHost;
 pub use cache::{ContentHash, InstancePreCache, content_hash};
 pub use linker_set::{CapsKey, LinkerSet};

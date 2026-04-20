@@ -93,10 +93,7 @@ impl widget_tree_types::Host for PluginCtx {}
 struct TerminalNodeBody(TerminalWidgetTree);
 
 impl HostTerminalNode for PluginCtx {
-    async fn new(
-        &mut self,
-        tree: TerminalWidgetTree,
-    ) -> wasmtime::Result<Resource<TerminalNode>> {
+    async fn new(&mut self, tree: TerminalWidgetTree) -> wasmtime::Result<Resource<TerminalNode>> {
         // Push the tree body onto the per-plugin `ResourceTable` and
         // re-type the returned resource index as `Resource<TerminalNode>`
         // — wasmtime's `Resource<T>` is a phantom-typed index, so the

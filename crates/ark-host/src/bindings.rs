@@ -8,8 +8,15 @@
 //! * `path: "../ark-plugin-protocol/wit"` — resolved relative to this
 //!   crate's `CARGO_MANIFEST_DIR` (i.e. `crates/ark-host/`). The two
 //!   source files (`plugin.wit`, `widget-tree.wit`) together declare the
-//!   `ark:plugin@0.1.0` package plus its `plugin` world.
-//! * `world: "plugin"` — the single world every ark plugin targets.
+//!   `ark:plugin@1.0.0` package plus its `plugin-base` world (what
+//!   plugin authors extend) and `plugin-host` world (the host-side
+//!   union that includes every cap interface — what this bindgen call
+//!   binds against).
+//! * `world: "plugin-host"` — the MAXIMAL world used on the host side.
+//!   Contains the three unconditional `ark:host/*` imports PLUS all six
+//!   `ark:cap/*` imports. Plugins themselves target `plugin-base` (or
+//!   their own world that `include`s `plugin-base` plus the caps they
+//!   actually use) — see `crates/ark-plugin-protocol/wit/plugin.wit`.
 //! * `imports: { default: async | trappable }` — wasmtime 43 bindgen
 //!   syntax for the two invariants kit R4 requires:
 //!     - `async` — every host import is an `async fn` so epoch-based
@@ -53,7 +60,7 @@
 
 wasmtime::component::bindgen!({
     path: "../ark-plugin-protocol/wit",
-    world: "plugin",
+    world: "plugin-host",
     imports: {
         default: async | trappable,
     },

@@ -59,10 +59,7 @@ fn main() {
     let crate_dir = env!("CARGO_MANIFEST_DIR");
     let wit_dir = Path::new(crate_dir).join("wit");
 
-    let files = [
-        wit_dir.join("plugin.wit"),
-        wit_dir.join("widget-tree.wit"),
-    ];
+    let files = [wit_dir.join("plugin.wit"), wit_dir.join("widget-tree.wit")];
 
     // Rerun triggers — any touch to either .wit file re-runs the lint.
     for f in &files {
@@ -146,9 +143,7 @@ fn main() {
     }
 
     if failed {
-        println!(
-            "cargo:warning=ark-plugin-protocol WIT lint FAILED — see the preceding warnings."
-        );
+        println!("cargo:warning=ark-plugin-protocol WIT lint FAILED — see the preceding warnings.");
         process::exit(1);
     }
 }

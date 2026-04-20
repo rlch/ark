@@ -1,0 +1,28 @@
+// Echo example's own world.
+//
+// Demonstrates the canonical pattern every plugin author follows: write
+// a per-plugin world in your own `wit/` directory, `include` the shared
+// `ark:plugin/plugin-base` world (which carries the five lifecycle
+// exports + the unconditional `ark:host/*` imports), then manually
+// `import` only the `ark:cap/*` interfaces this plugin actually uses.
+//
+// Echo only needs `ark:cap/fs-read` (demo purposes — the capability is
+// declared for the `ark-caps:v1` section but no real filesystem call is
+// made). It does NOT import `fs-write` / `network` / `spawn-process` /
+// `bus-send` / `bus-receive` — attempting to do so without a matching
+// grant in `ark.kdl` would fail the host's coarse gate at
+// `instantiate_pre` time.
+//
+// The shared ark:plugin package lives in `wit/deps/ark-plugin/` (the
+// canonical wit-bindgen multi-package layout).
+
+package ark:echo@0.1.0;
+
+world echo {
+    include ark:plugin/plugin-base@1.0.0;
+
+    // Only the caps this plugin actually uses. The host's LinkerSet
+    // coarse gate (crates/ark-host/src/linker_set.rs) only registers a
+    // cap's linker fn in the variant whose CapsKey contains its id.
+    import ark:plugin/fs-read@1.0.0;
+}

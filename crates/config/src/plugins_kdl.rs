@@ -236,8 +236,14 @@ mod tests {
                 "spawn-process".to_string()
             ]
         );
-        assert_eq!(p.runtime.get("update-failure-budget").map(String::as_str), Some("16"));
-        assert_eq!(p.runtime.get("render-budget-ms").map(String::as_str), Some("16"));
+        assert_eq!(
+            p.runtime.get("update-failure-budget").map(String::as_str),
+            Some("16")
+        );
+        assert_eq!(
+            p.runtime.get("render-budget-ms").map(String::as_str),
+            Some("16")
+        );
     }
 
     #[test]

@@ -45,7 +45,9 @@ pub enum PluginLoadError {
     /// deserialize (truncated, wrong encoding, schema drift).
     ///
     /// Kit: R3, R9.
-    #[error("error[plugin/manifest-corrupt]: plugin {plugin} manifest section {section} failed to decode: {detail}")]
+    #[error(
+        "error[plugin/manifest-corrupt]: plugin {plugin} manifest section {section} failed to decode: {detail}"
+    )]
     ManifestCorrupt {
         plugin: String,
         section: &'static str,
@@ -89,7 +91,9 @@ pub enum PluginLoadError {
     /// `ark.kdl` key.
     ///
     /// Kit: R9 acceptance "name is a process-global primary key".
-    #[error("error[plugin/name-collision]: plugin name {name} declared by {first:?} and {second:?}")]
+    #[error(
+        "error[plugin/name-collision]: plugin name {name} declared by {first:?} and {second:?}"
+    )]
     NameCollision {
         name: String,
         first: PathBuf,
@@ -125,7 +129,9 @@ pub enum PluginLoadError {
     /// A view-type export implements zero render-target marker traits.
     ///
     /// Kit: R6 acceptance "A view that implements none = view-no-target".
-    #[error("error[plugin/view-no-target]: plugin {plugin} view {view} has no render-target marker")]
+    #[error(
+        "error[plugin/view-no-target]: plugin {plugin} view {view} has no render-target marker"
+    )]
     ViewNoTarget { plugin: String, view: String },
 
     /// A view-type export implements more than one render-target
@@ -214,15 +220,11 @@ mod tests {
         // contract the kit promises to users and scripts.
         let cases: Vec<(PluginLoadError, &str)> = vec![
             (
-                PluginLoadError::MissingCaps {
-                    plugin: "p".into(),
-                },
+                PluginLoadError::MissingCaps { plugin: "p".into() },
                 "error[plugin/missing-caps]",
             ),
             (
-                PluginLoadError::MissingMeta {
-                    plugin: "p".into(),
-                },
+                PluginLoadError::MissingMeta { plugin: "p".into() },
                 "error[plugin/missing-meta]",
             ),
             (
@@ -327,9 +329,7 @@ mod tests {
                 "error[ark-kdl/cap-not-granted]",
             ),
             (
-                PluginLoadError::Abi(AbiError::MissingVersion {
-                    plugin: "p".into(),
-                }),
+                PluginLoadError::Abi(AbiError::MissingVersion { plugin: "p".into() }),
                 "error[abi/missing-version]",
             ),
         ];

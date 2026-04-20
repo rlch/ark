@@ -8,9 +8,7 @@
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use ark_host::{
-    CapsKey, ContentHash, InstancePreCache, LinkerSet, content_hash, engine,
-};
+use ark_host::{CapsKey, ContentHash, InstancePreCache, LinkerSet, content_hash, engine};
 use wasmtime::component::Component;
 
 /// Smallest possible valid component: an empty one. We parse the WAT

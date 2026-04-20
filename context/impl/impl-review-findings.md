@@ -1341,3 +1341,72 @@ The existing `build_zellij_command_inside_zellij_env_still_creates_session` test
 - `cargo check -p ark-cli` clean — zero warnings.
 - `cargo test -p ark-cli --lib commands::spawn` — 68 passing (baseline 64 + 4 new F-730 tests).
 - `cargo test --workspace -- --test-threads=1` — all test binaries green (reviewed `test result` lines individually: 288 + 98 + 75 + 86 + 73 + 119 + 99 + ... with zero `FAILED`).
+
+## Plugin-protocol Tier 3B interim review — 2026-04-20
+
+**Base ref:** `fac6223` (docs: Tier 3B plan landing)
+**Head:** `066d9b4` (Tier 3B landings — bindings + host_fns + cap_fns + linker_set + cache)
+**Reviewer:** Codex (codex-cli, interim review post-Tier 3B)
+**Commits:** T-PP-031..T-PP-036 (bindings, host-fn impls, cap-fn impls, LinkerSet, InstancePre cache, wasi_ctx_for_caps).
+
+### F-433 / F-436 — P1 LinkerSet registers every cap fn unconditionally (FIXED)
+
+**Source:** codex
+**Tier:** plugin-protocol-3B
+**Severity:** P1
+**Status:** fixed
+**Location:** `crates/ark-host/src/linker_set.rs::build_one_variant()` — pre-fix the fn took no `CapsKey` argument and called `Plugin::add_to_linker` (one bindgen call adding every interface from the world). That registered all six `ark:cap/*` fns in EVERY variant — the deny-all + partial-cap variants still had fs-read/fs-write/network/spawn-process/bus-send/bus-receive available at link time. Approach C by accident — R4's "coarse gate" wasn't a gate at all, only the fine-gate in `cap_fns.rs` was operative. The acceptance criterion "declared-but-ungranted cap fails at `instantiate_pre`" was checked only at fn-call time.
+
+**Resolution:**
+
+1. `build_one_variant` now takes `caps: &CapsKey` and uses per-interface `add_to_linker` calls from `bindings::ark::plugin::{log, clock, plugin_id, types, widget_tree_types, fs_read, fs_write, network, spawn_process, bus_send, bus_receive}`. The three `ark:host/*` interfaces + the two helper interfaces (`types` no-op, `widget-tree-types` wires the `terminal-node` resource) are registered unconditionally; each `ark:cap/*` is registered IFF `caps.contains("<id>")`.
+2. `LinkerSet::build` threads each key into the per-variant construction.
+
+**Tests added (`crates/ark-host/tests/linker_cap_gate.rs`):**
+
+- `empty_variant_rejects_fs_read_import_at_instantiate_pre` — synthetic WAT component imports `ark:plugin/fs-read@1.0.0`; empty linker variant's `instantiate_pre` MUST fail with a link-time error; fs-read variant's `instantiate_pre` MUST succeed. Proves the R4 coarse gate.
+- `fs_read_variant_does_not_leak_other_caps` — defense-in-depth: fs-read variant refuses a synthetic component that imports `ark:plugin/network@1.0.0`.
+
+### F-434 / F-437 — P1 `world plugin` mandated every cap import (FIXED)
+
+**Source:** codex
+**Tier:** plugin-protocol-3B
+**Severity:** P1
+**Status:** fixed
+**Location:** `crates/ark-plugin-protocol/wit/plugin.wit` — the single `world plugin` declaration unconditionally imported `log`, `clock`, `plugin-id`, `fs-read`, `fs-write`, `network`, `spawn-process`, `bus-send`, `bus-receive`. Every plugin authoring against this world was forced to declare — and the compiled component bound — every cap interface. R4's per-plugin-selected cap import design required the shared world to expose only the unconditional surface; plugins would write their own per-plugin world that `include`d the shared one and manually imported only the caps they needed.
+
+**Resolution:**
+
+1. Split into two worlds:
+   - **`world plugin-base`** — what plugin authors extend. Imports only `log`, `clock`, `plugin-id`. `use`s `types` + `widget-tree-types`. Exports the five lifecycle funcs. NO cap imports.
+   - **`world plugin-host`** — the MAXIMAL world the host binds against. `include`s `plugin-base` and adds imports for every `ark:cap/*` interface. The host's `wasmtime::component::bindgen!` call now targets `world: "plugin-host"` (so per-interface `add_to_linker` helpers exist for the conditional wiring in `linker_set.rs`).
+2. Echo example (`crates/ark-plugin-protocol/examples/echo/`) now owns its world:
+   - `wit/echo.wit`: `package ark:echo@0.1.0; world echo { include ark:plugin/plugin-base@1.0.0; import ark:plugin/fs-read@1.0.0; }`.
+   - `wit/deps/ark-plugin/{plugin,widget-tree}.wit`: copies of the shared ark:plugin package (canonical wit-bindgen multi-package layout).
+   - `src/lib.rs`: `wit_bindgen::generate!({ path: "wit", world: "echo", generate_all })`; `#[plugin(name = "echo", version = "0.1.0", wit = "wit/echo.wit", ...)]`. T-PP-021's world-name check now sees `echo` matching the plugin name.
+3. Host `lib.rs` re-exports `PluginHost` (renamed from the old `Plugin`) — the bindgen world struct for the `plugin-host` world.
+
+### F-435 / F-438 — P1 widget-tree resource change broke `ark:plugin@0.1.0` (FIXED)
+
+**Source:** codex
+**Tier:** plugin-protocol-3B
+**Severity:** P1
+**Status:** fixed
+**Location:** `crates/ark-plugin-protocol/wit/widget-tree.wit` — Tier 1 introduced `resource terminal-node` + `list<terminal-node>` in `container-node.children` (forced by wit-parser 0.245's type-graph toposort rejecting direct `list<terminal-widget-tree>` recursion in a variant). That was a breaking change to the WIT surface against the declared `ark:plugin@0.1.0` package version — the semver contract was violated.
+
+**Resolution:** bumped both `wit/plugin.wit` and `wit/widget-tree.wit` preambles to `package ark:plugin@1.0.0;` (first-stable-release marker). `ARK_ABI_VERSION` STAYS AT 1 — per R14 the binary ABI version is distinct from WIT semver; the on-wire widget-tree shape change is a pre-1.0 scaffolding event (no binary has shipped), and future WIT minor/patch bumps do not bump `ARK_ABI_VERSION`. Kit R14 now carries a new acceptance criterion making this distinction explicit. The host's bindgen call and the echo `include ark:plugin/plugin-base@1.0.0` + `import ark:plugin/fs-read@1.0.0` use the new package version string; wasmtime's linker instance names (`ark:plugin/log@1.0.0`, `ark:plugin/fs-read@1.0.0`, etc.) track the package version automatically.
+
+**Gate evidence (all three fixes):**
+
+- `cargo check --workspace` clean — zero real warnings (only the pre-existing `cargo:warning=` telemetry from `crates/cli/build.rs` reporting plugin sizes).
+- `cargo test -p ark-host` → 26 passing (baseline 24 + 2 new linker_cap_gate tests).
+- `cargo test -p ark-plugin-protocol` → 25 passing, 1 ignored (wit_doc_comments.rs doc-comment literals still match; echo_sections.rs remains `#[ignore]`d as before).
+- `cargo test -p ark-plugin-sdk` → 1 passing, 1 ignored. Trybuild fixtures all pass with the same stderr goldens — the sdk validator output didn't shift (it reads the single wit_path the `#[plugin]` attr specifies; package-version is not surfaced in any error message).
+- `cargo test --workspace -- --test-threads=1` → 2428 passing, 23 ignored, 0 failed (baseline 2426 → +2 for the new tests).
+
+**Dead ends avoided:**
+
+- Did NOT use `define_unknown_imports_as_traps` (Approach C banned — replaces link-time errors with runtime traps).
+- Did NOT revert the `terminal-node` resource indirection (wit-parser requires it; only the package version was bumped).
+- Did NOT bump `ARK_ABI_VERSION` to 2 (no binary has shipped; R14 semver independence applies).
+- Did NOT change `host_fns.rs` or `cap_fns.rs` bodies (the fine-gate logic was correct; the bug was the coarse-gate being absent at link time).
