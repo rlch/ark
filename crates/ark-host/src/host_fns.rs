@@ -28,7 +28,9 @@ use wasmtime::component::Resource;
 
 use crate::bindings::ark::plugin::{
     clock, log, plugin_id, types,
-    widget_tree_types::{self, HostTerminalNode, TerminalNode, TerminalWidgetTree},
+    widget_tree_types::{
+        self, ContainerNode, HostTerminalNode, TerminalNode, TerminalWidgetTree,
+    },
 };
 use crate::store::PluginCtx;
 
@@ -92,6 +94,43 @@ impl widget_tree_types::Host for PluginCtx {}
 /// toposort.
 struct TerminalNodeBody(TerminalWidgetTree);
 
+/// Reconstruct a `TerminalWidgetTree` from a shared reference, rebuilding
+/// each `Resource<TerminalNode>` handle via `new_own(rep)` with the SAME
+/// `u32` rep the table uses internally. The generated
+/// `TerminalWidgetTree` is NOT `Clone` because `wasmtime::component::
+/// Resource<T>` enforces host-side ownership semantics (no bitwise copy),
+/// so a `#[derive(Clone)]` can't propagate. A manual shallow rebuild is
+/// the right tool: every child handle's rep still points into the same
+/// `ResourceTable` entry, which is safe because the guest side — not the
+/// host — calls `drop` when the handle goes out of scope.
+///
+/// Used by `HostTerminalNode::tree` so calling `tree()` twice on the
+/// same handle observes identical payloads. See kit R10 acceptance:
+/// the resource handle contract is "tree() is idempotent, drop is what
+/// transfers ownership".
+fn clone_terminal_widget_tree(t: &TerminalWidgetTree) -> TerminalWidgetTree {
+    match t {
+        TerminalWidgetTree::Text(n) => TerminalWidgetTree::Text(n.clone()),
+        TerminalWidgetTree::Row(c) => TerminalWidgetTree::Row(clone_container(c)),
+        TerminalWidgetTree::Column(c) => TerminalWidgetTree::Column(clone_container(c)),
+        TerminalWidgetTree::BoxNode(c) => TerminalWidgetTree::BoxNode(clone_container(c)),
+        TerminalWidgetTree::Spacer(n) => TerminalWidgetTree::Spacer(*n),
+        TerminalWidgetTree::Cursor(n) => TerminalWidgetTree::Cursor(*n),
+    }
+}
+
+/// See [`clone_terminal_widget_tree`].
+fn clone_container(c: &ContainerNode) -> ContainerNode {
+    ContainerNode {
+        children: c
+            .children
+            .iter()
+            .map(|r| wasmtime::component::Resource::<TerminalNode>::new_own(r.rep()))
+            .collect(),
+        layout: c.layout,
+    }
+}
+
 impl HostTerminalNode for PluginCtx {
     async fn new(&mut self, tree: TerminalWidgetTree) -> wasmtime::Result<Resource<TerminalNode>> {
         // Push the tree body onto the per-plugin `ResourceTable` and
@@ -109,19 +148,32 @@ impl HostTerminalNode for PluginCtx {
         &mut self,
         self_: Resource<TerminalNode>,
     ) -> wasmtime::Result<TerminalWidgetTree> {
-        // Consume the resource — taking the payload out. The guest's
-        // subsequent `drop` call on the same handle is a no-op
-        // because `ResourceTable` surfaces a "not found" which
-        // bindgen's `drop` glue tolerates. v1 semantics: `tree()`
-        // transfers ownership of the inner payload to the caller.
-        let body: TerminalNodeBody = self
+        // WIT signature `tree: func() -> terminal-widget-tree` is NOT a
+        // consumer — the handle has its own destructor (the `drop` impl
+        // below). `tree()` is idempotent: calling it twice on the same
+        // handle must yield two identical payloads without surfacing a
+        // "resource missing" error on the second read. Clone the stored
+        // payload instead of removing it from the table.
+        //
+        // Clone cost: `TerminalWidgetTree` is a tagged-union of small
+        // records (color triples, u32 flex/padding, optional styled
+        // strings) plus a list of `Resource<TerminalNode>` children —
+        // the children are handle copies, not a deep tree clone, so the
+        // clone is O(direct-children) per node. For v1 this is cheap
+        // enough to not warrant an `Arc` wrapper; revisit if render
+        // paths show up in profiles.
+        let body: &TerminalNodeBody = self
             .resource_table
-            .delete(Resource::<TerminalNodeBody>::new_own(self_.rep()))?;
-        Ok(body.0)
+            .get(&Resource::<TerminalNodeBody>::new_own(self_.rep()))?;
+        Ok(clone_terminal_widget_tree(&body.0))
     }
 
     async fn drop(&mut self, rep: Resource<TerminalNode>) -> wasmtime::Result<()> {
-        // Tolerate a missing entry — may have been consumed by `tree()`.
+        // `tree()` no longer consumes, so the entry is expected to be
+        // present — but we still `let _ =` to stay tolerant of a guest
+        // that drops an already-dropped handle (defense-in-depth for
+        // malformed guests). A missing entry is NOT a host-observable
+        // error.
         let _ = self
             .resource_table
             .delete(Resource::<TerminalNodeBody>::new_own(rep.rep()));

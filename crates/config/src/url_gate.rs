@@ -2,10 +2,13 @@
 //!
 //! v1 only admits two URL schemes for plugin `location=` values:
 //!
-//! - `file:` — absolute path OR a `~`-prefixed path expanded against
-//!   `$HOME`. Loaded in place.
-//! - `https:` — permitted; downloaded into the content-addressed cache
-//!   by `ark-host` (cache wiring is its own tier, NOT this module).
+//! - `file://` — absolute path OR a `~`-prefixed path expanded against
+//!   `$HOME`. Loaded in place. The `//` authority separator is REQUIRED
+//!   (the RFC 3986 single-slash shorthand `file:/abs/path` is refused).
+//! - `https://` — permitted; downloaded into the content-addressed cache
+//!   by `ark-host` (cache wiring is its own tier, NOT this module). The
+//!   `//` is REQUIRED — a single-colon shorthand like `https:example.com`
+//!   is refused up front instead of discovered at fetch time.
 //!
 //! Everything else is an explicit refusal — `http:` especially earns a
 //! bespoke diagnostic because a user typo of `http://` for `https://`
@@ -140,10 +143,25 @@ pub(crate) fn parse_plugin_url_with_home(
     let scheme_lower = scheme_str.to_ascii_lowercase();
     match scheme_lower.as_str() {
         "file" => parse_file_url(rest, home),
-        "https" => Ok(PluginUrl {
-            scheme: UrlScheme::Https,
-            raw: raw.to_string(),
-        }),
+        "https" => {
+            // v1 requires the `//` authority separator after the colon.
+            // `https:not-a-url` and `https:example.com/x.wasm` are
+            // single-colon shorthands that never parse cleanly downstream
+            // — refuse at the scheme gate instead of discovering at fetch
+            // time.
+            let body = rest.strip_prefix("//").ok_or_else(|| UrlGateError::Malformed {
+                raw: raw.to_string(),
+            })?;
+            if body.is_empty() {
+                return Err(UrlGateError::Malformed {
+                    raw: raw.to_string(),
+                });
+            }
+            Ok(PluginUrl {
+                scheme: UrlScheme::Https,
+                raw: raw.to_string(),
+            })
+        }
         "http" => Err(UrlGateError::HttpNotAllowed),
         other => Err(UrlGateError::UnsupportedScheme {
             scheme: other.to_string(),
@@ -153,25 +171,32 @@ pub(crate) fn parse_plugin_url_with_home(
 
 /// Expand a `file:`-scheme URL payload.
 ///
-/// KDL strings reach this function without the leading `file:`. Three
-/// shapes are accepted:
+/// KDL strings reach this function without the leading `file:`. The
+/// `//` authority separator is REQUIRED (v1 contract — single-slash
+/// RFC 3986 shorthand is refused up front). Two shapes are accepted:
 ///
 /// - `file:///abs/path` — authority empty, absolute path
 /// - `file://~/rel/path` — authority is `~`, home-expanded
-/// - `file:/abs/path` — no authority, absolute path (RFC 3986 shorthand)
-/// - `file:~/rel/path` — bare `~` form, home-expanded
+///
+/// Everything else — `file:/abs/path` (single-slash shorthand),
+/// `file:~/rel/path` (bare tilde without `//`), `file:relative/path`
+/// (no slash at all) — is refused with `Malformed` (missing `//`) or
+/// `FileNotAbsolute` (has `//` but the path is not absolute / not `~`).
 fn parse_file_url(rest: &str, home: Option<&str>) -> Result<PluginUrl, UrlGateError> {
-    // Strip the optional `//` authority separator.
-    let payload = rest.strip_prefix("//").unwrap_or(rest);
+    // Require the `//` authority separator. Single-slash `file:/abs`
+    // shorthands and bare `file:~/path` forms no longer parse.
+    let payload = rest.strip_prefix("//").ok_or_else(|| UrlGateError::Malformed {
+        raw: format!("file:{rest}"),
+    })?;
 
-    // `//~/...` → authority was the single `~` token, path follows.
-    // `//~`    → authority was `~`, path empty → treat as `~` itself.
-    // `~/...`  → bare tilde form after `file:` (no authority).
-    // `/...`   → absolute path (no authority / empty authority).
+    // After `file://`, the payload is one of:
+    // - `~/...` / `~`  → authority was `~`, home-expanded
+    // - `/...`         → empty authority, absolute path
+    // - anything else  → relative path after `//`, refused
     let expanded = if let Some(tail) = payload.strip_prefix('~') {
         // `tail` is whatever follows the `~`: "/sub/path", "", or more.
         let home = home.ok_or_else(|| UrlGateError::HomeUnset {
-            raw: format!("file:{rest}"),
+            raw: format!("file://{payload}"),
         })?;
         if tail.is_empty() {
             format!("file://{home}")
@@ -209,11 +234,14 @@ mod tests {
     }
 
     #[test]
-    fn file_single_slash_absolute_parses() {
-        // RFC 3986 shorthand — `file:/abs/path` with no authority.
-        let u = parse_plugin_url("file:/abs/path/plugin.wasm").unwrap();
-        assert_eq!(u.scheme(), UrlScheme::File);
-        assert_eq!(u.as_str(), "file:///abs/path/plugin.wasm");
+    fn file_single_slash_shorthand_refused() {
+        // v1 contract: `file:/abs/path` (RFC 3986 single-slash shorthand)
+        // is REFUSED. The `//` authority separator is mandatory.
+        let err = parse_plugin_url("file:/abs/path/plugin.wasm").unwrap_err();
+        assert!(
+            matches!(err, UrlGateError::Malformed { .. }),
+            "expected Malformed for single-slash shorthand, got {err:?}"
+        );
     }
 
     #[test]
@@ -225,9 +253,15 @@ mod tests {
     }
 
     #[test]
-    fn file_bare_tilde_form_expands() {
-        let u = parse_plugin_url_with_home("file:~/plugins/p.wasm", Some("/Users/alice")).unwrap();
-        assert_eq!(u.as_str(), "file:///Users/alice/plugins/p.wasm");
+    fn file_bare_tilde_shorthand_refused() {
+        // v1 contract: `file:~/path` (no `//` authority separator) is
+        // REFUSED. Use `file://~/path` instead.
+        let err =
+            parse_plugin_url_with_home("file:~/plugins/p.wasm", Some("/Users/alice")).unwrap_err();
+        assert!(
+            matches!(err, UrlGateError::Malformed { .. }),
+            "expected Malformed for bare-tilde shorthand, got {err:?}"
+        );
     }
 
     #[test]
@@ -286,11 +320,65 @@ mod tests {
 
     #[test]
     fn file_relative_path_refused() {
+        // `file:plugins/p.wasm` — no `//`, so this is now rejected as
+        // Malformed before path-absoluteness even comes into play.
         let err = parse_plugin_url("file:plugins/p.wasm").unwrap_err();
         match err {
-            UrlGateError::FileNotAbsolute { .. } => {}
-            other => panic!("expected FileNotAbsolute, got {other:?}"),
+            UrlGateError::Malformed { .. } => {}
+            other => panic!("expected Malformed (no `//`), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn file_single_slash_relative_refused() {
+        // `file:../foo` — no `//` authority separator, must be refused.
+        let err = parse_plugin_url("file:../foo").unwrap_err();
+        assert!(
+            matches!(err, UrlGateError::Malformed { .. }),
+            "expected Malformed for `file:../foo`, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn file_two_slashes_relative_refused() {
+        // `file://plugins/p.wasm` — has `//`, but the path after is
+        // neither `/...` nor `~...`. Must surface FileNotAbsolute.
+        let err = parse_plugin_url("file://plugins/p.wasm").unwrap_err();
+        assert!(
+            matches!(err, UrlGateError::FileNotAbsolute { .. }),
+            "expected FileNotAbsolute for `file://plugins/p.wasm`, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn https_requires_double_slash() {
+        // v1 contract: `https:not-a-url` is refused at the scheme gate,
+        // not silently parsed and left to fail at fetch time.
+        let err = parse_plugin_url("https:not-a-url").unwrap_err();
+        assert!(
+            matches!(err, UrlGateError::Malformed { .. }),
+            "expected Malformed for `https:not-a-url`, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn https_shorthand_colon_host_refused() {
+        // `https:example.com/x.wasm` — single-colon shorthand.
+        let err = parse_plugin_url("https:example.com/x.wasm").unwrap_err();
+        assert!(
+            matches!(err, UrlGateError::Malformed { .. }),
+            "expected Malformed for `https:example.com/x.wasm`, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn https_empty_body_refused() {
+        // `https://` with no host at all.
+        let err = parse_plugin_url("https://").unwrap_err();
+        assert!(
+            matches!(err, UrlGateError::Malformed { .. }),
+            "expected Malformed for `https://`, got {err:?}"
+        );
     }
 
     #[test]

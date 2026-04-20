@@ -133,3 +133,103 @@ fn fs_read_variant_does_not_leak_other_caps() {
         );
     }
 }
+
+// ---------------------------------------------------------------------
+// F-445 regression: plugins MUST NOT see `wasi:*` imports.
+// ---------------------------------------------------------------------
+//
+// Pre-fix the host called `wasmtime_wasi::p2::add_to_linker_async` on
+// every variant — that exposed the whole wasi:filesystem / wasi:sockets
+// / wasi:io / wasi:clocks / wasi:random surface to every plugin,
+// bypassing the `ark:cap/*` coarse gate. Post-fix no variant calls
+// into wasmtime-wasi for linker wiring; wasi is a host-internal
+// concern used inside cap-fn impls only.
+//
+// This test asserts a synthetic component importing
+// `wasi:filesystem/types@0.2.3` (the p2 filesystem interface) is
+// REJECTED at `instantiate_pre` in EVERY variant — including the
+// richest one in the set — because wasi isn't registered at all.
+
+#[test]
+fn wasi_filesystem_import_rejected_in_every_variant() {
+    // Build a set covering every cap so we exercise the richest linker
+    // variant alongside the empty one. If wasi ever sneaks back into
+    // the blanket wiring, the `all_caps_linker` branch here will
+    // catch it — the empty branch would catch a partial regression.
+    let all = caps_key(&[
+        "fs-read",
+        "fs-write",
+        "network",
+        "spawn-process",
+        "bus-send",
+        "bus-receive",
+    ]);
+    let set = LinkerSet::build(vec![all.clone()]).expect("LinkerSet::build");
+
+    // The wasi:filesystem/types interface carries a `descriptor`
+    // resource plus companion functions; for a link-time probe we only
+    // need the import declaration — a single stub fn inside the
+    // imported instance is enough to force resolution. We use the
+    // known p2 filesystem version `0.2.3` (the one wasmtime-wasi 43
+    // exposes) so the name matches the interface wasmtime would have
+    // registered had the pre-fix blanket add still been in place.
+    let wat = r#"
+(component
+  (import "wasi:filesystem/types@0.2.3"
+    (instance
+      (export "ok" (func))
+    )
+  )
+)
+"#;
+    let binary = wat::parse_str(wat).expect("parse synthetic wasi:filesystem WAT");
+    let component = Component::from_binary(engine(), &binary)
+        .expect("compile synthetic wasi:filesystem component");
+
+    for (label, key) in [("empty", CapsKey::new()), ("all-caps", all)] {
+        let linker = set.for_caps(&key).expect("variant must exist");
+        let result = linker.instantiate_pre(&component);
+        assert!(
+            result.is_err(),
+            "F-445 regression: {label} variant MUST refuse a component that \
+             imports wasi:filesystem/types@0.2.3 — plugins NEVER see `wasi:*` \
+             imports. See crates/ark-host/src/linker_set.rs build_one_variant(); \
+             a blanket `wasmtime_wasi::p2::add_to_linker_async` call would have \
+             let this succeed."
+        );
+    }
+}
+
+#[test]
+fn wasi_sockets_import_rejected_in_every_variant() {
+    // Sibling of the fs test: the `wasi:sockets` family must also be
+    // invisible to plugins. Even the `network` cap grant only opens
+    // `ark:cap/network` (stub today, real socket surface in a future
+    // tier); it MUST NOT resolve `wasi:sockets/*` imports.
+    let network = caps_key(&["network"]);
+    let set = LinkerSet::build(vec![network.clone()]).expect("LinkerSet::build");
+
+    let wat = r#"
+(component
+  (import "wasi:sockets/tcp@0.2.3"
+    (instance
+      (export "ok" (func))
+    )
+  )
+)
+"#;
+    let binary = wat::parse_str(wat).expect("parse synthetic wasi:sockets WAT");
+    let component = Component::from_binary(engine(), &binary)
+        .expect("compile synthetic wasi:sockets component");
+
+    for (label, key) in [("empty", CapsKey::new()), ("network", network)] {
+        let linker = set.for_caps(&key).expect("variant must exist");
+        let result = linker.instantiate_pre(&component);
+        assert!(
+            result.is_err(),
+            "F-445 regression: {label} variant MUST refuse a component that \
+             imports wasi:sockets/tcp@0.2.3 — granting `network` opens \
+             `ark:cap/network` only, never wasi:sockets."
+        );
+    }
+}

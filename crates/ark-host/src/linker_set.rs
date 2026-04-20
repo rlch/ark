@@ -19,18 +19,32 @@
 //!
 //! The **`empty` variant** — the linker built from `CapsKey::new()` —
 //! is always present, even when no declared plugin asks for it. It
-//! carries the unconditional `ark:host/*` services and WASI p2 only.
-//! A deny-all plugin runs against this linker.
+//! carries ONLY the unconditional `ark:host/*` services plus the two
+//! shared type interfaces. A deny-all plugin runs against this linker.
 //!
-//! # WASI p2 wiring
+//! # No WASI surface is exposed to plugins
 //!
-//! Every variant calls [`wasmtime_wasi::p2::add_to_linker_async`] so
-//! `wasi:clocks` / `wasi:filesystem` / `wasi:io` / `wasi:sockets`
-//! imports resolve through the per-plugin `WasiCtx` wired at
-//! instantiation time. The WasiCtx itself is default-deny — granting
-//! `network` at the cap level ALSO upgrades the WasiCtx to allow
-//! TCP/UDP/DNS (see `store::wasi_ctx_for_caps`, T-PP-035); granting
-//! `fs-read` adds a read-only preopen.
+//! Earlier drafts called [`wasmtime_wasi::p2::add_to_linker_async`]
+//! on every variant so `wasi:*` imports (`wasi:filesystem`,
+//! `wasi:sockets`, `wasi:io`, `wasi:clocks`, `wasi:random`, …) would
+//! resolve. That wiring was removed in the Tier 3 gate fix (F-445):
+//! a plugin that imports `wasi:filesystem` directly would have
+//! bypassed the `ark:cap/*` coarse gate entirely — the user can grant
+//! `fs-read` but the plugin could import `wasi:filesystem/types` and
+//! touch the world without a host-authored fine gate.
+//!
+//! The rule is now: **plugins never see `wasi:*` imports.** Every
+//! capability-gated I/O primitive the guest needs flows through an
+//! `ark:cap/*` interface (R3 + R4), whose implementation on the host
+//! side may call WASI internally. The bindgen-generated WIT surface
+//! (`crates/ark-plugin-protocol/wit/plugin.wit` +
+//! `widget-tree.wit`) deliberately does NOT `use` or re-export any
+//! `wasi:*` type, so a conforming plugin has no lexical path to
+//! `wasi:*` from `ark:plugin@1.0.0`.
+//!
+//! `PluginCtx` still carries a `WasiCtx` (see `store::wasi_ctx_for_caps`)
+//! because host-side code may call WASI APIs when implementing cap
+//! fns — the context, not the linker, is where WASI lives.
 //!
 //! # Performance
 //!
@@ -74,9 +88,6 @@ impl LinkerSet {
     /// plus an always-present `empty` variant.
     ///
     /// Each variant is wired with:
-    /// * WASI p2 (`wasmtime_wasi::p2::add_to_linker_async`) — resolves
-    ///   any `wasi:*` imports the plugin has, subject to the plugin's
-    ///   `WasiCtx` (built separately by `store::wasi_ctx_for_caps`).
     /// * The three unconditional `ark:host/*` interfaces (`log`,
     ///   `clock`, `plugin-id`) — always registered.
     /// * The helper `types` / `widget-tree-types` interfaces —
@@ -88,6 +99,13 @@ impl LinkerSet {
     ///   `ark:cap/fs-read` but runs against a linker that was built
     ///   without fs-read fails at `instantiate_pre` time — this is the
     ///   R4 "coarse gate" (Approach B proper).
+    ///
+    /// NO `wasi:*` interface is registered on any variant. A plugin
+    /// that imports `wasi:filesystem` / `wasi:sockets` / `wasi:io` /
+    /// etc. fails at `instantiate_pre` in EVERY variant, including the
+    /// ones with caps granted. The plugin contract is
+    /// `ark:host/*` + `ark:cap/*` — WASI is a host-internal concern
+    /// used inside cap-fn impls, never exposed to the guest.
     ///
     /// The cap fine-gate inside each cap-fn body (`cap_fns.rs`) is a
     /// defense-in-depth check that also returns
@@ -129,9 +147,9 @@ impl LinkerSet {
     }
 }
 
-/// Build one `Linker<PluginCtx>` with WASI p2 + the unconditional
-/// `ark:host/*` trio + the helper type interfaces + only those
-/// `ark:cap/*` interfaces named in `caps`.
+/// Build one `Linker<PluginCtx>` with the unconditional `ark:host/*`
+/// trio + the helper type interfaces + only those `ark:cap/*`
+/// interfaces named in `caps`.
 ///
 /// The per-interface `add_to_linker` functions come from the
 /// `plugin-host` bindgen world (see `crates/ark-host/src/bindings.rs`
@@ -140,12 +158,13 @@ impl LinkerSet {
 /// `HasData` impl that makes `D::Data<'_> = &'_ mut PluginCtx`, so
 /// every generated host-fn glue (e.g. `Host::log(host, …)`) gets a
 /// `&mut PluginCtx`.
+///
+/// WASI is NOT added. See the module preamble for the rationale (F-445
+/// — blanket `wasmtime_wasi::p2::add_to_linker_async` would let
+/// plugins import `wasi:filesystem` / `wasi:sockets` directly and
+/// bypass the `ark:cap/*` coarse gate).
 fn build_one_variant(caps: &CapsKey) -> wasmtime::Result<Linker<PluginCtx>> {
     let mut linker: Linker<PluginCtx> = Linker::new(engine());
-    // WASI p2 — resolves `wasi:clocks` / `wasi:io` / `wasi:filesystem` /
-    // `wasi:sockets` imports against the per-plugin `WasiCtx` carried
-    // on `PluginCtx`.
-    wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
 
     // Unconditional `ark:host/*` services — every plugin imports these.
     log::add_to_linker::<_, HasSelf<PluginCtx>>(&mut linker, |ctx| ctx)?;

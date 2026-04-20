@@ -1410,3 +1410,96 @@ The existing `build_zellij_command_inside_zellij_env_still_creates_session` test
 - Did NOT revert the `terminal-node` resource indirection (wit-parser requires it; only the package version was bumped).
 - Did NOT bump `ARK_ABI_VERSION` to 2 (no binary has shipped; R14 semver independence applies).
 - Did NOT change `host_fns.rs` or `cap_fns.rs` bodies (the fine-gate logic was correct; the bug was the coarse-gate being absent at link time).
+
+## Plugin-protocol Tier 3 gate — Cycle 1 findings — 2026-04-20
+
+**Reviewer:** Codex (adversarial tier-gate review of the Tier 3B landings on top of `fac6223`).
+**Tier:** plugin-protocol-3 gate.
+
+### F-444 / F-445 / F-448 — P1 blanket WASI in LinkerSet bypasses `ark:cap/*` coarse gate (FIXED)
+
+**Source:** codex
+**Tier:** plugin-protocol-3
+**Severity:** P1 — BLOCKED the Tier 3 gate
+**Status:** fixed
+**Location:** `crates/ark-host/src/linker_set.rs::build_one_variant()` — every variant called `wasmtime_wasi::p2::add_to_linker_async(&mut linker)`, which registered the entire `wasi:*` Preview 2 family (`wasi:filesystem`, `wasi:sockets`, `wasi:io`, `wasi:clocks`, `wasi:random`, `wasi:cli`, `wasi:environment`, `wasi:stdio`) on every per-cap-profile `Linker<PluginCtx>`, INCLUDING the empty-caps variant. A plugin could import `wasi:filesystem/types` directly, bypassing the `ark:cap/fs-read` coarse gate entirely — the WasiCtx itself is default-deny but the WasiCtx allows the `fs-write` cap to upgrade to read/write, so a plugin that imports `wasi:filesystem` but declares no caps could still walk around the host-authored fs-read surface the moment a user granted any filesystem cap. R3 + R4 both broken in the same move.
+
+**Architectural principle codified here:** plugins never see `wasi:*` imports. The plugin contract is `ark:host/*` (unconditional) + `ark:cap/*` (user-granted). WASI is a HOST-INTERNAL concern for ark's own cap-fn impls.
+
+**Resolution:**
+
+1. `build_one_variant` no longer calls `wasmtime_wasi::p2::add_to_linker_async`. No `wasi:*` interface is registered on any variant.
+2. The `ark-plugin-protocol/wit/plugin.wit` preamble already documented this design intent ("The `ark:plugin` world itself does NOT re-export any `wasi:*` interface; the host wires WASI into each `Linker<PluginCtx>` variant via `wasmtime_wasi::p2::add_to_linker_async` separately") — the code now matches. The "separately" clause was aspirational; the current WIT doesn't reference any `wasi:*` type, so zero wasi wiring is needed in linkers.
+3. `PluginCtx.wasi` remains — cap-fn impls may call WASI APIs internally, and `wasi_ctx_for_caps` still builds the per-cap preopen/socket permissions for that internal use.
+
+**Tests added (`crates/ark-host/tests/linker_cap_gate.rs`):**
+
+- `wasi_filesystem_import_rejected_in_every_variant` — compiles a synthetic WAT component importing `wasi:filesystem/types@0.2.3` and asserts `instantiate_pre` fails on BOTH the empty-caps variant AND the richest (all-caps) variant. A blanket wasi add would have made this succeed.
+- `wasi_sockets_import_rejected_in_every_variant` — same shape for `wasi:sockets/tcp@0.2.3`; the `network` cap must open `ark:cap/network` only, not `wasi:sockets`.
+
+**WASI surface verdict:** NONE. The `Linker<PluginCtx>` built by `build_one_variant` has exactly: `ark:host/{log, clock, plugin-id}` + `ark:plugin/{types, widget-tree-types}` + whichever subset of `ark:plugin/{fs-read, fs-write, network, spawn-process, bus-send, bus-receive}` the variant's `CapsKey` grants. The WIT doesn't `use` or `import` any `wasi:*` type, so no wasi interface needs to be wired to resolve any `ark:*` surface.
+
+### F-446 / F-449 — P2 `url_gate` accepts single-colon shorthand schemes (FIXED)
+
+**Source:** codex
+**Tier:** plugin-protocol-3
+**Severity:** P2 (tier-gate-inline fix)
+**Status:** fixed
+**Location:** `crates/config/src/url_gate.rs::parse_plugin_url_with_home` — the https branch accepted any input starting with `https:` (scheme-colon only), so `https:not-a-url`, `https:example.com/x.wasm`, `https:../foo` all parsed successfully and only failed at fetch time. Similarly `file:/abs/path` (RFC 3986 single-slash shorthand) and `file:~/plugins/x.wasm` (bare tilde without `//`) parsed but were inconsistent with the `file://` form the rest of the codebase documents.
+
+**Resolution:**
+
+1. `https` branch now requires `https://` (strips the `//` prefix; refuses `Malformed` if missing or if body is empty).
+2. `file` branch now requires `file://` (strips the `//` prefix at the top; only THEN accepts `/abs/path` or `~/rel/path` after the `//`). Single-slash + bare-tilde shorthands are `Malformed`.
+3. Existing tests for the refused shorthands were renamed to `..._refused` and flipped to assert the error. New tests cover the positive/negative fixtures called out in the task packet.
+
+**Tests added (`crates/config/src/url_gate.rs::tests`):**
+
+- `file_single_slash_shorthand_refused` (was `file_single_slash_absolute_parses`).
+- `file_bare_tilde_shorthand_refused` (was `file_bare_tilde_form_expands`).
+- `file_single_slash_relative_refused` — `file:../foo` → `Malformed`.
+- `file_two_slashes_relative_refused` — `file://plugins/p.wasm` → `FileNotAbsolute` (has `//` but path is not `/...` or `~...`).
+- `https_requires_double_slash` — `https:not-a-url` → `Malformed`.
+- `https_shorthand_colon_host_refused` — `https:example.com/x.wasm` → `Malformed`.
+- `https_empty_body_refused` — `https://` (no host) → `Malformed`.
+- `file_relative_path_refused` now expects `Malformed` (no `//`) instead of `FileNotAbsolute`.
+
+### F-447 / F-450 — P2 `HostTerminalNode::tree` consumes the resource (FIXED)
+
+**Source:** codex
+**Tier:** plugin-protocol-3
+**Severity:** P2 (tier-gate-inline fix)
+**Status:** fixed
+**Location:** `crates/ark-host/src/host_fns.rs::HostTerminalNode::tree` — the fn called `ResourceTable::delete` and returned the payload by value. The WIT signature `tree: func() -> terminal-widget-tree` is NOT a consumer — the resource handle has its own `drop` glue. Calling `tree()` twice on the same handle surfaced a `ResourceTableError::NotPresent` on the second read, violating kit R10's "terminal-node resource handle is idempotently readable until the guest drops it" implicit contract.
+
+**Resolution:**
+
+1. `tree` now calls `ResourceTable::get(&Resource::new_own(rep))` and rebuilds a fresh `TerminalWidgetTree` via the new `clone_terminal_widget_tree` helper. The helper is manual because `wasmtime::component::Resource<T>` is not `Clone` (ownership-safety), so a `#[derive(Clone)]` on `TerminalWidgetTree` wouldn't propagate; the helper rebuilds each `Resource<TerminalNode>` child handle via `Resource::new_own(rep)` with the same `u32` rep the table uses. The handle's underlying entry lives until the guest (or the host-side `drop` impl) actually drops it.
+2. `drop` impl is unchanged — still tolerates a missing entry as a safety net for malformed guests, but with `tree()` no longer consuming, the expected path is a present entry on first drop.
+3. The `Arc<TerminalNodeBody>` route suggested in the packet wasn't needed for v1 — the shallow rebuild is O(direct-children) and the current usage (terminal renders) is bounded.
+
+**Tests added (`crates/ark-host/tests/host_fns_terminal_node.rs`):**
+
+- `tree_is_idempotent_on_spacer_leaf` — creates a `Spacer` handle, calls `tree()` twice on the same rep, asserts both reads succeed with identical payloads, then exercises a double-drop (second drop must be tolerated).
+- `tree_is_idempotent_on_cursor_leaf` — same shape for a `Cursor` node; catches any variant-specific regression in the `clone_terminal_widget_tree` match arms.
+
+**Gate evidence (Cycle 1):**
+
+- `cargo check --workspace` → clean (0 errors; the pre-existing `cargo:warning=` plugin-size telemetry and two `unused_imports` in `crates/cli/src/commands/bus.rs` predate this change).
+- `cargo clippy -p ark-host -p ark-config --tests` → 0 errors, 2 pre-existing non-fix warnings (wasi_deny_baseline `drop(view)` on `!Drop`, cache.rs complex type).
+- `cargo test -p ark-host` → 32 passing (baseline 26 → +4 linker_cap_gate wasi-rejection tests + +2 host_fns_terminal_node idempotent tests).
+- `cargo test -p ark-config` → 122 unit tests passing (baseline 114 → +8 url_gate negative/positive fixtures; ignored-count unchanged at 2).
+- `cargo test --workspace -- --test-threads=1` → 2471 passing, 24 ignored, 0 failed. The 2 `crates/mux/zellij/src/socket_dir.rs` env-interference failures observed under the default parallel scheduler are a pre-existing artifact (pass cleanly when that crate is run in isolation or at `--test-threads=1`).
+- T-PP-030 (`lint_forbidden_apis`) — still passes. The forbidden wasmtime-wasi API list (`ambient_authority`, `open_ambient_dir`, `WasiCtxBuilder` outside `store.rs`) didn't change; the blanket wasmtime-wasi add removed wasn't on the banned list (it was a policy-level bug, not a lint-level one).
+- T-PP-040 (`no_runtime_cap_prompts`) — still passes. The `wasi` references remaining in `linker_set.rs` are doc-comments describing why wasi is NOT added, not API calls.
+
+**Dead ends avoided:**
+
+- Did NOT re-enable `wasmtime_wasi::p2::add_to_linker_async` as a blanket add (F-445 root).
+- Did NOT expose `wasi:filesystem` or `wasi:sockets` to plugins via any mechanism.
+- Did NOT use `define_unknown_imports_as_traps` as a shortcut (Approach C banned).
+- Did NOT change `ARK_ABI_VERSION` or the WIT package version.
+- Did NOT add new crates to the workspace.
+- Did NOT run `just install` or `cargo build --target wasm32-wasip1` (plugins untouched).
+- Did NOT adopt `Arc<TerminalNodeBody>` for F-447 — manual shallow rebuild is cheaper and keeps the resource-table ownership semantics explicit.
+- Did NOT add `additional_derives: [Clone]` to bindgen — it would fail because `Resource<T>` is not `Clone`, and changing it would propagate surface churn across every generated type.
