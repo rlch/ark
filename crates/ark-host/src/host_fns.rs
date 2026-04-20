@@ -92,69 +92,146 @@ impl widget_tree_types::Host for PluginCtx {}
 /// `widget-tree.wit` (see that file's preamble) — it is not semantic
 /// ownership machinery, just a workaround for wit-parser 0.245's
 /// toposort.
-struct TerminalNodeBody(TerminalWidgetTree);
+pub(crate) struct TerminalNodeBody(pub(crate) TerminalWidgetTree);
 
-/// Reconstruct a `TerminalWidgetTree` from a shared reference, rebuilding
-/// each `Resource<TerminalNode>` handle via `new_borrow(rep)` with the
-/// SAME `u32` rep the table uses internally. The generated
-/// `TerminalWidgetTree` is NOT `Clone` because `wasmtime::component::
-/// Resource<T>` enforces host-side ownership semantics (no bitwise copy),
-/// so a `#[derive(Clone)]` can't propagate. A manual shallow rebuild is
-/// the right tool.
+/// Cycle 3 fix (F-459/F-461): `tree()` produces a DEEP CLONE of the
+/// stored `TerminalWidgetTree`, with every child handle materialised as
+/// a fresh `ResourceTable` entry.
 ///
-/// # Why borrow, not own
+/// # Why not borrow handles
 ///
-/// The children of a `ContainerNode` stored inside a `TerminalNodeBody`
-/// are themselves `Resource<TerminalNode>` handles that were originally
-/// pushed onto the same `ResourceTable` by earlier guest calls to
-/// `terminal-node::new()`. Each of those pushes returned a *single*
-/// OWNED handle. The guest then handed those owned handles to the host
-/// as children of a new parent tree — at which point the host stored
-/// them inside `TerminalNodeBody(TerminalWidgetTree)`. So the table has
-/// exactly ONE owned ticket per live child entry, and it lives inside
-/// the parent's stored body.
+/// Cycle 2 rebuilt each child via `Resource::new_borrow(rep)`. That
+/// passes wasmtime's type-check and the host-side idempotence test, but
+/// it fails the ABI-boundary semantics: **borrowed Wasmtime resources
+/// are CALL-SCOPED**. The borrow is valid only for the duration of the
+/// host call that produced it. Once control returns to the guest and
+/// the guest later enters another host call holding that handle (e.g.
+/// `child.tree()`), the original borrow has expired — the generated
+/// glue will refuse to resolve it, producing an invalid-handle trap or
+/// (worse) silent aliasing if the slot got recycled.
 ///
-/// When the guest later calls `tree()` on the parent and the host hands
-/// back a shallow rebuild of the children, those rebuilt handles must
-/// NOT carry their own drop-rights — if they did, the guest's trip
-/// around the generated `Drop for Resource<T>` glue would remove the
-/// table entry out from under the parent, and the next `tree()` call
-/// (or the parent's own `drop`) would panic with "entry already
-/// removed". Borrow handles make the view non-owning: the guest can
-/// read the tree, but the parent's OWNED handle remains the sole
-/// drop-authority. See kit R10 acceptance: "tree() is idempotent, drop
-/// is what transfers ownership".
-fn clone_terminal_widget_tree(t: &TerminalWidgetTree) -> TerminalWidgetTree {
+/// Deep-cloning sidesteps the borrow-scope problem entirely. Each child
+/// returned by `tree()` is a FRESH `ResourceTable` entry with its own
+/// owned handle. The guest gets independent drop-rights over every
+/// handle in the returned tree; the parent's stored handles and the
+/// view's handles have separate lifetimes; a second call to `tree()`
+/// allocates a second, still-independent snapshot.
+///
+/// Cost is O(total nodes in tree) per `tree()` call plus one
+/// `ResourceTable::push` per child. This is strictly worse than the
+/// shallow-borrow approach in steady-state memory, but it is the only
+/// option that matches wasmtime's published ABI contract for handles
+/// that cross the host/guest boundary. v1 renders are infrequent
+/// compared to the render surface itself; revisit with an `Arc<_>`
+/// interior-shared representation only if profiling flags it.
+///
+/// # Borrow-checker shape
+///
+/// The deep clone is split into two passes. [`shape_snapshot`] walks a
+/// stored `TerminalWidgetTree` under a short immutable borrow of the
+/// resource table and copies the variant + leaf records into a
+/// table-free [`TreeShape`] (containers keep their children as bare
+/// `u32` reps, not handles). Once the immutable borrow is released,
+/// [`rebuild_from_snapshot`] takes `&mut PluginCtx` and does the actual
+/// `ResourceTable::push`es — recursively, since it may need to snapshot
+/// child bodies in turn. That separation is what appeases the borrow
+/// checker: we never hold a `&TerminalNodeBody` reference across a
+/// table mutation.
+///
+/// Owned, table-free mirror of a `TerminalWidgetTree` used to smuggle
+/// subtree shape across a borrow-checker boundary.
+///
+/// We need this intermediate because the recursive deep-clone requires
+/// `&mut ctx` but the caller is inside a `resource_table.get(...)`
+/// immutable borrow — the natural `for child in ... { deep_clone(child,
+/// ctx) }` shape would hold both borrows simultaneously.
+///
+/// `TreeShape` carries the enum variant and its leaf data, PLUS the
+/// child reps (not handles — plain `u32`) when it's a container. A
+/// second pass (`rebuild_from_snapshot`) then does the actual
+/// resource-table pushes without needing to re-enter the original
+/// handle's body.
+enum TreeShape {
+    Text(crate::bindings::ark::plugin::widget_tree_types::TextNode),
+    Spacer(crate::bindings::ark::plugin::widget_tree_types::SpacerNode),
+    Cursor(crate::bindings::ark::plugin::widget_tree_types::CursorNode),
+    Row(ContainerShape),
+    Column(ContainerShape),
+    BoxNode(ContainerShape),
+}
+
+struct ContainerShape {
+    child_reps: Vec<u32>,
+    layout: Option<crate::bindings::ark::plugin::widget_tree_types::LayoutHints>,
+}
+
+fn shape_snapshot(t: &TerminalWidgetTree) -> TreeShape {
     match t {
-        TerminalWidgetTree::Text(n) => TerminalWidgetTree::Text(n.clone()),
-        TerminalWidgetTree::Row(c) => TerminalWidgetTree::Row(clone_container(c)),
-        TerminalWidgetTree::Column(c) => TerminalWidgetTree::Column(clone_container(c)),
-        TerminalWidgetTree::BoxNode(c) => TerminalWidgetTree::BoxNode(clone_container(c)),
-        TerminalWidgetTree::Spacer(n) => TerminalWidgetTree::Spacer(*n),
-        TerminalWidgetTree::Cursor(n) => TerminalWidgetTree::Cursor(*n),
+        TerminalWidgetTree::Text(n) => TreeShape::Text(n.clone()),
+        TerminalWidgetTree::Spacer(n) => TreeShape::Spacer(*n),
+        TerminalWidgetTree::Cursor(n) => TreeShape::Cursor(*n),
+        TerminalWidgetTree::Row(c) => TreeShape::Row(container_shape(c)),
+        TerminalWidgetTree::Column(c) => TreeShape::Column(container_shape(c)),
+        TerminalWidgetTree::BoxNode(c) => TreeShape::BoxNode(container_shape(c)),
     }
 }
 
-/// See [`clone_terminal_widget_tree`].
-///
-/// Each child handle is rebuilt via [`Resource::new_borrow`] — NOT
-/// `new_own`. Using `new_own` here would create duplicate drop-authority
-/// over the same table slot, so the second `tree()` call (or the
-/// parent's own drop) would hit a `ResourceTableError::NotPresent`
-/// panic when the second owner tries to delete an already-deleted
-/// entry. Borrow handles are explicitly documented in wasmtime's
-/// `Resource::new_borrow` as "passed to a guest as a borrowed resource;
-/// the embedder knows the `rep` won't be in use by the guest
-/// afterwards" — exactly what a read-only `tree()` view needs.
-fn clone_container(c: &ContainerNode) -> ContainerNode {
-    ContainerNode {
-        children: c
-            .children
-            .iter()
-            .map(|r| wasmtime::component::Resource::<TerminalNode>::new_borrow(r.rep()))
-            .collect(),
+fn container_shape(c: &ContainerNode) -> ContainerShape {
+    ContainerShape {
+        child_reps: c.children.iter().map(|r| r.rep()).collect(),
         layout: c.layout,
     }
+}
+
+/// Rebuild a `TerminalWidgetTree` from a `TreeShape`, allocating fresh
+/// `ResourceTable` entries for each container's children via the
+/// existing deep-clone recursion ([`deep_clone_container_from_reps`]).
+///
+/// The result is owned independently of the original table entry the
+/// snapshot was taken from.
+fn rebuild_from_snapshot(
+    ctx: &mut PluginCtx,
+    shape: &TreeShape,
+) -> wasmtime::Result<TerminalWidgetTree> {
+    match shape {
+        TreeShape::Text(n) => Ok(TerminalWidgetTree::Text(n.clone())),
+        TreeShape::Spacer(n) => Ok(TerminalWidgetTree::Spacer(*n)),
+        TreeShape::Cursor(n) => Ok(TerminalWidgetTree::Cursor(*n)),
+        TreeShape::Row(c) => Ok(TerminalWidgetTree::Row(deep_clone_container_from_reps(
+            ctx, c,
+        )?)),
+        TreeShape::Column(c) => Ok(TerminalWidgetTree::Column(deep_clone_container_from_reps(
+            ctx, c,
+        )?)),
+        TreeShape::BoxNode(c) => Ok(TerminalWidgetTree::BoxNode(deep_clone_container_from_reps(
+            ctx, c,
+        )?)),
+    }
+}
+
+/// Rebuild a `ContainerNode` from a `ContainerShape` whose children are
+/// referenced by rep. Each rep is looked up in the table, its subtree
+/// shaped-snapshotted, then rebuilt as a fresh entry.
+fn deep_clone_container_from_reps(
+    ctx: &mut PluginCtx,
+    source: &ContainerShape,
+) -> wasmtime::Result<ContainerNode> {
+    let mut new_children = Vec::with_capacity(source.child_reps.len());
+    for rep in &source.child_reps {
+        let snapshot = {
+            let existing: &TerminalNodeBody = ctx
+                .resource_table
+                .get(&Resource::<TerminalNodeBody>::new_own(*rep))?;
+            shape_snapshot(&existing.0)
+        };
+        let cloned = rebuild_from_snapshot(ctx, &snapshot)?;
+        let new_entry = ctx.resource_table.push(TerminalNodeBody(cloned))?;
+        new_children.push(Resource::new_own(new_entry.rep()));
+    }
+    Ok(ContainerNode {
+        children: new_children,
+        layout: source.layout,
+    })
 }
 
 impl HostTerminalNode for PluginCtx {
@@ -178,20 +255,23 @@ impl HostTerminalNode for PluginCtx {
         // consumer — the handle has its own destructor (the `drop` impl
         // below). `tree()` is idempotent: calling it twice on the same
         // handle must yield two identical payloads without surfacing a
-        // "resource missing" error on the second read. Clone the stored
-        // payload instead of removing it from the table.
+        // "resource missing" error on the second read. And — critical
+        // per F-459 — each returned subtree must be INDEPENDENTLY OWNED:
+        // the guest can drop children at will, pass them to subsequent
+        // host calls, and survive the parent being dropped.
         //
-        // Clone cost: `TerminalWidgetTree` is a tagged-union of small
-        // records (color triples, u32 flex/padding, optional styled
-        // strings) plus a list of `Resource<TerminalNode>` children —
-        // the children are handle copies, not a deep tree clone, so the
-        // clone is O(direct-children) per node. For v1 this is cheap
-        // enough to not warrant an `Arc` wrapper; revisit if render
-        // paths show up in profiles.
-        let body: &TerminalNodeBody = self
-            .resource_table
-            .get(&Resource::<TerminalNodeBody>::new_own(self_.rep()))?;
-        Ok(clone_terminal_widget_tree(&body.0))
+        // Strategy: snapshot the stored body under a short immutable
+        // borrow, then deep-clone it — recursively allocating fresh
+        // `ResourceTable` entries for every nested child — into a new
+        // owned tree. See `deep_clone_tree` for the full rationale.
+        let parent_rep = self_.rep();
+        let snapshot = {
+            let body: &TerminalNodeBody = self
+                .resource_table
+                .get(&Resource::<TerminalNodeBody>::new_own(parent_rep))?;
+            shape_snapshot(&body.0)
+        };
+        rebuild_from_snapshot(self, &snapshot)
     }
 
     async fn drop(&mut self, rep: Resource<TerminalNode>) -> wasmtime::Result<()> {

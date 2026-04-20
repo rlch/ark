@@ -19,7 +19,11 @@
 //!   `//` is REQUIRED — a single-colon shorthand like `https:example.com`
 //!   is refused up front instead of discovered at fetch time. After the
 //!   `//`, the host portion must be non-empty and consist of hostname
-//!   characters (`[a-zA-Z0-9.-]+`) with an optional `:PORT` suffix.
+//!   characters (`[a-zA-Z0-9.-]+`) with an optional `:PORT` suffix — OR
+//!   a bracketed IPv6 literal (`[::1]`, `[2001:db8::1]`) optionally
+//!   followed by `:PORT`. The IPv6 grammar itself is not validated: an
+//!   unclosed bracket or empty bracket is rejected, but the contents
+//!   between `[` and `]` are handed verbatim to the fetcher.
 //!
 //! Everything else is an explicit refusal — `http:` especially earns a
 //! bespoke diagnostic because a user typo of `http://` for `https://`
@@ -234,17 +238,95 @@ fn parse_file_url(rest: &str, home: Option<&str>) -> Result<PluginUrl, UrlGateEr
 /// then a non-empty, well-formed host portion.
 ///
 /// The host portion is whatever comes between the `//` and the first
-/// `/`, `?`, or `#` delimiter. It must:
+/// `/`, `?`, or `#` delimiter — BUT a bracketed IPv6 literal (`[…]`) is
+/// treated atomically so its embedded `:` don't get confused for the
+/// hostname/port separator and its content can be anything up to the
+/// matching `]`.
 ///
-/// 1. Be non-empty (rejects `https:///path` and `https://?x`).
-/// 2. Contain no whitespace (rejects `https:// /x`).
-/// 3. Match `^[a-zA-Z0-9.-]+(:\d+)?$` — hostname characters plus an
-///    optional decimal port. We hand-roll the check rather than pulling
-///    in `regex`; the grammar is small.
+/// Accepted host shapes:
+///
+/// - `hostname`                        — `[a-zA-Z0-9.-]+`
+/// - `hostname:PORT`                   — plus decimal port
+/// - `[ipv6]`                          — IPv6 literal, grammar not validated
+/// - `[ipv6]:PORT`                     — IPv6 literal + port
+///
+/// Rejected:
+///
+/// - empty host (`https:///path`, `https://?x`, `https://#frag`, `https://`)
+/// - whitespace in host (`https:// /x`)
+/// - non-hostname characters in a non-bracketed host
+/// - empty or non-numeric port
+/// - unclosed bracket (`https://[::1`)
+/// - empty bracket (`https://[]`)
+/// - characters between `]` and the path delimiter other than `:PORT`
+///
+/// The IPv6 grammar itself is intentionally unchecked. A malformed
+/// literal like `https://[::xyz::]` parses here and surfaces as a clear
+/// resolve-time error from the fetcher instead; we don't want to carry
+/// an IPv6 grammar in the gate.
 fn parse_https_url(rest: &str, raw: &str) -> Result<PluginUrl, UrlGateError> {
     let body = rest.strip_prefix("//").ok_or_else(|| UrlGateError::Malformed {
         raw: raw.to_string(),
     })?;
+
+    // A bracketed IPv6 host is atomic — scan to the matching `]` first
+    // so the subsequent host/port split isn't fooled by IPv6-internal
+    // colons. If the body doesn't start with `[`, the regular hostname
+    // path runs.
+    if let Some(after_bracket) = body.strip_prefix('[') {
+        let close_idx =
+            after_bracket
+                .find(']')
+                .ok_or_else(|| UrlGateError::HttpsInvalidHost {
+                    raw: raw.to_string(),
+                })?;
+        let inside = &after_bracket[..close_idx];
+        if inside.is_empty() {
+            return Err(UrlGateError::HttpsInvalidHost {
+                raw: raw.to_string(),
+            });
+        }
+        // Whitespace inside the bracket is still a host-shape failure —
+        // we don't validate IPv6 internals, but a space is never valid
+        // and the fetcher's error would be opaque.
+        if inside.chars().any(|c| c.is_whitespace()) {
+            return Err(UrlGateError::HttpsInvalidHost {
+                raw: raw.to_string(),
+            });
+        }
+
+        // `rest_after_close` = whatever comes after the `]`. Must be
+        // either empty, a `/`/`?`/`#` path delimiter, or a `:PORT`
+        // optionally followed by a path delimiter.
+        let rest_after_close = &after_bracket[close_idx + 1..];
+        let port_and_path = rest_after_close;
+
+        // Find where the authority ends (first path/query/fragment char).
+        let auth_end = port_and_path
+            .find(|c: char| c == '/' || c == '?' || c == '#')
+            .unwrap_or(port_and_path.len());
+        let authority_tail = &port_and_path[..auth_end];
+
+        if !authority_tail.is_empty() {
+            // Anything after `]` before the path delimiter must be a
+            // `:PORT`. Plain `]foo/x` or `]x` is a malformed authority.
+            let port = authority_tail
+                .strip_prefix(':')
+                .ok_or_else(|| UrlGateError::HttpsInvalidHost {
+                    raw: raw.to_string(),
+                })?;
+            if port.is_empty() || !port.chars().all(|c| c.is_ascii_digit()) {
+                return Err(UrlGateError::HttpsInvalidHost {
+                    raw: raw.to_string(),
+                });
+            }
+        }
+
+        return Ok(PluginUrl {
+            scheme: UrlScheme::Https,
+            raw: raw.to_string(),
+        });
+    }
 
     // Split the body on the first `/`, `?`, or `#` — the prefix is the
     // host[:port] portion. An empty body (`https://`) and an empty host
@@ -506,6 +588,104 @@ mod tests {
         assert!(
             matches!(err, UrlGateError::HttpsInvalidHost { .. }),
             "expected HttpsInvalidHost for non-numeric port, got {err:?}"
+        );
+    }
+
+    // ---- https:// — IPv6 bracketed hosts -----------------------------
+
+    #[test]
+    fn https_ipv6_loopback_accepted() {
+        // `https://[::1]/plugin.wasm` — IPv6 loopback literal.
+        let u = parse_plugin_url("https://[::1]/plugin.wasm").unwrap();
+        assert_eq!(u.scheme(), UrlScheme::Https);
+        assert_eq!(u.as_str(), "https://[::1]/plugin.wasm");
+    }
+
+    #[test]
+    fn https_ipv6_full_with_port_accepted() {
+        // `https://[2001:db8::1]:8443/plugin.wasm` — full-form IPv6 + port.
+        let u = parse_plugin_url("https://[2001:db8::1]:8443/plugin.wasm").unwrap();
+        assert_eq!(u.scheme(), UrlScheme::Https);
+        assert_eq!(u.as_str(), "https://[2001:db8::1]:8443/plugin.wasm");
+    }
+
+    #[test]
+    fn https_ipv6_bracket_only_no_path_accepted() {
+        // `https://[::1]` — bracket, no path. Fetcher defaults the path.
+        let u = parse_plugin_url("https://[::1]").unwrap();
+        assert_eq!(u.scheme(), UrlScheme::Https);
+        assert_eq!(u.as_str(), "https://[::1]");
+    }
+
+    #[test]
+    fn https_ipv6_unclosed_bracket_refused() {
+        // `https://[::1` — no closing `]`.
+        let err = parse_plugin_url("https://[::1").unwrap_err();
+        assert!(
+            matches!(err, UrlGateError::HttpsInvalidHost { .. }),
+            "expected HttpsInvalidHost for unclosed bracket, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn https_ipv6_empty_bracket_refused() {
+        // `https://[]` — empty IPv6 literal.
+        let err = parse_plugin_url("https://[]").unwrap_err();
+        assert!(
+            matches!(err, UrlGateError::HttpsInvalidHost { .. }),
+            "expected HttpsInvalidHost for empty bracket, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn https_ipv6_empty_bracket_with_path_refused() {
+        // `https://[]/x` — empty IPv6 literal, still rejected before path.
+        let err = parse_plugin_url("https://[]/x").unwrap_err();
+        assert!(
+            matches!(err, UrlGateError::HttpsInvalidHost { .. }),
+            "expected HttpsInvalidHost for empty bracket with path, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn https_ipv6_trailing_garbage_refused() {
+        // `https://[::1]foo/x` — characters between `]` and the path
+        // delimiter that don't start with `:PORT` are malformed.
+        let err = parse_plugin_url("https://[::1]foo/x").unwrap_err();
+        assert!(
+            matches!(err, UrlGateError::HttpsInvalidHost { .. }),
+            "expected HttpsInvalidHost for trailing junk after bracket, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn https_ipv6_empty_port_refused() {
+        // `https://[::1]:/x` — colon present, port missing.
+        let err = parse_plugin_url("https://[::1]:/x").unwrap_err();
+        assert!(
+            matches!(err, UrlGateError::HttpsInvalidHost { .. }),
+            "expected HttpsInvalidHost for empty port after bracket, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn https_ipv6_non_numeric_port_refused() {
+        // `https://[::1]:abc/x` — port must be digits only.
+        let err = parse_plugin_url("https://[::1]:abc/x").unwrap_err();
+        assert!(
+            matches!(err, UrlGateError::HttpsInvalidHost { .. }),
+            "expected HttpsInvalidHost for non-numeric port after bracket, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn https_ipv6_whitespace_in_bracket_refused() {
+        // `https://[: :1]/x` — whitespace inside a bracketed host is
+        // always malformed.
+        let err = parse_plugin_url("https://[: :1]/x").unwrap_err();
+        assert!(
+            matches!(err, UrlGateError::HttpsInvalidHost { .. }),
+            "expected HttpsInvalidHost for whitespace in IPv6 literal, got {err:?}"
         );
     }
 

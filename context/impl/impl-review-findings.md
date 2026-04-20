@@ -1,5 +1,83 @@
 # Peer Review Findings
 
+## Plugin-protocol Tier 3 gate — Cycle 3 findings — 2026-04-20
+
+**Reviewer:** packet-driven Cycle 3 override (2-cycle cap waived per user decision).
+**Tier:** plugin-protocol-3 gate.
+**Scope:** re-inspection of Cycle 2 fixes (F-452..F-457) — found a deeper issue in the `new_borrow` approach that only manifests at the host/guest ABI boundary.
+
+### F-459 / F-461 — P1 Cycle-2 `new_borrow` children are CALL-SCOPED and unsafe at the ABI boundary (FIXED)
+
+**Source:** Cycle-3 packet (re-review of F-452/F-455 Cycle-2 fix).
+**Tier:** plugin-protocol-3
+**Severity:** P1 — the previous `Resource::new_borrow` rebuild looks correct from host-side Rust tests but violates wasmtime's published ABI contract. Borrowed resources are valid only for the duration of the host call that produces them; once control returns to the guest and a subsequent host call reuses that handle (e.g. `child.tree()`), the borrow has expired → invalid-handle trap or silent aliasing. The Cycle-1 test was insufficient because it exercised only the host-side trait impl, not the guest-boundary drop-and-re-enter path.
+**Status:** fixed
+**Location:** `crates/ark-host/src/host_fns.rs::clone_container` (now replaced by `shape_snapshot` + `rebuild_from_snapshot` + `deep_clone_container_from_reps`).
+
+**Resolution:**
+
+1. `HostTerminalNode::tree` now DEEP-CLONES the stored body. The walk is split into two passes to satisfy the borrow checker:
+   - `shape_snapshot` walks the stored `TerminalWidgetTree` under a short `&resource_table.get(…)?` borrow and produces a table-free `TreeShape` whose container variants carry children as `Vec<u32>` of reps rather than `Resource<T>` handles.
+   - `rebuild_from_snapshot` then takes `&mut PluginCtx` and recursively allocates fresh `ResourceTable::push` entries for every child, collecting the new owned handles into the returned `ContainerNode`.
+2. Each returned child handle is therefore INDEPENDENTLY OWNED: its lifetime is decoupled from the parent's stored handles and from handles produced by previous or subsequent `tree()` calls. The guest can drop the parent, drop individual children, or pass tree()-returned children back into host calls — every scenario that borrowed handles failed.
+3. Commentary block on `HostTerminalNode::tree` rewritten to document the deep-clone rationale + the two-pass borrow shape. The old "Why borrow, not own" block was inverted.
+4. Steady-state cost: O(total nodes in subtree) per `tree()` call + one `ResourceTable::push` per child. v1 tree() is called per render frame; if profiling ever flags this, switch to an `Arc<TerminalWidgetTree>`-interior representation before re-trying the borrow-handle path. **Do NOT** reintroduce `Resource::new_borrow` for handles that cross the host/guest boundary.
+
+**Tests updated (`crates/ark-host/tests/host_fns_terminal_node.rs`):**
+
+- `tree_with_children_stays_owned_across_multiple_reads` — rewritten for the deep-clone invariant: child reps from tree() MUST differ from the parent-owned originals, and two tree() calls produce two distinct sets of reps. Verifies the table grows by +3 and then +6 after successive reads.
+- ADDED: `tree_children_are_independently_droppable` — call parent.tree(), save child rep, drop PARENT, verify tree()-returned child still resolves in a subsequent tree() call. Pre-fix this was silently broken; post-fix it's the contract.
+- ADDED: `tree_twice_produces_distinct_child_handles` — two tree() calls on the same parent yield children with DIFFERENT `.rep()` values (fresh entries each call).
+- ADDED: `tree_deep_clones_nested_containers` — deep-clone must descend. Row[Row[Spacer]] is cloned and every level's rep differs from the original stored reps.
+
+### F-460 / F-462 — P2 `url_gate` rejects IPv6 bracketed hosts (FIXED)
+
+**Source:** Cycle-3 packet (re-review of F-454/F-457 Cycle-2 fix).
+**Tier:** plugin-protocol-3
+**Severity:** P2 — the Cycle-2 hand-rolled host-char loop required `[a-zA-Z0-9.-]+` in the hostname, which outright rejected RFC-3986 IPv6 literal hosts like `https://[::1]/plugin.wasm` or `https://[2001:db8::1]:8443/…`. Tier-gate-inline fix so registry flows that land on loopback IPv6 during dev aren't refused.
+**Status:** fixed
+**Location:** `crates/config/src/url_gate.rs::parse_https_url`.
+
+**Resolution:**
+
+1. Before the generic host/port split, `parse_https_url` checks `body.starts_with('[')`. If so, it scans to the matching `]` and treats everything between as an atomic IPv6 literal (grammar intentionally NOT validated — host resolver failures surface later with clear messages).
+2. After the closing `]`, the authority-tail must be either empty, a path/query/fragment delimiter (`/`, `?`, `#`), or `:PORT` followed by the same. Anything else (`]foo/x`) is `HttpsInvalidHost`.
+3. Unclosed bracket (`https://[::1`), empty bracket (`https://[]`, `https://[]/x`), empty port (`[::1]:`), non-numeric port (`[::1]:abc`), and whitespace inside brackets all surface `HttpsInvalidHost` with the raw URL echoed back.
+4. Module comment + `parse_https_url` docstring enumerate the accepted shapes and rejected shapes explicitly. No URL-parsing crate added.
+
+**Tests added (`crates/config/src/url_gate.rs::tests`):** 10 new cases.
+
+- Accepted: `https_ipv6_loopback_accepted`, `https_ipv6_full_with_port_accepted`, `https_ipv6_bracket_only_no_path_accepted`.
+- Rejected: `https_ipv6_unclosed_bracket_refused`, `https_ipv6_empty_bracket_refused`, `https_ipv6_empty_bracket_with_path_refused`, `https_ipv6_trailing_garbage_refused`, `https_ipv6_empty_port_refused`, `https_ipv6_non_numeric_port_refused`, `https_ipv6_whitespace_in_bracket_refused`.
+
+**Gate evidence (Cycle 3):**
+
+- `cargo check --workspace` → clean (pre-existing `cargo:warning=` plugin-size telemetry only).
+- `cargo test -p ark-host` → 36 passing (Cycle 2 baseline 33 → +3 new deep-clone tests: `tree_children_are_independently_droppable`, `tree_twice_produces_distinct_child_handles`, `tree_deep_clones_nested_containers`; existing `tree_with_children_stays_owned_across_multiple_reads` rewritten for the new invariant).
+- `cargo test -p ark-config` → 146 passing, 2 ignored (Cycle 2 baseline 136 → +10 IPv6 tests).
+- `cargo test --workspace -- --test-threads=1` → 2497 passing, 24 ignored, 0 failed (Cycle 2 baseline 2484 → +13).
+- `cargo test -p ark-host --test lint_forbidden_apis --test no_runtime_cap_prompts` → 4 passing; T-PP-030 and T-PP-040 both green.
+- `cargo clippy -p ark-host -p ark-config --tests` → no warnings, no errors.
+
+**Dead ends avoided (explicit per packet):**
+
+- Did NOT reintroduce `Resource::new_borrow` for cross-boundary handles (F-459 root cause).
+- Did NOT use `ResourceTable::delete` inside `tree()` (F-447 idempotence invariant preserved).
+- Did NOT add a URL-parsing crate for the IPv6 fix.
+- Did NOT re-enable `wasmtime_wasi::p2::add_to_linker_async`.
+- Did NOT change `ARK_ABI_VERSION` or the WIT package version.
+- Did NOT break T-PP-030 / T-PP-040 lint gates.
+- Did NOT break the doctor.rs R12 `file:/abs` regression gate (Cycle 2 fix preserved).
+
+**Deep-clone strategy notes (for future maintainers):**
+
+- Two-pass because `TerminalWidgetTree` is NOT `Clone` (wasmtime::component::Resource<T> doesn't implement Clone). You cannot take a `&TerminalNodeBody` borrow AND call `resource_table.push(…)` (which requires `&mut`) in the same block.
+- `TreeShape` + `ContainerShape` act as owned intermediates — leaf records are already `Copy`/`Clone`, and children collapse to `Vec<u32>` reps so the shape is fully detached from the table.
+- `rebuild_from_snapshot` recursively calls itself through `deep_clone_container_from_reps`, which re-enters `shape_snapshot` on each nested child's body. This guarantees every node at every depth gets a fresh `ResourceTable` entry.
+- The existing `TerminalNodeBody` type was made `pub(crate)` and its field `pub(crate)` so tests or sibling modules could interrogate it without private-field contortions if needed (not currently exercised; kept minimal).
+
+---
+
 ## Plugin-protocol Tier 3 gate — Cycle 2 findings — 2026-04-20
 
 **Reviewer:** Codex (re-scan of Cycle 1 fixes on top of `13823fb`).
