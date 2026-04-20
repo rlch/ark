@@ -1,7 +1,11 @@
 //! `ark-host` — wasmtime-based plugin runtime substrate.
 //!
-//! T-PP-004 (cavekit-plugin-protocol R1): Tier 0 scaffold. Real
-//! wasmtime wiring lands in Tier 3 (T-PP-025..T-PP-036).
+//! T-PP-004 (cavekit-plugin-protocol R1): Tier 0 scaffold.
+//!
+//! Tier 3A (T-PP-025..T-PP-030) — landed: `engine` singleton, per-plugin
+//! `Store<PluginCtx>`, default-deny `WasiCtx` helper, forbidden-API lint.
+//! Tier 3B+ (T-PP-031..T-PP-036) — pending: bindgen, host-fn bodies,
+//! `LinkerSet`, `InstancePre` cache.
 
 pub mod cache;
 pub mod engine;
@@ -9,3 +13,9 @@ pub mod lifecycle;
 pub mod linker_set;
 pub mod loader;
 pub mod store;
+
+// Tier 3A public surface — the only names Tier 3B and downstream
+// crates should need. Deeper types (e.g. `LogSink`, `ticks_seen`) are
+// reachable via their modules for callers that want them.
+pub use engine::{engine, start_epoch_ticker};
+pub use store::{PluginCtx, default_deny_wasi, new_default_deny_store, new_store};
