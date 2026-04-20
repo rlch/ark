@@ -253,18 +253,20 @@ One scene file = one composed configuration for one `ark` session.
 
 **Description:** Everything is an extension. No shipped-vs-user distinction in format or API. Extensions provide views, intents, events, and supervisor-side lifecycle hooks.
 
+> **SUPERSEDED (2026-04-20) for the `wasm` delivery mode** by `cavekit-plugin-protocol.md` (the new `wasm-component` mode replaces the old `wasm` mode entirely). The `compiled-in` and `subprocess` delivery modes are unchanged. Wasm extensions are now ark-native components loaded by ark-host's own wasmtime runtime, not zellij; manifest format moves from `ark.metadata` (KDL via facet-kdl) to `ark-meta:v1` + `ark-caps:v1` postcard custom sections (no parser in guest); capability gating moves from runtime modal to install-time refusal against user grants in `ark.kdl`. See plugin-protocol R1-R14.
+
 **Acceptance Criteria:**
 
 **Format parity:**
-- [ ] Identical manifest format for compiled-in, subprocess, and wasm extensions.
+- [ ] Identical manifest format for compiled-in, subprocess, and wasm-component extensions (the wasm-component manifest is the `ark-meta:v1` postcard payload per plugin-protocol R9, conceptually equivalent to the other modes' manifests).
 - [ ] For compiled-in Rust extensions: manifest code-generated via `#[derive(Extension)]` + facet SHAPE. Zero manifest file.
 - [ ] For subprocess extensions: hand-written `extension.kdl` alongside binary.
-- [ ] For wasm extensions: manifest embedded as `ark.metadata` custom section in `.wasm`.
+- [ ] For wasm-component extensions: manifest emitted at build time via `#[derive(ArkPlugin)]` + `#[derive(Plugin)]` into `ark-caps:v1` + `ark-meta:v1` custom sections (no facet-kdl in guest). Per plugin-protocol R3 + R9.
 
 **Delivery modes (3 for v1):**
 - [ ] `compiled-in` — Rust crate in workspace. In-process trait dispatch. Registered via `inventory`/`linkme` at boot.
 - [ ] `subprocess` — any-language binary. NDJSON JSON-RPC over unix socket. Ark spawns protocol handler; view process runs in pane separately.
-- [ ] `wasm` — zellij plugin runtime. Loaded by zellij. Ark protocol via pipe through ark-bus.
+- [ ] `wasm-component` — wasm component-model component. Loaded by ark-host's own wasmtime runtime (NOT zellij). Capability-gated via `ark:cap/*` imports. Per `cavekit-plugin-protocol.md` R1-R14.
 
 **Resolution (no central registry file):**
 - [ ] `use "<name>"` resolves by scanning (project-local wins, XDG convention):

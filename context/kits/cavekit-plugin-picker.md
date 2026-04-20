@@ -7,7 +7,7 @@ last_edited: "2026-04-16"
 
 > **v0.1 (shipped inline, current content):** zellij wasm plugin loaded by the built-in default scene as `plugin "picker" { source "shipped:picker"; mount "floating" }` with a default keybind (e.g., `Alt p`). The R1–R7 acceptance criteria below describe this runtime.
 >
-> **Port to ark-native extension (scene R17):** `ark-picker` becomes an ark extension with `ExtensionMetadata` + sidecar scene fragment. Default scene migrates to `use "picker"` form. Inline compat retained indefinitely.
+> **Port to ark-native wasm-component (REVISED 2026-04-20):** `ark-picker` becomes an ark wasm-component plugin per `cavekit-plugin-protocol.md`. The earlier `ExtensionMetadata`-via-`register_extension!` design is retired — that path pulled facet-kdl into the wasm guest. New path: `#[derive(ArkPlugin)]` + `#[derive(Plugin)]` emit postcard custom sections; ark-host's wasmtime loads the component; capabilities declared via `ark:cap/*` imports cross-checked against user grants in `ark.kdl`. Default scene migrates to `use "picker"` form (unchanged from prior plan). Runtime behavior unchanged. The R1–R7 behavioral requirements below stay; the underlying plugin ABI moves from zellij-tile to ark-plugin-protocol R2 WIT world.
 >
 > **2026-04-18 scope cut:** ACP permission-modal feature removed. ACP was deleted from ark; there are no permission requests for the picker to render. Picker is now purely a session-management UI.
 

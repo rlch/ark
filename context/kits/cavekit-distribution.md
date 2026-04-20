@@ -45,6 +45,9 @@ Building, packaging, and shipping ark. Cargo workspace layout, `cargo-dist` rele
 **Dependencies:** R1
 
 ### R3: Wasm plugin embedding
+
+> **AMENDED (2026-04-20)** by `cavekit-plugin-protocol.md` R12. Once the wasm-component plugin protocol lands, `ark-plugin-status` and `ark-plugin-picker` are rebuilt as ark-native wasm-component plugins (loaded by ark-host's own wasmtime, not by zellij). The embedding mechanism stays — the host still ships the plugins inside the `ark` binary so the install footprint stays single-artifact — but the build-time path changes (component-model build, no facet-kdl pulled into the guest, no `~/.config/zellij/plugins/` reconciliation), and runtime loading goes through plugin-protocol R8's three-phase loader instead of zellij's plugin runtime. This R3 stays as the embedding contract; the plugin-protocol kit owns the loader contract. Until the migration completes, the existing zellij-tile build path is the transitional implementation.
+
 **Description:** Ship wasm plugins inside the `ark` binary.
 **Acceptance Criteria:**
 - [ ] `ark-cli` crate has a `build.rs` that:

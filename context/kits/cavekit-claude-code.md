@@ -73,8 +73,9 @@ Depends on:
   - `ArkExtension::doctor_checks` — preflight checks (R10).
   - `ArkExtension::list_columns` — contributes `cc model`, `cc tokens`,
     `cc cost` (R11).
-  - `ArkExtension::control_verbs` — registers
-    `ark ext claude-code install-hooks`, `... reinstall-hook-binary`.
+  - **Lifecycle hooks (per `cavekit-plugin-protocol.md` R7, replacing the prior `control_verbs` design):**
+    - `on-install(install-event::install | update | host-update | reload)` — idempotent setup. Writes the `~/.claude/settings.json` reconciler entry, copies the `cc-hook` binary into place, and verifies prerequisites. Replaces the prior standalone `ark ext claude-code install-hooks` and `... reinstall-hook-binary` verbs — both folded into this single idempotent hook fired by ark on install/update/host-upgrade/dev-reload.
+    - `load()` — per-session subscriptions: open the per-session unix socket, attach the transcript fs-watcher, register intent handlers.
 - **Soul Phase 3 complete** — ACP deleted.
 - **Soul Phase 4 complete (revised)** — `crates/orchestrators/claude-code/` +
   `crates/hook/` + `crates/types/src/permission.rs` deleted as ark crates;
@@ -196,7 +197,7 @@ socket.
   targeting other commands are preserved; only ark-managed entries
   (matched by a stable comment / key marker) are updated.
 - Version drift (cc-hook binary version ≠ crate version) triggers a
-  doctor warning + remediation hint (`ark ext claude-code reinstall-hook-binary`).
+  doctor warning + remediation hint (`ark ext reload claude-code` to re-fire `on-install`).
 - On scene without `use "claude-code"`, the extension does NOT modify
   settings.json. Existing ark-managed entries from a prior session stay;
   cc-hook being invoked without a live socket is a no-op (see R2).
@@ -282,9 +283,11 @@ validates and surfaces mismatch as a doctor warning.
   next `ark doctor`) and continues forwarding events.
 - Subsequent POSTs in the same session do NOT re-emit `bridge_version`
   (kept lean; one version check per session is enough).
-- Mismatch remediation: user runs `ark ext claude-code reinstall-hook-binary`
-  which rebuilds cc-hook from the current crate and replaces the
-  installed binary.
+- Mismatch remediation (post plugin-protocol migration): the `on-install`
+  lifecycle hook re-runs idempotently on the next ark restart or on
+  explicit `ark ext reload claude-code` (which fires `install-event::reload`
+  per plugin-protocol R7). The standalone `ark ext claude-code reinstall-hook-binary`
+  verb is retired; the user simply triggers a reload.
 
 ---
 
@@ -506,7 +509,7 @@ accounting.
   or similar, per current Claude Code install docs).
 - Check: `cc-hook` binary exists at the expected install path and its
   version matches the crate version. Mismatch / absence → warning with
-  remediation (`ark ext claude-code reinstall-hook-binary`).
+  remediation (`ark ext reload claude-code` per plugin-protocol R7 reload).
 - Check: `~/.claude/settings.json` exists and its `hooks` block has
   ark-managed entries for all 9 event kinds pointing at the installed
   cc-hook. Drift → warning with remediation
