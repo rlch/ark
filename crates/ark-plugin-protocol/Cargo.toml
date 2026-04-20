@@ -6,6 +6,11 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+# T-PP-015 (cavekit-plugin-protocol R2): WIT lint runs at build time
+# over every `wit/*.wit` file. Enforces the ark:host/* vs ark:cap/*
+# interface partition and the WASI-no-reexport rule. Pure std — no
+# build-dependencies required.
+build = "build.rs"
 
 # T-PP-001 (cavekit-plugin-protocol R2, R6): shared protocol surface
 # between `ark-host` (runtime substrate) and `ark-plugin-sdk` (guest-side
@@ -16,5 +21,11 @@ rust-version.workspace = true
 ark-types = { path = "../types" }
 serde = { workspace = true }
 thiserror = { workspace = true }
+# T-PP-016 / T-PP-017 (cavekit-plugin-protocol R3, R9): `postcard` is
+# the on-disk format for both the `ark-caps:v1` manifest and the
+# `ark-meta:v1` manifest. Uses the workspace pin (`use-std` feature)
+# so the host side can work freely with `Vec<u8>` / `String`; the
+# guest-side proc-macro consumes a no-std postcard separately.
+postcard = { workspace = true }
 
 [dev-dependencies]

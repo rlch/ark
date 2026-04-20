@@ -1,0 +1,169 @@
+// ark plugin WIT world — v1 contract.
+//
+// Spec: context/kits/cavekit-plugin-protocol.md R2 (WIT world), R7 (lifecycle).
+//
+// v1 commitments:
+//   - Package is `ark:plugin@0.1.0`; MAJOR bump on any export rename/removal,
+//     on a rename/removal of an `ark:host/*` or `ark:cap/*` interface, or on
+//     an incompatible change to the `install-event` variant. MINOR bump on
+//     additive changes (new `ark:cap/*` interface, new additive arm on
+//     `install-event` via the `reserved-future` sentinel, new optional field
+//     on a record). Matches the versioning contract in R2.
+//   - `world plugin` exports EXACTLY the five lifecycle funcs enumerated
+//     below — no more, no fewer. Adding a sixth export requires an
+//     `ARK_ABI_VERSION` bump (see crates/types/src/abi.rs) and a MAJOR world
+//     bump per R2.
+//   - All host imports live under one of two prefixes: `ark:host/*`
+//     (unconditional services, always linked) or `ark:cap/*` (capability-
+//     gated services, linked only when the user's `ark.kdl` grants the
+//     matching cap). CI lint in `crates/ark-plugin-protocol/build.rs`
+//     enforces the partition.
+//   - WASI p2 deps (`wasi:clocks/monotonic-clock@0.2.3`,
+//     `wasi:io/streams@0.2.3`) are consumed *inside* host-owned
+//     resources as dependencies of `ark:host/clock` and the
+//     `ark:cap/*` I/O interfaces. The `ark:plugin` world itself does
+//     NOT re-export any `wasi:*` interface; the host wires WASI into
+//     each `Linker<PluginCtx>` variant via
+//     `wasmtime_wasi::p2::add_to_linker_async` separately. This keeps
+//     the plugin contract decoupled from WASI's own version churn.
+//
+// See cavekit-plugin-protocol.md R2 (this world) and R7 (lifecycle
+// semantics + doc-comment idempotency guarantees).
+
+package ark:plugin@0.1.0;
+
+// ---------------------------------------------------------------
+// Unconditional host services — every plugin sees these.
+// ---------------------------------------------------------------
+
+interface log {
+    /// Emit a log line at the host's info level.
+    log: func(message: string);
+}
+
+interface clock {
+    /// Monotonic nanoseconds since some host-chosen epoch. Backed by the
+    /// host's `wasi:clocks/monotonic-clock@0.2.3` wiring; exposed here
+    /// as a simpler function so plugins don't have to pull the full
+    /// WASI interface surface.
+    now-ns: func() -> u64;
+}
+
+interface plugin-id {
+    /// The calling plugin's identity string (typically the URL it was
+    /// loaded from — `file:./foo.wasm`, `https://…`).
+    id: func() -> string;
+}
+
+// ---------------------------------------------------------------
+// Capability-gated host services — each is present in a linker variant
+// only when the user's `ark.kdl` has granted the matching cap (R4, R5).
+//
+// Every interface declares AT LEAST ONE function so the import is
+// observable via `Component::component_type().imports()` (the R3 caps
+// drift check relies on the import set being non-empty). The `ok`
+// stubs are intentional placeholders — the full function surface lands
+// in later tiers (and will wire `wasi:io/streams@0.2.3` resources
+// where needed).
+// ---------------------------------------------------------------
+
+interface fs-read {
+    /// Stub. Real fs-read surface (open, read, metadata, …) lands in a
+    /// later tier. Exists now so the import is visible to the host's
+    /// cap scanner.
+    ok: func();
+}
+
+interface fs-write {
+    /// Stub. See `fs-read` for rationale.
+    ok: func();
+}
+
+interface network {
+    /// Stub. See `fs-read` for rationale.
+    ok: func();
+}
+
+interface spawn-process {
+    /// Stub. See `fs-read` for rationale.
+    ok: func();
+}
+
+interface bus-send {
+    /// Stub. See `fs-read` for rationale.
+    ok: func();
+}
+
+interface bus-receive {
+    /// Stub. See `fs-read` for rationale.
+    ok: func();
+}
+
+// ---------------------------------------------------------------
+// Shared types used by the guest-export surface.
+// ---------------------------------------------------------------
+
+interface types {
+    use widget-tree-types.{widget-tree};
+
+    /// Reason an `on-install` hook is running. See R7 acceptance
+    /// criteria: four concrete arms + one sentinel arm for non-exhaustive
+    /// evolution (MINOR additions do not break plugins that match on
+    /// `reserved-future`).
+    ///
+    /// DO NOT REMOVE the `reserved-future` arm — it is the documented
+    /// escape hatch for adding a fifth reason in a future MINOR without
+    /// breaking plugins compiled against v1. See kit R7.
+    variant install-event {
+        install,
+        update(string),      // from-version
+        host-update(string), // from-host-version
+        reload,
+        // DO NOT REMOVE — sentinel for non-exhaustive evolution per kit R7
+        reserved-future(u32),
+    }
+
+    /// Host-delivered event the plugin may act on. Placeholder record
+    /// at Tier 1 — the full shape (per-event tagged union covering
+    /// pane lifecycle, config reload, scene diffs, keybind chords, …)
+    /// lands in a later tier. Plugins should treat it as opaque for
+    /// now; match-against-nothing keeps the WIT surface future-proof.
+    record host-event { }
+
+    /// Inbound pipe-bus message. Placeholder record at Tier 1 — the
+    /// full shape (intent + payload + routing metadata) lands in a
+    /// later tier when the pipe bus is wired through the WIT surface.
+    record pipe-message { }
+}
+
+// ---------------------------------------------------------------
+// The single world every ark plugin targets.
+// ---------------------------------------------------------------
+
+world plugin {
+    // Unconditional host services — R2 acceptance.
+    import log;
+    import clock;
+    import plugin-id;
+
+    // Capability-gated host services — R2 acceptance. Present in a
+    // linker variant only when the matching cap is granted.
+    import fs-read;
+    import fs-write;
+    import network;
+    import spawn-process;
+    import bus-send;
+    import bus-receive;
+
+    use types.{install-event, host-event, pipe-message};
+    use widget-tree-types.{widget-tree};
+
+    // Guest exports — R7 acceptance. Exactly five lifecycle funcs.
+    //
+    /// May run again on the next activation cycle — must be idempotent.
+    export on-install: func(event: install-event);
+    export load: func();
+    export update: func(event: host-event) -> bool;
+    export render: func(view-id: string, width: u32, height: u32) -> widget-tree;
+    export pipe: func(message: pipe-message) -> bool;
+}

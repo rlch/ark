@@ -1,0 +1,102 @@
+// ark plugin widget-tree WIT types — v1 contract.
+//
+// Spec: context/kits/cavekit-plugin-protocol.md R10 (abstract widget
+// tree per view type). Plugins emit data, not pixels — the host owns
+// the materializer that turns a `widget-tree` into the active render
+// surface (`crates/ark-render-terminal/`). See also the `render` hook
+// signature in R7.
+//
+// Non-exhaustive evolution note: WIT does not yet support
+// `#[non_exhaustive]` markers directly (upstream issue tracked).
+// Every variant in this file is subject to additive extension in a
+// future MINOR — plugins / bindings MUST NOT rely on closed-variant
+// exhaustiveness. Specifically:
+//   - `widget-tree` may gain a `gui(...)` arm (and later `web(...)`,
+//     …) as new host render targets land.
+//   - `terminal-widget-tree` may gain new node kinds (e.g. `table`,
+//     `overlay`, `link`). Existing node kinds are stable; additions
+//     are MINOR.
+//
+// Reserved arms are commented out below, not declared, so that the
+// WIT parser sees a minimal v1 surface while this file documents the
+// future direction.
+
+package ark:plugin@0.1.0;
+
+interface widget-tree-types {
+    /// RGB colour triple. Theme-resolved values may override fg/bg in
+    /// the host materializer; plugins should stick to theme tokens
+    /// where possible (see R10 cross-reference).
+    record color {
+        r: u8,
+        g: u8,
+        b: u8,
+    }
+
+    record text-style {
+        fg: option<color>,
+        bg: option<color>,
+        bold: bool,
+        italic: bool,
+        underline: bool,
+    }
+
+    record text-node {
+        content: string,
+        style: option<text-style>,
+    }
+
+    record layout-hints {
+        gap: u32,
+        padding: u32,
+    }
+
+    record container-node {
+        children: list<terminal-widget-tree>,
+        layout: option<layout-hints>,
+    }
+
+    record spacer-node {
+        flex: u32,
+    }
+
+    enum cursor-shape {
+        block,
+        bar,
+        underline,
+    }
+
+    record cursor-node {
+        row: u32,
+        col: u32,
+        shape: cursor-shape,
+    }
+
+    /// Subset of `widget-tree` covering the TerminalView materializer.
+    /// Recursive variant — `row`/`column`/`box-node` contain further
+    /// `terminal-widget-tree` children via `container-node`.
+    ///
+    /// `box` is a WIT reserved keyword; the terminal-container arm is
+    /// named `box-node` to sidestep the reserved-keyword conflict.
+    ///
+    /// Subject to additive extension in a future MINOR (see file header).
+    variant terminal-widget-tree {
+        text(text-node),
+        row(container-node),
+        column(container-node),
+        box-node(container-node),
+        spacer(spacer-node),
+        cursor(cursor-node),
+    }
+
+    /// Tagged union over render targets. v1 ships exactly one arm
+    /// (`terminal`); the `gui` arm is reserved for a future host GUI
+    /// materializer. See R10.
+    ///
+    /// Subject to additive extension in a future MINOR (see file header).
+    ///
+    ///   reserved for future: gui(gui-widget-tree),
+    variant widget-tree {
+        terminal(terminal-widget-tree),
+    }
+}

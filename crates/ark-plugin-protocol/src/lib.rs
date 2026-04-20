@@ -6,10 +6,15 @@
 
 pub mod bus;
 pub mod errors;
+pub mod manifest;
 pub mod target;
 
 pub use bus::{BusError, Intent, IntentTarget, PipeMessage, PipeSource};
 pub use errors::PluginLoadError;
+pub use manifest::{
+    CAPS_SECTION_NAME, CAPS_SECTION_NAME_V2, CapDecl, CapsManifest, META_SECTION_NAME,
+    META_SECTION_NAME_V2, ManifestValidationError, MetaManifest,
+};
 pub use target::{Target, host_target};
 
 // Re-export the ABI version constants so plugin authors / host code can
