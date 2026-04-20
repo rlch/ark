@@ -22,10 +22,11 @@
 //! (see `engine.rs`).
 
 use std::collections::BTreeSet;
+use std::time::Instant;
 
 use wasmtime::Store;
 use wasmtime::component::ResourceTable;
-use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::engine::engine;
 
@@ -82,6 +83,10 @@ pub struct PluginCtx {
     pub granted_caps: BTreeSet<String>,
     /// Sink for plugin-emitted log records. See [`LogSink`].
     pub log_sink: Box<dyn LogSink>,
+    /// Lazy monotonic-clock epoch. Set on the first `ark:host/clock`
+    /// call (T-PP-032) so `now-ns` returns a small u64 delta instead of
+    /// a full `Instant` timestamp. `None` until the first clock call.
+    pub monotonic_epoch: Option<Instant>,
 }
 
 impl PluginCtx {
@@ -99,6 +104,7 @@ impl PluginCtx {
             plugin_id: plugin_id.into(),
             granted_caps,
             log_sink,
+            monotonic_epoch: None,
         }
     }
 }
@@ -178,4 +184,55 @@ pub fn new_default_deny_store(
 ) -> Store<PluginCtx> {
     let ctx = PluginCtx::new(default_deny_wasi(), plugin_id, granted_caps, log_sink);
     new_store(ctx)
+}
+
+/// Builds a `WasiCtx` with preopens / socket allows derived from the
+/// granted capability set (T-PP-035, cavekit-plugin-protocol R1 + R4).
+///
+/// The mapping table:
+///
+/// | Cap                  | WasiCtx delta                                                 |
+/// |----------------------|---------------------------------------------------------------|
+/// | (none)               | [`default_deny_wasi`] baseline — no preopens, TCP/UDP/DNS off |
+/// | `fs-read`            | `preopened_dir(plugin_dir, "/", READ, READ)` (read-only)      |
+/// | `fs-read`+`fs-write` | preopen upgraded to `DirPerms::all()` / `FilePerms::all()`    |
+/// | `network`            | `allow_tcp(true)`, `allow_udp(true)`, `allow_ip_name_lookup(true)` |
+/// | `spawn-process`      | no effect — gated via the `ark:cap/spawn-process` host fn      |
+/// | `bus-send` / `bus-receive` | no effect — gated via the `ark:cap/bus-*` host fns         |
+///
+/// The per-cap deltas are additive on top of the default-deny baseline;
+/// ordering within `granted` does not matter. A filesystem preopen
+/// failure (typical cause: `plugin_dir` does not exist) surfaces as a
+/// `wasmtime::Error`; the Tier 3B loader folds that into
+/// [`PluginLoadError`] further up the stack.
+///
+/// [`PluginLoadError`]: ark_plugin_protocol::PluginLoadError
+pub fn wasi_ctx_for_caps(
+    plugin_dir: &std::path::Path,
+    granted: &BTreeSet<String>,
+) -> wasmtime::Result<WasiCtx> {
+    let mut b = WasiCtxBuilder::new();
+    // Baseline: mirror `default_deny_wasi` exactly. We cannot reuse
+    // that helper because the builder consumes itself on `.build()`.
+    b.allow_tcp(false).allow_udp(false).allow_ip_name_lookup(false);
+
+    let has_fs_read = granted.contains("fs-read");
+    let has_fs_write = granted.contains("fs-write");
+    if has_fs_read || has_fs_write {
+        // fs-write implies fs-read (per kit R5 cap semantics). Perms
+        // start READ-only; if fs-write is also granted, upgrade to
+        // full DirPerms / FilePerms on the same preopen.
+        let (dir_perms, file_perms) = if has_fs_write {
+            (DirPerms::all(), FilePerms::all())
+        } else {
+            (DirPerms::READ, FilePerms::READ)
+        };
+        b.preopened_dir(plugin_dir, "/", dir_perms, file_perms)?;
+    }
+
+    if granted.contains("network") {
+        b.allow_tcp(true).allow_udp(true).allow_ip_name_lookup(true);
+    }
+
+    Ok(b.build())
 }

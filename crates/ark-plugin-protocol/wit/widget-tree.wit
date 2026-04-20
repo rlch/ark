@@ -1,3 +1,5 @@
+package ark:plugin@0.1.0;
+
 // ark plugin widget-tree WIT types — v1 contract.
 //
 // Spec: context/kits/cavekit-plugin-protocol.md R10 (abstract widget
@@ -20,8 +22,12 @@
 // Reserved arms are commented out below, not declared, so that the
 // WIT parser sees a minimal v1 surface while this file documents the
 // future direction.
-
-package ark:plugin@0.1.0;
+//
+// File preamble note: the `package` declaration precedes the preamble
+// comments so wit-parser does not attach the preamble as a doc-comment
+// on the package. See `plugin.wit` for the full rationale — only one
+// `.wit` file in a multi-file package may carry doc-comments on the
+// `package` item.
 
 interface widget-tree-types {
     /// RGB colour triple. Theme-resolved values may override fg/bg in
@@ -51,8 +57,29 @@ interface widget-tree-types {
         padding: u32,
     }
 
+    /// Opaque host-owned handle that wraps one `terminal-widget-tree`
+    /// node inside a `container-node.children` list. Required because
+    /// wit-parser's type-graph toposort (wit-parser 0.245) does not
+    /// thread `list<T>` as an indirection boundary — a direct
+    /// `list<terminal-widget-tree>` in `container-node` would be
+    /// diagnosed as `type depends on itself`. Threading children
+    /// through an owned resource makes the recursion explicit (handles
+    /// are always boxed) and satisfies the toposort.
+    ///
+    /// On the host side (`ark-host`) the resource is materialised as
+    /// an `Arc<TerminalWidgetTree>` stored in the plugin's
+    /// `ResourceTable`; on the guest side (`ark-plugin-sdk`) the
+    /// generated `Own<TerminalNode>` wrapper can be constructed from
+    /// the corresponding Rust enum.
+    resource terminal-node {
+        constructor(tree: terminal-widget-tree);
+        /// Unwrap the resource back into the tagged tree value. The
+        /// host materializer calls this to walk children.
+        tree: func() -> terminal-widget-tree;
+    }
+
     record container-node {
-        children: list<terminal-widget-tree>,
+        children: list<terminal-node>,
         layout: option<layout-hints>,
     }
 
@@ -74,7 +101,8 @@ interface widget-tree-types {
 
     /// Subset of `widget-tree` covering the TerminalView materializer.
     /// Recursive variant — `row`/`column`/`box-node` contain further
-    /// `terminal-widget-tree` children via `container-node`.
+    /// `terminal-widget-tree` children via a list of `terminal-node`
+    /// resource handles (see `terminal-node` for the rationale).
     ///
     /// `box` is a WIT reserved keyword; the terminal-container arm is
     /// named `box-node` to sidestep the reserved-keyword conflict.

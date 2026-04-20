@@ -1,3 +1,5 @@
+package ark:plugin@0.1.0;
+
 // ark plugin WIT world — v1 contract.
 //
 // Spec: context/kits/cavekit-plugin-protocol.md R2 (WIT world), R7 (lifecycle).
@@ -29,8 +31,15 @@
 //
 // See cavekit-plugin-protocol.md R2 (this world) and R7 (lifecycle
 // semantics + doc-comment idempotency guarantees).
-
-package ark:plugin@0.1.0;
+//
+// File preamble note: the `package` declaration precedes the preamble
+// comments so wit-parser does not attach the preamble as a doc-comment
+// on the package. A multi-file WIT package may carry docs on at most
+// one `package` declaration; keeping both files package-at-line-1 lets
+// wit-parser treat the preamble as file-level commentary. The
+// comment-attachment instead attaches the preamble to the first
+// interface below — acceptable, as interface doc-comments are
+// advisory.
 
 // ---------------------------------------------------------------
 // Unconditional host services — every plugin sees these.

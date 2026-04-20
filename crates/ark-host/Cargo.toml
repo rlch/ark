@@ -23,7 +23,21 @@ thiserror = { workspace = true }
 # come from workspace feature set. Fuel is explicitly NOT enabled.
 wasmtime = { workspace = true }
 wasmtime-wasi = { workspace = true }
+# T-PP-032: `ark:host/log` routes plugin log records into the host's
+# tracing subscriber.
+tracing = { workspace = true }
+# T-PP-036: `InstancePre` cache keyed by sha256 of the wasm bytes.
+sha2 = { workspace = true }
 
 [dev-dependencies]
 # T-PP-026/T-PP-027: async runtime for the epoch-ticker + singleton tests.
 tokio = { workspace = true }
+# T-PP-036: cache test constructs a minimal `Component` from text via
+# `Component::new`, which requires a compilation backend. Cranelift is
+# the standard backend and is needed only for the test binary — the
+# `ark-host` library itself never compiles components at runtime and
+# keeps wasmtime's `cranelift` feature OFF in production.
+wasmtime = { workspace = true, features = ["cranelift", "runtime"] }
+# `wat` crate parses WebAssembly text format — the cache test wraps a
+# minimal inline `(component)` string into a real `Component`.
+wat = "1.0"

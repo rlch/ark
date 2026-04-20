@@ -420,10 +420,13 @@ version = "0.1.0"
 dependencies = [
  "ark-plugin-protocol",
  "ark-types",
+ "sha2",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "wasmtime",
  "wasmtime-wasi",
+ "wat",
 ]
 
 [[package]]

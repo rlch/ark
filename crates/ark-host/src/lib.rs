@@ -7,8 +7,11 @@
 //! Tier 3B+ (T-PP-031..T-PP-036) — pending: bindgen, host-fn bodies,
 //! `LinkerSet`, `InstancePre` cache.
 
+pub mod bindings;
 pub mod cache;
+pub mod cap_fns;
 pub mod engine;
+pub mod host_fns;
 pub mod lifecycle;
 pub mod linker_set;
 pub mod loader;
@@ -18,4 +21,11 @@ pub mod store;
 // crates should need. Deeper types (e.g. `LogSink`, `ticks_seen`) are
 // reachable via their modules for callers that want them.
 pub use engine::{engine, start_epoch_ticker};
-pub use store::{PluginCtx, default_deny_wasi, new_default_deny_store, new_store};
+pub use store::{
+    PluginCtx, default_deny_wasi, new_default_deny_store, new_store, wasi_ctx_for_caps,
+};
+
+// Tier 3B public surface (T-PP-031..T-PP-036).
+pub use bindings::Plugin;
+pub use cache::{ContentHash, InstancePreCache, content_hash};
+pub use linker_set::{CapsKey, LinkerSet};
