@@ -1,5 +1,55 @@
 # Peer Review Findings
 
+## Plugin-protocol Tier 3 gate — Cycle 4 findings — 2026-04-20
+
+**Reviewer:** packet-driven Cycle 4 override (follow-up to Cycle 3 deep-clone `tree()`).
+**Tier:** plugin-protocol-3 gate.
+**Scope:** single P1 — `HostTerminalNode::drop` interaction with the Cycle-3 deep-clone tree.
+
+### F-464 / F-465 — P1 `HostTerminalNode::drop` is non-recursive, leaks every descendant of a deep-cloned tree (FIXED)
+
+**Source:** Cycle-4 packet.
+**Tier:** plugin-protocol-3
+**Severity:** P1 — Cycle 3's `tree()` allocates a FRESH `ResourceTable` entry per child at every depth. The prior `drop` impl only removed the top-level handle passed in. When the guest drops the root handle of a deep-cloned subtree, every descendant entry is left orphaned in the table — unreachable, but still counting against host memory. On a per-frame render path (the expected tree() call site) that's a linear leak proportional to tree size per frame.
+**Status:** fixed
+**Location:** `crates/ark-host/src/host_fns.rs::HostTerminalNode::drop` + new `drop_tree_recursive` helper.
+
+**Resolution:**
+
+1. `HostTerminalNode::drop` now `delete`s the top handle to take ownership of its body, then hands that body to `drop_tree_recursive`.
+2. `drop_tree_recursive(ctx, tree)` matches the `TerminalWidgetTree` variant:
+   - `Row | Column | BoxNode` → for every child handle in the `ContainerNode`, call `resource_table.delete(Resource::<TerminalNodeBody>::new_own(rep))` and recurse on the returned body.
+   - `Text | Spacer | Cursor` → no children, terminate.
+3. If a child handle is already orphaned (`delete` returns `NotPresent`), log a `tracing::warn!` decorated with `plugin` and `rep`, then continue with the next sibling. A single missing child never aborts the cascade and leaks the remaining subtree.
+4. If the TOP handle is missing at entry (double-drop by malformed guest), the outer `delete` returns an error and `drop` returns `Ok(())` — same tolerance contract as before, but no cascade needed since there was no body to descend through.
+5. Borrow shape: `body` from `delete` is owned, so iterating `body.0`'s children freely calls `&mut resource_table` via recursive `delete` without conflicting borrows. Each recursive call sources child handles via `Resource::<TerminalNodeBody>::new_own(child.rep())` — matches the constructor used everywhere else in the module for the body-typed phantom.
+
+**Tests added (`crates/ark-host/tests/host_fns_terminal_node.rs`):**
+
+- `tree_drop_releases_all_descendants` — 3-level nested `Row[ Row[ Spacer, Spacer ] ]`. Records table size pre-`tree()` (4 originals), asserts +3 fresh entries after `tree()` (fresh inner + 2 fresh leaves — the outer root is the returned enum, not a new handle), drops the fresh inner-row handle, and asserts the table is restored to exactly the pre-`tree()` size. Also confirms the original 4 entries remain (deep-clone does not disturb source), and confirms double-drop on the now-missing fresh root is tolerated (non-fatal).
+
+**Gate evidence (Cycle 4):**
+
+- `cargo check --workspace` → clean (pre-existing `cargo:warning=` plugin-size telemetry only).
+- `cargo test -p ark-host` → **37 passing** (Cycle 3 baseline 36 → +1: `tree_drop_releases_all_descendants`).
+- `cargo test --workspace -- --test-threads=1` → **2498 passing**, 24 ignored, 0 failed (Cycle 3 baseline 2497 → +1).
+
+**Table growth/shrink evidence (from the new test):**
+
+- Pre-tree() entries: 4 (outer + inner + 2 leaves).
+- After tree(): 7 (+3 fresh: fresh inner + 2 fresh leaves; the outer is the enum payload, not a handle).
+- After recursive drop of fresh inner: 4 (all +3 fresh descendants freed; originals intact).
+- Double-drop on missing handle: still 4 (no-op).
+
+**Dead ends avoided (explicit per packet):**
+
+- Did NOT make `drop` skip recursion (that's the bug).
+- Did NOT leak borrows escaping scope — body from `delete` is owned, recursion operates on owned values only.
+- Did NOT reintroduce `p2::add_to_linker_async`.
+- Did NOT change WIT or ABI version.
+
+---
+
 ## Plugin-protocol Tier 3 gate — Cycle 3 findings — 2026-04-20
 
 **Reviewer:** packet-driven Cycle 3 override (2-cycle cap waived per user decision).

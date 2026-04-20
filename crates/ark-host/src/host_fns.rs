@@ -275,14 +275,68 @@ impl HostTerminalNode for PluginCtx {
     }
 
     async fn drop(&mut self, rep: Resource<TerminalNode>) -> wasmtime::Result<()> {
-        // `tree()` no longer consumes, so the entry is expected to be
-        // present — but we still `let _ =` to stay tolerant of a guest
-        // that drops an already-dropped handle (defense-in-depth for
-        // malformed guests). A missing entry is NOT a host-observable
-        // error.
-        let _ = self
+        // F-464 (Cycle 4): `tree()` deep-clones — every descendant of a
+        // returned subtree is allocated as its OWN `ResourceTable` entry.
+        // A shallow drop that only removes the top handle would orphan
+        // every descendant in the table and leak host-side memory every
+        // frame. Dropping the top handle therefore must recursively
+        // delete every descendant entry reachable through the stored
+        // body.
+        //
+        // Tolerant of an already-dropped top handle: a missing entry is
+        // NOT a host-observable error (defense-in-depth for malformed
+        // guests). If we CAN read the body, we own it via `delete` —
+        // that lets us walk `body.0`'s children without holding a live
+        // `ResourceTable` borrow, satisfying the borrow checker during
+        // the recursive `delete` calls.
+        match self
             .resource_table
-            .delete(Resource::<TerminalNodeBody>::new_own(rep.rep()));
-        Ok(())
+            .delete(Resource::<TerminalNodeBody>::new_own(rep.rep()))
+        {
+            Ok(body) => drop_tree_recursive(self, body.0),
+            Err(_) => Ok(()),
+        }
     }
+}
+
+/// Recursively delete every descendant `ResourceTable` entry referenced
+/// by a `TerminalWidgetTree`. The tree is passed by-value so that the
+/// caller has already taken ownership via `resource_table.delete(…)` —
+/// this function owns the subtree and may re-enter the table freely.
+///
+/// A child handle that is already missing (e.g. the guest manually
+/// dropped it earlier) is tolerated: we log at `warn` via `tracing` and
+/// continue with the remaining siblings, so a single orphaned handle
+/// never aborts the cascade and leaves the rest of the subtree leaked.
+fn drop_tree_recursive(
+    ctx: &mut PluginCtx,
+    tree: TerminalWidgetTree,
+) -> wasmtime::Result<()> {
+    match tree {
+        TerminalWidgetTree::Row(c)
+        | TerminalWidgetTree::Column(c)
+        | TerminalWidgetTree::BoxNode(c) => {
+            for child in c.children {
+                let rep = child.rep();
+                match ctx
+                    .resource_table
+                    .delete(Resource::<TerminalNodeBody>::new_own(rep))
+                {
+                    Ok(body) => drop_tree_recursive(ctx, body.0)?,
+                    Err(err) => {
+                        tracing::warn!(
+                            target: "ark_host::plugin",
+                            plugin = %ctx.plugin_id,
+                            rep,
+                            "drop: child handle already absent — continuing cascade: {err}"
+                        );
+                    }
+                }
+            }
+        }
+        TerminalWidgetTree::Text(_)
+        | TerminalWidgetTree::Spacer(_)
+        | TerminalWidgetTree::Cursor(_) => {}
+    }
+    Ok(())
 }

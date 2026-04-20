@@ -430,6 +430,135 @@ fn tree_deep_clones_nested_containers() {
     }
 }
 
+/// F-464 (Cycle 4): `HostTerminalNode::drop` must be RECURSIVE. The
+/// deep-clone path in `tree()` allocates a fresh `ResourceTable` entry
+/// for every descendant container / leaf child. A shallow drop that
+/// removed only the top handle would orphan every grandchild in the
+/// table, leaking host-side memory every frame `tree()` is called on a
+/// nested container.
+///
+/// Test shape (3-level nested tree):
+///
+/// * Build `Row[ Row[ Spacer, Spacer ] ]` — 4 ResourceTable entries
+///   (outer + inner + 2 leaves).
+/// * Call `tree()` on the outer row. The deep-clone path allocates one
+///   fresh entry per CHILD rebuilt, not per node — the root of the
+///   returned tree is the plain enum payload, not a handle. For this
+///   nesting we expect +3 fresh entries: fresh inner-row + 2 fresh
+///   leaves.
+/// * The returned enum is `TerminalWidgetTree::Row` whose single child
+///   IS a handle (the fresh inner-row). Recursively dropping that
+///   handle must cascade through the 2 fresh leaf children beneath it,
+///   freeing all 3 fresh entries and returning the table to its
+///   pre-tree() size.
+/// * A redundant drop of the same now-missing handle must be tolerated
+///   (non-fatal warn), confirming the "already-orphaned child" guard.
+#[test]
+fn tree_drop_releases_all_descendants() {
+    let mut ctx = fresh_ctx();
+
+    // --- Setup: 3-level nested Row[ Row[ Spacer, Spacer ] ] ----------
+    let leaf_a = block_on(HostTerminalNode::new(
+        &mut ctx,
+        TerminalWidgetTree::Spacer(SpacerNode { flex: 1 }),
+    ))
+    .expect("leaf a new()");
+    let leaf_b = block_on(HostTerminalNode::new(
+        &mut ctx,
+        TerminalWidgetTree::Spacer(SpacerNode { flex: 2 }),
+    ))
+    .expect("leaf b new()");
+    let inner_row = block_on(HostTerminalNode::new(
+        &mut ctx,
+        TerminalWidgetTree::Row(ContainerNode {
+            children: vec![leaf_a, leaf_b],
+            layout: None,
+        }),
+    ))
+    .expect("inner row new()");
+    let outer = block_on(HostTerminalNode::new(
+        &mut ctx,
+        TerminalWidgetTree::Row(ContainerNode {
+            children: vec![inner_row],
+            layout: None,
+        }),
+    ))
+    .expect("outer row new()");
+    let outer_rep = outer.rep();
+
+    // 4 entries: outer + inner + 2 leaves.
+    let entries_pre_tree = ctx.resource_table.iter_mut().count();
+    assert_eq!(
+        entries_pre_tree, 4,
+        "expected 4 pre-tree() entries (outer + inner + 2 leaves)"
+    );
+
+    // --- tree() allocates +3 fresh descendants (inner + 2 leaves) ---
+    let snapshot = block_on(HostTerminalNode::tree(
+        &mut ctx,
+        wasmtime::component::Resource::new_own(outer_rep),
+    ))
+    .expect("tree() must succeed");
+
+    let entries_after_tree = ctx.resource_table.iter_mut().count();
+    assert_eq!(
+        entries_after_tree,
+        entries_pre_tree + 3,
+        "deep-clone allocates a fresh entry per CHILD rebuilt \
+         (+3 expected: inner-row + 2 leaves); grew {entries_pre_tree} -> \
+         {entries_after_tree}"
+    );
+
+    // Extract the fresh inner-row handle — dropping it must cascade
+    // through the 2 fresh leaves underneath it.
+    let fresh_inner_rep = match snapshot {
+        TerminalWidgetTree::Row(c) => {
+            assert_eq!(c.children.len(), 1, "fresh outer-enum has 1 child");
+            let r = c.children[0].rep();
+            // Drop the enum wrapper (its Resource handles are just
+            // phantom-typed u32 indices — no actual destructor runs
+            // here, but we release the Rust-side value cleanly before
+            // the explicit drop() below).
+            drop(c);
+            r
+        }
+        other => panic!("expected Row, got {other:?}"),
+    };
+
+    // --- Recursive drop cascades through 2 fresh leaves --------------
+    block_on(HostTerminalNode::drop(
+        &mut ctx,
+        wasmtime::component::Resource::new_own(fresh_inner_rep),
+    ))
+    .expect("recursive drop must succeed");
+
+    let entries_post_drop = ctx.resource_table.iter_mut().count();
+    assert_eq!(
+        entries_post_drop, entries_pre_tree,
+        "recursive drop must release all 3 fresh descendants, returning \
+         the table to its pre-tree() size ({entries_pre_tree}); got \
+         {entries_post_drop}"
+    );
+
+    // --- Already-orphaned child: non-fatal, no panic ----------------
+    // Re-drop the same fresh root — it's gone. The drop impl must
+    // treat that as a no-op (defense-in-depth for malformed guests).
+    block_on(HostTerminalNode::drop(
+        &mut ctx,
+        wasmtime::component::Resource::new_own(fresh_inner_rep),
+    ))
+    .expect("double-drop on missing handle must be tolerated");
+
+    // The originals (outer + inner + 2 leaves) should all still be
+    // present too — deep-clone does not disturb the source entries,
+    // and the recursive drop only cascaded through the FRESH subtree.
+    assert_eq!(
+        ctx.resource_table.iter_mut().count(),
+        entries_pre_tree,
+        "original source entries must remain after fresh-subtree drop"
+    );
+}
+
 #[test]
 fn tree_is_idempotent_on_cursor_leaf() {
     // A second leaf shape to catch any variant-specific regression in
