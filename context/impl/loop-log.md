@@ -676,3 +676,20 @@ Overall: 45/134 (34%). Next: Tier 2 (engine-claude-code + event-bus consumers, 1
 - Wave 8a (serial): T-037 (3863b1a) ark-ext-test-support stub crate. 9 tests green.
 - 7 tasks remain (T-038..T-044). Handoff written: handoff-2026-04-18-phase-2-tier-7-mid.md.
 - User rejected T-041 dispatch (trybuild deferral language) — next session should consider option (b) full KDL-level validator, or coordinate with user before defaulting to option (a).
+
+### Iteration Tier-0 — 2026-04-20 — plugin-protocol
+- Wave 1: T-PP-001..T-PP-011 (11 scaffold tasks, single packet, general-purpose+opus, no worktree) → 9b46ec3. Build P, Tests P (workspace compile + ark-config 89P + ark-types 51P). 4 new crates: ark-plugin-protocol, ark-plugin-sdk, ark-host, ark-render-terminal. ABI const + PluginLoadError + Target + Intent/Bus types + config plugins{} KDL grammar.
+- Deferrals: ark-plugin-sdk empty (derive in T-PP-019/020), ark-host 6 module stubs (Tier 3), materialize placeholder sig (T-PP-014/047), plugins_kdl grammar-only (T-PP-037 semantic). wasmparser aliased at 0.247 to coexist with scene 0.246.
+- Next: Tier 1 — T-PP-012..T-PP-018 (WIT contracts + postcard section schemas + echo plugin world wiring).
+
+### Iteration Tier-1 — 2026-04-20 — plugin-protocol
+- Wave 2: T-PP-012..T-PP-018 (7 tasks, single packet) → 92fb67d. Build P, Tests P (plugin-protocol 22P, types 51P, config 89P, workspace no-run P).
+- Codex tier-gate: CLEAN. Gate: PROCEED.
+- Shape decisions: install-event/host-event/pipe-message in `interface types` (WIT disallows top-level decls in world); widget-tree in separate `widget-tree-types` interface + imported. Hand-rolled semver+regex (no new deps). build.rs lint plain-text (std-only).
+- Next: Tier 2 — T-PP-019..T-PP-024 (derive(Plugin) macro caps+meta halves, echo sections wired, trybuild, doc-lint).
+
+### Iteration Tier-2 — 2026-04-20 — plugin-protocol
+- Wave 3: T-PP-019..T-PP-024 (6 tasks, single packet) → f6f18d7. Build P, Tests P (workspace 2402P 23ignored; ark-plugin-sdk trybuild 4 fixtures pinned).
+- Codex tier-gate: CLEAN. Gate: PROCEED.
+- Decisions: compile-time postcard bytes emitted as `&[u8;N]` statics (no runtime alloc in guest). Hand-rolled semver check. Echo sections gate #[ignore]d behind rustup wasm32-wasip2 detection (skips cleanly when target absent).
+- Next: Tier 3 — T-PP-025..T-PP-040 (16 tasks). Splitting into Wave A (engine/store/wasi/lint), Wave B (bindgen+host/cap fns+LinkerSet+cache), Wave C (KDL semantic parser + URL gate + grep gates).

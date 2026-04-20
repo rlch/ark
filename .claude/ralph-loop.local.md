@@ -1,10 +1,10 @@
 ---
 active: true
 iteration: 1
-session_id: 4df1124e-3b3a-4b45-9257-9a6ecd7325b3
+session_id: 76a5b877-f22d-45c5-abac-a9c8d8d0b474
 max_iterations: 20
 completion_promise: "CAVEKIT COMPLETE"
-started_at: "2026-04-18T06:11:40Z"
+started_at: "2026-04-20T06:06:59Z"
 ---
 
 # Cavekit Build
@@ -15,13 +15,14 @@ unblocked task, read its cavekit, implement it, validate, commit.
 
 ## Read These First (every iteration)
 1. `context/impl/loop-log.md` — your iteration history (if exists)
-2. `context/plans/build-site-soul-phase-2.md` — the task dependency graph
+2. `context/plans/build-site-plugin-protocol.md` — the task dependency graph
 3. Impl tracking files in `context/impl/` — but ONLY files that are scoped to this build site.
-   An impl file is scoped if it contains `Build site: context/plans/build-site-soul-phase-2.md` (or the matching basename).
+   An impl file is scoped if it contains `Build site: context/plans/build-site-plugin-protocol.md` (or the matching basename).
    Ignore impl files that declare a different build site. If no scoped files exist, read all impl files.
 
 ## Kits (read when implementing a specific requirement)
 
+- `context/kits/archive-cavekit-scene-v2.md`
 - `context/kits/cavekit-claude-code.md`
 - `context/kits/cavekit-cli.md`
 - `context/kits/cavekit-config.md`
@@ -32,8 +33,8 @@ unblocked task, read its cavekit, implement it, validate, commit.
 - `context/kits/cavekit-pane-commands.md`
 - `context/kits/cavekit-pi.md`
 - `context/kits/cavekit-plugin-picker.md`
+- `context/kits/cavekit-plugin-protocol.md`
 - `context/kits/cavekit-plugin-status.md`
-- `context/kits/cavekit-scene-v2-archived.md`
 - `context/kits/cavekit-scene.md`
 - `context/kits/cavekit-soul-phase-1-cli-and-launch.md`
 - `context/kits/cavekit-soul-phase-1-overview.md`
@@ -82,7 +83,7 @@ last_edited: "{CURRENT_DATE_UTC}"
 ---
 # Implementation Tracking: {domain}
 
-Build site: context/plans/build-site-soul-phase-2.md
+Build site: context/plans/build-site-plugin-protocol.md
 
 | Task | Status | Notes |
 |------|--------|-------|

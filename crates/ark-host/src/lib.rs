@@ -33,5 +33,9 @@ pub use store::{
 // target `plugin-base` or their own world; the host uses the union
 // to bind against any variant.
 pub use bindings::PluginHost;
+// Back-compat alias for pre-world-split name. Retained so downstream
+// imports written against the Tier 3B initial API keep compiling.
+// See impl-review-findings.md F-440/F-442.
+pub use bindings::PluginHost as Plugin;
 pub use cache::{ContentHash, InstancePreCache, content_hash};
 pub use linker_set::{CapsKey, LinkerSet};
