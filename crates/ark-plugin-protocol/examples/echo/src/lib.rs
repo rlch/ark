@@ -1,4 +1,4 @@
-//! T-PP-018 partial: exports world, imports log + fs-read. Sections wired in T-PP-022.
+//! T-PP-022: full `#[derive(Plugin)]` wire-up.
 //!
 //! Reference "echo" plugin — the minimum viable implementation of the
 //! `ark:plugin@0.1.0` world. Purpose: exercise the WIT contract end-
@@ -6,15 +6,33 @@
 //! coarse cap gate). No business logic; `render` returns a single
 //! `text("echo")` widget.
 //!
+//! The `#[derive(Plugin)]` invocation below emits the `ark-caps:v1` +
+//! `ark-meta:v1` custom sections into the compiled `.wasm` via
+//! `#[link_section]`. See `crates/ark-plugin-sdk` for the attribute
+//! surface.
+//!
+//! NOTE on the `name = "plugin"` attribute: the shared WIT world in
+//! `crates/ark-plugin-protocol/wit/plugin.wit` is itself named `plugin`.
+//! Per R9 "the WIT world name must equal the plugin name", the echo
+//! example adopts `"plugin"` as its plugin name. If/when echo needs its
+//! own identity, a dedicated `wit/echo.wit` world named `echo` can be
+//! introduced and `name = "echo"` used in its place.
+//!
 //! This crate is intentionally NOT a workspace member — `cargo check
 //! --workspace` does not touch it. It builds standalone against
 //! `wasm32-wasip2`. The CI gate that actually compiles this crate
-//! lands in T-PP-022 once the `#[derive(Plugin)]` macro is real.
+//! lives in `crates/ark-plugin-protocol/tests/echo_sections.rs`
+//! (ignored by default — run with `cargo test -p ark-plugin-protocol --
+//! --ignored`).
 //!
 //! Dep policy: no `arborium-sysroot`, no `facet-kdl`, no
-//! `facet-format` (kit R12 regression check).
+//! `facet-format` (kit R12 regression check). `ark-plugin-sdk` is a
+//! proc-macro-only dep and does NOT appear in the wasm guest's runtime
+//! dep graph.
 
 #![cfg(target_arch = "wasm32")]
+
+use ark_plugin_sdk::Plugin;
 
 // Generate the guest bindings against the repo's canonical WIT.
 //
@@ -34,6 +52,25 @@ wit_bindgen::generate!({
     // cap gate ensures uncalled cap interfaces don't actually wire
     // at instantiation time.
 });
+
+/// Identity + cap-declaration target for the `#[derive(Plugin)]` macro.
+///
+/// The macro sees this unit struct as the hook for its
+/// `#[link_section]` emission — `Echo` itself doesn't carry any state;
+/// the guest trait is implemented on `EchoPlugin` below.
+#[derive(Plugin)]
+#[plugin(
+    // See the crate-level note on why `name = "plugin"` — tracks the
+    // shared WIT world's name. The `wit = "..."` path is relative to
+    // this Cargo.toml (`examples/echo/Cargo.toml`).
+    name = "plugin",
+    version = "0.1.0",
+    wit = "../../wit/plugin.wit",
+    capabilities(
+        fs_read(display = "Read files", reason = "echo example reads demo file"),
+    ),
+)]
+struct Echo;
 
 struct EchoPlugin;
 

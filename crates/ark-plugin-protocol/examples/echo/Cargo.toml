@@ -26,3 +26,10 @@ crate-type = ["cdylib"]
 # here and will be hoisted to workspace-level when a second guest
 # lands. 0.42 matches the MSRV + wasmtime 43 host line.
 wit-bindgen = "0.42"
+
+# T-PP-022 (kit R3, R9): the `#[derive(Plugin)]` macro emits the
+# `ark-caps:v1` + `ark-meta:v1` custom sections directly into this
+# crate's wasm binary via `#[link_section]` statics. Proc-macro crates
+# are HOST-side deps only — `cargo tree -p echo --target wasm32-wasip2`
+# MUST NOT include `syn`/`quote`/`postcard` here (R12 regression).
+ark-plugin-sdk = { path = "../../../ark-plugin-sdk" }

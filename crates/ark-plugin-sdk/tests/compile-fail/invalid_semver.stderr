@@ -1,0 +1,5 @@
+error: `version = "not-a-version"` is not valid semver 2.0.0: unexpected character 'n' while parsing major version number
+ --> tests/compile-fail/invalid_semver.rs:7:15
+  |
+7 |     version = "not-a-version",
+  |               ^^^^^^^^^^^^^^^

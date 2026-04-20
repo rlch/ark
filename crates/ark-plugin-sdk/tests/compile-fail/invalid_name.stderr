@@ -1,0 +1,5 @@
+error: `name = "Invalid-Name"` must match `^[a-z][a-z0-9_]*$` — lowercase letters, digits, and underscore only, starting with a letter
+ --> tests/compile-fail/invalid_name.rs:7:12
+  |
+7 |     name = "Invalid-Name",
+  |            ^^^^^^^^^^^^^^

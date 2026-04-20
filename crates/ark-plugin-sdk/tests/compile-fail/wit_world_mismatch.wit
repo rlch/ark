@@ -1,0 +1,8 @@
+// T-PP-023 R9 fixture: the `world` declaration below is named `bar`,
+// but the fixture's #[plugin(name = "foo", ...)] attribute says `foo`.
+// The derive must compile-error out on that mismatch.
+
+package ark:test-fixture-world-mismatch@0.0.1;
+
+world bar {
+}

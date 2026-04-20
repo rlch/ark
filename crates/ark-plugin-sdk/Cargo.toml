@@ -8,13 +8,45 @@ repository.workspace = true
 rust-version.workspace = true
 
 # T-PP-002 (cavekit-plugin-protocol R3, R9): single proc-macro crate
-# plugin authors depend on. Tier 0 is skeleton-only — the real
-# `#[derive(Plugin)]` body (section emission for `ark-caps:v1` +
-# `ark-meta:v1`) lands in Tier 2 (T-PP-019, T-PP-020, T-PP-021).
+# plugin authors depend on. Tier 2 implements the real `#[derive(Plugin)]`
+# body — it emits BOTH the `ark-caps:v1` and `ark-meta:v1` custom-section
+# statics via `#[link_section]` (T-PP-019, T-PP-020, T-PP-021).
+#
+# Dep policy: this is a PROC-MACRO crate, so every dep below is host-side
+# only (the consumer's wasm guest never pulls `syn`/`quote`/`postcard`
+# into its dep graph — proc-macros run at the consumer's compile time on
+# the host). Tracked via kit R12 regression: `cargo tree -p echo
+# --target wasm32-wasip2` must NOT include syn/quote/proc-macro2.
 
 [lib]
 proc-macro = true
 
 [dependencies]
-# Proc-macro crates typically need syn/quote/proc-macro2, but at Tier 0
-# we have no logic to emit, so we add these only in T-PP-019.
+# Standard proc-macro trio — same versions as crates/scene-macros uses
+# so the workspace stays on one `syn 2 / quote 1 / proc-macro2 1` line.
+syn = { version = "2", features = ["full", "extra-traits"] }
+quote = "1"
+proc-macro2 = "1"
+# T-PP-019 / T-PP-020: the derive macro computes postcard bytes at
+# macro-expansion time and emits them as `&[u8; N]` literals. This pulls
+# `postcard` into the proc-macro crate's HOST-side dep graph only — it
+# does NOT reach the wasm guest. Uses the workspace pin (`use-std`).
+postcard = { workspace = true }
+# T-PP-020: validate `version = "..."` against semver 2.0.0 at macro
+# expansion; proc-macro error on invalid input before emit. Workspace pin.
+semver = { workspace = true }
+# T-PP-019 / T-PP-020: reach `CapsManifest`, `MetaManifest`, section-name
+# constants so the encoded bytes agree with the host-side decoder. This
+# is a compile-time dep for the proc-macro body only; the generated code
+# emits raw bytes + string literals and does NOT reference any symbol
+# from `ark-plugin-protocol`, so the guest never pulls it in.
+ark-plugin-protocol = { path = "../ark-plugin-protocol" }
+# T-PP-020: reach `ARK_ABI_VERSION` for default + abi-mismatch check.
+# Same host-only rationale as above.
+ark-types = { path = "../types" }
+
+[dev-dependencies]
+# T-PP-023: compile-fail goldens for `#[derive(Plugin)]` errors (invalid
+# name regex, invalid semver, world-name mismatch, abi mismatch). Shared
+# pattern with crates/scene/tests/ui/ + extensions/claude-code/tests/ui/.
+trybuild = "1"

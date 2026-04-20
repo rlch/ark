@@ -1,0 +1,5 @@
+error: WIT world "bar" does not match #[plugin(name = "foo")] — either rename the world or update the `name` attribute
+  --> tests/compile-fail/world_name_mismatch.rs:15:11
+   |
+15 |     wit = "../../../../crates/ark-plugin-sdk/tests/compile-fail/wit_world_mismatch.wit",
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

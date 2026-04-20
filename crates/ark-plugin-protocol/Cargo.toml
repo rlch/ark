@@ -29,3 +29,10 @@ thiserror = { workspace = true }
 postcard = { workspace = true }
 
 [dev-dependencies]
+# T-PP-022: the `echo_sections.rs` ignored gate parses the built
+# `examples/echo/*.wasm` via wasmparser to assert both `ark-caps:v1` and
+# `ark-meta:v1` custom sections are present. Uses the plugin-host pin
+# (0.247) via the workspace `wasmparser-plugin-host` rename (the name
+# `wasmparser` is also pinned at 0.246 for scene, so the rename keeps
+# the two versions distinct in the workspace graph).
+wasmparser-plugin-host = { workspace = true }

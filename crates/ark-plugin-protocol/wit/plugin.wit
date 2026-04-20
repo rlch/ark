@@ -160,8 +160,17 @@ world plugin {
 
     // Guest exports — R7 acceptance. Exactly five lifecycle funcs.
     //
-    /// May run again on the next activation cycle — must be idempotent.
+    /// Fires once per (plugin-id, version, host-installation-uuid) tuple
+    /// plus once per dev-mode reload. Idempotent — if the plugin crashed
+    /// before returning, the host will retry on the next activation
+    /// cycle. Authors MUST make every write idempotent (UPSERT,
+    /// `mkdir -p`, etc.); this hook may run again on the next activation cycle.
     export on-install: func(event: install-event);
+    /// Called once per instance after Component instantiation, before any
+    /// `update`/`render`/`pipe`. The place to subscribe to events and
+    /// pull initial state from `Resource<T>` handles. Nothing in memory survives across calls —
+    /// the plugin re-reads from host-owned resources or the filesystem
+    /// every time `load` runs.
     export load: func();
     export update: func(event: host-event) -> bool;
     export render: func(view-id: string, width: u32, height: u32) -> widget-tree;

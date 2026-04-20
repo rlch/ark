@@ -1,0 +1,5 @@
+error: #[plugin(abi = 9999)] mismatches ark_types::ARK_ABI_VERSION = 1 — re-derive with correct abi or update ark-types
+ --> tests/compile-fail/abi_mismatch.rs:8:11
+  |
+8 |     abi = 9999,
+  |           ^^^^
