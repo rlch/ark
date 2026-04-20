@@ -20,6 +20,11 @@ shlex = { workspace = true }
 # upstream `kdl` crate — no reflection/facet-kdl needed for grammar
 # only (semantic validation lives in T-PP-037).
 kdl = { workspace = true }
+# T-PP-037 (cavekit-plugin-protocol R5): Levenshtein-style "did you mean
+# ...?" suggestions for unknown capability names / runtime keys. The
+# workspace already pins `strsim = "0.11"` for the scene crate, so the
+# semantic layer re-uses it rather than hand-rolling edit distance.
+strsim = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

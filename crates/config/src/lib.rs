@@ -59,12 +59,18 @@ pub mod ext_sections;
 pub mod hooks;
 pub mod plugins_kdl;
 pub mod schema;
+pub mod url_gate;
 
 pub use ext_sections::{
     ExtConfigError, extract_section, section_key, validate_all_extensions, validate_ext_sections,
 };
 pub use hooks::{HookContext, HookEntry};
-pub use plugins_kdl::{PluginEntry, PluginsBlock, PluginsKdlError, parse_plugins_block};
+pub use plugins_kdl::{
+    DEFAULT_RENDER_BUDGET_MS, DEFAULT_UPDATE_FAILURE_BUDGET, KNOWN_CAPABILITIES, KNOWN_RUNTIME_KEYS,
+    PluginEntry, PluginsBlock, PluginsKdlError, PluginsSemanticError, RuntimeConfig,
+    SemanticPluginEntry, SemanticPluginsBlock, parse_plugins_block, parse_plugins_block_semantic,
+};
+pub use url_gate::{PluginUrl, UrlGateError, UrlScheme, parse_plugin_url};
 pub use schema::{
     Config, DefaultsSection, DiffSection, EngineClaudeCodeSection, EngineLaunchSpec, EngineSection,
     MuxSection, MuxZellijSection, OrchestratorCavekitSection, OrchestratorClaudeCodeSection,
