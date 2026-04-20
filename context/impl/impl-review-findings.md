@@ -1,5 +1,103 @@
 # Peer Review Findings
 
+## Plugin-protocol Tier 3 gate — Cycle 2 findings — 2026-04-20
+
+**Reviewer:** Codex (re-scan of Cycle 1 fixes on top of `13823fb`).
+**Tier:** plugin-protocol-3 gate.
+**Convergence rule:** per `ck:make` max-2-cycles, Cycle 2 is the FINAL cycle — gate advances after this regardless.
+
+### F-452 / F-455 — P1 `clone_container` creates duplicate OWNED child handles (FIXED)
+
+**Source:** codex (Cycle 2)
+**Tier:** plugin-protocol-3
+**Severity:** P1 — would crash the host on any second `tree()` read of a container with children
+**Status:** fixed
+**Location:** `crates/ark-host/src/host_fns.rs::clone_container` — the helper rebuilt each child `Resource<TerminalNode>` via `Resource::new_own(r.rep())` while the parent's stored `ContainerNode` already owned those handles. The second `tree()` call (or the eventual parent `drop`) would hit `ResourceTableError::NotPresent` when the second owner tried to remove an already-deleted slot.
+
+**Resolution:**
+
+1. `clone_container` now rebuilds each child via `wasmtime::component::Resource::<TerminalNode>::new_borrow(r.rep())`. Wasmtime 43's `Resource::new_borrow` (see `runtime/component/resources/host_static.rs:173`) is documented as "passed to a guest as a borrowed resource; the embedder knows the rep won't be in use by the guest afterwards" — exactly the read-only view `tree()` needs.
+2. Doc comment on `clone_terminal_widget_tree` expanded to explain the ownership invariant: the PARENT's stored `TerminalNodeBody` is the sole owner of each child slot; `tree()` hands the guest a non-owning view so drop-rights stay with the parent.
+3. Did NOT switch to a deep copy (the kit-packet fallback). Borrow handles compile, match wasmtime's documented semantics, and avoid allocating new `ResourceTable` entries on every `tree()` read.
+
+**Tests added (`crates/ark-host/tests/host_fns_terminal_node.rs`):**
+
+- `tree_with_children_stays_owned_across_multiple_reads` — pushes 3 `Spacer` leaves, builds a `Row` parent over them, calls `tree()` twice, and asserts on each call that (a) the `Row`'s 3 child handles have the same reps as the originally pushed leaves, and (b) `ctx.resource_table.iter_mut().count()` is unchanged (stays at 4 entries = 3 children + 1 parent). Pre-fix this would panic on the second `new_own`-copy's `Drop`.
+
+### F-453 / F-456 — P1 `url_gate` Cycle-1 fix over-rejected kit R12 forms (REGRESSION FIXED)
+
+**Source:** codex (Cycle 2 — regression introduced by Cycle 1's F-446 fix)
+**Tier:** plugin-protocol-3
+**Severity:** P1 — broke `crates/cli/src/commands/doctor.rs::status_plugin_kdl_snippet` which emits `file:{abs-path}` (single-slash shorthand). Users copying doctor's suggested KDL into their config would fail to parse.
+**Status:** fixed
+**Location:** `crates/config/src/url_gate.rs::parse_file_url` — Cycle 1 made the `//` authority separator mandatory, refusing RFC-3986-valid `file:/abs/path` and `file:~/rel/path` shorthand spellings that kit R12 explicitly admits.
+
+**Resolution:**
+
+1. `parse_file_url` now peels off the `//` authority separator *optionally* (`rest.strip_prefix("//").unwrap_or(rest)`). After that, the same absoluteness-or-home-relative check runs, so bare-relative payloads (`file:plugins/p.wasm`, `file:foo.wasm`, `file://plugins/x`, `file://./rel`) all still fail with `FileNotAbsolute`.
+2. All four kit R12 spellings now normalise to the canonical `file:///abs/path` form in `PluginUrl::as_str()`:
+   - `file:///abs/path` → `file:///abs/path`
+   - `file:/abs/path` → `file:///abs/path`
+   - `file://~/rel` → `file:///HOME/rel` (home-expanded)
+   - `file:~/rel` → `file:///HOME/rel` (home-expanded)
+3. The top-of-file module comment + `parse_file_url` docstring rewritten to enumerate the four accepted forms explicitly.
+
+**Tests updated (`crates/config/src/url_gate.rs::tests`):**
+
+- Cycle 1 renamed `file_single_slash_shorthand_refused` and `file_bare_tilde_shorthand_refused` to assert the refusal — those are replaced by `file_single_slash_absolute_parses` and `file_bare_tilde_expands` that assert acceptance (kit R12 correct behaviour). The ACL-style names make the intent clear.
+- New `doctor_single_slash_form_accepted` pins the doctor.rs output as a regression gate — `file:/Users/alice/.local/share/ark/plugins/ark-status.wasm` MUST parse.
+- New `file_bare_relative_refused`, `file_bare_name_refused`, `file_double_slash_dot_relative_refused`, `file_empty_refused` cover the payloads that are STILL rejected (bare relative after the colon / after `//`).
+- `file_bare_tilde_without_home_errors` added (the previous test only covered `file://~` form; the shorthand path needs its own coverage).
+- `file_scheme_case_insensitive_single_slash` belt-and-braces on `FILE:/abs/x`.
+
+### F-454 / F-457 — P2 `https://` host component not validated (FIXED)
+
+**Source:** codex (Cycle 2)
+**Tier:** plugin-protocol-3
+**Severity:** P2 (tier-gate-inline fix)
+**Status:** fixed
+**Location:** `crates/config/src/url_gate.rs::parse_plugin_url_with_home` https branch — after requiring the `//` separator, the remainder was accepted verbatim. `https:///plugin.wasm` (empty host), `https://?x` (empty host + query), and `https:// /plugin.wasm` (whitespace host) all parsed successfully and only failed at fetch time.
+
+**Resolution:**
+
+1. Split the https parsing into a dedicated `parse_https_url` helper.
+2. After stripping `//`, the helper splits the body on the first `/`, `?`, or `#` — everything before that delimiter is the host[:port] token.
+3. The host must be non-empty, contain only hostname characters (`[a-zA-Z0-9.-]`) for the hostname part, and — if a `:PORT` suffix is present — the port must be non-empty and all-digits. The check is hand-rolled (no `regex` dep added) per the packet guidance.
+4. New error variant `UrlGateError::HttpsInvalidHost { raw }` distinguishes host-shape failures from scheme-level `Malformed` failures; the display string steers the user toward a well-formed URL.
+
+**Tests added (`crates/config/src/url_gate.rs::tests`):**
+
+- `https_empty_host_refused` — `https:///plugin.wasm` → `HttpsInvalidHost`.
+- `https_query_only_no_host_refused` — `https://?x` → `HttpsInvalidHost`.
+- `https_whitespace_host_refused` — `https:// /plugin.wasm` → `HttpsInvalidHost`.
+- `https_empty_port_refused` — `https://example.com:/x` → `HttpsInvalidHost`.
+- `https_non_numeric_port_refused` — `https://example.com:abc/x` → `HttpsInvalidHost`.
+- `https_with_port_accepted` — `https://example.com:8443/plugin.wasm` → OK.
+- `https_host_only_accepted` — `https://example.com` (no path) → OK.
+- Existing `https_empty_body_refused` flipped to expect the new `HttpsInvalidHost` variant.
+
+**Gate evidence (Cycle 2):**
+
+- `cargo check --workspace` → clean (pre-existing `cargo:warning=` plugin-size telemetry + unchanged `unused_imports` warnings only).
+- `cargo test -p ark-host` → 33 passing (Cycle 1 baseline 32 → +1 `tree_with_children_stays_owned_across_multiple_reads`).
+- `cargo test -p ark-config` → 136 passing, 2 ignored (Cycle 1 baseline 122 → +14 for restored R12 forms + new https-host validation tests).
+- `cargo test --workspace -- --test-threads=1` → 2484 passing, 24 ignored, 0 failed (Cycle 1 baseline 2471 → +13).
+- `cargo test -p ark-cli doctor` → 60 passing — `status_plugin_kdl_snippet`'s `file:/abs` output is now accepted by the gate.
+- T-PP-030 (`lint_forbidden_apis`) → still passes; no change to the forbidden-wasmtime-wasi API set.
+- T-PP-040 (`no_runtime_cap_prompts`) → still passes; the wasi references in `linker_set.rs` remain doc-comments, not API calls.
+
+**Dead ends avoided:**
+
+- Did NOT re-enable `wasmtime_wasi::p2::add_to_linker_async` blanket add (F-445 invariant preserved).
+- Did NOT revert `HostTerminalNode::tree` back to `ResourceTable::delete` — idempotent `tree()` via `get` + `clone_terminal_widget_tree` is the Cycle-1 fix that stays. Cycle 2's fix is on the *children rebuild* side (borrow vs own), not on the top-level payload retrieval.
+- Did NOT switch `clone_container` to a deep copy (the packet's acceptable fallback). `Resource::new_borrow` exists in wasmtime 43 with the expected signature, so the simpler path was viable.
+- Did NOT touch `ARK_ABI_VERSION` or the WIT package version.
+- Did NOT add new crates to the workspace.
+- Did NOT run `just install` or `cargo build --target wasm32-wasip1` (plugins untouched).
+- Did NOT rename the existing `Malformed` error variant — added `HttpsInvalidHost` as a distinct variant so downstream match arms that only handled `Malformed` still compile (none did; the grep `UrlGateError::` in non-test code was empty).
+
+---
+
 ## Latest Review: scene v3 Tiers 8-15 — 2026-04-17
 
 **Base ref:** `d948c5d` (Tiers 5+6+7)

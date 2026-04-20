@@ -95,19 +95,35 @@ impl widget_tree_types::Host for PluginCtx {}
 struct TerminalNodeBody(TerminalWidgetTree);
 
 /// Reconstruct a `TerminalWidgetTree` from a shared reference, rebuilding
-/// each `Resource<TerminalNode>` handle via `new_own(rep)` with the SAME
-/// `u32` rep the table uses internally. The generated
+/// each `Resource<TerminalNode>` handle via `new_borrow(rep)` with the
+/// SAME `u32` rep the table uses internally. The generated
 /// `TerminalWidgetTree` is NOT `Clone` because `wasmtime::component::
 /// Resource<T>` enforces host-side ownership semantics (no bitwise copy),
 /// so a `#[derive(Clone)]` can't propagate. A manual shallow rebuild is
-/// the right tool: every child handle's rep still points into the same
-/// `ResourceTable` entry, which is safe because the guest side — not the
-/// host — calls `drop` when the handle goes out of scope.
+/// the right tool.
 ///
-/// Used by `HostTerminalNode::tree` so calling `tree()` twice on the
-/// same handle observes identical payloads. See kit R10 acceptance:
-/// the resource handle contract is "tree() is idempotent, drop is what
-/// transfers ownership".
+/// # Why borrow, not own
+///
+/// The children of a `ContainerNode` stored inside a `TerminalNodeBody`
+/// are themselves `Resource<TerminalNode>` handles that were originally
+/// pushed onto the same `ResourceTable` by earlier guest calls to
+/// `terminal-node::new()`. Each of those pushes returned a *single*
+/// OWNED handle. The guest then handed those owned handles to the host
+/// as children of a new parent tree — at which point the host stored
+/// them inside `TerminalNodeBody(TerminalWidgetTree)`. So the table has
+/// exactly ONE owned ticket per live child entry, and it lives inside
+/// the parent's stored body.
+///
+/// When the guest later calls `tree()` on the parent and the host hands
+/// back a shallow rebuild of the children, those rebuilt handles must
+/// NOT carry their own drop-rights — if they did, the guest's trip
+/// around the generated `Drop for Resource<T>` glue would remove the
+/// table entry out from under the parent, and the next `tree()` call
+/// (or the parent's own `drop`) would panic with "entry already
+/// removed". Borrow handles make the view non-owning: the guest can
+/// read the tree, but the parent's OWNED handle remains the sole
+/// drop-authority. See kit R10 acceptance: "tree() is idempotent, drop
+/// is what transfers ownership".
 fn clone_terminal_widget_tree(t: &TerminalWidgetTree) -> TerminalWidgetTree {
     match t {
         TerminalWidgetTree::Text(n) => TerminalWidgetTree::Text(n.clone()),
@@ -120,12 +136,22 @@ fn clone_terminal_widget_tree(t: &TerminalWidgetTree) -> TerminalWidgetTree {
 }
 
 /// See [`clone_terminal_widget_tree`].
+///
+/// Each child handle is rebuilt via [`Resource::new_borrow`] — NOT
+/// `new_own`. Using `new_own` here would create duplicate drop-authority
+/// over the same table slot, so the second `tree()` call (or the
+/// parent's own drop) would hit a `ResourceTableError::NotPresent`
+/// panic when the second owner tries to delete an already-deleted
+/// entry. Borrow handles are explicitly documented in wasmtime's
+/// `Resource::new_borrow` as "passed to a guest as a borrowed resource;
+/// the embedder knows the `rep` won't be in use by the guest
+/// afterwards" — exactly what a read-only `tree()` view needs.
 fn clone_container(c: &ContainerNode) -> ContainerNode {
     ContainerNode {
         children: c
             .children
             .iter()
-            .map(|r| wasmtime::component::Resource::<TerminalNode>::new_own(r.rep()))
+            .map(|r| wasmtime::component::Resource::<TerminalNode>::new_borrow(r.rep()))
             .collect(),
         layout: c.layout,
     }
